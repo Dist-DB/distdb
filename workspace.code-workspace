@@ -1,0 +1,41 @@
+{
+  "folders": [
+    {
+      "name": "docs",
+      "path": "./docs"
+    },
+    {
+      "name": "common",
+      "path": "./common"
+    },
+    {
+      "name": "serverlib",
+      "path": "./serverlib"
+    },
+    {
+      "name": "server",
+      "path": "./server"
+    },
+    {
+      "name": "connector",
+      "path": "./connector"
+    },
+    {
+      "name": "client",
+      "path": "./client"
+    }
+  ],
+  "settings": {
+    "chat.tools.terminal.autoApprove": {
+      "cargo clippy": true,
+      "java": true,
+      "cargo check": true,
+      "cargo test": true,
+      "cargo info": true,
+      "git ls-remote": true,
+      "cargo clean": true,
+      "env": true,
+      "cargo run": true
+    }
+  }
+}

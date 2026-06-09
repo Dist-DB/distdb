@@ -1,0 +1,9 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sam Colak <sam@samcolak.com>"]
+
+[dependencies]
+connector = { path = "../connector" }
+common = { path = "../common" }

@@ -1,0 +1,8 @@
+[package]
+name = "serverlib"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sam Colak <sam@samcolak.com>"]
+
+[dependencies]
+common = { path = "../common" }

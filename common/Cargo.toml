@@ -1,0 +1,13 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sam Colak <sam@samcolak.com>"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+uuid = { version = "1.22.0", features = ["serde", "v4", "v7", "fast-rng"] }
+libp2p = { version = "0.55", default-features = false, features = ["cbor", "identify", "macros", "mdns", "noise", "ping", "quic", "request-response", "serde", "tcp", "tokio", "yamux"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
