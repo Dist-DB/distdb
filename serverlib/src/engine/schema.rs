@@ -1,5 +1,5 @@
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldType {
     Int(u8),
     UInt(u8),
@@ -11,7 +11,7 @@ pub enum FieldType {
     Blob,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FieldDef {
     pub seqno: u32,
     pub field_name: String,
@@ -21,8 +21,7 @@ pub struct FieldDef {
     pub default_value: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
-    pub table_id: String,
     pub fields: Vec<FieldDef>,
 }

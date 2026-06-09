@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use common::helpers::format::{verify_header, FILE_EXTENSION, HEADER_SIZE};
+use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE};
 use common::helpers::{append_bytes, read_bytes, stable_id, write_bytes};
 
 use crate::engine::transaction::{TransactionId, TransactionLog, TransactionRecord};
@@ -82,7 +82,7 @@ impl ConcurrentWalManager {
         let wal_path = self
             .data_dir
             .as_ref()
-            .map(|dir| dir.join(format!("{}.{}", stream_key, FILE_EXTENSION)));
+            .map(|dir| dir.join(FileKind::Data.file_name(&stream_key)));
 
         let sender = spawn_worker(stream_key.clone(), Arc::clone(&self.storage), wal_path);
         workers.insert(stream_key, sender.clone());
@@ -161,7 +161,7 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
         Err(_) => return Vec::new(),
     };
 
-    if let Err(e) = verify_header(&bytes) {
+    if let Err(e) = verify_header(FileKind::Data, &bytes) {
         log::error!("invalid WAL header in '{}': {}", path.display(), e);
         return Vec::new();
     }
@@ -194,11 +194,11 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
 fn ensure_wal_file(path: &Path) -> Result<(), &'static str> {
     match read_bytes(path) {
         Ok(existing) => {
-            verify_header(&existing).map_err(|_| "invalid WAL file header/version")?;
+            verify_header(FileKind::Data, &existing).map_err(|_| "invalid WAL file header/version")?;
             Ok(())
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            write_bytes(path, &common::helpers::format::make_header())
+            write_bytes(path, &make_header(FileKind::Data))
                 .map_err(|_| "failed to initialize WAL file header")
         }
         Err(_) => Err("failed to inspect WAL file"),

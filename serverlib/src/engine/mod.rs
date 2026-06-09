@@ -7,7 +7,11 @@ pub mod sql;
 pub mod transaction;
 pub mod wal;
 
-pub use database::{DatabaseId, DatabaseReplicaState};
+pub use database::{
+	DatabaseCatalog, DatabaseId, DatabaseIndex, DatabaseRelationship, DatabaseReplicaState,
+	DatabaseTable, IndexId,
+};
+
 pub use replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use schema::{FieldDef, FieldType, TableSchema};
 pub use transaction::{TransactionId, TransactionKind, TransactionRecord};

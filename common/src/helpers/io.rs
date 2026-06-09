@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
     fs::create_dir_all(path)
@@ -42,6 +42,18 @@ pub fn append_bytes(path: impl AsRef<Path>, content: &[u8]) -> io::Result<()> {
 
     let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(content)
+}
+
+pub fn list_files(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_file() {
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
 }
 
 #[cfg(test)]

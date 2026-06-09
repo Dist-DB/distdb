@@ -9,6 +9,11 @@ pub fn unique_id() -> String {
 }
 
 
+pub fn normalize_identifier(value: impl AsRef<str>) -> String {
+    value.as_ref().trim().to_ascii_lowercase()
+}
+
+
 pub fn epoch() -> i64 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(_n) => _n.as_secs().try_into().unwrap(),
