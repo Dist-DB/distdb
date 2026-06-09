@@ -8,3 +8,5 @@ authors = ["Sam Colak <sam@samcolak.com>"]
 serverlib = { path = "../serverlib" }
 connector = { path = "../connector" }
 common = { path = "../common" }
+log = "0.4"
+env_logger = "0.11"

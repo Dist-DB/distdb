@@ -11,20 +11,20 @@ pub struct ServerApp {
 }
 
 impl ServerApp {
-    
+
     pub fn new(config: ServerRuntimeConfig) -> Result<Self, ServerAppError> {
         let node_config = config.to_node_config();
         node_config
             .validate()
             .map_err(|msg| ServerAppError::InvalidConfig(msg.to_string()))?;
 
-        Ok(Self {
-            config,
-            wal: ConcurrentWalManager::new(),
-        })
+        let wal = ConcurrentWalManager::with_data_dir(config.data_dir.clone());
+        log::info!("server app created for node_id={}", config.node_id);
+        Ok(Self { config, wal })
     }
 
     pub fn bootstrap(&mut self) -> Result<(), ServerAppError> {
+        log::info!("server bootstrap complete for node_id={}", self.config.node_id);
         Ok(())
     }
 
@@ -37,6 +37,7 @@ impl ServerApp {
     }
 
     pub fn shutdown(&self) -> Result<(), ServerAppError> {
+        log::info!("server shutting down for node_id={}", self.config.node_id);
         self.wal
             .shutdown_all()
             .map_err(|msg| ServerAppError::Runtime(msg.to_string()))
