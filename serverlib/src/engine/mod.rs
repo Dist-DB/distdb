@@ -8,8 +8,8 @@ pub mod transaction;
 pub mod wal;
 
 pub use database::{
-	DatabaseCatalog, DatabaseId, DatabaseIndex, DatabaseRelationship, DatabaseReplicaState,
-	DatabaseTable, IndexId,
+	DatabaseCatalog, DatabaseError, DatabaseId, DatabaseIndex, DatabaseRelationship,
+	DatabaseReplicaState, DatabaseResult, DatabaseTable, IndexId, ObjectStatus,
 };
 
 pub use replication::{EventType, PublicationEvent, SubscriptionKey};

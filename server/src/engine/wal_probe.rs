@@ -15,6 +15,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
 
     wal.append(orders_wal_id, TransactionRecord {
         id: TransactionId(1),
+        refid: None,
         timestamp_epoch_ms: 1,
         actor: actor.clone(),
         kind: TransactionKind::Insert,
@@ -23,6 +24,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
 
     wal.append(orders_wal_id, TransactionRecord {
         id: TransactionId(2),
+        refid: None,
         timestamp_epoch_ms: 2,
         actor: actor.clone(),
         kind: TransactionKind::Update,
@@ -31,6 +33,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
 
     wal.append(inventory_wal_id, TransactionRecord {
         id: TransactionId(1),
+        refid: None,        
         timestamp_epoch_ms: 3,
         actor,
         kind: TransactionKind::Insert,
@@ -76,6 +79,7 @@ mod tests {
 
         wal.append("events", TransactionRecord {
             id: TransactionId(4),
+            refid: None,
             timestamp_epoch_ms: 1,
             actor: actor.clone(),
             kind: TransactionKind::Insert,
@@ -85,6 +89,7 @@ mod tests {
 
         let out_of_order = wal.append("events", TransactionRecord {
             id: TransactionId(3),
+            refid: None,
             timestamp_epoch_ms: 2,
             actor,
             kind: TransactionKind::Update,

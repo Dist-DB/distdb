@@ -9,8 +9,8 @@ pub use core::config::NodeConfig;
 pub use core::identity::{NodeId, PasswordKey, UserId};
 
 pub use engine::database::{
-	DatabaseCatalog, DatabaseId, DatabaseIndex, DatabaseRelationship, DatabaseReplicaState,
-	DatabaseTable, IndexId,
+	DatabaseCatalog, DatabaseError, DatabaseId, DatabaseIndex, DatabaseRelationship,
+	DatabaseReplicaState, DatabaseResult, DatabaseTable, IndexId, ObjectStatus,
 };
 pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use engine::schema::{FieldDef, FieldType, TableSchema};
