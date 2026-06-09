@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use common::helpers::{append_bytes, read_bytes};
+use common::helpers::format::{verify_header, FILE_EXTENSION, HEADER_SIZE};
+use common::helpers::{append_bytes, read_bytes, stable_id, write_bytes};
 
 use crate::engine::transaction::{TransactionId, TransactionLog, TransactionRecord};
 
@@ -66,23 +68,24 @@ impl ConcurrentWalManager {
         Ok(())
     }
 
-    fn get_or_spawn_worker(&self, table_id: &str) -> Result<Sender<WalCommand>, &'static str> {
+    fn get_or_spawn_worker(&self, wal_id: &str) -> Result<Sender<WalCommand>, &'static str> {
+        let stream_key = obfuscated_stream_key(wal_id)?;
         let mut workers = self
             .workers
             .lock()
             .map_err(|_| "failed to lock WAL workers")?;
 
-        if let Some(existing) = workers.get(table_id) {
+        if let Some(existing) = workers.get(&stream_key) {
             return Ok(existing.clone());
         }
 
         let wal_path = self
             .data_dir
             .as_ref()
-            .map(|dir| dir.join("wal").join(format!("{}.wal", table_id)));
+            .map(|dir| dir.join(format!("{}.{}", stream_key, FILE_EXTENSION)));
 
-        let sender = spawn_worker(table_id.to_string(), Arc::clone(&self.storage), wal_path);
-        workers.insert(table_id.to_string(), sender.clone());
+        let sender = spawn_worker(stream_key.clone(), Arc::clone(&self.storage), wal_path);
+        workers.insert(stream_key, sender.clone());
         Ok(sender)
     }
 
@@ -90,9 +93,8 @@ impl ConcurrentWalManager {
 
 impl TransactionLog for ConcurrentWalManager {
 
-    fn append(&self, record: TransactionRecord) -> Result<(), &'static str> {
-        let table_id = record.table_id.clone();
-        let sender = self.get_or_spawn_worker(&table_id)?;
+    fn append(&self, wal_id: &str, record: TransactionRecord) -> Result<(), &'static str> {
+        let sender = self.get_or_spawn_worker(wal_id)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
         sender
             .send(WalCommand::Append {
@@ -106,7 +108,11 @@ impl TransactionLog for ConcurrentWalManager {
             .map_err(|_| "failed to receive WAL append acknowledgement")?
     }
 
-    fn since(&self, table_id: &str, from: Option<TransactionId>) -> Vec<TransactionRecord> {
+    fn since(&self, wal_id: &str, from: Option<TransactionId>) -> Vec<TransactionRecord> {
+        let stream_key = match obfuscated_stream_key(wal_id) {
+            Ok(k) => k,
+            Err(_) => return Vec::new(),
+        };
 
         let store = match self.storage.lock() {
             Ok(store) => store,
@@ -114,7 +120,7 @@ impl TransactionLog for ConcurrentWalManager {
         };
 
         store
-            .get(table_id)
+            .get(&stream_key)
             .map(|entries| {
                 match from {
                     Some(min_id) => entries
@@ -141,13 +147,27 @@ fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
     Ok(frame)
 }
 
+fn obfuscated_stream_key(wal_id: &str) -> Result<String, &'static str> {
+    let normalized = wal_id.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err("wal_id must not be empty");
+    }
+    Ok(stable_id(&[&normalized]))
+}
+
 fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
     let bytes = match read_bytes(path) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
+
+    if let Err(e) = verify_header(&bytes) {
+        log::error!("invalid WAL header in '{}': {}", path.display(), e);
+        return Vec::new();
+    }
+
     let mut records = Vec::new();
-    let mut pos = 0;
+    let mut pos = HEADER_SIZE;
     while pos + 8 <= bytes.len() {
         let len = u64::from_le_bytes(
             bytes[pos..pos + 8]
@@ -171,33 +191,50 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
     records
 }
 
+fn ensure_wal_file(path: &Path) -> Result<(), &'static str> {
+    match read_bytes(path) {
+        Ok(existing) => {
+            verify_header(&existing).map_err(|_| "invalid WAL file header/version")?;
+            Ok(())
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            write_bytes(path, &common::helpers::format::make_header())
+                .map_err(|_| "failed to initialize WAL file header")
+        }
+        Err(_) => Err("failed to inspect WAL file"),
+    }
+}
+
 fn spawn_worker(
-    table_id: String,
+    stream_key: String,
     storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
     wal_path: Option<PathBuf>,
 ) -> Sender<WalCommand> {
     let (tx, rx) = mpsc::channel::<WalCommand>();
     thread::spawn(move || {
         if let Some(ref path) = wal_path {
+            if let Err(e) = ensure_wal_file(path) {
+                log::error!("failed to initialize WAL file '{}': {}", path.display(), e);
+            }
             let existing = load_records_from_file(path);
             let count = existing.len();
             if let Ok(mut state) = storage.lock() {
-                state.entry(table_id.clone()).or_default().extend(existing);
+                state.entry(stream_key.clone()).or_default().extend(existing);
             }
             log::info!(
-                "WAL worker started for table={} (replayed {} record(s) from disk)",
-                table_id,
+                "WAL worker started for stream={} (replayed {} record(s) from disk)",
+                stream_key,
                 count
             );
         } else {
-            log::info!("WAL worker started for table={} (in-memory only)", table_id);
+            log::info!("WAL worker started for stream={} (in-memory only)", stream_key);
         }
 
         while let Ok(command) = rx.recv() {
             match command {
                 WalCommand::Append { record, ack } => {
                     if let Ok(mut state) = storage.lock() {
-                        let entries = state.entry(table_id.clone()).or_default();
+                        let entries = state.entry(stream_key.clone()).or_default();
                         let is_ordered = entries
                             .last()
                             .map(|last| record.id.0 > last.id.0)
@@ -209,8 +246,8 @@ fn spawn_worker(
                                     Ok(frame) => {
                                         if let Err(e) = append_bytes(path, &frame) {
                                             log::error!(
-                                                "failed to persist WAL record for table={}: {}",
-                                                table_id,
+                                                "failed to persist WAL record for stream={}: {}",
+                                                stream_key,
                                                 e
                                             );
                                             let _ = ack.send(Err(
@@ -229,8 +266,8 @@ fn spawn_worker(
                             let _ = ack.send(Ok(()));
                         } else {
                             log::warn!(
-                                "out-of-order transaction rejected for table={}",
-                                table_id
+                                "out-of-order transaction rejected for stream={}",
+                                stream_key
                             );
                             let _ = ack.send(Err(
                                 "out-of-order transaction id for table WAL stream",
@@ -238,15 +275,15 @@ fn spawn_worker(
                         }
                     } else {
                         log::error!(
-                            "failed to acquire WAL storage lock for table={}",
-                            table_id
+                            "failed to acquire WAL storage lock for stream={}",
+                            stream_key
                         );
                         let _ = ack.send(Err("failed to lock WAL storage"));
                         break;
                     }
                 }
                 WalCommand::Shutdown => {
-                    log::info!("WAL worker shutting down for table={}", table_id);
+                    log::info!("WAL worker shutting down for stream={}", stream_key);
                     break;
                 }
             }

@@ -7,6 +7,7 @@ pub mod p2p;
 
 pub use core::config::NodeConfig;
 pub use core::identity::{NodeId, PasswordKey, UserId};
+
 pub use engine::database::{DatabaseId, DatabaseReplicaState};
 pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use engine::schema::{FieldDef, FieldType, TableSchema};

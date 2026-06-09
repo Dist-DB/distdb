@@ -8,11 +8,12 @@ pub struct WalProbeResult {
 }
 
 pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'static str> {
+    let orders_wal_id = "orders";
+    let inventory_wal_id = "inventory";
 
     let actor = UserId::from_username("probe-user");
 
-    wal.append(TransactionRecord {
-        table_id: "orders".to_string(),
+    wal.append(orders_wal_id, TransactionRecord {
         id: TransactionId(1),
         timestamp_epoch_ms: 1,
         actor: actor.clone(),
@@ -20,8 +21,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
         payload: vec![1, 2, 3],
     })?;
 
-    wal.append(TransactionRecord {
-        table_id: "orders".to_string(),
+    wal.append(orders_wal_id, TransactionRecord {
         id: TransactionId(2),
         timestamp_epoch_ms: 2,
         actor: actor.clone(),
@@ -29,8 +29,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
         payload: vec![4, 5, 6],
     })?;
 
-    wal.append(TransactionRecord {
-        table_id: "inventory".to_string(),
+    wal.append(inventory_wal_id, TransactionRecord {
         id: TransactionId(1),
         timestamp_epoch_ms: 3,
         actor,
@@ -38,7 +37,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
         payload: vec![7],
     })?;
 
-    let replay = wal.since("orders", Some(TransactionId(1)));
+    let replay = wal.since(orders_wal_id, Some(TransactionId(1)));
 
     Ok(WalProbeResult {
         active_workers: wal.active_worker_count(),
@@ -75,8 +74,7 @@ mod tests {
         let wal = ConcurrentWalManager::new();
         let actor = UserId::from_username("integrity-user");
 
-        wal.append(TransactionRecord {
-            table_id: "events".to_string(),
+        wal.append("events", TransactionRecord {
             id: TransactionId(4),
             timestamp_epoch_ms: 1,
             actor: actor.clone(),
@@ -85,8 +83,7 @@ mod tests {
         })
         .expect("first append should succeed");
 
-        let out_of_order = wal.append(TransactionRecord {
-            table_id: "events".to_string(),
+        let out_of_order = wal.append("events", TransactionRecord {
             id: TransactionId(3),
             timestamp_epoch_ms: 2,
             actor,

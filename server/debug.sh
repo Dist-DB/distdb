@@ -1,1 +1,1 @@
-RUST_LOG="warn,error,info,critical" RUST_BACKTRACE=1 cargo run
+RUST_LOG="warn,error,info,critical" RUST_BACKTRACE=1 cargo run datadir=./data

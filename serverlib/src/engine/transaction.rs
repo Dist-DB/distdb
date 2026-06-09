@@ -14,7 +14,6 @@ pub enum TransactionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TransactionRecord {
-    pub table_id: String,
     pub id: TransactionId,
     pub timestamp_epoch_ms: u64,
     pub actor: UserId,
@@ -23,8 +22,8 @@ pub struct TransactionRecord {
 }
 
 pub trait TransactionLog {
-    fn append(&self, record: TransactionRecord) -> Result<(), &'static str>;
+    fn append(&self, wal_id: &str, record: TransactionRecord) -> Result<(), &'static str>;
     // When `from` is provided, return records after that transaction id (exclusive).
-    // When `from` is None, return all records for the table.
-    fn since(&self, table_id: &str, from: Option<TransactionId>) -> Vec<TransactionRecord>;
+    // When `from` is None, return all records for the WAL stream.
+    fn since(&self, wal_id: &str, from: Option<TransactionId>) -> Vec<TransactionRecord>;
 }

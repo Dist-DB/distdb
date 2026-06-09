@@ -13,14 +13,16 @@ pub struct ServerRuntimeConfig {
 impl ServerRuntimeConfig {
 
     pub fn default_local() -> Self {
-        
+        Self::default_local_with_data_dir(PathBuf::from("./data"))
+    }
+
+    pub fn default_local_with_data_dir(data_dir: PathBuf) -> Self {
         Self {
             node_id: "server-node-local-01".to_string(),
             swarm_id: "distdb-devnet".to_string(),
-            data_dir: PathBuf::from("./data"),
+            data_dir,
             listen_addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
         }
-
     }
 
     pub fn to_node_config(&self) -> NodeConfig {

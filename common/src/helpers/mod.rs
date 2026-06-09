@@ -1,5 +1,6 @@
 
 pub(crate) mod utils;
+pub mod format;
 pub mod io;
 mod hash;
 
