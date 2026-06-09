@@ -23,6 +23,9 @@
     {
       "name": "client",
       "path": "./client"
+    },
+    { "name": "console",
+      "path": "./console"
     }
   ],
   "settings": {
@@ -36,7 +39,8 @@
       "cargo clean": true,
       "env": true,
       "cargo run": true,
-      "mv": true
+      "mv": true,
+      "cargo build": true
     }
   }
 }

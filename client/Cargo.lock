@@ -427,7 +427,9 @@ dependencies = [
 name = "connector"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "common",
+ "serde",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ pub struct WalProbeResult {
 }
 
 pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'static str> {
+    
     let orders_wal_id = "orders";
     let inventory_wal_id = "inventory";
 
@@ -51,6 +52,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

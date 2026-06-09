@@ -15,9 +15,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find_map(|arg| arg.strip_prefix("datadir=").map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("./data"));
 
-    log::info!("using data directory: {}", data_dir.display());
+    let listen_addr = std::env::args()
+        .find_map(|arg| arg.strip_prefix("listen_addr=").map(ToOwned::to_owned))
+        .unwrap_or_else(|| "0.0.0.0".to_string());
 
-    let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
+    log::info!("using data directory: {}", data_dir.display());
+    log::info!("using listen address host: {}", listen_addr);
+
+    let config = ServerRuntimeConfig::default_local_with_listen_addr(
+        data_dir,
+        format!("/ip4/{listen_addr}/tcp/{}", common::DEFAULT_SERVER_PORT),
+    );
 
     let mut app = ServerApp::new(config)?;
     app.bootstrap()?;

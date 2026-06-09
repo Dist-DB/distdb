@@ -9,3 +9,4 @@ common = { path = "../common" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 log = "0.4"
+sqlparser = "0.51"

@@ -7,13 +7,24 @@ pub mod p2p;
 
 pub use core::config::NodeConfig;
 pub use core::identity::{NodeId, PasswordKey, UserId};
+pub use common::schema::{
+	normalize_field_name, validate_field_kind, FieldKind, SchemaValidationError,
+};
 
 pub use engine::database::{
 	DatabaseCatalog, DatabaseError, DatabaseId, DatabaseIndex, DatabaseRelationship,
 	DatabaseReplicaState, DatabaseResult, DatabaseTable, IndexId, ObjectStatus,
 };
 pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
-pub use engine::schema::{FieldDef, FieldType, TableSchema};
-pub use engine::transaction::{TransactionId, TransactionKind, TransactionRecord};
+pub use engine::sql::{
+	parse_mysql8_sql_requests, parse_sql_requests, sql_directive_for_statement,
+	SqlCompatibilityTarget, SqlDirective, SqlOperation, SqlParseError, SqlRequest,
+};
+pub use engine::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
+pub use engine::transaction::{SchemaChangePayload, TransactionId, TransactionKind, TransactionRecord};
 pub use engine::wal::ConcurrentWalManager;
+pub use p2p::{
+	DiscoveryMode, KademliaDiscoveryConfig, KademliaDiscoveryService,
+	ServerP2pEvent, ServerP2pHandleOutcome, ServerP2pNetwork, ServerP2pRuntime,
+};
 

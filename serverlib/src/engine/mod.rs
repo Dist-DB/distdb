@@ -1,7 +1,8 @@
 
 pub mod database;
+pub mod database_table;
 pub mod replication;
-pub mod schema;
+pub mod table_schema;
 pub mod security;
 pub mod sql;
 pub mod transaction;
@@ -13,6 +14,7 @@ pub use database::{
 };
 
 pub use replication::{EventType, PublicationEvent, SubscriptionKey};
-pub use schema::{FieldDef, FieldType, TableSchema};
+pub use table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
 pub use transaction::{TransactionId, TransactionKind, TransactionRecord};
+pub use transaction::SchemaChangePayload;
 pub use wal::ConcurrentWalManager;

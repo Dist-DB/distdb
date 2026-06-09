@@ -6,3 +6,5 @@ authors = ["Sam Colak <sam@samcolak.com>"]
 
 [dependencies]
 common = { path = "../common" }
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"

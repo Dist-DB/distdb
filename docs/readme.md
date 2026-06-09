@@ -13,7 +13,7 @@ The database platform conforms to the following principles
 - The p2p network uses Kadema for IP discovery for remote nodes
 - A database may reside on any of the server nodes (one or more)
 - Each database instance coordinates transactions with other database replicas
-- A database is compliant the SQL standards in terms of a SQL statement
+- A database follows a versioned SQL compatibility target based on MySQL 8.0.x for the supported statement set
 - Each database maintains a transactional log of all data changes
 - Security is defined on a node & database instance
 - A standard set of SQL directives are supported by the service
@@ -43,5 +43,15 @@ The database platform conforms to the following principles
 
 - tables have indexes based upon the schema definition
 - all tables are subject to crud directives (create, retreive, update, delete)
+
+## SQL Compatibility Target
+
+The platform should treat MySQL 8.0.x as the compatibility baseline for SQL parsing, statement planning, and builder output.
+
+The implementation should:
+
+- parse the supported statement set using MySQL 8.0.x-compatible syntax rules
+- translate parsed statements into one or more execution actions
+- reject unsupported MySQL 8.0.x syntax explicitly rather than silently normalizing it
 
 

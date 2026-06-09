@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use common::DEFAULT_SERVER_PORT;
 use serverlib::NodeConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +22,16 @@ impl ServerRuntimeConfig {
             node_id: "server-node-local-01".to_string(),
             swarm_id: "distdb-devnet".to_string(),
             data_dir,
-            listen_addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+            listen_addrs: vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")],
+        }
+    }
+
+    pub fn default_local_with_listen_addr(data_dir: PathBuf, listen_addr: impl Into<String>) -> Self {
+        Self {
+            node_id: "server-node-local-01".to_string(),
+            swarm_id: "distdb-devnet".to_string(),
+            data_dir,
+            listen_addrs: vec![listen_addr.into()],
         }
     }
 
@@ -36,4 +46,16 @@ impl ServerRuntimeConfig {
 
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_local_listens_on_all_interfaces() {
+        let config = ServerRuntimeConfig::default_local();
+
+        assert_eq!(config.listen_addrs, vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")]);
+    }
 }
