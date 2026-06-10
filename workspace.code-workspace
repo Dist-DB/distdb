@@ -5,6 +5,10 @@
       "path": "./.github"
     },
     {
+      "name": "scripts",
+      "path": "./scripts"
+    },
+    {
       "name": "docs",
       "path": "./docs"
     },
