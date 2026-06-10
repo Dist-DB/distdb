@@ -1,6 +1,16 @@
 # Using the platform
 
-# Server
+The platform comprises of a number of elements
+
+## Common
+
+A set of commonly used functions and statics that are used throughout the project
+
+## ServerLib
+
+The core container for the service stack (as a Cargo Library) - This is used by the connector and also the server components
+
+## Server
 
 For the default configuration, use 
 
@@ -11,7 +21,11 @@ cd ./server
 
 The server will run in debug mode presenting all output to the console (using log) - This can be supressed by running the service in release mode (cargo run --release) as needed. Since this project is not production ready, i recommend using the debug version at the moment.
 
-# Console
+## Client
+
+An example application featuring a range of features available to the platform - this is (at the moment) behind the core application development cycle - interested parties should look at the console application first
+
+## Console
 
 Using the same function to run server, 
 
