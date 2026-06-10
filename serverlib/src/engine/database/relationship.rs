@@ -1,7 +1,65 @@
 
+use super::core::ObjectStatus;
+use super::entity::{DatabaseEntityAspect, DatabaseEntityKind};
+use super::entity_metadata::EntityMetadata;
+use super::table_schema::TableSchema;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseRelationship {
     pub left_table_id: String,
     pub right_table_id: String,
     pub relation_name: String,
+    pub metadata: EntityMetadata,
+}
+
+impl DatabaseRelationship {
+    pub fn new(left_table_id: String, right_table_id: String, relation_name: String) -> Self {
+        Self {
+            left_table_id,
+            right_table_id,
+            relation_name,
+            metadata: EntityMetadata::default(),
+        }
+    }
+}
+
+impl DatabaseEntityAspect for DatabaseRelationship {
+
+    fn kind(&self) -> DatabaseEntityKind {
+        DatabaseEntityKind::Relationship
+    }
+
+    fn storage_key(&self) -> String {
+        let left = common::normalize_identifier!(&self.left_table_id);
+        let right = common::normalize_identifier!(&self.right_table_id);
+        let name = common::normalize_identifier!(&self.relation_name);
+        format!("rel:{left}:{right}:{name}")
+    }
+
+    fn status(&self) -> ObjectStatus {
+        ObjectStatus::Ready
+    }
+
+    fn metadata(&self) -> &EntityMetadata {
+        &self.metadata
+    }
+
+    fn wal_stream_id(&self, database_wal_id: &str) -> String {
+        database_wal_id.to_string()
+    }
+
+    fn schema_revision(&self) -> Option<u64> {
+        None
+    }
+
+    fn schema(&self) -> Option<&TableSchema> {
+        None
+    }
+
+    fn normalize_in_place(&mut self) {
+        self.left_table_id = common::normalize_identifier!(&self.left_table_id);
+        self.right_table_id = common::normalize_identifier!(&self.right_table_id);
+        self.relation_name = common::normalize_identifier!(&self.relation_name);
+    }
+
 }

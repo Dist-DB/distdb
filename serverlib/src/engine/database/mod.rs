@@ -4,6 +4,7 @@ pub mod status;
 pub mod schema_error;
 pub mod catalog;
 pub mod id;
+pub mod entity_metadata;
 pub mod field_def;
 pub mod field_types;
 pub mod index_id;

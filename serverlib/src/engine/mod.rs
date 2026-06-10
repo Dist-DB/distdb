@@ -8,6 +8,8 @@ pub mod wal;
 pub use database::core::{
 	DatabaseCatalog, DatabaseError, DatabaseId, DatabaseIndex, DatabaseRelationship,
 	DatabaseReplicaState, DatabaseResult, DatabaseTable, DatabaseView, DatabaseEntity,
+	EntityMetadata,
+	DatabaseEntityAspect, DatabaseEntityKind, DatabaseObjectRef, DatabaseObjectType,
 	IndexId, ObjectStatus,
 };
 

@@ -1,5 +1,8 @@
 
 use super::core::{DatabaseError, DatabaseResult, ObjectStatus};
+use super::entity::{DatabaseEntityAspect, DatabaseEntityKind};
+use super::entity_metadata::EntityMetadata;
+use super::index::IndexId;
 use super::table_schema::TableSchema;
 
 use std::collections::HashMap;
@@ -11,6 +14,7 @@ pub struct DatabaseTable {
     pub schema_revision: u64,
     pub schema: TableSchema,
     pub indexes: HashMap<String, super::index::DatabaseIndex>,
+    pub metadata: EntityMetadata,
 }
 
 impl DatabaseTable {
@@ -26,6 +30,7 @@ impl DatabaseTable {
             schema_revision: 0,
             schema,
             indexes,
+            metadata: EntityMetadata::default(),
         }
     }
 
@@ -85,4 +90,50 @@ impl DatabaseTable {
         Ok(())
     }
 
+}
+
+impl DatabaseEntityAspect for DatabaseTable {
+
+    fn kind(&self) -> DatabaseEntityKind {
+        DatabaseEntityKind::Table
+    }
+
+    fn storage_key(&self) -> String {
+        common::normalize_identifier!(&self.table_id)
+    }
+
+    fn status(&self) -> ObjectStatus {
+        self.status()
+    }
+
+    fn metadata(&self) -> &EntityMetadata {
+        &self.metadata
+    }
+
+    fn wal_stream_id(&self, _database_wal_id: &str) -> String {
+        self.storage_key()
+    }
+
+    fn schema_revision(&self) -> Option<u64> {
+        Some(self.schema_revision())
+    }
+
+    fn schema(&self) -> Option<&TableSchema> {
+        Some(self.schema())
+    }
+
+    fn normalize_in_place(&mut self) {
+        let normalized_table_id = common::normalize_identifier!(&self.table_id);
+        self.table_id = normalized_table_id.clone();
+
+        let mut normalized_indexes = HashMap::with_capacity(self.indexes.len());
+        for (_, mut index) in std::mem::take(&mut self.indexes) {
+            index.table_id = normalized_table_id.clone();
+            index.field_name = common::normalize_identifier!(&index.field_name);
+            index.index_id = IndexId(format!("{}:{}", index.table_id, index.field_name));
+            normalized_indexes.insert(index.index_id.0.clone(), index);
+        }
+        self.indexes = normalized_indexes;
+    }
+    
 }

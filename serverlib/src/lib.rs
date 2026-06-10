@@ -13,7 +13,9 @@ pub use common::schema::{
 
 pub use engine::database::core::{
 	DatabaseCatalog, DatabaseEntity, DatabaseError, DatabaseId, DatabaseIndex,
-	DatabaseRelationship, DatabaseReplicaState, DatabaseResult, DatabaseTable,
+	DatabaseEntityAspect, DatabaseEntityKind, DatabaseRelationship, DatabaseReplicaState, DatabaseResult, DatabaseTable,
+	EntityMetadata,
+	DatabaseObjectRef, DatabaseObjectType,
 	DatabaseView, IndexId, ObjectStatus,
 };
 

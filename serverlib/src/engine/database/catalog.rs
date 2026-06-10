@@ -6,7 +6,10 @@ use common::helpers::format::FileKind;
 use common::helpers::{read_bytes, write_bytes};
 
 use super::core::{DatabaseError, DatabaseResult, ObjectStatus};
-use super::entity::DatabaseEntity;
+use super::entity::{
+    DatabaseEntity, DatabaseEntityAspect, DatabaseEntityKind, DatabaseObjectRef,
+    DatabaseObjectType,
+};
 use super::id::DatabaseId;
 use super::index::DatabaseIndex;
 use super::relationship::DatabaseRelationship;
@@ -102,19 +105,93 @@ impl DatabaseCatalog {
     }
 
     pub fn table(&self, table_id: &str) -> Option<&DatabaseTable> {
-        let normalized = common::normalize_identifier!(table_id);
-        match self.entities.get(&normalized) {
-            Some(DatabaseEntity::Table(table)) => Some(table),
+        match self.object(DatabaseObjectType::Table, table_id) {
+            Some(DatabaseObjectRef::Table(table)) => Some(table),
             _ => None,
         }
     }
 
     pub fn index(&self, index_id: &str) -> Option<&DatabaseIndex> {
-        let normalized = common::normalize_identifier!(index_id);
+        match self.object(DatabaseObjectType::Index, index_id) {
+            Some(DatabaseObjectRef::Index(index)) => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn object(&self, object_type: DatabaseObjectType, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
+
+        let normalized = common::normalize_identifier!(object_id);
+        
+        match object_type {
+            DatabaseObjectType::Table => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::Table(table)) => Some(DatabaseObjectRef::Table(table)),
+                _ => None,
+            },
+            DatabaseObjectType::View => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::View(view)) => Some(DatabaseObjectRef::View(view)),
+                _ => None,
+            },
+            DatabaseObjectType::Relationship => self.entities.get(&normalized).and_then(|entity| match entity {
+                DatabaseEntity::Relationship(relationship) => Some(DatabaseObjectRef::Relationship(relationship)),
+                _ => None,
+            }),
+            DatabaseObjectType::Index => {
+                self.entities.values().find_map(|entity| match entity {
+                    DatabaseEntity::Table(table) => table
+                        .indexes
+                        .get(&normalized)
+                        .map(DatabaseObjectRef::Index),
+                    _ => None,
+                })
+            }
+        }
+        
+    }
+
+    /// Return an object by id without requiring the caller to provide an
+    /// object type. Entity ids are checked first, then table indexes.
+    pub fn object_by_index(&self, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
+
+        let normalized = common::normalize_identifier!(object_id);
+
+        if let Some(entity) = self.entities.get(&normalized) {
+            return match entity {
+                DatabaseEntity::Table(table) => Some(DatabaseObjectRef::Table(table)),
+                DatabaseEntity::View(view) => Some(DatabaseObjectRef::View(view)),
+                DatabaseEntity::Relationship(relationship) => {
+                    Some(DatabaseObjectRef::Relationship(relationship))
+                }
+            };
+        }
+
         self.entities.values().find_map(|entity| match entity {
-            DatabaseEntity::Table(table) => table.indexes.get(&normalized),
+            DatabaseEntity::Table(table) => table.indexes.get(&normalized).map(DatabaseObjectRef::Index),
             _ => None,
         })
+
+    }
+
+    pub fn entity(&self, entity_id: &str) -> Option<&DatabaseEntity> {
+        let normalized = common::normalize_identifier!(entity_id);
+        self.entities.get(&normalized)
+    }
+
+    pub fn entity_kind(&self, entity_id: &str) -> Option<DatabaseEntityKind> {
+        self.entity(entity_id).map(DatabaseEntityAspect::kind)
+    }
+
+    pub fn entity_status(&self, entity_id: &str) -> Option<ObjectStatus> {
+        self.entity(entity_id).map(DatabaseEntityAspect::status)
+    }
+
+    pub fn entity_wal_stream_id(&self, entity_id: &str) -> Option<String> {
+        self.entity(entity_id)
+            .map(|entity| entity.wal_stream_id(&self.database_id.0))
+    }
+
+    pub fn entity_schema_revision(&self, entity_id: &str) -> Option<u64> {
+        self.entity(entity_id)
+            .and_then(DatabaseEntityAspect::schema_revision)
     }
 
     pub fn relationships(&self) -> Vec<&DatabaseRelationship> {
@@ -278,20 +355,22 @@ impl DatabaseCatalog {
 
         self.entities.insert(
             view_id.clone(),
-            DatabaseEntity::View(DatabaseView {
-                view_id,
-                sql: sql.into(),
-                schema,
-            }),
+            DatabaseEntity::View(DatabaseView::new(view_id, sql.into(), schema)),
         );
 
         Ok(())
     }
 
     pub fn view(&self, view_id: &str) -> Option<&DatabaseView> {
-        let normalized = common::normalize_identifier!(view_id);
-        match self.entities.get(&normalized) {
-            Some(DatabaseEntity::View(view)) => Some(view),
+        match self.object(DatabaseObjectType::View, view_id) {
+            Some(DatabaseObjectRef::View(view)) => Some(view),
+            _ => None,
+        }
+    }
+
+    pub fn relationship(&self, relationship_id: &str) -> Option<&DatabaseRelationship> {
+        match self.object(DatabaseObjectType::Relationship, relationship_id) {
+            Some(DatabaseObjectRef::Relationship(relationship)) => Some(relationship),
             _ => None,
         }
     }
@@ -339,8 +418,11 @@ impl DatabaseCatalog {
             return Err(DatabaseError::CatalogPayloadMissing);
         }
 
-        bincode::deserialize::<Self>(&bytes[common::helpers::format::HEADER_SIZE..])
-            .map_err(|_| DatabaseError::CatalogDeserialize)
+        let mut catalog = bincode::deserialize::<Self>(&bytes[common::helpers::format::HEADER_SIZE..])
+            .map_err(|_| DatabaseError::CatalogDeserialize)?;
+
+        catalog.normalize_loaded_entities()?;
+        Ok(catalog)
     }
 
     pub fn save_in_directory(&self, directory: impl AsRef<Path>) -> DatabaseResult<()> {
@@ -395,10 +477,31 @@ impl DatabaseCatalog {
         }
         indexes
     }
+
+    fn normalize_loaded_entities(&mut self) -> DatabaseResult<()> {
+        let mut normalized_entities = HashMap::with_capacity(self.entities.len());
+        for (_, mut entity) in std::mem::take(&mut self.entities) {
+            entity.normalize_in_place();
+
+            if let DatabaseEntity::Table(table) = &mut entity {
+                table.indexes = Self::indexes_for_schema(&table.table_id, &table.schema);
+            }
+
+            let key = entity.storage_key();
+            if normalized_entities.insert(key, entity).is_some() {
+                return Err(DatabaseError::CatalogDeserialize);
+            }
+        }
+
+        self.entities = normalized_entities;
+        Ok(())
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -599,8 +702,9 @@ mod tests {
 
     #[test]
     fn schema_change_tx_abort_returns_table_to_ready_without_schema_change() {
-        let mut catalog =
-            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
         let initial_schema = TableSchema::new(vec![crate::engine::database::table_schema::FieldDef {
             seqno: 1,
             field_name: "name".to_string(),
@@ -633,8 +737,9 @@ mod tests {
 
     #[test]
     fn schema_change_tx_commit_aborts_when_persist_fails() {
-        let mut catalog =
-            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
         let initial_schema = TableSchema::new(Vec::new());
         catalog
             .create_table("users", initial_schema.clone())
@@ -661,8 +766,9 @@ mod tests {
 
     #[test]
     fn schema_replay_uses_latest_transaction_payload() {
-        let mut catalog =
-            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
         catalog
             .register_table("users", TableSchema::new(Vec::new()))
             .expect("table register should succeed");
@@ -678,45 +784,49 @@ mod tests {
             indexed: FieldIndex::None,
             default_value: None,
         }]);
+
         let first_payload = SchemaChangePayload {
             table_id: "users".to_string(),
             schema_revision: 1,
             schema: first_schema,
         };
+
         wal.append(
             "users",
-            crate::engine::database::transaction::TransactionRecord {
-                id: crate::engine::database::transaction::TransactionId(1),
+            crate::TransactionRecord {
+                id: crate::TransactionId(1),
                 refid: None,
                 timestamp_epoch_ms: 1,
                 actor: actor.clone(),
-                kind: crate::engine::database::transaction::TransactionKind::SchemaChange,
+                kind: crate::TransactionKind::SchemaChange,
                 payload: first_payload.encode().expect("schema payload should encode"),
             },
         )
         .expect("first schema append should succeed");
 
-        let second_schema = TableSchema::new(vec![crate::engine::database::table_schema::FieldDef {
+        let second_schema = TableSchema::new(vec![crate::FieldDef {
             seqno: 1,
             field_name: "email".to_string(),
-            field_type: crate::engine::database::table_schema::FieldType::Text,
+            field_type: crate::FieldType::Text,
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
         }]);
+
         let second_payload = SchemaChangePayload {
             table_id: "users".to_string(),
             schema_revision: 2,
             schema: second_schema.clone(),
         };
+
         wal.append(
             "users",
-            crate::engine::database::transaction::TransactionRecord {
-                id: crate::engine::database::transaction::TransactionId(2),
+            crate::TransactionRecord {
+                id: crate::TransactionId(2),
                 refid: None,
                 timestamp_epoch_ms: 2,
                 actor,
-                kind: crate::engine::database::transaction::TransactionKind::SchemaChange,
+                kind: crate::TransactionKind::SchemaChange,
                 payload: second_payload.encode().expect("schema payload should encode"),
             },
         )
@@ -730,5 +840,173 @@ mod tests {
         assert_eq!(catalog.table_schema("users"), Some(&second_schema));
         assert_eq!(catalog.table_schema_revision("users"), Some(2));
         assert!(catalog.index("users:email").is_some());
+
     }
+
+    #[test]
+    fn entity_aspects_expose_status_and_wal_stream() {
+
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_table("users", TableSchema::new(Vec::new()))
+            .expect("table register should succeed");
+
+        catalog
+            .register_view("users_view", "select * from users", TableSchema::new(Vec::new()))
+            .expect("view register should succeed");
+
+        catalog.register_relationship(DatabaseRelationship::new(
+            "users".to_string(),
+            "accounts".to_string(),
+            "owns".to_string(),
+        ));
+
+        assert_eq!(catalog.entity_status("users"), Some(ObjectStatus::Load));
+        assert_eq!(catalog.entity_wal_stream_id("users"), Some("users".to_string()));
+        assert_eq!(catalog.entity_schema_revision("users"), Some(0));
+
+        assert_eq!(
+            catalog.entity_wal_stream_id("users_view"),
+            Some(catalog.database_id.0.clone())
+        );
+        assert_eq!(catalog.entity_schema_revision("users_view"), None);
+
+        assert_eq!(
+            catalog.entity_wal_stream_id("rel:users:accounts:owns"),
+            Some(catalog.database_id.0.clone())
+        );
+
+    }
+
+    #[test]
+    fn normalize_loaded_entities_rekeys_and_rebuilds_indexes() {
+
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let schema = TableSchema::new(vec![crate::FieldDef {
+            seqno: 1,
+            field_name: "UserId".to_string(),
+            field_type: crate::FieldType::UInt(64),
+            nullable: false,
+            indexed: FieldIndex::Indexed,
+            default_value: None,
+        }]);
+
+        catalog
+            .register_table("Users", schema)
+            .expect("table register should succeed");
+
+        let entity = catalog
+            .entities
+            .remove("users")
+            .expect("expected normalized table entry");
+        catalog.entities.insert("Users".to_string(), entity);
+
+        catalog
+            .normalize_loaded_entities()
+            .expect("normalization should succeed");
+
+        assert!(catalog.entities.contains_key("users"));
+        assert!(!catalog.entities.contains_key("Users"));
+        assert!(catalog.index("users:userid").is_some());
+
+    }
+
+    #[test]
+    fn object_accessor_routes_all_supported_types() {
+
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let schema = TableSchema::new(vec![crate::FieldDef {
+            seqno: 1,
+            field_name: "email".to_string(),
+            field_type: crate::FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::Indexed,
+            default_value: None,
+        }]);
+
+        catalog
+            .register_table("users", schema.clone())
+            .expect("table register should succeed");
+        catalog
+            .register_view("users_view", "select * from users", schema)
+            .expect("view register should succeed");
+        catalog.register_relationship(DatabaseRelationship::new(
+            "users".to_string(),
+            "accounts".to_string(),
+            "owns".to_string(),
+        ));
+
+        assert!(matches!(
+            catalog.object(DatabaseObjectType::Table, "users"),
+            Some(DatabaseObjectRef::Table(_))
+        ));
+        
+        assert!(matches!(
+            catalog.object(DatabaseObjectType::View, "users_view"),
+            Some(DatabaseObjectRef::View(_))
+        ));
+        
+        assert!(matches!(
+            catalog.object(DatabaseObjectType::Relationship, "rel:users:accounts:owns"),
+            Some(DatabaseObjectRef::Relationship(_))
+        ));
+        
+        assert!(matches!(
+            catalog.object(DatabaseObjectType::Index, "users:email"),
+            Some(DatabaseObjectRef::Index(_))
+        ));
+
+    }
+
+    #[test]
+    fn object_by_index_returns_untyped_object_by_id() {
+
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let schema = TableSchema::new(vec![crate::FieldDef {
+            seqno: 1,
+            field_name: "email".to_string(),
+            field_type: crate::FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::Indexed,
+            default_value: None,
+        }]);
+
+        catalog
+            .register_table("users", schema.clone())
+            .expect("table register should succeed");
+
+        catalog
+            .register_view("users_view", "select * from users", schema)
+            .expect("view register should succeed");
+
+        catalog.register_relationship(DatabaseRelationship::new(
+            "users".to_string(),
+            "accounts".to_string(),
+            "owns".to_string(),
+        ));
+
+        assert!(matches!(catalog.object_by_index("users"), Some(DatabaseObjectRef::Table(_))));
+        assert!(matches!(catalog.object_by_index("users_view"), Some(DatabaseObjectRef::View(_))));
+        assert!(matches!(
+            catalog.object_by_index("rel:users:accounts:owns"),
+            Some(DatabaseObjectRef::Relationship(_))
+        ));
+        
+        assert!(matches!(
+            catalog.object_by_index("users:email"),
+            Some(DatabaseObjectRef::Index(_))
+        ));
+
+        assert!(catalog.object_by_index("missing_object").is_none());
+    
+    }
+
 }
