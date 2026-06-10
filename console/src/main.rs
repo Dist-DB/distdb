@@ -2,8 +2,7 @@
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorP2pConfig, ConnectorP2pEvent,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldIndex, FieldType,
-    MutationResult, QueryResult, QueryTimings, ResponseStatus,
+    ConnectorResponse, ConnectorResult, DataQuery,
 };
 
 use std::env;
@@ -24,14 +23,10 @@ struct ConsoleSession {
     runtime: ConnectorP2pRuntime,
     current_database: String,
     request_seq: u64,
-    simulate_responses: bool,
 }
 
 impl ConsoleSession {
-    fn new(
-        server_address: String,
-        simulate_responses: bool,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(server_address: String) -> Result<Self, Box<dyn std::error::Error>> {
         let transport = ConnectorP2pTransport::new(
             ConnectorP2pConfig::new("/distdb/kad/1.0.0")
                 .with_bootstrap_peers(vec![server_address.clone()]),
@@ -47,7 +42,6 @@ impl ConsoleSession {
             runtime,
             current_database: "main".to_string(),
             request_seq: 0,
-            simulate_responses,
         })
     }
 
@@ -104,6 +98,19 @@ impl ConsoleSession {
                 Ok(true)
             }
             ConsoleCommand::UseDatabase(database) => {
+                let probe_request = ConnectorRequest::new(
+                    self.next_request_id(),
+                    ConnectorCommand::Query {
+                        query: DataQuery {
+                            database_id: database.clone(),
+                            sql: "show tables".to_string(),
+                        },
+                    },
+                );
+
+                let client = ConnectorClient::new(self.runtime.transport().clone());
+                client.execute(&probe_request)?;
+
                 self.current_database = database;
                 println!("database switched to {}", self.current_database);
                 Ok(true)
@@ -121,12 +128,7 @@ impl ConsoleSession {
             },
         };
 
-        let request = ConnectorRequest::new(request_id.clone(), command.clone());
-        if self.simulate_responses {
-            let simulated_response = simulate_server_response(&request_id, &command);
-            self.runtime
-                .handle_event(ConnectorP2pEvent::ResponseReceived(simulated_response))?;
-        }
+        let request = ConnectorRequest::new(request_id.clone(), command);
 
         let client = ConnectorClient::new(self.runtime.transport().clone());
         let request_start = std::time::Instant::now();
@@ -168,55 +170,10 @@ impl ConsoleSession {
         );
         println!("  active_connection={}", transport.has_live_connection());
         println!("  queued_response_count={}", transport.queued_response_count());
-        println!("  response_simulation={}", self.simulate_responses);
         println!("server p2p:");
         println!(
             "  visibility=not exposed by connector API yet (request/response path is active)"
         );
-    }
-}
-
-fn should_show_unwired_hint(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    lowered.contains("no queued response")
-        || lowered.contains("network loop not wired")
-        || lowered.contains("request/response handlers are not wired")
-}
-
-fn simulate_server_response(request_id: &str, command: &ConnectorCommand) -> ConnectorResponse {
-    match command {
-        ConnectorCommand::Mutation { .. } => ConnectorResponse {
-            request_id: request_id.to_string(),
-            status: ResponseStatus::Applied,
-            result: ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-        },
-        ConnectorCommand::Query { .. } => ConnectorResponse {
-            request_id: request_id.to_string(),
-            status: ResponseStatus::Applied,
-            result: ConnectorResult::Query(QueryResult {
-                columns: vec![FieldDef {
-                    seqno: 1,
-                    field_name: "result".to_string(),
-                    field_type: FieldType::Text,
-                    nullable: false,
-                    indexed: FieldIndex::None,
-                    default_value: None,
-                }],
-                rows: vec![vec![format!("simulated connector boundary response: {:?}", command).into_bytes()]],
-                timings: QueryTimings {
-                    server_parse_ms: 0,
-                    server_execute_ms: 0,
-                    server_total_ms: 0,
-                    network_round_trip_ms: None,
-                    cache: None,
-                },
-            }),
-        },
-        _ => ConnectorResponse {
-            request_id: request_id.to_string(),
-            status: ResponseStatus::Applied,
-            result: ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-        },
     }
 }
 
@@ -338,22 +295,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    let simulate_responses = env::var("DISTDB_CONSOLE_SIMULATE")
-        .ok()
-        .map(|value| {
-            let lowered = value.to_ascii_lowercase();
-            lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on"
-        })
-        .unwrap_or(true);
-
-    let mut session = ConsoleSession::new(server_address, simulate_responses)?;
+    let mut session = ConsoleSession::new(server_address)?;
 
     println!("distdb console");
     println!("type help for commands, or \\q to quit");
-    println!("p2p response simulation: {}", simulate_responses);
-    if simulate_responses {
-        println!("set DISTDB_CONSOLE_SIMULATE=0 to require real p2p responses");
-    }
 
     loop {
         print!("distdb:{}> ", session.current_database);
@@ -376,12 +321,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(error) => {
                         eprintln!("error: {error}");
-                        let error_text = error.to_string();
-                        if !session.simulate_responses && should_show_unwired_hint(&error_text) {
-                            eprintln!(
-                                "hint: console is running in real p2p mode and request/response handlers are not wired yet; set DISTDB_CONSOLE_SIMULATE=1 for simulated responses"
-                            );
-                        }
                     }
                 }
             }

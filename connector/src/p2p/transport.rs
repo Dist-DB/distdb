@@ -224,7 +224,7 @@ impl ConnectorTransport for ConnectorP2pTransport {
                     request.request_id
                 );
                 ConnectorError::Transport(
-                    "no queued response for request_id; p2p request/response loop is not wired yet (enable DISTDB_CONSOLE_SIMULATE=1 or wire network handlers)"
+                    "no queued response for request_id; p2p request/response loop is not wired yet"
                         .to_string(),
                 )
             })
