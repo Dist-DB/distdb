@@ -1,3 +1,4 @@
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseError {
     InvalidDatabaseName,
@@ -13,16 +14,26 @@ pub enum DatabaseError {
     CatalogSerialize,
     CatalogWrite,
     SchemaPayloadDeserialize,
+    MetadataPayloadDeserialize,
+    SqlDefinitionPayloadDeserialize,
     SchemaRevisionOutOfOrder,
     SchemaChange(super::schema_error::SchemaError),
     TableNotLocked,
     DuplicateView,
     ViewNotFound,
     ViewNotWritable,
+    DuplicateTrigger,
+    TriggerNotFound,
+    DuplicateStoredProcedure,
+    StoredProcedureNotFound,
+    EntityNotFound,
+    UnsupportedSqlObjectKind,
 }
 
 impl std::fmt::Display for DatabaseError {
+
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
         match self {
             Self::InvalidDatabaseName => write!(f, "database name must not be empty"),
             Self::DuplicateTable => write!(f, "table already registered in database catalog"),
@@ -39,6 +50,12 @@ impl std::fmt::Display for DatabaseError {
             Self::SchemaPayloadDeserialize => {
                 write!(f, "failed to deserialize schema change payload")
             }
+            Self::MetadataPayloadDeserialize => {
+                write!(f, "failed to deserialize metadata change payload")
+            }
+            Self::SqlDefinitionPayloadDeserialize => {
+                write!(f, "failed to deserialize sql definition payload")
+            }
             Self::SchemaRevisionOutOfOrder => {
                 write!(f, "schema revision must advance monotonically")
             }
@@ -52,8 +69,25 @@ impl std::fmt::Display for DatabaseError {
             Self::ViewNotWritable => {
                 write!(f, "views are read-only; write operations are not permitted")
             }
+            Self::DuplicateTrigger => {
+                write!(f, "trigger already registered in database catalog")
+            }
+            Self::TriggerNotFound => write!(f, "trigger not found in database catalog"),
+            Self::DuplicateStoredProcedure => {
+                write!(f, "stored procedure already registered in database catalog")
+            }
+            Self::StoredProcedureNotFound => {
+                write!(f, "stored procedure not found in database catalog")
+            }
+            Self::EntityNotFound => write!(f, "entity not found in database catalog"),
+            Self::UnsupportedSqlObjectKind => write!(
+                f,
+                "sql object kind is not yet supported by this catalog"
+            ),
         }
+
     }
+    
 }
 
 impl std::error::Error for DatabaseError {}

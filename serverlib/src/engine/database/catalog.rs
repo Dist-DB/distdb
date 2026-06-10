@@ -14,9 +14,14 @@ use super::id::DatabaseId;
 use super::index::DatabaseIndex;
 use super::relationship::DatabaseRelationship;
 use super::schema_change_tx::SchemaChangeTx;
+use super::stored_procedure::DatabaseStoredProcedure;
 use super::table::DatabaseTable;
 use super::table_schema::{FieldIndex, TableSchema};
-use super::transaction::{SchemaChangePayload, TransactionKind, TransactionLog};
+use super::trigger::DatabaseTrigger;
+use super::transaction::{
+    EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
+    SqlObjectKind, TransactionKind, TransactionLog,
+};
 use super::view::DatabaseView;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -135,6 +140,16 @@ impl DatabaseCatalog {
                 DatabaseEntity::Relationship(relationship) => Some(DatabaseObjectRef::Relationship(relationship)),
                 _ => None,
             }),
+            DatabaseObjectType::Trigger => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::Trigger(trigger)) => Some(DatabaseObjectRef::Trigger(trigger)),
+                _ => None,
+            },
+            DatabaseObjectType::StoredProcedure => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::StoredProcedure(procedure)) => {
+                    Some(DatabaseObjectRef::StoredProcedure(procedure))
+                }
+                _ => None,
+            },
             DatabaseObjectType::Index => {
                 self.entities.values().find_map(|entity| match entity {
                     DatabaseEntity::Table(table) => table
@@ -150,7 +165,7 @@ impl DatabaseCatalog {
 
     /// Return an object by id without requiring the caller to provide an
     /// object type. Entity ids are checked first, then table indexes.
-    pub fn object_by_index(&self, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
+    pub fn object_by_id(&self, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
 
         let normalized = common::normalize_identifier!(object_id);
 
@@ -160,6 +175,10 @@ impl DatabaseCatalog {
                 DatabaseEntity::View(view) => Some(DatabaseObjectRef::View(view)),
                 DatabaseEntity::Relationship(relationship) => {
                     Some(DatabaseObjectRef::Relationship(relationship))
+                }
+                DatabaseEntity::Trigger(trigger) => Some(DatabaseObjectRef::Trigger(trigger)),
+                DatabaseEntity::StoredProcedure(procedure) => {
+                    Some(DatabaseObjectRef::StoredProcedure(procedure))
                 }
             };
         }
@@ -182,6 +201,10 @@ impl DatabaseCatalog {
 
     pub fn entity_status(&self, entity_id: &str) -> Option<ObjectStatus> {
         self.entity(entity_id).map(DatabaseEntityAspect::status)
+    }
+
+    pub fn entity_metadata(&self, entity_id: &str) -> Option<&super::entity_metadata::EntityMetadata> {
+        self.entity(entity_id).map(DatabaseEntityAspect::metadata)
     }
 
     pub fn entity_wal_stream_id(&self, entity_id: &str) -> Option<String> {
@@ -280,6 +303,130 @@ impl DatabaseCatalog {
         Ok(())
     }
 
+    pub fn apply_entity_metadata(&mut self, payload: EntityMetadataPayload) -> DatabaseResult<()> {
+        let entity_id = common::normalize_identifier!(payload.entity_id);
+        let entity = self
+            .entities
+            .get_mut(&entity_id)
+            .ok_or(DatabaseError::EntityNotFound)?;
+
+        match entity {
+            DatabaseEntity::Table(table) => table.metadata = payload.metadata,
+            DatabaseEntity::View(view) => view.metadata = payload.metadata,
+            DatabaseEntity::Relationship(relationship) => relationship.metadata = payload.metadata,
+            DatabaseEntity::Trigger(trigger) => trigger.metadata = payload.metadata,
+            DatabaseEntity::StoredProcedure(procedure) => procedure.metadata = payload.metadata,
+        }
+
+        Ok(())
+    }
+
+    pub fn set_entity_metadata(
+        &mut self,
+        entity_id: impl Into<String>,
+        metadata: super::entity_metadata::EntityMetadata,
+    ) -> DatabaseResult<()> {
+        let payload = EntityMetadataPayload {
+            entity_id: entity_id.into(),
+            metadata,
+        };
+        self.apply_entity_metadata(payload)
+    }
+
+    pub fn apply_sql_definition(&mut self, payload: SqlDefinitionPayload) -> DatabaseResult<()> {
+        let object_id = common::normalize_identifier!(payload.object_id);
+
+        match payload.action {
+            SqlDefinitionAction::Upsert => {
+                let normalized_dependencies = payload
+                    .dependencies
+                    .into_iter()
+                    .map(|dep| common::normalize_identifier!(dep))
+                    .collect::<Vec<_>>();
+
+                match payload.object_kind {
+                    SqlObjectKind::View => {
+                        if self.view(&object_id).is_none() {
+                            self.register_view(
+                                object_id.clone(),
+                                payload.sql.clone(),
+                                TableSchema::new(Vec::new()),
+                            )?;
+                        }
+
+                        let view = self.view_mut(&object_id).ok_or(DatabaseError::ViewNotFound)?;
+                        view.sql = payload.sql;
+                        view.dependencies = normalized_dependencies;
+                        Ok(())
+                    }
+                    SqlObjectKind::Trigger => {
+                        if self.trigger(&object_id).is_none() {
+                            self.register_trigger(
+                                object_id.clone(),
+                                payload.sql.clone(),
+                                normalized_dependencies.clone(),
+                            )?;
+                        }
+
+                        let trigger = self
+                            .trigger_mut(&object_id)
+                            .ok_or(DatabaseError::TriggerNotFound)?;
+                        trigger.sql = payload.sql;
+                        trigger.dependencies = normalized_dependencies;
+                        Ok(())
+                    }
+                    SqlObjectKind::StoredProcedure => {
+                        if self.stored_procedure(&object_id).is_none() {
+                            self.register_stored_procedure(
+                                object_id.clone(),
+                                payload.sql.clone(),
+                                normalized_dependencies.clone(),
+                            )?;
+                        }
+
+                        let procedure = self
+                            .stored_procedure_mut(&object_id)
+                            .ok_or(DatabaseError::StoredProcedureNotFound)?;
+                        procedure.sql = payload.sql;
+                        procedure.dependencies = normalized_dependencies;
+                        Ok(())
+                    }
+                }
+            }
+            SqlDefinitionAction::Drop => match payload.object_kind {
+                SqlObjectKind::View => match self.drop_view(&object_id) {
+                    Ok(()) | Err(DatabaseError::ViewNotFound) => Ok(()),
+                    Err(e) => Err(e),
+                },
+                SqlObjectKind::Trigger => match self.drop_trigger(&object_id) {
+                    Ok(()) | Err(DatabaseError::TriggerNotFound) => Ok(()),
+                    Err(e) => Err(e),
+                },
+                SqlObjectKind::StoredProcedure => match self.drop_stored_procedure(&object_id) {
+                    Ok(()) | Err(DatabaseError::StoredProcedureNotFound) => Ok(()),
+                    Err(e) => Err(e),
+                },
+            },
+        }
+    }
+
+    pub fn set_sql_definition(
+        &mut self,
+        object_id: impl Into<String>,
+        object_kind: SqlObjectKind,
+        sql: impl Into<String>,
+        dependencies: Vec<String>,
+    ) -> DatabaseResult<()> {
+        let payload = SqlDefinitionPayload {
+            object_id: object_id.into(),
+            object_kind,
+            action: SqlDefinitionAction::Upsert,
+            sql: sql.into(),
+            dependencies,
+        };
+        self.apply_sql_definition(payload)
+    }
+
     pub fn replay_schema_from_log<L: TransactionLog>(
         &mut self,
         wal_id: &str,
@@ -296,6 +443,40 @@ impl DatabaseCatalog {
                 .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
             self.apply_schema_change(payload)?;
             applied += 1;
+        }
+
+        Ok(applied)
+    }
+
+    pub fn replay_entity_construction_from_log<L: TransactionLog>(
+        &mut self,
+        wal_id: &str,
+        log: &L,
+    ) -> DatabaseResult<usize> {
+        let mut applied = 0usize;
+
+        for record in log.since(wal_id, None) {
+            match record.kind {
+                TransactionKind::SchemaChange => {
+                    let payload = SchemaChangePayload::decode(&record.payload)
+                        .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
+                    self.apply_schema_change(payload)?;
+                    applied += 1;
+                }
+                TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
+                    let payload = EntityMetadataPayload::decode(&record.payload)
+                        .map_err(|_| DatabaseError::MetadataPayloadDeserialize)?;
+                    self.apply_entity_metadata(payload)?;
+                    applied += 1;
+                }
+                TransactionKind::SqlDefinitionChange => {
+                    let payload = SqlDefinitionPayload::decode(&record.payload)
+                        .map_err(|_| DatabaseError::SqlDefinitionPayloadDeserialize)?;
+                    self.apply_sql_definition(payload)?;
+                    applied += 1;
+                }
+                _ => {}
+            }
         }
 
         Ok(applied)
@@ -368,11 +549,126 @@ impl DatabaseCatalog {
         }
     }
 
+    pub fn drop_view(&mut self, view_id: &str) -> DatabaseResult<()> {
+        let normalized = common::normalize_identifier!(view_id);
+        match self.entities.get(&normalized) {
+            Some(DatabaseEntity::View(_)) => {
+                self.entities.remove(&normalized);
+                Ok(())
+            }
+            _ => Err(DatabaseError::ViewNotFound),
+        }
+    }
+
     pub fn relationship(&self, relationship_id: &str) -> Option<&DatabaseRelationship> {
         match self.object(DatabaseObjectType::Relationship, relationship_id) {
             Some(DatabaseObjectRef::Relationship(relationship)) => Some(relationship),
             _ => None,
         }
+    }
+
+    pub fn register_trigger(
+        &mut self,
+        trigger_id: impl Into<String>,
+        sql: impl Into<String>,
+        dependencies: Vec<String>,
+    ) -> DatabaseResult<()> {
+        let trigger_id = common::normalize_identifier!(trigger_id.into());
+
+        if self.entities.contains_key(&trigger_id) {
+            return Err(DatabaseError::DuplicateTrigger);
+        }
+
+        self.entities.insert(
+            trigger_id.clone(),
+            DatabaseEntity::Trigger(DatabaseTrigger::new(
+                trigger_id,
+                sql.into(),
+                dependencies,
+            )),
+        );
+
+        Ok(())
+    }
+
+    pub fn trigger(&self, trigger_id: &str) -> Option<&DatabaseTrigger> {
+        match self.object(DatabaseObjectType::Trigger, trigger_id) {
+            Some(DatabaseObjectRef::Trigger(trigger)) => Some(trigger),
+            _ => None,
+        }
+    }
+
+    pub fn drop_trigger(&mut self, trigger_id: &str) -> DatabaseResult<()> {
+        let normalized = common::normalize_identifier!(trigger_id);
+        match self.entities.get(&normalized) {
+            Some(DatabaseEntity::Trigger(_)) => {
+                self.entities.remove(&normalized);
+                Ok(())
+            }
+            _ => Err(DatabaseError::TriggerNotFound),
+        }
+    }
+
+    pub fn trigger_ids(&self) -> Vec<String> {
+        self.entities
+            .iter()
+            .filter_map(|(entity_id, entity)| match entity {
+                DatabaseEntity::Trigger(_) => Some(entity_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn register_stored_procedure(
+        &mut self,
+        procedure_id: impl Into<String>,
+        sql: impl Into<String>,
+        dependencies: Vec<String>,
+    ) -> DatabaseResult<()> {
+        let procedure_id = common::normalize_identifier!(procedure_id.into());
+
+        if self.entities.contains_key(&procedure_id) {
+            return Err(DatabaseError::DuplicateStoredProcedure);
+        }
+
+        self.entities.insert(
+            procedure_id.clone(),
+            DatabaseEntity::StoredProcedure(DatabaseStoredProcedure::new(
+                procedure_id,
+                sql.into(),
+                dependencies,
+            )),
+        );
+
+        Ok(())
+    }
+
+    pub fn stored_procedure(&self, procedure_id: &str) -> Option<&DatabaseStoredProcedure> {
+        match self.object(DatabaseObjectType::StoredProcedure, procedure_id) {
+            Some(DatabaseObjectRef::StoredProcedure(procedure)) => Some(procedure),
+            _ => None,
+        }
+    }
+
+    pub fn drop_stored_procedure(&mut self, procedure_id: &str) -> DatabaseResult<()> {
+        let normalized = common::normalize_identifier!(procedure_id);
+        match self.entities.get(&normalized) {
+            Some(DatabaseEntity::StoredProcedure(_)) => {
+                self.entities.remove(&normalized);
+                Ok(())
+            }
+            _ => Err(DatabaseError::StoredProcedureNotFound),
+        }
+    }
+
+    pub fn stored_procedure_ids(&self) -> Vec<String> {
+        self.entities
+            .iter()
+            .filter_map(|(entity_id, entity)| match entity {
+                DatabaseEntity::StoredProcedure(_) => Some(entity_id.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn view_ids(&self) -> Vec<String> {
@@ -404,6 +700,33 @@ impl DatabaseCatalog {
         let normalized = common::normalize_identifier!(table_id);
         match self.entities.get_mut(&normalized) {
             Some(DatabaseEntity::Table(table)) => Some(table),
+            _ => None,
+        }
+    }
+
+    fn view_mut(&mut self, view_id: &str) -> Option<&mut DatabaseView> {
+        let normalized = common::normalize_identifier!(view_id);
+        match self.entities.get_mut(&normalized) {
+            Some(DatabaseEntity::View(view)) => Some(view),
+            _ => None,
+        }
+    }
+
+    fn trigger_mut(&mut self, trigger_id: &str) -> Option<&mut DatabaseTrigger> {
+        let normalized = common::normalize_identifier!(trigger_id);
+        match self.entities.get_mut(&normalized) {
+            Some(DatabaseEntity::Trigger(trigger)) => Some(trigger),
+            _ => None,
+        }
+    }
+
+    fn stored_procedure_mut(
+        &mut self,
+        procedure_id: &str,
+    ) -> Option<&mut DatabaseStoredProcedure> {
+        let normalized = common::normalize_identifier!(procedure_id);
+        match self.entities.get_mut(&normalized) {
+            Some(DatabaseEntity::StoredProcedure(procedure)) => Some(procedure),
             _ => None,
         }
     }
@@ -503,6 +826,7 @@ impl DatabaseCatalog {
 mod tests {
 
     use super::*;
+    use crate::EntityMetadata;
 
     #[test]
     fn create_empty_catalog_from_name_sets_obscured_id() {
@@ -844,6 +1168,178 @@ mod tests {
     }
 
     #[test]
+    fn metadata_and_sql_definition_replay_builds_view_state() {
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_view(
+                "users_view",
+                "select id from users",
+                TableSchema::new(Vec::new()),
+            )
+            .expect("view register should succeed");
+
+        let wal = crate::engine::wal::ConcurrentWalManager::new();
+        let actor = crate::core::identity::UserId::from_username("view-tester");
+
+        let metadata_payload = EntityMetadataPayload {
+            entity_id: "users_view".to_string(),
+            metadata: EntityMetadata::default()
+                .with_creator("alice")
+                .with_created_at(100),
+        };
+
+        wal.append(
+            "main_db",
+            crate::TransactionRecord {
+                id: crate::TransactionId(1),
+                refid: None,
+                timestamp_epoch_ms: 100,
+                actor: actor.clone(),
+                kind: crate::TransactionKind::MetadataChange,
+                payload: metadata_payload
+                    .encode()
+                    .expect("metadata payload should encode"),
+            },
+        )
+        .expect("metadata append should succeed");
+
+        let sql_payload = SqlDefinitionPayload {
+            object_id: "users_view".to_string(),
+            object_kind: SqlObjectKind::View,
+            action: SqlDefinitionAction::Upsert,
+            sql: "select id, email from users".to_string(),
+            dependencies: vec!["Users".to_string(), "Accounts".to_string()],
+        };
+
+        wal.append(
+            "main_db",
+            crate::TransactionRecord {
+                id: crate::TransactionId(2),
+                refid: Some(crate::TransactionId(1)),
+                timestamp_epoch_ms: 101,
+                actor,
+                kind: crate::TransactionKind::SqlDefinitionChange,
+                payload: sql_payload
+                    .encode()
+                    .expect("sql payload should encode"),
+            },
+        )
+        .expect("sql append should succeed");
+
+        let applied = catalog
+            .replay_entity_construction_from_log("main_db", &wal)
+            .expect("replay should succeed");
+        assert_eq!(applied, 2);
+
+        let view = catalog.view("users_view").expect("view should exist");
+        assert_eq!(view.metadata.created_by.as_deref(), Some("alice"));
+        assert_eq!(view.metadata.created_at_epoch_ms, Some(100));
+        assert_eq!(view.sql, "select id, email from users");
+        assert_eq!(view.dependencies, vec!["users", "accounts"]);
+    }
+
+    #[test]
+    fn trigger_and_procedure_registration_and_updates_work() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_trigger(
+                "audit_insert",
+                "create trigger audit_insert before insert on users for each row set @x = 1",
+                vec!["Users".to_string()],
+            )
+            .expect("trigger register should succeed");
+
+        catalog
+            .register_stored_procedure(
+                "refresh_accounts",
+                "create procedure refresh_accounts() begin select 1; end",
+                vec!["Accounts".to_string()],
+            )
+            .expect("procedure register should succeed");
+
+        catalog
+            .set_sql_definition(
+                "audit_insert",
+                SqlObjectKind::Trigger,
+                "create trigger audit_insert before insert on users for each row set @x = 2",
+                vec!["users".to_string(), "logs".to_string()],
+            )
+            .expect("trigger sql update should succeed");
+
+        catalog
+            .set_sql_definition(
+                "refresh_accounts",
+                SqlObjectKind::StoredProcedure,
+                "create procedure refresh_accounts() begin select 2; end",
+                vec!["accounts".to_string(), "users".to_string()],
+            )
+            .expect("procedure sql update should succeed");
+
+        catalog
+            .set_entity_metadata(
+                "audit_insert",
+                EntityMetadata::default().with_creator("ops"),
+            )
+            .expect("metadata update should succeed");
+
+        let trigger = catalog
+            .trigger("audit_insert")
+            .expect("trigger should exist");
+        assert_eq!(trigger.dependencies, vec!["users", "logs"]);
+        assert_eq!(trigger.metadata.created_by.as_deref(), Some("ops"));
+
+        let procedure = catalog
+            .stored_procedure("refresh_accounts")
+            .expect("procedure should exist");
+        assert_eq!(procedure.dependencies, vec!["accounts", "users"]);
+
+        assert_eq!(catalog.trigger_ids(), vec!["audit_insert".to_string()]);
+        assert_eq!(
+            catalog.stored_procedure_ids(),
+            vec!["refresh_accounts".to_string()]
+        );
+    }
+
+    #[test]
+    fn drop_helpers_remove_sql_backed_entities() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_view("users_view", "select * from users", TableSchema::new(Vec::new()))
+            .expect("view register should succeed");
+        catalog
+            .register_trigger(
+                "audit_insert",
+                "create trigger audit_insert before insert on users for each row set @x = 1",
+                vec!["users".to_string()],
+            )
+            .expect("trigger register should succeed");
+        catalog
+            .register_stored_procedure(
+                "refresh_accounts",
+                "create procedure refresh_accounts() begin select 1; end",
+                vec!["accounts".to_string()],
+            )
+            .expect("procedure register should succeed");
+
+        catalog.drop_view("users_view").expect("view drop should succeed");
+        catalog
+            .drop_trigger("audit_insert")
+            .expect("trigger drop should succeed");
+        catalog
+            .drop_stored_procedure("refresh_accounts")
+            .expect("procedure drop should succeed");
+
+        assert!(catalog.view("users_view").is_none());
+        assert!(catalog.trigger("audit_insert").is_none());
+        assert!(catalog.stored_procedure("refresh_accounts").is_none());
+    }
+
+    #[test]
     fn entity_aspects_expose_status_and_wal_stream() {
 
         let mut catalog =
@@ -941,6 +1437,20 @@ mod tests {
             "accounts".to_string(),
             "owns".to_string(),
         ));
+        catalog
+            .register_trigger(
+                "audit_insert",
+                "create trigger audit_insert before insert on users for each row set @x = 1",
+                vec!["users".to_string()],
+            )
+            .expect("trigger register should succeed");
+        catalog
+            .register_stored_procedure(
+                "refresh_accounts",
+                "create procedure refresh_accounts() begin select 1; end",
+                vec!["accounts".to_string()],
+            )
+            .expect("procedure register should succeed");
 
         assert!(matches!(
             catalog.object(DatabaseObjectType::Table, "users"),
@@ -955,6 +1465,16 @@ mod tests {
         assert!(matches!(
             catalog.object(DatabaseObjectType::Relationship, "rel:users:accounts:owns"),
             Some(DatabaseObjectRef::Relationship(_))
+        ));
+
+        assert!(matches!(
+            catalog.object(DatabaseObjectType::Trigger, "audit_insert"),
+            Some(DatabaseObjectRef::Trigger(_))
+        ));
+
+        assert!(matches!(
+            catalog.object(DatabaseObjectType::StoredProcedure, "refresh_accounts"),
+            Some(DatabaseObjectRef::StoredProcedure(_))
         ));
         
         assert!(matches!(
@@ -993,19 +1513,45 @@ mod tests {
             "owns".to_string(),
         ));
 
-        assert!(matches!(catalog.object_by_index("users"), Some(DatabaseObjectRef::Table(_))));
-        assert!(matches!(catalog.object_by_index("users_view"), Some(DatabaseObjectRef::View(_))));
+        assert!(matches!(catalog.object_by_id("users"), Some(DatabaseObjectRef::Table(_))));
+        assert!(matches!(catalog.object_by_id("users_view"), Some(DatabaseObjectRef::View(_))));
         assert!(matches!(
-            catalog.object_by_index("rel:users:accounts:owns"),
+            catalog.object_by_id("rel:users:accounts:owns"),
             Some(DatabaseObjectRef::Relationship(_))
+        ));
+
+        catalog
+            .register_trigger(
+                "audit_insert",
+                "create trigger audit_insert before insert on users for each row set @x = 1",
+                vec!["users".to_string()],
+            )
+            .expect("trigger register should succeed");
+
+        catalog
+            .register_stored_procedure(
+                "refresh_accounts",
+                "create procedure refresh_accounts() begin select 1; end",
+                vec!["accounts".to_string()],
+            )
+            .expect("procedure register should succeed");
+
+        assert!(matches!(
+            catalog.object_by_id("audit_insert"),
+            Some(DatabaseObjectRef::Trigger(_))
+        ));
+
+        assert!(matches!(
+            catalog.object_by_id("refresh_accounts"),
+            Some(DatabaseObjectRef::StoredProcedure(_))
         ));
         
         assert!(matches!(
-            catalog.object_by_index("users:email"),
+            catalog.object_by_id("users:email"),
             Some(DatabaseObjectRef::Index(_))
         ));
 
-        assert!(catalog.object_by_index("missing_object").is_none());
+        assert!(catalog.object_by_id("missing_object").is_none());
     
     }
 

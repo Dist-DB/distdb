@@ -2,7 +2,7 @@ use sqlparser::ast::{
     Delete, FromTable, GrantObjects, ObjectName, ObjectType, Query, SchemaName, SetExpr,
     SetOperator, Statement, TableFactor, TableWithJoins, Use,
 };
-use sqlparser::dialect::MySqlDialect;
+use sqlparser::dialect::{GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,13 +29,18 @@ pub enum SqlOperation {
     Insert,
     Update,
     Delete,
+    TruncateTable,
     CreateDatabase,
     CreateTable,
     CreateView,
+    CreateTrigger,
+    CreateStoredProcedure,
     CreateOther,
     DropDatabase,
     DropTable,
     DropView,
+    DropTrigger,
+    DropStoredProcedure,
     DropOther,
     AlterTable,
     AlterView,
@@ -87,8 +92,25 @@ pub fn parse_sql_requests(
     database_id: impl Into<String>,
     compatibility_target: SqlCompatibilityTarget,
 ) -> Result<Vec<SqlRequest>, SqlParseError> {
+    
     let database_id = database_id.into();
-    let statements = parse_mysql_statements(sql)?;
+    let statements = match parse_mysql_statements(sql) {
+        Ok(statements) => statements,
+        Err(parse_error) => {
+            let trimmed = sql.trim();
+            if let Some((directive, operation, object_name)) = classify_text_fallback(trimmed) {
+                return Ok(vec![SqlRequest {
+                    database_id,
+                    sql: trimmed.to_string(),
+                    directive,
+                    operation,
+                    object_name,
+                    compatibility_target,
+                }]);
+            }
+            return Err(parse_error);
+        }
+    };
 
     if statements.is_empty() {
         return Err(SqlParseError::EmptyStatement);
@@ -110,12 +132,22 @@ pub fn parse_sql_requests(
             })
         })
         .collect()
+
 }
 
 pub fn sql_statement_metadata(
     statement: &str,
 ) -> Result<(SqlDirective, SqlOperation, Option<String>), SqlParseError> {
-    let parsed = parse_mysql_statements(statement)?;
+
+    let parsed = match parse_mysql_statements(statement) {
+        Ok(parsed) => parsed,
+        Err(parse_error) => {
+            if let Some(metadata) = classify_text_fallback(statement.trim()) {
+                return Ok(metadata);
+            }
+            return Err(parse_error);
+        }
+    };
 
     let single = parsed
         .first()
@@ -129,6 +161,7 @@ pub fn sql_statement_metadata(
 
     let statement_sql = single.to_string();
     classify_statement(single, &statement_sql)
+
 }
 
 pub fn sql_directive_for_statement(statement: &str) -> Result<SqlDirective, SqlParseError> {
@@ -137,14 +170,22 @@ pub fn sql_directive_for_statement(statement: &str) -> Result<SqlDirective, SqlP
 }
 
 fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
-    let dialect = MySqlDialect {};
-    Parser::parse_sql(&dialect, sql).map_err(|e| SqlParseError::UnsupportedStatement(e.to_string()))
+    let mysql = MySqlDialect {};
+    match Parser::parse_sql(&mysql, sql) {
+        Ok(statements) => Ok(statements),
+        Err(mysql_error) => {
+            let generic = GenericDialect {};
+            Parser::parse_sql(&generic, sql)
+                .map_err(|_| SqlParseError::UnsupportedStatement(mysql_error.to_string()))
+        }
+    }
 }
 
 fn classify_statement(
     statement: &Statement,
     statement_sql: &str,
 ) -> Result<(SqlDirective, SqlOperation, Option<String>), SqlParseError> {
+
     let normalized = statement_sql.trim();
 
     let (directive, operation, object_name) = match statement {
@@ -193,6 +234,16 @@ fn classify_statement(
             SqlOperation::CreateView,
             Some(name.to_string()),
         ),
+        Statement::CreateTrigger { name, .. } => (
+            SqlDirective::Create,
+            SqlOperation::CreateTrigger,
+            Some(name.to_string()),
+        ),
+        Statement::CreateProcedure { name, .. } => (
+            SqlDirective::Create,
+            SqlOperation::CreateStoredProcedure,
+            Some(name.to_string()),
+        ),
         Statement::CreateIndex(create_index) => (
             SqlDirective::Create,
             SqlOperation::CreateOther,
@@ -201,6 +252,16 @@ fn classify_statement(
                 .as_ref()
                 .map(ObjectName::to_string)
                 .or_else(|| Some(create_index.table_name.to_string())),
+        ),
+        Statement::DropTrigger { trigger_name, .. } => (
+            SqlDirective::AlterSchema,
+            SqlOperation::DropTrigger,
+            Some(trigger_name.to_string()),
+        ),
+        Statement::DropProcedure { proc_desc, .. } => (
+            SqlDirective::AlterSchema,
+            SqlOperation::DropStoredProcedure,
+            proc_desc.first().map(|desc| desc.name.to_string()),
         ),
         Statement::Drop {
             object_type, names, ..
@@ -226,7 +287,7 @@ fn classify_statement(
         ),
         Statement::Truncate { table_names, .. } => (
             SqlDirective::Delete,
-            SqlOperation::Delete,
+            SqlOperation::TruncateTable,
             table_names.first().map(|target| target.name.to_string()),
         ),
         Statement::ShowCreate { obj_name, .. } => (
@@ -295,9 +356,13 @@ fn classify_statement(
         SqlOperation::CreateDatabase
             | SqlOperation::CreateTable
             | SqlOperation::CreateView
+            | SqlOperation::CreateTrigger
+            | SqlOperation::CreateStoredProcedure
             | SqlOperation::DropDatabase
             | SqlOperation::DropTable
             | SqlOperation::DropView
+            | SqlOperation::DropTrigger
+            | SqlOperation::DropStoredProcedure
             | SqlOperation::AlterTable
             | SqlOperation::AlterView
     ) && object_name.is_none()
@@ -402,6 +467,98 @@ fn first_object_name_in_grant_objects(objects: &GrantObjects) -> Option<String> 
         | GrantObjects::Sequences(schemas)
         | GrantObjects::Tables(schemas) => schemas.first().map(|name| name.to_string()),
     }
+}
+
+fn classify_text_fallback(statement: &str) -> Option<(SqlDirective, SqlOperation, Option<String>)> {
+
+    let lowered = statement.trim().to_ascii_lowercase();
+
+    if lowered.starts_with("create trigger ") || lowered.starts_with("create or replace trigger ") {
+        return Some((
+            SqlDirective::Create,
+            SqlOperation::CreateTrigger,
+            fallback_object_name_after_create(statement, "trigger"),
+        ));
+    }
+
+    if lowered.starts_with("drop trigger ") {
+        return Some((
+            SqlDirective::AlterSchema,
+            SqlOperation::DropTrigger,
+            fallback_object_name_after_drop(statement, "trigger"),
+        ));
+    }
+
+    if lowered.starts_with("create procedure ") || lowered.starts_with("create or alter procedure ") {
+        return Some((
+            SqlDirective::Create,
+            SqlOperation::CreateStoredProcedure,
+            fallback_object_name_after_create(statement, "procedure"),
+        ));
+    }
+
+    if lowered.starts_with("drop procedure ") {
+        return Some((
+            SqlDirective::AlterSchema,
+            SqlOperation::DropStoredProcedure,
+            fallback_object_name_after_drop(statement, "procedure"),
+        ));
+    }
+
+    None
+
+}
+
+fn fallback_object_name_after_create(statement: &str, object_keyword: &str) -> Option<String> {
+    fallback_object_name_after_keyword(statement, "create", object_keyword)
+}
+
+fn fallback_object_name_after_drop(statement: &str, object_keyword: &str) -> Option<String> {
+    fallback_object_name_after_keyword(statement, "drop", object_keyword)
+}
+
+fn fallback_object_name_after_keyword(
+    statement: &str,
+    leading_keyword: &str,
+    object_keyword: &str,
+) -> Option<String> {
+
+    let mut tokens = statement
+        .split_whitespace()
+        .map(|token| token.trim_matches(';'));
+
+    let first = tokens.next()?.to_ascii_lowercase();
+    if first != leading_keyword {
+        return None;
+    }
+
+    let mut next = tokens.next()?.to_ascii_lowercase();
+    if next == "or" {
+        let maybe_replace_or_alter = tokens.next()?.to_ascii_lowercase();
+        if maybe_replace_or_alter != "replace" && maybe_replace_or_alter != "alter" {
+            return None;
+        }
+        next = tokens.next()?.to_ascii_lowercase();
+    }
+
+    if next != object_keyword {
+        return None;
+    }
+
+    let mut name = tokens.next()?;
+    if name.eq_ignore_ascii_case("if") {
+        let exists = tokens.next()?;
+        if !exists.eq_ignore_ascii_case("exists") {
+            return None;
+        }
+        name = tokens.next()?;
+    }
+
+    Some(
+        name.trim_matches(|c| c == ';' || c == '(' || c == ')')
+            .to_string(),
+    )
+
 }
 
 #[cfg(test)]
@@ -584,13 +741,13 @@ mod tests {
     }
 
     #[test]
-    fn truncate_table_maps_to_delete_operation() {
+    fn truncate_table_maps_to_truncate_operation() {
         let requests = parse_mysql8_sql_requests("truncate table users", "main")
             .expect("truncate table should parse");
 
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].directive, SqlDirective::Delete);
-        assert_eq!(requests[0].operation, SqlOperation::Delete);
+        assert_eq!(requests[0].operation, SqlOperation::TruncateTable);
         assert_eq!(requests[0].object_name.as_deref(), Some("users"));
     }
 
@@ -732,29 +889,52 @@ mod tests {
     }
 
     #[test]
-    fn create_procedure_is_unsupported() {
-        let error = parse_mysql8_sql_requests("create procedure p_sync() begin end", "main")
-            .expect_err("create procedure should be unsupported");
-
-        assert!(matches!(error, SqlParseError::UnsupportedStatement(_)));
-    }
-
-    #[test]
-    fn drop_procedure_is_unsupported() {
-        let error = parse_mysql8_sql_requests("drop procedure p_sync", "main")
-            .expect_err("drop procedure should be unsupported");
-
-        assert!(matches!(error, SqlParseError::UnsupportedStatement(_)));
-    }
-
-    #[test]
-    fn create_trigger_is_unsupported() {
-        let error = parse_mysql8_sql_requests(
-            "create trigger trg_users_bi before insert on users for each row begin end",
+    fn create_procedure_maps_to_create_stored_procedure_operation() {
+        let requests = parse_mysql8_sql_requests(
+            "create procedure p_sync() as begin end;",
             "main",
         )
-        .expect_err("create trigger should be unsupported");
+        .expect("create procedure should parse");
 
-        assert!(matches!(error, SqlParseError::UnsupportedStatement(_)));
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::Create);
+        assert_eq!(requests[0].operation, SqlOperation::CreateStoredProcedure);
+        assert_eq!(requests[0].object_name.as_deref(), Some("p_sync"));
+    }
+
+    #[test]
+    fn drop_procedure_maps_to_drop_stored_procedure_operation() {
+        let requests = parse_mysql8_sql_requests("drop procedure p_sync", "main")
+            .expect("drop procedure should parse");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
+        assert_eq!(requests[0].operation, SqlOperation::DropStoredProcedure);
+        assert_eq!(requests[0].object_name.as_deref(), Some("p_sync"));
+    }
+
+    #[test]
+    fn create_trigger_maps_to_create_trigger_operation() {
+        let requests = parse_mysql8_sql_requests(
+            "create trigger trg_users_bi before insert on users for each row execute function audit_users()",
+            "main",
+        )
+        .expect("create trigger should parse");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::Create);
+        assert_eq!(requests[0].operation, SqlOperation::CreateTrigger);
+        assert_eq!(requests[0].object_name.as_deref(), Some("trg_users_bi"));
+    }
+
+    #[test]
+    fn drop_trigger_maps_to_drop_trigger_operation() {
+        let requests = parse_mysql8_sql_requests("drop trigger trg_users_bi on users", "main")
+            .expect("drop trigger should parse");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
+        assert_eq!(requests[0].operation, SqlOperation::DropTrigger);
+        assert_eq!(requests[0].object_name.as_deref(), Some("trg_users_bi"));
     }
 }

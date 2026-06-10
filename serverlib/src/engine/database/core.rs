@@ -15,5 +15,7 @@ pub use super::entity::{
 pub use super::index::{DatabaseIndex, IndexId};
 pub use super::relationship::DatabaseRelationship;
 pub use super::schema_change_tx::SchemaChangeTx;
+pub use super::stored_procedure::DatabaseStoredProcedure;
 pub use super::table::DatabaseTable;
+pub use super::trigger::DatabaseTrigger;
 pub use super::view::DatabaseView;

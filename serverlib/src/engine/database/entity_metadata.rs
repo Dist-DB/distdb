@@ -9,6 +9,7 @@ pub struct EntityMetadata {
 }
 
 impl Default for EntityMetadata {
+
     fn default() -> Self {
         Self {
             created_by: None,
@@ -18,6 +19,7 @@ impl Default for EntityMetadata {
             tags: Vec::new(),
         }
     }
+    
 }
 
 impl EntityMetadata {

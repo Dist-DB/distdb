@@ -52,7 +52,7 @@ impl ServerApp {
 
     pub fn bootstrap(&mut self) -> Result<(), ServerAppError> {
         self.load_catalogs_from_disk()?;
-        self.replay_catalog_schemas_from_wal()?;
+        self.replay_catalog_state_from_wal()?;
         log::info!("server bootstrap complete for node_id={} data_dir={}", self.config.node_id, self.node_data_dir.display());
         Ok(())
     }
@@ -98,7 +98,8 @@ impl ServerApp {
             ConnectorCommand::Query { query } => handle_query_command(
                 &request.request_id,
                 query,
-                &self.catalogs,
+                &mut self.catalogs,
+                &self.wal,
             ),
             ConnectorCommand::Schema { .. } => ConnectorResponse::rejected(
                 request.request_id.clone(),
@@ -167,17 +168,17 @@ impl ServerApp {
 
     }
 
-    fn replay_catalog_schemas_from_wal(&mut self) -> Result<(), ServerAppError> {
+    fn replay_catalog_state_from_wal(&mut self) -> Result<(), ServerAppError> {
 
         for catalog in self.catalogs.values_mut() {
             let wal_id = catalog.database_id.0.clone();
             let applied = catalog
-                .replay_schema_from_log(&wal_id, &self.wal)
+                .replay_entity_construction_from_log(&wal_id, &self.wal)
                 .map_err(|msg| ServerAppError::Runtime(msg.to_string()))?;
 
             if applied > 0 {
                 log::info!(
-                    "replayed {} schema change transaction(s) for database='{}'",
+                    "replayed {} catalog transaction(s) for database='{}'",
                     applied,
                     catalog.database_id.0
                 );
@@ -200,7 +201,11 @@ mod tests {
         ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest,
         ConnectorResult, ConnectorTransport, ResponseStatus,
     };
-    use serverlib::{FieldDef, FieldIndex, FieldType, SchemaChangePayload, TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId};
+    use serverlib::{
+        EntityMetadata, EntityMetadataPayload, FieldDef, FieldIndex, FieldType,
+        SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind,
+        TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
+    };
     use serverlib::engine::database::transaction::TransactionLog;
 
     #[derive(Debug)]
@@ -293,6 +298,161 @@ mod tests {
         assert_eq!(loaded.table_schema_revision("users"), Some(2));
         assert!(loaded.index("users:email").is_some());
         
+    }
+
+    #[test]
+    fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-bootstrap-sql-definition-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let database_name = "sql_definition_bootstrap";
+        let mut catalog = DatabaseCatalog::create_empty_from_name(database_name)
+            .expect("catalog should be created");
+
+        catalog
+            .register_table(
+                "users",
+                TableSchema::new(vec![FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                }]),
+            )
+            .expect("base table should register");
+
+        catalog
+            .save_in_directory(&app.node_data_dir)
+            .expect("catalog should be persisted");
+
+        let wal_id = catalog.database_id.0.clone();
+        let actor = UserId::from_username("bootstrap-object-replay");
+
+        let trigger_payload = SqlDefinitionPayload {
+            object_id: "trg_users_bi".to_string(),
+            object_kind: SqlObjectKind::Trigger,
+            action: SqlDefinitionAction::Upsert,
+            sql: "create trigger trg_users_bi before insert on users for each row begin end"
+                .to_string(),
+            dependencies: vec!["users".to_string()],
+        };
+
+        app.wal
+            .append(
+                &wal_id,
+                TransactionRecord {
+                    id: TransactionId(1),
+                    refid: None,
+                    timestamp_epoch_ms: 1,
+                    actor: actor.clone(),
+                    kind: TransactionKind::SqlDefinitionChange,
+                    payload: trigger_payload
+                        .encode()
+                        .expect("trigger sql payload should encode"),
+                },
+            )
+            .expect("trigger sql definition append should succeed");
+
+        let trigger_metadata_payload = EntityMetadataPayload {
+            entity_id: "trg_users_bi".to_string(),
+            metadata: EntityMetadata::default()
+                .with_creator("bootstrap-object-replay")
+                .with_created_at(2),
+        };
+
+        app.wal
+            .append(
+                &wal_id,
+                TransactionRecord {
+                    id: TransactionId(2),
+                    refid: Some(TransactionId(1)),
+                    timestamp_epoch_ms: 2,
+                    actor: actor.clone(),
+                    kind: TransactionKind::MetadataChange,
+                    payload: trigger_metadata_payload
+                        .encode()
+                        .expect("trigger metadata payload should encode"),
+                },
+            )
+            .expect("trigger metadata append should succeed");
+
+        let view_upsert_payload = SqlDefinitionPayload {
+            object_id: "users_v".to_string(),
+            object_kind: SqlObjectKind::View,
+            action: SqlDefinitionAction::Upsert,
+            sql: "create view users_v as select * from users".to_string(),
+            dependencies: vec!["users".to_string()],
+        };
+
+        app.wal
+            .append(
+                &wal_id,
+                TransactionRecord {
+                    id: TransactionId(3),
+                    refid: Some(TransactionId(2)),
+                    timestamp_epoch_ms: 3,
+                    actor: actor.clone(),
+                    kind: TransactionKind::SqlDefinitionChange,
+                    payload: view_upsert_payload
+                        .encode()
+                        .expect("view upsert payload should encode"),
+                },
+            )
+            .expect("view upsert append should succeed");
+
+        let view_drop_payload = SqlDefinitionPayload {
+            object_id: "users_v".to_string(),
+            object_kind: SqlObjectKind::View,
+            action: SqlDefinitionAction::Drop,
+            sql: String::new(),
+            dependencies: Vec::new(),
+        };
+
+        app.wal
+            .append(
+                &wal_id,
+                TransactionRecord {
+                    id: TransactionId(4),
+                    refid: Some(TransactionId(3)),
+                    timestamp_epoch_ms: 4,
+                    actor,
+                    kind: TransactionKind::SqlDefinitionChange,
+                    payload: view_drop_payload
+                        .encode()
+                        .expect("view drop payload should encode"),
+                },
+            )
+            .expect("view drop append should succeed");
+
+        app.bootstrap()
+            .expect("bootstrap should replay entity construction records");
+
+        let loaded = app
+            .catalogs()
+            .get(&wal_id)
+            .expect("catalog should be loaded");
+
+        assert!(loaded.trigger("trg_users_bi").is_some());
+        assert_eq!(
+            loaded
+                .entity_metadata("trg_users_bi")
+                .and_then(|metadata| metadata.created_by.as_deref()),
+            Some("bootstrap-object-replay")
+        );
+        assert!(loaded.view("users_v").is_none());
     }
 
     #[test]
@@ -457,6 +617,126 @@ mod tests {
 
         assert_eq!(row_values, vec!["accounts", "users"]);
 
+    }
+
+    #[test]
+    fn create_and_drop_sql_backed_objects_are_wired() {
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-sql-backed-objects-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        catalog
+            .register_table(
+                "users",
+                TableSchema::new(vec![FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                }]),
+            )
+            .expect("users table should register");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let create_view = ConnectorRequest::new(
+            "req-create-view",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create view users_v as select * from users".to_string(),
+                },
+            },
+        );
+
+        let create_trigger = ConnectorRequest::new(
+            "req-create-trigger",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create trigger trg_users_bi before insert on users for each row begin end"
+                        .to_string(),
+                },
+            },
+        );
+
+        let create_procedure = ConnectorRequest::new(
+            "req-create-procedure",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create procedure p_sync() begin end".to_string(),
+                },
+            },
+        );
+
+        let create_view_response = app.handle_connector_request(&create_view);
+        let create_trigger_response = app.handle_connector_request(&create_trigger);
+        let create_procedure_response = app.handle_connector_request(&create_procedure);
+
+        assert_eq!(create_view_response.status, ResponseStatus::Applied);
+        assert_eq!(create_trigger_response.status, ResponseStatus::Applied);
+        assert_eq!(create_procedure_response.status, ResponseStatus::Applied);
+
+        let catalog = app.catalogs.get("main").expect("main catalog should exist");
+        assert!(catalog.view("users_v").is_some());
+        assert!(catalog.trigger("trg_users_bi").is_some());
+        assert!(catalog.stored_procedure("p_sync").is_some());
+
+        let drop_view = ConnectorRequest::new(
+            "req-drop-view",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "drop view users_v".to_string(),
+                },
+            },
+        );
+
+        let drop_trigger = ConnectorRequest::new(
+            "req-drop-trigger",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "drop trigger trg_users_bi on users".to_string(),
+                },
+            },
+        );
+
+        let drop_procedure = ConnectorRequest::new(
+            "req-drop-procedure",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "drop procedure p_sync".to_string(),
+                },
+            },
+        );
+
+        let drop_view_response = app.handle_connector_request(&drop_view);
+        let drop_trigger_response = app.handle_connector_request(&drop_trigger);
+        let drop_procedure_response = app.handle_connector_request(&drop_procedure);
+
+        assert_eq!(drop_view_response.status, ResponseStatus::Applied);
+        assert_eq!(drop_trigger_response.status, ResponseStatus::Applied);
+        assert_eq!(drop_procedure_response.status, ResponseStatus::Applied);
+
+        let catalog = app.catalogs.get("main").expect("main catalog should exist");
+        assert!(catalog.view("users_v").is_none());
+        assert!(catalog.trigger("trg_users_bi").is_none());
+        assert!(catalog.stored_procedure("p_sync").is_none());
     }
 
     #[test]

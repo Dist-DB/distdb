@@ -1,3 +1,4 @@
+
 pub mod core;
 pub mod error;
 pub mod status;
@@ -5,6 +6,8 @@ pub mod schema_error;
 pub mod catalog;
 pub mod id;
 pub mod entity_metadata;
+pub mod stored_procedure;
+pub mod entity_metadata_payload;
 pub mod field_def;
 pub mod field_types;
 pub mod index_id;
@@ -14,6 +17,7 @@ pub mod index;
 pub mod relationship;
 pub mod schema_change_tx;
 pub mod schema_change_payload;
+pub mod sql_definition_payload;
 pub mod table;
 pub mod table_schema;
 pub mod table_schema_def;
@@ -23,4 +27,5 @@ pub mod transaction_id;
 pub mod transaction_kind;
 pub mod transaction_log;
 pub mod transaction_record;
+pub mod trigger;
 pub mod view;

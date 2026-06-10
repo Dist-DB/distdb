@@ -1,3 +1,4 @@
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectStatus {
     Load,
@@ -7,6 +8,7 @@ pub enum ObjectStatus {
 }
 
 impl ObjectStatus {
+
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
@@ -21,14 +23,17 @@ impl ObjectStatus {
                 | (Self::Lock, Self::Ready)
         )
     }
+
 }
 
 #[cfg(test)]
 mod tests {
+    
     use super::ObjectStatus;
 
     #[test]
     fn object_status_lock_to_ready_is_valid_for_abort_path() {
         assert!(ObjectStatus::Lock.can_transition_to(ObjectStatus::Ready));
     }
+
 }

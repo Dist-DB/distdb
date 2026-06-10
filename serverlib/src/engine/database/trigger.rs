@@ -1,43 +1,39 @@
 
 use super::core::ObjectStatus;
 use super::entity::{DatabaseEntityAspect, DatabaseEntityKind};
-use super::table_schema::TableSchema;
 use super::entity_metadata::EntityMetadata;
+use super::table_schema::TableSchema;
 
-/// A named, stored SQL query. Views are never writable; their schema is
-/// derived once at definition time and stored so schema inspection does not
-/// need to re-execute the view SQL.
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct DatabaseView {
-    pub view_id: String,
+pub struct DatabaseTrigger {
+    pub trigger_id: String,
     pub sql: String,
-    pub schema: TableSchema,
     pub dependencies: Vec<String>,
     pub metadata: EntityMetadata,
 }
 
-impl DatabaseView {
-    
-    pub fn new(view_id: String, sql: String, schema: TableSchema) -> Self {
+impl DatabaseTrigger {
+
+    pub fn new(trigger_id: String, sql: String, dependencies: Vec<String>) -> Self {
         Self {
-            view_id,
+            trigger_id,
             sql,
-            schema,
-            dependencies: Vec::new(),
+            dependencies,
             metadata: EntityMetadata::default(),
         }
     }
 
 }
 
-impl DatabaseEntityAspect for DatabaseView {
+impl DatabaseEntityAspect for DatabaseTrigger {
 
     fn kind(&self) -> DatabaseEntityKind {
-        DatabaseEntityKind::View
+        DatabaseEntityKind::Trigger
     }
 
     fn storage_key(&self) -> String {
-        common::normalize_identifier!(&self.view_id)
+        common::normalize_identifier!(&self.trigger_id)
     }
 
     fn status(&self) -> ObjectStatus {
@@ -57,16 +53,16 @@ impl DatabaseEntityAspect for DatabaseView {
     }
 
     fn schema(&self) -> Option<&TableSchema> {
-        Some(&self.schema)
+        None
     }
 
     fn normalize_in_place(&mut self) {
-        self.view_id = common::normalize_identifier!(&self.view_id);
+        self.trigger_id = common::normalize_identifier!(&self.trigger_id);
         self.dependencies = self
             .dependencies
             .iter()
             .map(|dep| common::normalize_identifier!(dep))
             .collect();
     }
-
+    
 }

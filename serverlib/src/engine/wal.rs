@@ -8,12 +8,19 @@ use std::thread;
 use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE};
 use common::helpers::{append_bytes, read_bytes, stable_id, write_bytes};
 
+use crate::core::identity::UserId;
 use crate::engine::database::transaction::{TransactionId, TransactionLog, TransactionRecord};
+use crate::TransactionKind;
 
 #[derive(Debug)]
 enum WalCommand {
     Append {
         record: TransactionRecord,
+        ack: Sender<Result<(), &'static str>>,
+    },
+    CompactToLatestSchemaAndMetadata {
+        actor: UserId,
+        timestamp_epoch_ms: u64,
         ack: Sender<Result<(), &'static str>>,
     },
     Shutdown,
@@ -66,6 +73,27 @@ impl ConcurrentWalManager {
             let _ = sender.send(WalCommand::Shutdown);
         }
         Ok(())
+    }
+
+    pub fn compact_stream_to_latest_schema_and_metadata(
+        &self,
+        wal_id: &str,
+        actor: UserId,
+        timestamp_epoch_ms: u64,
+    ) -> Result<(), &'static str> {
+        let sender = self.get_or_spawn_worker(wal_id)?;
+        let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
+        sender
+            .send(WalCommand::CompactToLatestSchemaAndMetadata {
+                actor,
+                timestamp_epoch_ms,
+                ack: ack_tx,
+            })
+            .map_err(|_| "failed to send WAL compact command")?;
+
+        ack_rx
+            .recv()
+            .map_err(|_| "failed to receive WAL compact acknowledgement")?
     }
 
     fn get_or_spawn_worker(&self, wal_id: &str) -> Result<Sender<WalCommand>, &'static str> {
@@ -205,6 +233,58 @@ fn ensure_wal_file(path: &Path) -> Result<(), &'static str> {
     }
 }
 
+fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'static str> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&make_header(FileKind::Data));
+    for record in records {
+        let frame = frame_record(record)?;
+        bytes.extend_from_slice(&frame);
+    }
+    write_bytes(path, &bytes).map_err(|_| "failed to rewrite compacted WAL file")
+}
+
+fn compact_entries_to_latest_schema_and_metadata(
+    entries: &mut Vec<TransactionRecord>,
+    actor: UserId,
+    timestamp_epoch_ms: u64,
+) {
+    let last_id = entries.last().map(|record| record.id).unwrap_or(TransactionId(0));
+
+    let latest_schema = entries
+        .iter()
+        .rev()
+        .find(|record| record.kind == TransactionKind::SchemaChange)
+        .cloned();
+    let latest_metadata = entries
+        .iter()
+        .rev()
+        .find(|record| {
+            record.kind == TransactionKind::MetadataChange
+                || record.kind == TransactionKind::SecurityChange
+        })
+        .cloned();
+
+    let mut retained = Vec::new();
+    if let Some(schema) = latest_schema {
+        retained.push(schema);
+    }
+    if let Some(metadata) = latest_metadata {
+        retained.push(metadata);
+    }
+    retained.sort_by_key(|record| record.id.0);
+
+    retained.push(TransactionRecord {
+        id: TransactionId(last_id.0 + 1),
+        refid: Some(last_id),
+        timestamp_epoch_ms,
+        actor,
+        kind: TransactionKind::Truncate,
+        payload: Vec::new(),
+    });
+
+    *entries = retained;
+}
+
 fn spawn_worker(
     stream_key: String,
     storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
@@ -282,6 +362,41 @@ fn spawn_worker(
                         break;
                     }
                 }
+                WalCommand::CompactToLatestSchemaAndMetadata {
+                    actor,
+                    timestamp_epoch_ms,
+                    ack,
+                } => {
+                    if let Ok(mut state) = storage.lock() {
+                        let entries = state.entry(stream_key.clone()).or_default();
+                        compact_entries_to_latest_schema_and_metadata(
+                            entries,
+                            actor,
+                            timestamp_epoch_ms,
+                        );
+
+                        if let Some(ref path) = wal_path {
+                            if let Err(e) = rewrite_wal_file(path, entries) {
+                                log::error!(
+                                    "failed to rewrite compacted WAL for stream={}: {}",
+                                    stream_key,
+                                    e
+                                );
+                                let _ = ack.send(Err(e));
+                                continue;
+                            }
+                        }
+
+                        let _ = ack.send(Ok(()));
+                    } else {
+                        log::error!(
+                            "failed to acquire WAL storage lock during compact for stream={}",
+                            stream_key
+                        );
+                        let _ = ack.send(Err("failed to lock WAL storage"));
+                        break;
+                    }
+                }
                 WalCommand::Shutdown => {
                     log::info!("WAL worker shutting down for stream={}", stream_key);
                     break;
@@ -290,4 +405,75 @@ fn spawn_worker(
         }
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_record(id: u64, kind: TransactionKind, actor: &UserId) -> TransactionRecord {
+        TransactionRecord {
+            id: TransactionId(id),
+            refid: None,
+            timestamp_epoch_ms: id,
+            actor: actor.clone(),
+            kind,
+            payload: vec![id as u8],
+        }
+    }
+
+    #[test]
+    fn compact_keeps_latest_schema_metadata_and_appends_truncate_marker() {
+        let wal = ConcurrentWalManager::new();
+        let actor = UserId::from_username("tester");
+
+        wal.append("users", make_record(1, TransactionKind::Insert, &actor))
+            .expect("append should succeed");
+        wal.append("users", make_record(2, TransactionKind::SchemaChange, &actor))
+            .expect("append should succeed");
+        wal.append("users", make_record(3, TransactionKind::Update, &actor))
+            .expect("append should succeed");
+        wal.append("users", make_record(4, TransactionKind::SecurityChange, &actor))
+            .expect("append should succeed");
+        wal.append("users", make_record(5, TransactionKind::Delete, &actor))
+            .expect("append should succeed");
+
+        wal.compact_stream_to_latest_schema_and_metadata(
+            "users",
+            actor.clone(),
+            99,
+        )
+        .expect("compact should succeed");
+
+        let records = wal.since("users", None);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].kind, TransactionKind::SchemaChange);
+        assert_eq!(records[0].id, TransactionId(2));
+        assert_eq!(records[1].kind, TransactionKind::SecurityChange);
+        assert_eq!(records[1].id, TransactionId(4));
+        assert_eq!(records[2].kind, TransactionKind::Truncate);
+        assert_eq!(records[2].id, TransactionId(6));
+        assert_eq!(records[2].refid, Some(TransactionId(5)));
+        assert_eq!(records[2].timestamp_epoch_ms, 99);
+    }
+
+    #[test]
+    fn compact_prefers_latest_metadata_change_record_when_present() {
+        let wal = ConcurrentWalManager::new();
+        let actor = UserId::from_username("tester");
+
+        wal.append("users", make_record(1, TransactionKind::SchemaChange, &actor))
+            .expect("append should succeed");
+        wal.append("users", make_record(2, TransactionKind::SecurityChange, &actor))
+            .expect("append should succeed");
+        wal.append("users", make_record(3, TransactionKind::MetadataChange, &actor))
+            .expect("append should succeed");
+
+        wal.compact_stream_to_latest_schema_and_metadata("users", actor, 101)
+            .expect("compact should succeed");
+
+        let records = wal.since("users", None);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].kind, TransactionKind::MetadataChange);
+    }
 }

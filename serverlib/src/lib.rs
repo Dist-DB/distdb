@@ -13,14 +13,19 @@ pub use common::schema::{
 
 pub use engine::database::core::{
 	DatabaseCatalog, DatabaseEntity, DatabaseError, DatabaseId, DatabaseIndex,
-	DatabaseEntityAspect, DatabaseEntityKind, DatabaseRelationship, DatabaseReplicaState, DatabaseResult, DatabaseTable,
+	DatabaseEntityAspect, DatabaseEntityKind, DatabaseRelationship, DatabaseReplicaState,
+	DatabaseResult, DatabaseStoredProcedure, DatabaseTable, DatabaseTrigger,
 	EntityMetadata,
 	DatabaseObjectRef, DatabaseObjectType,
 	DatabaseView, IndexId, ObjectStatus,
 };
 
 pub use engine::database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
-pub use engine::database::transaction::{SchemaChangePayload, TransactionId, TransactionKind, TransactionRecord};
+pub use engine::database::transaction::{
+	EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
+	SqlObjectKind,
+	TransactionId, TransactionKind, TransactionRecord,
+};
 
 pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use engine::sql::{
