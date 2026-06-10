@@ -4,6 +4,8 @@ use super::table_schema::TableSchema;
 pub struct SchemaChangePayload {
     pub table_id: String,
     pub schema_revision: u64,
+    #[serde(default)]
+    pub schema_epoch: u64,
     pub schema: TableSchema,
 }
 

@@ -74,6 +74,7 @@ impl SchemaChangeTx {
         let payload = SchemaChangePayload {
             table_id: self.table_id.clone(),
             schema_revision: self.next_revision,
+            schema_epoch: catalog.schema_epoch().saturating_add(1),
             schema: self.pending_schema,
         };
 

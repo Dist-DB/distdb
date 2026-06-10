@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
@@ -94,6 +95,41 @@ impl ConcurrentWalManager {
         ack_rx
             .recv()
             .map_err(|_| "failed to receive WAL compact acknowledgement")?
+    }
+
+    pub fn delete_stream(&self, wal_id: &str) -> Result<(), &'static str> {
+        let stream_key = obfuscated_stream_key(wal_id)?;
+
+        let sender = {
+            let mut workers = self
+                .workers
+                .lock()
+                .map_err(|_| "failed to lock WAL workers")?;
+            workers.remove(&stream_key)
+        };
+
+        if let Some(sender) = sender {
+            let _ = sender.send(WalCommand::Shutdown);
+        }
+
+        {
+            let mut storage = self
+                .storage
+                .lock()
+                .map_err(|_| "failed to lock WAL storage")?;
+            storage.remove(&stream_key);
+        }
+
+        if let Some(data_dir) = &self.data_dir {
+            let wal_path = data_dir.join(FileKind::Data.file_name(&stream_key));
+            if let Err(err) = fs::remove_file(wal_path) {
+                if err.kind() != ErrorKind::NotFound {
+                    return Err("failed to delete WAL file");
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn get_or_spawn_worker(&self, wal_id: &str) -> Result<Sender<WalCommand>, &'static str> {
@@ -475,5 +511,34 @@ mod tests {
         let records = wal.since("users", None);
         assert_eq!(records.len(), 3);
         assert_eq!(records[1].kind, TransactionKind::MetadataChange);
+    }
+
+    #[test]
+    fn delete_stream_removes_in_memory_and_disk_state() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-wal-delete-stream-{}-{}",
+            std::process::id(),
+            common::epochabs!()
+        ));
+
+        std::fs::create_dir_all(&temp_root).expect("temp wal dir should be created");
+
+        let wal = ConcurrentWalManager::with_data_dir(temp_root.clone());
+        let actor = UserId::from_username("tester");
+        wal.append("users", make_record(1, TransactionKind::Insert, &actor))
+            .expect("append should succeed");
+
+        let stream_key = super::obfuscated_stream_key("users")
+            .expect("stream key should resolve");
+        let wal_file = temp_root.join(FileKind::Data.file_name(&stream_key));
+        assert!(wal_file.exists());
+
+        wal.delete_stream("users")
+            .expect("delete stream should succeed");
+
+        assert!(wal.since("users", None).is_empty());
+        assert!(!wal_file.exists());
+
+        let _ = std::fs::remove_dir_all(temp_root);
     }
 }

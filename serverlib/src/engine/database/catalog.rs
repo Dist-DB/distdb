@@ -16,6 +16,7 @@ use super::relationship::DatabaseRelationship;
 use super::schema_change_tx::SchemaChangeTx;
 use super::stored_procedure::DatabaseStoredProcedure;
 use super::table::DatabaseTable;
+use super::table_lifecycle_payload::{TableLifecycleAction, TableLifecyclePayload};
 use super::table_schema::{FieldIndex, TableSchema};
 use super::trigger::DatabaseTrigger;
 use super::transaction::{
@@ -28,6 +29,8 @@ use super::view::DatabaseView;
 pub struct DatabaseCatalog {
     pub database_id: DatabaseId,
     status: ObjectStatus,
+    #[serde(default)]
+    schema_epoch: u64,
     entities: HashMap<String, DatabaseEntity>,
 }
 
@@ -37,6 +40,7 @@ impl DatabaseCatalog {
         Self {
             database_id,
             status: ObjectStatus::Load,
+            schema_epoch: 0,
             entities: HashMap::new(),
         }
     }
@@ -97,7 +101,73 @@ impl DatabaseCatalog {
         }
 
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
-        table.complete_sync()
+        table.complete_sync()?;
+        self.bump_schema_epoch();
+        Ok(())
+    }
+
+    pub fn drop_object(
+        &mut self,
+        object_type: DatabaseObjectType,
+        object_id: &str,
+    ) -> DatabaseResult<()> {
+        let normalized = common::normalize_identifier!(object_id);
+
+        let removed = match object_type {
+            
+            DatabaseObjectType::Table => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::Table(_)) => {
+                    self.entities.remove(&normalized);
+                    Ok(())
+                }
+                _ => Err(DatabaseError::TableNotFound),
+            },
+            
+            DatabaseObjectType::View => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::View(_)) => {
+                    self.entities.remove(&normalized);
+                    Ok(())
+                }
+                _ => Err(DatabaseError::ViewNotFound),
+            },
+            
+            DatabaseObjectType::Trigger => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::Trigger(_)) => {
+                    self.entities.remove(&normalized);
+                    Ok(())
+                }
+                _ => Err(DatabaseError::TriggerNotFound),
+            },
+            
+            DatabaseObjectType::StoredProcedure => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::StoredProcedure(_)) => {
+                    self.entities.remove(&normalized);
+                    Ok(())
+                }
+                _ => Err(DatabaseError::StoredProcedureNotFound),
+            },
+            
+            DatabaseObjectType::Relationship => match self.entities.get(&normalized) {
+                Some(DatabaseEntity::Relationship(_)) => {
+                    self.entities.remove(&normalized);
+                    Ok(())
+                }
+                _ => Err(DatabaseError::EntityNotFound),
+            },
+
+            DatabaseObjectType::Index => Err(DatabaseError::EntityNotFound),
+        };
+
+        if removed.is_ok() {
+            self.bump_schema_epoch();
+        }
+
+        removed
+
+    }
+
+    pub fn drop_table(&mut self, table_id: &str) -> DatabaseResult<()> {
+        self.drop_object(DatabaseObjectType::Table, table_id)
     }
 
     pub fn register_relationship(&mut self, relationship: DatabaseRelationship) {
@@ -107,6 +177,7 @@ impl DatabaseCatalog {
         let entity_id = format!("rel:{left}:{right}:{name}");
         self.entities
             .insert(entity_id, DatabaseEntity::Relationship(relationship));
+        self.bump_schema_epoch();
     }
 
     pub fn table(&self, table_id: &str) -> Option<&DatabaseTable> {
@@ -231,6 +302,10 @@ impl DatabaseCatalog {
         self.status
     }
 
+    pub fn schema_epoch(&self) -> u64 {
+        self.schema_epoch
+    }
+
     pub fn transition_status(&mut self, next: ObjectStatus) -> DatabaseResult<()> {
         if !self.status.can_transition_to(next) {
             return Err(DatabaseError::InvalidStatusTransition);
@@ -268,15 +343,19 @@ impl DatabaseCatalog {
         &mut self,
         payload: SchemaChangePayload,
     ) -> DatabaseResult<()> {
+
         let table_id = common::normalize_identifier!(&payload.table_id);
         self.apply_schema_change(payload)?;
+
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.begin_sync()?;
         if !self.table_sync_acknowledged_stub(&table_id) {
             return Err(DatabaseError::SyncPending);
         }
-        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;        
         table.complete_sync()
+
     }
 
     /// Internal: release the lock without changing the schema (`Lock -> Ready`).
@@ -290,7 +369,15 @@ impl DatabaseCatalog {
     /// Internal: apply a schema payload directly. Does not enforce or alter
     /// table status. Used by `finalize_schema_change` and WAL replay.
     pub fn apply_schema_change(&mut self, payload: SchemaChangePayload) -> DatabaseResult<()> {
+
+        if !self.should_apply_schema_epoch(payload.schema_epoch) {
+            return Ok(());
+        }
+
         let table_id = common::normalize_identifier!(payload.table_id);
+        if self.table(&table_id).is_none() {
+            self.register_table(table_id.clone(), payload.schema.clone())?;
+        }
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
 
         if payload.schema_revision <= table.schema_revision() {
@@ -300,10 +387,39 @@ impl DatabaseCatalog {
         let indexes = Self::indexes_for_schema(&table_id, &payload.schema);
 
         table.replace_schema(payload.schema_revision, payload.schema, indexes);
+        self.accept_schema_epoch(payload.schema_epoch);
         Ok(())
+
+    }
+
+    pub fn apply_table_lifecycle(&mut self, payload: TableLifecyclePayload) -> DatabaseResult<()> {
+        if !self.should_apply_schema_epoch(payload.schema_epoch) {
+            return Ok(());
+        }
+
+        let table_id = common::normalize_identifier!(payload.table_id);
+
+        match payload.action {
+            TableLifecycleAction::Create => {
+                let schema = payload.schema.unwrap_or_else(|| TableSchema::new(Vec::new()));
+                if self.table(&table_id).is_none() {
+                    self.register_table(table_id, schema)?;
+                }
+                self.accept_schema_epoch(payload.schema_epoch);
+                Ok(())
+            }
+            TableLifecycleAction::Drop => match self.drop_table(&table_id) {
+                Ok(()) | Err(DatabaseError::TableNotFound) => {
+                    self.accept_schema_epoch(payload.schema_epoch);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+        }
     }
 
     pub fn apply_entity_metadata(&mut self, payload: EntityMetadataPayload) -> DatabaseResult<()> {
+
         let entity_id = common::normalize_identifier!(payload.entity_id);
         let entity = self
             .entities
@@ -319,6 +435,7 @@ impl DatabaseCatalog {
         }
 
         Ok(())
+
     }
 
     pub fn set_entity_metadata(
@@ -334,10 +451,23 @@ impl DatabaseCatalog {
     }
 
     pub fn apply_sql_definition(&mut self, payload: SqlDefinitionPayload) -> DatabaseResult<()> {
+
+        if !self.should_apply_schema_epoch(payload.schema_epoch) {
+            return Ok(());
+        }
+
         let object_id = common::normalize_identifier!(payload.object_id);
 
         match payload.action {
+
             SqlDefinitionAction::Upsert => {
+
+                let existed_before = match payload.object_kind {
+                    SqlObjectKind::View => self.view(&object_id).is_some(),
+                    SqlObjectKind::Trigger => self.trigger(&object_id).is_some(),
+                    SqlObjectKind::StoredProcedure => self.stored_procedure(&object_id).is_some(),
+                };
+
                 let normalized_dependencies = payload
                     .dependencies
                     .into_iter()
@@ -345,6 +475,7 @@ impl DatabaseCatalog {
                     .collect::<Vec<_>>();
 
                 match payload.object_kind {
+
                     SqlObjectKind::View => {
                         if self.view(&object_id).is_none() {
                             self.register_view(
@@ -357,8 +488,12 @@ impl DatabaseCatalog {
                         let view = self.view_mut(&object_id).ok_or(DatabaseError::ViewNotFound)?;
                         view.sql = payload.sql;
                         view.dependencies = normalized_dependencies;
+                        if existed_before {
+                            self.accept_schema_epoch(payload.schema_epoch);
+                        }
                         Ok(())
-                    }
+                    },
+
                     SqlObjectKind::Trigger => {
                         if self.trigger(&object_id).is_none() {
                             self.register_trigger(
@@ -373,8 +508,12 @@ impl DatabaseCatalog {
                             .ok_or(DatabaseError::TriggerNotFound)?;
                         trigger.sql = payload.sql;
                         trigger.dependencies = normalized_dependencies;
+                        if existed_before {
+                            self.accept_schema_epoch(payload.schema_epoch);
+                        }
                         Ok(())
-                    }
+                    },
+
                     SqlObjectKind::StoredProcedure => {
                         if self.stored_procedure(&object_id).is_none() {
                             self.register_stored_procedure(
@@ -389,25 +528,46 @@ impl DatabaseCatalog {
                             .ok_or(DatabaseError::StoredProcedureNotFound)?;
                         procedure.sql = payload.sql;
                         procedure.dependencies = normalized_dependencies;
+                        if existed_before {
+                            self.accept_schema_epoch(payload.schema_epoch);
+                        }
+                        Ok(())
+                    },
+
+                }
+            
+            },
+
+            SqlDefinitionAction::Drop => match payload.object_kind {
+
+                SqlObjectKind::View => match self.drop_view(&object_id) {
+                    Ok(()) | Err(DatabaseError::ViewNotFound) => {
+                        self.accept_schema_epoch(payload.schema_epoch);
                         Ok(())
                     }
-                }
-            }
-            SqlDefinitionAction::Drop => match payload.object_kind {
-                SqlObjectKind::View => match self.drop_view(&object_id) {
-                    Ok(()) | Err(DatabaseError::ViewNotFound) => Ok(()),
                     Err(e) => Err(e),
                 },
+
                 SqlObjectKind::Trigger => match self.drop_trigger(&object_id) {
-                    Ok(()) | Err(DatabaseError::TriggerNotFound) => Ok(()),
+                    Ok(()) | Err(DatabaseError::TriggerNotFound) => {
+                        self.accept_schema_epoch(payload.schema_epoch);
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 },
+
                 SqlObjectKind::StoredProcedure => match self.drop_stored_procedure(&object_id) {
-                    Ok(()) | Err(DatabaseError::StoredProcedureNotFound) => Ok(()),
+                    Ok(()) | Err(DatabaseError::StoredProcedureNotFound) => {
+                        self.accept_schema_epoch(payload.schema_epoch);
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 },
+
             },
+
         }
+
     }
 
     pub fn set_sql_definition(
@@ -421,6 +581,7 @@ impl DatabaseCatalog {
             object_id: object_id.into(),
             object_kind,
             action: SqlDefinitionAction::Upsert,
+            schema_epoch: self.schema_epoch.saturating_add(1),
             sql: sql.into(),
             dependencies,
         };
@@ -453,22 +614,34 @@ impl DatabaseCatalog {
         wal_id: &str,
         log: &L,
     ) -> DatabaseResult<usize> {
+        
         let mut applied = 0usize;
 
         for record in log.since(wal_id, None) {
+
             match record.kind {
+                
                 TransactionKind::SchemaChange => {
                     let payload = SchemaChangePayload::decode(&record.payload)
                         .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
                     self.apply_schema_change(payload)?;
                     applied += 1;
                 }
+                
+                TransactionKind::TableLifecycle => {
+                    let payload = TableLifecyclePayload::decode(&record.payload)
+                        .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
+                    self.apply_table_lifecycle(payload)?;
+                    applied += 1;
+                }
+                
                 TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
                     let payload = EntityMetadataPayload::decode(&record.payload)
                         .map_err(|_| DatabaseError::MetadataPayloadDeserialize)?;
                     self.apply_entity_metadata(payload)?;
                     applied += 1;
                 }
+
                 TransactionKind::SqlDefinitionChange => {
                     let payload = SqlDefinitionPayload::decode(&record.payload)
                         .map_err(|_| DatabaseError::SqlDefinitionPayloadDeserialize)?;
@@ -476,13 +649,17 @@ impl DatabaseCatalog {
                     applied += 1;
                 }
                 _ => {}
+            
             }
+
         }
 
         Ok(applied)
+
     }
 
     pub fn ensure_ready_for_write(&self, table_id: &str) -> DatabaseResult<()> {
+
         if self.status != ObjectStatus::Ready {
             return Err(DatabaseError::NotReadyForWrite);
         }
@@ -494,6 +671,7 @@ impl DatabaseCatalog {
         }
 
         Ok(())
+        
     }
 
     pub fn table_status(&self, table_id: &str) -> Option<ObjectStatus> {
@@ -539,6 +717,8 @@ impl DatabaseCatalog {
             DatabaseEntity::View(DatabaseView::new(view_id, sql.into(), schema)),
         );
 
+        self.bump_schema_epoch();
+
         Ok(())
     }
 
@@ -550,14 +730,7 @@ impl DatabaseCatalog {
     }
 
     pub fn drop_view(&mut self, view_id: &str) -> DatabaseResult<()> {
-        let normalized = common::normalize_identifier!(view_id);
-        match self.entities.get(&normalized) {
-            Some(DatabaseEntity::View(_)) => {
-                self.entities.remove(&normalized);
-                Ok(())
-            }
-            _ => Err(DatabaseError::ViewNotFound),
-        }
+        self.drop_object(DatabaseObjectType::View, view_id)
     }
 
     pub fn relationship(&self, relationship_id: &str) -> Option<&DatabaseRelationship> {
@@ -588,6 +761,8 @@ impl DatabaseCatalog {
             )),
         );
 
+        self.bump_schema_epoch();
+
         Ok(())
     }
 
@@ -599,14 +774,7 @@ impl DatabaseCatalog {
     }
 
     pub fn drop_trigger(&mut self, trigger_id: &str) -> DatabaseResult<()> {
-        let normalized = common::normalize_identifier!(trigger_id);
-        match self.entities.get(&normalized) {
-            Some(DatabaseEntity::Trigger(_)) => {
-                self.entities.remove(&normalized);
-                Ok(())
-            }
-            _ => Err(DatabaseError::TriggerNotFound),
-        }
+        self.drop_object(DatabaseObjectType::Trigger, trigger_id)
     }
 
     pub fn trigger_ids(&self) -> Vec<String> {
@@ -640,6 +808,8 @@ impl DatabaseCatalog {
             )),
         );
 
+        self.bump_schema_epoch();
+
         Ok(())
     }
 
@@ -651,14 +821,7 @@ impl DatabaseCatalog {
     }
 
     pub fn drop_stored_procedure(&mut self, procedure_id: &str) -> DatabaseResult<()> {
-        let normalized = common::normalize_identifier!(procedure_id);
-        match self.entities.get(&normalized) {
-            Some(DatabaseEntity::StoredProcedure(_)) => {
-                self.entities.remove(&normalized);
-                Ok(())
-            }
-            _ => Err(DatabaseError::StoredProcedureNotFound),
-        }
+        self.drop_object(DatabaseObjectType::StoredProcedure, procedure_id)
     }
 
     pub fn stored_procedure_ids(&self) -> Vec<String> {
@@ -732,6 +895,7 @@ impl DatabaseCatalog {
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> DatabaseResult<Self> {
+
         let bytes = read_bytes(path).map_err(|_| DatabaseError::CatalogRead)?;
 
         common::helpers::format::verify_header(FileKind::Catalog, &bytes)
@@ -745,7 +909,9 @@ impl DatabaseCatalog {
             .map_err(|_| DatabaseError::CatalogDeserialize)?;
 
         catalog.normalize_loaded_entities()?;
+        
         Ok(catalog)
+
     }
 
     pub fn save_in_directory(&self, directory: impl AsRef<Path>) -> DatabaseResult<()> {
@@ -799,6 +965,18 @@ impl DatabaseCatalog {
             }
         }
         indexes
+    }
+
+    fn bump_schema_epoch(&mut self) {
+        self.schema_epoch = self.schema_epoch.saturating_add(1);
+    }
+
+    fn should_apply_schema_epoch(&self, incoming_epoch: u64) -> bool {
+        incoming_epoch >= self.schema_epoch
+    }
+
+    fn accept_schema_epoch(&mut self, incoming_epoch: u64) {
+        self.schema_epoch = self.schema_epoch.max(incoming_epoch);
     }
 
     fn normalize_loaded_entities(&mut self) -> DatabaseResult<()> {
@@ -919,6 +1097,19 @@ mod tests {
     }
 
     #[test]
+    fn drop_table_removes_registered_table() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_table("users", TableSchema::new(Vec::new()))
+            .expect("table register should succeed");
+
+        catalog.drop_table("users").expect("drop table should succeed");
+        assert!(catalog.table("users").is_none());
+    }
+
+    #[test]
     fn write_requires_database_and_table_ready() {
         let mut catalog =
             DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
@@ -967,6 +1158,7 @@ mod tests {
         let payload = SchemaChangePayload {
             table_id: "users".to_string(),
             schema_revision: 3,
+            schema_epoch: 1,
             schema: updated_schema.clone(),
         };
 
@@ -1112,6 +1304,7 @@ mod tests {
         let first_payload = SchemaChangePayload {
             table_id: "users".to_string(),
             schema_revision: 1,
+            schema_epoch: 1,
             schema: first_schema,
         };
 
@@ -1140,6 +1333,7 @@ mod tests {
         let second_payload = SchemaChangePayload {
             table_id: "users".to_string(),
             schema_revision: 2,
+            schema_epoch: 2,
             schema: second_schema.clone(),
         };
 
@@ -1208,6 +1402,7 @@ mod tests {
             object_id: "users_view".to_string(),
             object_kind: SqlObjectKind::View,
             action: SqlDefinitionAction::Upsert,
+            schema_epoch: 1,
             sql: "select id, email from users".to_string(),
             dependencies: vec!["Users".to_string(), "Accounts".to_string()],
         };
@@ -1237,6 +1432,66 @@ mod tests {
         assert_eq!(view.metadata.created_at_epoch_ms, Some(100));
         assert_eq!(view.sql, "select id, email from users");
         assert_eq!(view.dependencies, vec!["users", "accounts"]);
+    }
+
+    #[test]
+    fn table_lifecycle_replay_honors_create_then_drop() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let wal = crate::engine::wal::ConcurrentWalManager::new();
+        let actor = crate::core::identity::UserId::from_username("table-lifecycle");
+
+        let create_payload = TableLifecyclePayload {
+            table_id: "users".to_string(),
+            action: TableLifecycleAction::Create,
+            schema_epoch: 1,
+            schema: Some(TableSchema::new(Vec::new())),
+        };
+
+        wal.append(
+            "main_db",
+            crate::TransactionRecord {
+                id: crate::TransactionId(1),
+                refid: None,
+                timestamp_epoch_ms: 1,
+                actor: actor.clone(),
+                kind: crate::TransactionKind::TableLifecycle,
+                payload: create_payload
+                    .encode()
+                    .expect("table create payload should encode"),
+            },
+        )
+        .expect("create lifecycle append should succeed");
+
+        let drop_payload = TableLifecyclePayload {
+            table_id: "users".to_string(),
+            action: TableLifecycleAction::Drop,
+            schema_epoch: 2,
+            schema: None,
+        };
+
+        wal.append(
+            "main_db",
+            crate::TransactionRecord {
+                id: crate::TransactionId(2),
+                refid: Some(crate::TransactionId(1)),
+                timestamp_epoch_ms: 2,
+                actor,
+                kind: crate::TransactionKind::TableLifecycle,
+                payload: drop_payload
+                    .encode()
+                    .expect("table drop payload should encode"),
+            },
+        )
+        .expect("drop lifecycle append should succeed");
+
+        let applied = catalog
+            .replay_entity_construction_from_log("main_db", &wal)
+            .expect("replay should succeed");
+
+        assert_eq!(applied, 2);
+        assert!(catalog.table("users").is_none());
     }
 
     #[test]
@@ -1337,6 +1592,116 @@ mod tests {
         assert!(catalog.view("users_view").is_none());
         assert!(catalog.trigger("audit_insert").is_none());
         assert!(catalog.stored_procedure("refresh_accounts").is_none());
+    }
+
+    #[test]
+    fn drop_object_removes_entity_from_catalog() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_table("users", TableSchema::new(Vec::new()))
+            .expect("table register should succeed");
+        catalog
+            .register_view("users_view", "select * from users", TableSchema::new(Vec::new()))
+            .expect("view register should succeed");
+        catalog
+            .register_trigger(
+                "audit_insert",
+                "create trigger audit_insert before insert on users for each row set @x = 1",
+                vec!["users".to_string()],
+            )
+            .expect("trigger register should succeed");
+        catalog
+            .register_stored_procedure(
+                "refresh_accounts",
+                "create procedure refresh_accounts() begin select 1; end",
+                vec!["accounts".to_string()],
+            )
+            .expect("procedure register should succeed");
+
+        catalog
+            .drop_object(DatabaseObjectType::Table, "users")
+            .expect("table drop should succeed");
+        catalog
+            .drop_object(DatabaseObjectType::View, "users_view")
+            .expect("view drop should succeed");
+        catalog
+            .drop_object(DatabaseObjectType::Trigger, "audit_insert")
+            .expect("trigger drop should succeed");
+        catalog
+            .drop_object(DatabaseObjectType::StoredProcedure, "refresh_accounts")
+            .expect("procedure drop should succeed");
+
+        assert!(catalog.table("users").is_none());
+        assert!(catalog.view("users_view").is_none());
+        assert!(catalog.trigger("audit_insert").is_none());
+        assert!(catalog.stored_procedure("refresh_accounts").is_none());
+    }
+
+    #[test]
+    fn schema_epoch_advances_for_object_lifecycle_mutations() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        assert_eq!(catalog.schema_epoch(), 0);
+
+        catalog
+            .create_table("users", TableSchema::new(Vec::new()))
+            .expect("table create should succeed");
+        assert_eq!(catalog.schema_epoch(), 1);
+
+        catalog
+            .register_view("users_view", "select * from users", TableSchema::new(Vec::new()))
+            .expect("view register should succeed");
+        assert_eq!(catalog.schema_epoch(), 2);
+
+        catalog
+            .drop_object(DatabaseObjectType::View, "users_view")
+            .expect("view drop should succeed");
+        assert_eq!(catalog.schema_epoch(), 3);
+    }
+
+    #[test]
+    fn schema_epoch_advances_for_schema_change_and_sql_update() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_table("users", TableSchema::new(Vec::new()))
+            .expect("table register should succeed");
+        let baseline_epoch = catalog.schema_epoch();
+
+        catalog
+            .apply_schema_change(SchemaChangePayload {
+                table_id: "users".to_string(),
+                schema_revision: 1,
+                schema_epoch: baseline_epoch + 1,
+                schema: TableSchema::new(Vec::new()),
+            })
+            .expect("schema change should succeed");
+
+        assert_eq!(catalog.schema_epoch(), baseline_epoch + 1);
+
+        catalog
+            .register_trigger(
+                "audit_insert",
+                "create trigger audit_insert before insert on users for each row set @x = 1",
+                vec!["users".to_string()],
+            )
+            .expect("trigger register should succeed");
+
+        let trigger_epoch = catalog.schema_epoch();
+        catalog
+            .set_sql_definition(
+                "audit_insert",
+                SqlObjectKind::Trigger,
+                "create trigger audit_insert before insert on users for each row set @x = 2",
+                vec!["users".to_string()],
+            )
+            .expect("trigger sql update should succeed");
+
+        assert_eq!(catalog.schema_epoch(), trigger_epoch + 1);
     }
 
     #[test]

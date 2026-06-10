@@ -23,13 +23,14 @@ pub use engine::database::core::{
 pub use engine::database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
 pub use engine::database::transaction::{
 	EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
-	SqlObjectKind,
+	SqlObjectKind, TableLifecycleAction, TableLifecyclePayload,
 	TransactionId, TransactionKind, TransactionRecord,
 };
 
 pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use engine::sql::{
-	parse_mysql8_sql_requests, parse_sql_requests, sql_directive_for_statement,
+	create_table_schema_from_statement, parse_mysql8_sql_requests, parse_sql_requests,
+	sql_directive_for_statement,
 	SqlCompatibilityTarget, SqlDirective, SqlOperation, SqlParseError, SqlRequest,
 };
 

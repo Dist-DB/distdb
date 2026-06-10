@@ -19,6 +19,7 @@ pub mod schema_change_tx;
 pub mod schema_change_payload;
 pub mod sql_definition_payload;
 pub mod table;
+pub mod table_lifecycle_payload;
 pub mod table_schema;
 pub mod table_schema_def;
 pub mod table_schema_revision;

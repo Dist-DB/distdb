@@ -17,6 +17,8 @@ pub struct SqlDefinitionPayload {
     pub object_id: String,
     pub object_kind: SqlObjectKind,
     pub action: SqlDefinitionAction,
+    #[serde(default)]
+    pub schema_epoch: u64,
     pub sql: String,
     pub dependencies: Vec<String>,
 }

@@ -100,6 +100,7 @@ impl ServerApp {
                 query,
                 &mut self.catalogs,
                 &self.wal,
+                &self.node_data_dir,
             ),
             ConnectorCommand::Schema { .. } => ConnectorResponse::rejected(
                 request.request_id.clone(),
@@ -270,6 +271,7 @@ mod tests {
         let payload = SchemaChangePayload {
             table_id: "users".to_string(),
             schema_revision: 2,
+            schema_epoch: 2,
             schema: schema.clone(),
         };
 
@@ -345,6 +347,7 @@ mod tests {
             object_id: "trg_users_bi".to_string(),
             object_kind: SqlObjectKind::Trigger,
             action: SqlDefinitionAction::Upsert,
+            schema_epoch: 1,
             sql: "create trigger trg_users_bi before insert on users for each row begin end"
                 .to_string(),
             dependencies: vec!["users".to_string()],
@@ -393,6 +396,7 @@ mod tests {
             object_id: "users_v".to_string(),
             object_kind: SqlObjectKind::View,
             action: SqlDefinitionAction::Upsert,
+            schema_epoch: 1,
             sql: "create view users_v as select * from users".to_string(),
             dependencies: vec!["users".to_string()],
         };
@@ -417,6 +421,7 @@ mod tests {
             object_id: "users_v".to_string(),
             object_kind: SqlObjectKind::View,
             action: SqlDefinitionAction::Drop,
+            schema_epoch: 2,
             sql: String::new(),
             dependencies: Vec::new(),
         };
@@ -617,6 +622,153 @@ mod tests {
 
         assert_eq!(row_values, vec!["accounts", "users"]);
 
+    }
+
+    #[test]
+    fn create_table_query_registers_table_with_schema() {
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-create-table-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let request = ConnectorRequest::new(
+            "req-create-table-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email varchar(255))"
+                        .to_string(),
+                },
+            },
+        );
+
+        let response = app.handle_connector_request(&request);
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let catalog = app.catalogs.get("main").expect("main catalog should exist");
+        let schema = catalog
+            .table_schema("users")
+            .expect("users schema should exist");
+        assert_eq!(schema.fields.len(), 2);
+        assert_eq!(schema.fields[0].field_name, "id");
+        assert_eq!(schema.fields[0].indexed, FieldIndex::PrimaryKey);
+        assert_eq!(schema.fields[1].field_name, "email");
+    }
+
+    #[test]
+    fn drop_table_query_removes_table() {
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-drop-table-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+        catalog
+            .register_table("users", TableSchema::new(Vec::new()))
+            .expect("users table should register");
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let request = ConnectorRequest::new(
+            "req-drop-table-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "drop table users".to_string(),
+                },
+            },
+        );
+
+        let response = app.handle_connector_request(&request);
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let catalog = app.catalogs.get("main").expect("main catalog should exist");
+        assert!(catalog.table("users").is_none());
+    }
+
+    #[test]
+    fn create_database_query_creates_catalog() {
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-create-db-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let request = ConnectorRequest::new(
+            "req-create-db-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create database analytics".to_string(),
+                },
+            },
+        );
+
+        let response = app.handle_connector_request(&request);
+        assert_eq!(response.status, ResponseStatus::Applied);
+        assert!(!app.catalogs().is_empty());
+    }
+
+    #[test]
+    fn drop_database_query_removes_catalog() {
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-drop-db-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("analytics")
+            .expect("catalog should be created");
+        catalog
+            .save_in_directory(&app.node_data_dir)
+            .expect("catalog should be persisted");
+
+        app.catalogs
+            .insert(catalog.database_id.0.clone(), catalog.clone());
+
+        let catalog_file = app.node_data_dir.join(catalog.file_name());
+        assert!(catalog_file.exists());
+
+        let request = ConnectorRequest::new(
+            "req-drop-db-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "drop database analytics".to_string(),
+                },
+            },
+        );
+
+        let response = app.handle_connector_request(&request);
+        assert_eq!(response.status, ResponseStatus::Applied);
+        assert!(app.catalogs().get("analytics").is_none());
+        assert!(!catalog_file.exists());
     }
 
     #[test]

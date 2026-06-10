@@ -5,6 +5,7 @@ pub enum TransactionKind {
     Update,
     Delete,
     Truncate,
+    TableLifecycle,
     SchemaChange,
     MetadataChange,
     SqlDefinitionChange,

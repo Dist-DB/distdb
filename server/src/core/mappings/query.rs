@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::time::Instant;
 
 use connector::{
@@ -8,7 +11,10 @@ use connector::{
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
     ConcurrentWalManager, DatabaseCatalog, DatabaseId, EntityMetadata, EntityMetadataPayload,
+    SchemaChangePayload,
+    DatabaseObjectType,
     SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind, SqlOperation, SqlRequest,
+    TableLifecycleAction, TableLifecyclePayload,
     TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
 };
 
@@ -17,17 +23,28 @@ pub(crate) fn handle_query_command(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
 ) -> ConnectorResponse {
+
     let request_start = Instant::now();
     let parse_start = Instant::now();
+    
     match serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) {
         Ok(parsed) => {
             let parse_ms = parse_start.elapsed().as_millis() as u64;
-            let response = execute_parsed_query(request_id, query, catalogs, wal, parsed);
+            let response = execute_parsed_query(
+                request_id,
+                query,
+                catalogs,
+                wal,
+                node_data_dir,
+                parsed,
+            );
             with_query_timings(response, make_query_timings(request_start, parse_ms))
         }
         Err(err) => ConnectorResponse::rejected(request_id.to_string(), format!("sql parse failed: {err}")),
     }
+    
 }
 
 fn execute_parsed_query(
@@ -35,6 +52,7 @@ fn execute_parsed_query(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
     parsed: Vec<SqlRequest>,
 ) -> ConnectorResponse {
 
@@ -48,18 +66,29 @@ fn execute_parsed_query(
     let statement = &parsed[0];
 
     match statement.operation {
+        SqlOperation::CreateDatabase => {
+            execute_create_database(request_id, statement, catalogs, node_data_dir)
+        }
+        SqlOperation::CreateTable => execute_create_table(request_id, query, catalogs, wal, statement),
+        SqlOperation::DropDatabase
+        | SqlOperation::DropTable
+        | SqlOperation::DropView
+        | SqlOperation::DropTrigger
+        | SqlOperation::DropStoredProcedure => execute_drop_directive(
+            request_id,
+            query,
+            catalogs,
+            wal,
+            node_data_dir,
+            statement,
+        ),
         SqlOperation::Select => execute_select(request_id, query, catalogs, statement),
         SqlOperation::CreateView => execute_create_view(request_id, query, catalogs, wal, statement),
-        SqlOperation::DropView => execute_drop_view(request_id, query, catalogs, wal, statement),
         SqlOperation::CreateTrigger => {
             execute_create_trigger(request_id, query, catalogs, wal, statement)
         }
-        SqlOperation::DropTrigger => execute_drop_trigger(request_id, query, catalogs, wal, statement),
         SqlOperation::CreateStoredProcedure => {
             execute_create_stored_procedure(request_id, query, catalogs, wal, statement)
-        }
-        SqlOperation::DropStoredProcedure => {
-            execute_drop_stored_procedure(request_id, query, catalogs, wal, statement)
         }
         _ => ConnectorResponse::rejected(
             request_id.to_string(),
@@ -69,6 +98,404 @@ fn execute_parsed_query(
             ),
         ),
     }
+}
+
+fn execute_create_database(
+    request_id: &str,
+    statement: &SqlRequest,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    node_data_dir: &Path,
+) -> ConnectorResponse {
+    let Some(database_name) = statement.object_name.as_deref() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "create database missing database identifier",
+        );
+    };
+
+    match DatabaseCatalog::create_new_database(database_name, node_data_dir) {
+        Ok(catalog) => {
+            catalogs.insert(catalog.database_id.0.clone(), catalog);
+            ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+            )
+        }
+        Err(err) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create database failed: {err}"),
+        ),
+    }
+}
+
+fn execute_create_table(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let (table_id, schema) = match serverlib::create_table_schema_from_statement(&statement.sql) {
+        Ok(tuple) => tuple,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create table schema parse failed: {err}"),
+            )
+        }
+    };
+
+    let normalized_table_id = common::normalize_identifier!(table_id);
+    if catalog.table(&normalized_table_id).is_some() {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table failed: table '{}' already exists", normalized_table_id),
+        );
+    }
+
+    let created_at = common::epochabs!() as u64;
+    if let Err(err) = catalog.create_table(normalized_table_id.clone(), schema.clone()) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table failed: {err}"),
+        );
+    }
+
+    let wal_id = catalog.database_id.0.clone();
+    let schema_payload = SchemaChangePayload {
+        table_id: normalized_table_id.clone(),
+        schema_revision: 1,
+        schema_epoch: catalog.schema_epoch(),
+        schema,
+    };
+
+    let encoded_schema = match schema_payload.encode() {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create table schema payload encode failed: {err}"),
+            )
+        }
+    };
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &wal_id,
+        TransactionKind::SchemaChange,
+        encoded_schema,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table schema WAL append failed: {err}"),
+        );
+    }
+
+    let lifecycle_payload = TableLifecyclePayload {
+        table_id: normalized_table_id.clone(),
+        action: TableLifecycleAction::Create,
+        schema_epoch: catalog.schema_epoch(),
+        schema: Some(
+            catalog
+                .table_schema(&normalized_table_id)
+                .cloned()
+                .unwrap_or_else(|| TableSchema::new(Vec::new())),
+        ),
+    };
+
+    let encoded_lifecycle = match lifecycle_payload.encode() {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create table lifecycle payload encode failed: {err}"),
+            )
+        }
+    };
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &wal_id,
+        TransactionKind::TableLifecycle,
+        encoded_lifecycle,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table lifecycle WAL append failed: {err}"),
+        );
+    }
+
+    let metadata = EntityMetadata::default()
+        .with_creator("server")
+        .with_created_at(created_at);
+
+    if let Err(err) = catalog.set_entity_metadata(&normalized_table_id, metadata.clone()) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table metadata apply failed: {err}"),
+        );
+    }
+
+    let metadata_payload = EntityMetadataPayload {
+        entity_id: normalized_table_id,
+        metadata,
+    };
+
+    let encoded_metadata = match metadata_payload.encode() {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create table metadata payload encode failed: {err}"),
+            )
+        }
+    };
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &wal_id,
+        TransactionKind::MetadataChange,
+        encoded_metadata,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table metadata WAL append failed: {err}"),
+        );
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+    )
+}
+
+fn execute_drop_directive(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+    match statement.operation {
+        SqlOperation::DropDatabase => execute_drop_database(request_id, catalogs, node_data_dir, statement),
+        SqlOperation::DropTable
+        | SqlOperation::DropView
+        | SqlOperation::DropTrigger
+        | SqlOperation::DropStoredProcedure => {
+            execute_drop_entity_object(request_id, query, catalogs, wal, statement)
+        }
+        _ => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop directive is not supported for operation '{:?}'", statement.operation),
+        ),
+    }
+}
+
+fn execute_drop_database(
+    request_id: &str,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    node_data_dir: &Path,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+    let Some(database_name) = statement.object_name.as_deref() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "drop database missing database identifier",
+        );
+    };
+
+    let direct_key = database_name.to_string();
+    let normalized_key = DatabaseId::from_database_name(database_name)
+        .map(|dbid| dbid.0)
+        .ok();
+
+    let removed = if catalogs.contains_key(&direct_key) {
+        catalogs.remove(&direct_key)
+    } else if let Some(key) = normalized_key.as_ref() {
+        catalogs.remove(key)
+    } else {
+        None
+    };
+
+    let Some(catalog) = removed else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop database failed: database '{}' not found", database_name),
+        );
+    };
+
+    let catalog_file = node_data_dir.join(catalog.file_name());
+    if let Err(err) = fs::remove_file(&catalog_file) {
+        if err.kind() != ErrorKind::NotFound {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("drop database failed: cannot remove catalog file: {err}"),
+            );
+        }
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+    )
+}
+
+fn execute_drop_entity_object(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+    let Some(object_id) = statement.object_name.as_deref() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop operation '{:?}' missing object identifier", statement.operation),
+        );
+    };
+
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let normalized_object_id = common::normalize_identifier!(object_id);
+    let (object_type, kind_label, sql_object_kind) = match statement.operation {
+        SqlOperation::DropTable => (DatabaseObjectType::Table, "table", None),
+        SqlOperation::DropView => (DatabaseObjectType::View, "view", Some(SqlObjectKind::View)),
+        SqlOperation::DropTrigger => {
+            (DatabaseObjectType::Trigger, "trigger", Some(SqlObjectKind::Trigger))
+        }
+        SqlOperation::DropStoredProcedure => (
+            DatabaseObjectType::StoredProcedure,
+            "stored procedure",
+            Some(SqlObjectKind::StoredProcedure),
+        ),
+        _ => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!(
+                    "drop entity-object handler does not support operation '{:?}'",
+                    statement.operation
+                ),
+            )
+        }
+    };
+
+    if catalog.object(object_type, &normalized_object_id).is_none() {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop {kind_label} failed: '{normalized_object_id}' not found"),
+        );
+    }
+
+    let entity_wal_stream_id = catalog.entity_wal_stream_id(&normalized_object_id);
+
+    if let Err(err) = catalog.drop_object(object_type, &normalized_object_id) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop {kind_label} failed: {err}"),
+        );
+    }
+
+    let wal_id = catalog.database_id.0.clone();
+
+    // Only remove a dedicated entity stream. SQL-backed objects currently
+    // share the database stream and must not delete it.
+    if let Some(stream_id) = entity_wal_stream_id {
+        if stream_id != wal_id {
+            if let Err(err) = wal.delete_stream(&stream_id) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("drop {kind_label} WAL delete failed: {err}"),
+                );
+            }
+        }
+    }
+
+    let timestamp = common::epochabs!() as u64;
+
+    if object_type == DatabaseObjectType::Table {
+        let lifecycle_payload = TableLifecyclePayload {
+            table_id: normalized_object_id,
+            action: TableLifecycleAction::Drop,
+            schema_epoch: catalog.schema_epoch(),
+            schema: None,
+        };
+
+        let encoded = match lifecycle_payload.encode() {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("drop table lifecycle payload encode failed: {err}"),
+                )
+            }
+        };
+
+        if let Err(err) = append_payload_record(
+            wal,
+            &wal_id,
+            TransactionKind::TableLifecycle,
+            encoded,
+            timestamp,
+        ) {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("drop table lifecycle WAL append failed: {err}"),
+            );
+        }
+    } else {
+        let sql_payload = SqlDefinitionPayload {
+            object_id: normalized_object_id,
+            object_kind: sql_object_kind.expect("sql object kind should be present for non-table drop"),
+            action: SqlDefinitionAction::Drop,
+            schema_epoch: catalog.schema_epoch(),
+            sql: String::new(),
+            dependencies: Vec::new(),
+        };
+
+        let encoded = match sql_payload.encode() {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("drop sql payload encode failed: {err}"),
+                )
+            }
+        };
+
+        if let Err(err) = append_payload_record(
+            wal,
+            &wal_id,
+            TransactionKind::SqlDefinitionChange,
+            encoded,
+            timestamp,
+        ) {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("drop sql definition WAL append failed: {err}"),
+            );
+        }
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+    )
 }
 
 fn execute_select(
@@ -231,6 +658,7 @@ fn execute_create_view(
                 object_id: view_id.to_string(),
                 object_kind: SqlObjectKind::View,
                 action: SqlDefinitionAction::Upsert,
+                schema_epoch: catalog.schema_epoch(),
                 sql: statement.sql.clone(),
                 dependencies: Vec::new(),
             };
@@ -264,75 +692,6 @@ fn execute_create_view(
         Err(err) => ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create view failed: {err}"),
-        ),
-    }
-}
-
-fn execute_drop_view(
-    request_id: &str,
-    query: &DataQuery,
-    catalogs: &mut HashMap<String, DatabaseCatalog>,
-    wal: &ConcurrentWalManager,
-    statement: &SqlRequest,
-) -> ConnectorResponse {
-    let Some(view_id) = statement.object_name.as_deref() else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            "drop view missing view identifier",
-        );
-    };
-
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
-
-    let wal_id = catalog.database_id.0.clone();
-
-    match catalog.drop_view(view_id) {
-        Ok(()) => {
-            let timestamp = common::epochabs!() as u64;
-            let sql_payload = SqlDefinitionPayload {
-                object_id: view_id.to_string(),
-                object_kind: SqlObjectKind::View,
-                action: SqlDefinitionAction::Drop,
-                sql: String::new(),
-                dependencies: Vec::new(),
-            };
-
-            let encoded = match sql_payload.encode() {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("drop view sql payload encode failed: {err}"),
-                    )
-                }
-            };
-
-            if let Err(err) = append_payload_record(
-                wal,
-                &wal_id,
-                TransactionKind::SqlDefinitionChange,
-                encoded,
-                timestamp,
-            ) {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("drop view sql definition WAL append failed: {err}"),
-                );
-            }
-
-            ConnectorResponse::applied(
-                request_id.to_string(),
-                ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-            )
-        }
-        Err(err) => ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("drop view failed: {err}"),
         ),
     }
 }
@@ -421,6 +780,7 @@ fn execute_create_trigger(
         object_id: trigger_id.to_string(),
         object_kind: SqlObjectKind::Trigger,
         action: SqlDefinitionAction::Upsert,
+        schema_epoch: catalog.schema_epoch(),
         sql: statement.sql.clone(),
         dependencies: Vec::new(),
     };
@@ -450,75 +810,6 @@ fn execute_create_trigger(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
-}
-
-fn execute_drop_trigger(
-    request_id: &str,
-    query: &DataQuery,
-    catalogs: &mut HashMap<String, DatabaseCatalog>,
-    wal: &ConcurrentWalManager,
-    statement: &SqlRequest,
-) -> ConnectorResponse {
-    let Some(trigger_id) = statement.object_name.as_deref() else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            "drop trigger missing trigger identifier",
-        );
-    };
-
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
-
-    let wal_id = catalog.database_id.0.clone();
-
-    match catalog.drop_trigger(trigger_id) {
-        Ok(()) => {
-            let timestamp = common::epochabs!() as u64;
-            let sql_payload = SqlDefinitionPayload {
-                object_id: trigger_id.to_string(),
-                object_kind: SqlObjectKind::Trigger,
-                action: SqlDefinitionAction::Drop,
-                sql: String::new(),
-                dependencies: Vec::new(),
-            };
-
-            let encoded = match sql_payload.encode() {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("drop trigger sql payload encode failed: {err}"),
-                    )
-                }
-            };
-
-            if let Err(err) = append_payload_record(
-                wal,
-                &wal_id,
-                TransactionKind::SqlDefinitionChange,
-                encoded,
-                timestamp,
-            ) {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("drop trigger sql definition WAL append failed: {err}"),
-                );
-            }
-
-            ConnectorResponse::applied(
-                request_id.to_string(),
-                ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-            )
-        }
-        Err(err) => ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("drop trigger failed: {err}"),
-        ),
-    }
 }
 
 fn execute_create_stored_procedure(
@@ -609,6 +900,7 @@ fn execute_create_stored_procedure(
         object_id: procedure_id.to_string(),
         object_kind: SqlObjectKind::StoredProcedure,
         action: SqlDefinitionAction::Upsert,
+        schema_epoch: catalog.schema_epoch(),
         sql: statement.sql.clone(),
         dependencies: Vec::new(),
     };
@@ -638,75 +930,6 @@ fn execute_create_stored_procedure(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
-}
-
-fn execute_drop_stored_procedure(
-    request_id: &str,
-    query: &DataQuery,
-    catalogs: &mut HashMap<String, DatabaseCatalog>,
-    wal: &ConcurrentWalManager,
-    statement: &SqlRequest,
-) -> ConnectorResponse {
-    let Some(procedure_id) = statement.object_name.as_deref() else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            "drop procedure missing identifier",
-        );
-    };
-
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
-
-    let wal_id = catalog.database_id.0.clone();
-
-    match catalog.drop_stored_procedure(procedure_id) {
-        Ok(()) => {
-            let timestamp = common::epochabs!() as u64;
-            let sql_payload = SqlDefinitionPayload {
-                object_id: procedure_id.to_string(),
-                object_kind: SqlObjectKind::StoredProcedure,
-                action: SqlDefinitionAction::Drop,
-                sql: String::new(),
-                dependencies: Vec::new(),
-            };
-
-            let encoded = match sql_payload.encode() {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("drop procedure sql payload encode failed: {err}"),
-                    )
-                }
-            };
-
-            if let Err(err) = append_payload_record(
-                wal,
-                &wal_id,
-                TransactionKind::SqlDefinitionChange,
-                encoded,
-                timestamp,
-            ) {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("drop procedure sql definition WAL append failed: {err}"),
-                );
-            }
-
-            ConnectorResponse::applied(
-                request_id.to_string(),
-                ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-            )
-        }
-        Err(err) => ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("drop procedure failed: {err}"),
-        ),
-    }
 }
 
 fn with_query_timings(mut response: ConnectorResponse, timings: QueryTimings) -> ConnectorResponse {

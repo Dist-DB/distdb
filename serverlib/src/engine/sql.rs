@@ -1,9 +1,11 @@
 use sqlparser::ast::{
-    Delete, FromTable, GrantObjects, ObjectName, ObjectType, Query, SchemaName, SetExpr,
-    SetOperator, Statement, TableFactor, TableWithJoins, Use,
+    ColumnOption, DataType, Delete, FromTable, GrantObjects, ObjectName, ObjectType, Query,
+    SchemaName, SetExpr, SetOperator, Statement, TableFactor, TableWithJoins, Use,
 };
 use sqlparser::dialect::{GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
+
+use crate::{FieldDef, FieldIndex, FieldType, TableSchema};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlCompatibilityTarget {
@@ -169,6 +171,64 @@ pub fn sql_directive_for_statement(statement: &str) -> Result<SqlDirective, SqlP
     Ok(directive)
 }
 
+pub fn create_table_schema_from_statement(
+    statement: &str,
+) -> Result<(String, TableSchema), SqlParseError> {
+
+    let parsed = parse_mysql_statements(statement)?;
+    let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
+
+    let Statement::CreateTable(create_table) = single else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not CREATE TABLE".to_string(),
+        ));
+    };
+
+    let table_id = create_table.name.to_string();
+    let mut fields = Vec::with_capacity(create_table.columns.len());
+
+    for (idx, column) in create_table.columns.iter().enumerate() {
+        
+        let nullable = !column
+            .options
+            .iter()
+            .any(|opt| matches!(opt.option, ColumnOption::NotNull));
+
+        let indexed = if column.options.iter().any(|opt| {
+            matches!(
+                opt.option,
+                ColumnOption::Unique {
+                    is_primary: true,
+                    ..
+                }
+            )
+        }) {
+            FieldIndex::PrimaryKey
+        } else if column
+            .options
+            .iter()
+            .any(|opt| matches!(opt.option, ColumnOption::Unique { .. }))
+        {
+            FieldIndex::Indexed
+        } else {
+            FieldIndex::None
+        };
+
+        fields.push(FieldDef {
+            seqno: (idx + 1) as u32,
+            field_name: column.name.value.clone(),
+            field_type: map_sql_data_type(&column.data_type),
+            nullable,
+            indexed,
+            default_value: None,
+        });
+
+    }
+
+    Ok((table_id, TableSchema::new(fields)))
+    
+}
+
 fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
     let mysql = MySqlDialect {};
     match Parser::parse_sql(&mysql, sql) {
@@ -179,6 +239,75 @@ fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
                 .map_err(|_| SqlParseError::UnsupportedStatement(mysql_error.to_string()))
         }
     }
+}
+
+fn map_sql_data_type(data_type: &DataType) -> FieldType {
+
+    let lowered = data_type.to_string().to_ascii_lowercase();
+
+    if lowered.contains("unsigned") {
+
+        if lowered.contains("bigint") {
+            return FieldType::UInt(64);
+        }
+
+        if lowered.contains("smallint") {
+            return FieldType::UInt(16);
+        }
+
+        if lowered.contains("tinyint") {
+            return FieldType::UInt(8);
+        }
+        
+        return FieldType::UInt(32);
+    }
+
+    if lowered.contains("bigint") {
+        return FieldType::Int(64);
+    }
+    
+    if lowered.contains("smallint") {
+        return FieldType::Int(16);
+    }
+    
+    if lowered.contains("tinyint") {
+        return FieldType::Int(8);
+    }
+    
+    if lowered.contains("int") {
+        return FieldType::Int(32);
+    }
+    
+    if lowered.contains("double") {
+        return FieldType::Float(64);
+    }
+    
+    if lowered.contains("float") || lowered.contains("real") {
+        return FieldType::Float(32);
+    }
+    
+    if lowered.contains("blob") || lowered.contains("binary") {
+        return FieldType::Blob;
+    }
+    
+    if lowered.contains("char(") {
+        let start = lowered.find("char(").unwrap_or(0) + 5;
+        let end = lowered[start..]
+            .find(')')
+            .map(|i| start + i)
+            .unwrap_or(start);
+        if let Ok(len) = lowered[start..end].trim().parse::<usize>() {
+            return FieldType::StringFixed(len.max(1));
+        }
+        return FieldType::StringFixed(32);
+    }
+    
+    if lowered.contains("text") || lowered.contains("varchar") || lowered.contains("string") {
+        return FieldType::Text;
+    }
+
+    FieldType::Text
+
 }
 
 fn classify_statement(
@@ -471,88 +600,64 @@ fn first_object_name_in_grant_objects(objects: &GrantObjects) -> Option<String> 
 
 fn classify_text_fallback(statement: &str) -> Option<(SqlDirective, SqlOperation, Option<String>)> {
 
-    let lowered = statement.trim().to_ascii_lowercase();
+    let tokens = statement
+        .split_whitespace()
+        .map(|token| token.trim_matches(';'))
+        .collect::<Vec<_>>();
 
-    if lowered.starts_with("create trigger ") || lowered.starts_with("create or replace trigger ") {
-        return Some((
-            SqlDirective::Create,
-            SqlOperation::CreateTrigger,
-            fallback_object_name_after_create(statement, "trigger"),
-        ));
+    let Some(first) = tokens.first() else {
+        return None;
+    };
+
+    let verb = first.to_ascii_lowercase();
+    if verb != "create" && verb != "drop" {
+        return None;
     }
 
-    if lowered.starts_with("drop trigger ") {
-        return Some((
-            SqlDirective::AlterSchema,
-            SqlOperation::DropTrigger,
-            fallback_object_name_after_drop(statement, "trigger"),
-        ));
+    let mut object_idx = 1usize;
+    if verb == "create" && tokens.get(1).is_some_and(|tok| tok.eq_ignore_ascii_case("or")) {
+        let modifier = tokens.get(2)?.to_ascii_lowercase();
+        if modifier != "replace" && modifier != "alter" {
+            return None;
+        }
+        object_idx = 3;
     }
 
-    if lowered.starts_with("create procedure ") || lowered.starts_with("create or alter procedure ") {
-        return Some((
-            SqlDirective::Create,
-            SqlOperation::CreateStoredProcedure,
-            fallback_object_name_after_create(statement, "procedure"),
-        ));
-    }
+    let object_kind = tokens.get(object_idx)?.to_ascii_lowercase();
+    let object_name = fallback_object_name_after_tokens(&tokens, &verb, object_idx);
 
-    if lowered.starts_with("drop procedure ") {
-        return Some((
-            SqlDirective::AlterSchema,
-            SqlOperation::DropStoredProcedure,
-            fallback_object_name_after_drop(statement, "procedure"),
-        ));
+    match (verb.as_str(), object_kind.as_str()) {
+        ("create", "trigger") => Some((SqlDirective::Create, SqlOperation::CreateTrigger, object_name)),
+        ("drop", "trigger") => Some((SqlDirective::AlterSchema, SqlOperation::DropTrigger, object_name)),
+        ("create", "procedure") => Some((SqlDirective::Create, SqlOperation::CreateStoredProcedure, object_name)),
+        ("drop", "procedure") => Some((SqlDirective::AlterSchema, SqlOperation::DropStoredProcedure, object_name)),
+        ("drop", "database") => Some((SqlDirective::AlterSchema, SqlOperation::DropDatabase, object_name)),
+        // Intentionally unsupported for now.
+        ("create", "function") | ("drop", "function") => None,
+        _ => None,
     }
-
-    None
 
 }
 
-fn fallback_object_name_after_create(statement: &str, object_keyword: &str) -> Option<String> {
-    fallback_object_name_after_keyword(statement, "create", object_keyword)
-}
-
-fn fallback_object_name_after_drop(statement: &str, object_keyword: &str) -> Option<String> {
-    fallback_object_name_after_keyword(statement, "drop", object_keyword)
-}
-
-fn fallback_object_name_after_keyword(
-    statement: &str,
-    leading_keyword: &str,
-    object_keyword: &str,
+fn fallback_object_name_after_tokens(
+    tokens: &[&str],
+    verb: &str,
+    object_idx: usize,
 ) -> Option<String> {
 
-    let mut tokens = statement
-        .split_whitespace()
-        .map(|token| token.trim_matches(';'));
-
-    let first = tokens.next()?.to_ascii_lowercase();
-    if first != leading_keyword {
-        return None;
-    }
-
-    let mut next = tokens.next()?.to_ascii_lowercase();
-    if next == "or" {
-        let maybe_replace_or_alter = tokens.next()?.to_ascii_lowercase();
-        if maybe_replace_or_alter != "replace" && maybe_replace_or_alter != "alter" {
+    let mut name_idx = object_idx + 1;
+    
+    if verb == "drop" && tokens.get(name_idx).is_some_and(|tok| tok.eq_ignore_ascii_case("if")) {
+        if !tokens
+            .get(name_idx + 1)
+            .is_some_and(|tok| tok.eq_ignore_ascii_case("exists"))
+        {
             return None;
         }
-        next = tokens.next()?.to_ascii_lowercase();
+        name_idx += 2;
     }
 
-    if next != object_keyword {
-        return None;
-    }
-
-    let mut name = tokens.next()?;
-    if name.eq_ignore_ascii_case("if") {
-        let exists = tokens.next()?;
-        if !exists.eq_ignore_ascii_case("exists") {
-            return None;
-        }
-        name = tokens.next()?;
-    }
+    let name = tokens.get(name_idx)?;
 
     Some(
         name.trim_matches(|c| c == ';' || c == '(' || c == ')')
@@ -677,6 +782,29 @@ mod tests {
     }
 
     #[test]
+    fn create_table_schema_helper_maps_fields() {
+        let (table_id, schema) = create_table_schema_from_statement(
+            "create table users (id bigint not null primary key, email varchar(255) not null, age int)",
+        )
+        .expect("create table schema should parse");
+
+        assert_eq!(table_id, "users");
+        assert_eq!(schema.fields.len(), 3);
+        assert_eq!(schema.fields[0].field_name, "id");
+        assert_eq!(schema.fields[0].field_type, FieldType::Int(64));
+        assert_eq!(schema.fields[0].indexed, FieldIndex::PrimaryKey);
+        assert!(!schema.fields[0].nullable);
+
+        assert_eq!(schema.fields[1].field_name, "email");
+        assert_eq!(schema.fields[1].field_type, FieldType::StringFixed(255));
+        assert!(!schema.fields[1].nullable);
+
+        assert_eq!(schema.fields[2].field_name, "age");
+        assert_eq!(schema.fields[2].field_type, FieldType::Int(32));
+        assert!(schema.fields[2].nullable);
+    }
+
+    #[test]
     fn drop_view_operation_maps_to_alter_schema() {
         let requests = parse_mysql8_sql_requests("drop view archived_users", "main")
             .expect("drop view should parse");
@@ -691,6 +819,17 @@ mod tests {
     fn drop_schema_operation_maps_to_drop_database() {
         let requests = parse_mysql8_sql_requests("drop schema analytics", "main")
             .expect("drop schema should parse");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
+        assert_eq!(requests[0].operation, SqlOperation::DropDatabase);
+        assert_eq!(requests[0].object_name.as_deref(), Some("analytics"));
+    }
+
+    #[test]
+    fn drop_database_operation_maps_to_drop_database() {
+        let requests = parse_mysql8_sql_requests("drop database analytics", "main")
+            .expect("drop database should parse");
 
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
@@ -931,6 +1070,31 @@ mod tests {
     fn drop_trigger_maps_to_drop_trigger_operation() {
         let requests = parse_mysql8_sql_requests("drop trigger trg_users_bi on users", "main")
             .expect("drop trigger should parse");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
+        assert_eq!(requests[0].operation, SqlOperation::DropTrigger);
+        assert_eq!(requests[0].object_name.as_deref(), Some("trg_users_bi"));
+    }
+
+    #[test]
+    fn create_or_replace_trigger_maps_to_create_trigger_operation() {
+        let requests = parse_mysql8_sql_requests(
+            "create or replace trigger trg_users_bi before insert on users for each row set @x = 1",
+            "main",
+        )
+        .expect("create or replace trigger should parse");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::Create);
+        assert_eq!(requests[0].operation, SqlOperation::CreateTrigger);
+        assert_eq!(requests[0].object_name.as_deref(), Some("trg_users_bi"));
+    }
+
+    #[test]
+    fn drop_trigger_if_exists_maps_to_drop_trigger_operation() {
+        let requests = parse_mysql8_sql_requests("drop trigger if exists trg_users_bi", "main")
+            .expect("drop trigger if exists should parse");
 
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
