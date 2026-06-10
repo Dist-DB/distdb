@@ -1,6 +1,6 @@
 
-use crate::engine::database::DatabaseId;
-use crate::engine::transaction::TransactionId;
+use crate::engine::database::core::DatabaseId;
+use crate::engine::database::transaction::TransactionId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {

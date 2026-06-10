@@ -1,54 +1,11 @@
+use common::schema::{normalize_field_name, validate_field_kind};
 
-use common::schema::{
-    normalize_field_name, validate_field_kind, FieldKind,
-};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchemaError {
-    DuplicateField,
-    FieldNotFound,
-    SeqnoConflict,
-    InvalidFieldType,
-    InvalidFieldName,
-}
-
-impl std::fmt::Display for SchemaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DuplicateField => write!(f, "a field with that name already exists"),
-            Self::FieldNotFound => write!(f, "field not found in schema"),
-            Self::SeqnoConflict => write!(f, "a field with that seqno already exists"),
-            Self::InvalidFieldType => write!(f, "field type definition is invalid"),
-            Self::InvalidFieldName => write!(f, "field name is invalid"),
-        }
-    }
-}
-
-impl std::error::Error for SchemaError {}
-
-pub type SchemaResult<T> = Result<T, SchemaError>;
-
-pub type FieldType = FieldKind;
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FieldDef {
-    pub seqno: u32,
-    pub field_name: String,
-    pub field_type: FieldType,
-    pub nullable: bool,
-    pub indexed: bool,
-    pub default_value: Option<Vec<u8>>,
-}
+use super::field_def::FieldDef;
+use super::schema_error::{SchemaError, SchemaResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
     pub fields: Vec<FieldDef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TableSchemaRevision {
-    pub revision: u64,
-    pub schema: TableSchema,
 }
 
 impl TableSchema {
@@ -61,13 +18,12 @@ impl TableSchema {
         self.fields.iter().find(|f| f.field_name == normalized)
     }
 
-    /// Append a new field to the schema.  The field name is normalized to
+    /// Append a new field to the schema. The field name is normalized to
     /// lower-case; callers may pass any casing.
     pub fn add_field(&mut self, mut field: FieldDef) -> SchemaResult<()> {
         field.field_name = normalize_field_name(&field.field_name)
             .map_err(|_| SchemaError::InvalidFieldName)?;
-        validate_field_kind(&field.field_type)
-            .map_err(|_| SchemaError::InvalidFieldType)?;
+        validate_field_kind(&field.field_type).map_err(|_| SchemaError::InvalidFieldType)?;
 
         if self.fields.iter().any(|f| f.field_name == field.field_name) {
             return Err(SchemaError::DuplicateField);
@@ -81,7 +37,7 @@ impl TableSchema {
         Ok(())
     }
 
-    /// Remove a field by name.  Returns `FieldNotFound` when no such field exists.
+    /// Remove a field by name. Returns FieldNotFound when no such field exists.
     pub fn remove_field(&mut self, name: &str) -> SchemaResult<()> {
         let normalized = name.trim().to_ascii_lowercase();
         let pos = self
@@ -94,13 +50,12 @@ impl TableSchema {
     }
 
     /// Replace the definition of an existing field (matched by name).
-    /// The incoming `field.field_name` is normalized and must match a field
-    /// that is already in the schema.
+    /// The incoming field_name is normalized and must match a field that
+    /// is already in the schema.
     pub fn update_field(&mut self, mut field: FieldDef) -> SchemaResult<()> {
         field.field_name = normalize_field_name(&field.field_name)
             .map_err(|_| SchemaError::InvalidFieldName)?;
-        validate_field_kind(&field.field_type)
-            .map_err(|_| SchemaError::InvalidFieldType)?;
+        validate_field_kind(&field.field_type).map_err(|_| SchemaError::InvalidFieldType)?;
         let target = self
             .fields
             .iter_mut()
@@ -113,8 +68,8 @@ impl TableSchema {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
+    use crate::engine::database::field_types::{FieldIndex, FieldType};
 
     fn text_field(seqno: u32, name: &str) -> FieldDef {
         FieldDef {
@@ -122,7 +77,7 @@ mod tests {
             field_name: name.to_string(),
             field_type: FieldType::Text,
             nullable: false,
-            indexed: false,
+            indexed: FieldIndex::None,
             default_value: None,
         }
     }
@@ -171,7 +126,7 @@ mod tests {
             field_name: "email".to_string(),
             field_type: FieldType::Text,
             nullable: true,
-            indexed: true,
+            indexed: FieldIndex::Indexed,
             default_value: None,
         };
         schema.update_field(updated.clone()).unwrap();
@@ -184,5 +139,4 @@ mod tests {
         let err = schema.update_field(text_field(1, "ghost")).unwrap_err();
         assert!(matches!(err, SchemaError::FieldNotFound));
     }
-    
 }

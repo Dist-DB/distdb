@@ -1,217 +1,35 @@
 
-use crate::core::identity::NodeId;
-use crate::engine::table_schema::{FieldDef, SchemaError, TableSchema};
-use crate::engine::transaction::{SchemaChangePayload, TransactionId, TransactionKind, TransactionLog};
-
-use common::helpers::format::FileKind;
-use common::helpers::{read_bytes, stable_id, write_bytes};
-
 use std::collections::HashMap;
 use std::path::Path;
 
-pub type DatabaseResult<T> = Result<T, DatabaseError>;
-pub use crate::engine::database_table::{DatabaseIndex, DatabaseRelationship, DatabaseTable, DatabaseView, IndexId};
+use common::helpers::format::FileKind;
+use common::helpers::{read_bytes, write_bytes};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DatabaseError {
-    InvalidDatabaseName,
-    DuplicateTable,
-    TableNotFound,
-    InvalidStatusTransition,
-    NotReadyForWrite,
-    SyncPending,
-    CatalogRead,
-    CatalogInvalidHeader,
-    CatalogPayloadMissing,
-    CatalogDeserialize,
-    CatalogSerialize,
-    CatalogWrite,
-    SchemaPayloadDeserialize,
-    SchemaRevisionOutOfOrder,
-    SchemaChange(SchemaError),
-    TableNotLocked,
-    DuplicateView,
-    ViewNotFound,
-    ViewNotWritable,
-}
-
-impl std::fmt::Display for DatabaseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidDatabaseName => write!(f, "database name must not be empty"),
-            Self::DuplicateTable => write!(f, "table already registered in database catalog"),
-            Self::TableNotFound => write!(f, "table not found in database catalog"),
-            Self::InvalidStatusTransition => write!(f, "invalid database/table status transition"),
-            Self::NotReadyForWrite => write!(f, "database/table is not ready for write operations"),
-            Self::SyncPending => write!(f, "database/table sync has not been acknowledged yet"),
-            Self::CatalogRead => write!(f, "failed to read catalog file"),
-            Self::CatalogInvalidHeader => write!(f, "invalid catalog file header/version"),
-            Self::CatalogPayloadMissing => write!(f, "catalog payload missing"),
-            Self::CatalogDeserialize => write!(f, "failed to deserialize catalog file"),
-            Self::CatalogSerialize => write!(f, "failed to serialize catalog"),
-            Self::CatalogWrite => write!(f, "failed to write catalog file"),
-            Self::SchemaPayloadDeserialize => {
-                write!(f, "failed to deserialize schema change payload")
-            }
-            Self::SchemaRevisionOutOfOrder => {
-                write!(f, "schema revision must advance monotonically")
-            }
-            Self::SchemaChange(e) => write!(f, "schema mutation error: {e}"),
-            Self::TableNotLocked => write!(f, "table must be locked before a schema change can be prepared or committed"),
-            Self::DuplicateView => write!(f, "view already registered in database catalog"),
-            Self::ViewNotFound => write!(f, "view not found in database catalog"),
-            Self::ViewNotWritable => write!(f, "views are read-only; write operations are not permitted"),
-        }
-    }
-}
-
-impl std::error::Error for DatabaseError {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ObjectStatus {
-    Load,
-    Sync,
-    Ready,
-    Lock,
-}
-
-impl ObjectStatus {
-    pub fn can_transition_to(self, next: Self) -> bool {
-        matches!(
-            (self, next),
-            (Self::Load, Self::Sync)
-                | (Self::Load, Self::Ready)
-                | (Self::Load, Self::Lock)
-                | (Self::Sync, Self::Ready)
-                | (Self::Sync, Self::Lock)
-                | (Self::Ready, Self::Sync)
-                | (Self::Ready, Self::Lock)
-                | (Self::Lock, Self::Sync)
-                | (Self::Lock, Self::Ready)
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct DatabaseId(pub String);
-
-impl DatabaseId {
-    pub fn from_database_name(name: &str) -> DatabaseResult<Self> {
-        let normalized = common::normalize_identifier!(name);
-        if normalized.is_empty() {
-            return Err(DatabaseError::InvalidDatabaseName);
-        }
-        Ok(Self(stable_id(&[&normalized])))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DatabaseReplicaState {
-    pub database_id: DatabaseId,
-    pub local_node_id: NodeId,
-    pub last_applied_tx: Option<TransactionId>,
-}
-
-/// An in-progress schema change transaction.  Obtained from
-/// [`DatabaseCatalog::begin_schema_change`]; the table is held in `Lock` state
-/// until this value is either committed or aborted.
-///
-/// Typical usage:
-/// ```ignore
-/// let mut tx = catalog.begin_schema_change("users")?;
-/// tx.add_field(field)?;
-/// tx.commit(&mut catalog, |payload| wal.append(wal_id, make_record(payload)))?;
-/// ```
-#[derive(Debug, Clone)]
-pub struct SchemaChangeTx {
-    table_id: String,
-    next_revision: u64,
-    pending_schema: TableSchema,
-}
-
-impl SchemaChangeTx {
-    pub fn table_id(&self) -> &str {
-        &self.table_id
-    }
-
-    pub fn next_revision(&self) -> u64 {
-        self.next_revision
-    }
-
-    /// Inspect the pending (not yet committed) schema.
-    pub fn pending_schema(&self) -> &TableSchema {
-        &self.pending_schema
-    }
-
-    pub fn add_field(&mut self, field: FieldDef) -> DatabaseResult<()> {
-        self.pending_schema
-            .add_field(field)
-            .map_err(DatabaseError::SchemaChange)
-    }
-
-    pub fn remove_field(&mut self, name: &str) -> DatabaseResult<()> {
-        self.pending_schema
-            .remove_field(name)
-            .map_err(DatabaseError::SchemaChange)
-    }
-
-    pub fn update_field(&mut self, field: FieldDef) -> DatabaseResult<()> {
-        self.pending_schema
-            .update_field(field)
-            .map_err(DatabaseError::SchemaChange)
-    }
-
-    /// Persist the change via `persist`, then if successful apply the schema
-    /// and drive the table `Lock → Sync → Ready`.
-    ///
-    /// If `persist` returns an error the lock is released (`Lock → Ready`)
-    /// and the schema is left unchanged.  The persist error is returned.
-    pub fn commit<E, F>(self, catalog: &mut DatabaseCatalog, persist: F) -> Result<(), E>
-    where
-        F: FnOnce(&SchemaChangePayload) -> Result<(), E>,
-        E: From<DatabaseError>,
-    {
-        let payload = SchemaChangePayload {
-            table_id: self.table_id.clone(),
-            schema_revision: self.next_revision,
-            schema: self.pending_schema,
-        };
-
-        if let Err(e) = persist(&payload) {
-            // Best-effort abort — release the lock even if abort itself fails.
-            let _ = catalog.release_schema_lock(&self.table_id);
-            return Err(e);
-        }
-
-        catalog
-            .finalize_schema_change(payload)
-            .map_err(E::from)
-    }
-
-    /// Release the lock without altering the schema.
-    pub fn abort(self, catalog: &mut DatabaseCatalog) -> DatabaseResult<()> {
-        catalog.release_schema_lock(&self.table_id)
-    }
-}
+use super::core::{DatabaseError, DatabaseResult, ObjectStatus};
+use super::entity::DatabaseEntity;
+use super::id::DatabaseId;
+use super::index::DatabaseIndex;
+use super::relationship::DatabaseRelationship;
+use super::schema_change_tx::SchemaChangeTx;
+use super::table::DatabaseTable;
+use super::table_schema::{FieldIndex, TableSchema};
+use super::transaction::{SchemaChangePayload, TransactionKind, TransactionLog};
+use super::view::DatabaseView;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseCatalog {
     pub database_id: DatabaseId,
     status: ObjectStatus,
-    tables: HashMap<String, DatabaseTable>,
-    views: HashMap<String, DatabaseView>,
-    relationships: Vec<DatabaseRelationship>,
+    entities: HashMap<String, DatabaseEntity>,
 }
 
 impl DatabaseCatalog {
-
+    
     pub fn new(database_id: DatabaseId) -> Self {
         Self {
             database_id,
             status: ObjectStatus::Load,
-            tables: HashMap::new(),
-            views: HashMap::new(),
-            relationships: Vec::new(),
+            entities: HashMap::new(),
         }
     }
 
@@ -220,10 +38,7 @@ impl DatabaseCatalog {
         Ok(Self::new(database_id))
     }
 
-    pub fn create_new_database(
-        name: &str,
-        directory: impl AsRef<Path>,
-    ) -> DatabaseResult<Self> {
+    pub fn create_new_database(name: &str, directory: impl AsRef<Path>) -> DatabaseResult<Self> {
         let mut catalog = Self::create_empty_from_name(name)?;
         catalog.transition_status(ObjectStatus::Sync)?;
         catalog.save_in_directory(&directory)?;
@@ -242,22 +57,20 @@ impl DatabaseCatalog {
         table_id: impl Into<String>,
         schema: TableSchema,
     ) -> DatabaseResult<()> {
-        
         let table_id = common::normalize_identifier!(table_id.into());
 
-        if self.tables.contains_key(&table_id) {
+        if self.entities.contains_key(&table_id) {
             return Err(DatabaseError::DuplicateTable);
         }
 
         let indexes = Self::indexes_for_schema(&table_id, &schema);
 
-        self.tables.insert(
+        self.entities.insert(
             table_id.clone(),
-            DatabaseTable::new(table_id.clone(), schema, indexes),
+            DatabaseEntity::Table(DatabaseTable::new(table_id, schema, indexes)),
         );
 
         Ok(())
-
     }
 
     pub fn create_table(
@@ -268,34 +81,50 @@ impl DatabaseCatalog {
         let table_id = common::normalize_identifier!(table_id.into());
         self.register_table(table_id.clone(), schema)?;
 
-        let table = self.tables.get_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.begin_sync()?;
 
         if !self.table_sync_acknowledged_stub(&table_id) {
             return Err(DatabaseError::SyncPending);
         }
 
-        let table = self.tables.get_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.complete_sync()
     }
 
     pub fn register_relationship(&mut self, relationship: DatabaseRelationship) {
-        self.relationships.push(relationship);
+        let left = common::normalize_identifier!(&relationship.left_table_id);
+        let right = common::normalize_identifier!(&relationship.right_table_id);
+        let name = common::normalize_identifier!(&relationship.relation_name);
+        let entity_id = format!("rel:{left}:{right}:{name}");
+        self.entities
+            .insert(entity_id, DatabaseEntity::Relationship(relationship));
     }
 
     pub fn table(&self, table_id: &str) -> Option<&DatabaseTable> {
-        self.tables.get(&common::normalize_identifier!(table_id))
+        let normalized = common::normalize_identifier!(table_id);
+        match self.entities.get(&normalized) {
+            Some(DatabaseEntity::Table(table)) => Some(table),
+            _ => None,
+        }
     }
 
     pub fn index(&self, index_id: &str) -> Option<&DatabaseIndex> {
         let normalized = common::normalize_identifier!(index_id);
-        self.tables
-            .values()
-            .find_map(|table| table.indexes.get(&normalized))
+        self.entities.values().find_map(|entity| match entity {
+            DatabaseEntity::Table(table) => table.indexes.get(&normalized),
+            _ => None,
+        })
     }
 
-    pub fn relationships(&self) -> &[DatabaseRelationship] {
-        &self.relationships
+    pub fn relationships(&self) -> Vec<&DatabaseRelationship> {
+        self.entities
+            .values()
+            .filter_map(|entity| match entity {
+                DatabaseEntity::Relationship(relationship) => Some(relationship),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn status(&self) -> ObjectStatus {
@@ -318,62 +147,51 @@ impl DatabaseCatalog {
         self.table(table_id).map(DatabaseTable::schema_revision)
     }
 
-    /// Lock `table_id` (`Ready → Lock`) and return a [`SchemaChangeTx`] that
-    /// owns the pending schema mutations.  The table stays locked until the
+    /// Lock `table_id` (`Ready -> Lock`) and return a [`SchemaChangeTx`] that
+    /// owns the pending schema mutations. The table stays locked until the
     /// returned transaction is either committed or aborted.
-    pub fn begin_schema_change(
-        &mut self,
-        table_id: &str,
-    ) -> DatabaseResult<SchemaChangeTx> {
+    pub fn begin_schema_change(&mut self, table_id: &str) -> DatabaseResult<SchemaChangeTx> {
         let table_id = common::normalize_identifier!(table_id);
-        let table = self
-            .tables
-            .get_mut(&table_id)
-            .ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
 
         let pending_schema = table.schema().clone();
         let next_revision = table.schema_revision() + 1;
 
         table.lock()?;
 
-        Ok(SchemaChangeTx {
-            table_id,
-            next_revision,
-            pending_schema,
-        })
+        Ok(SchemaChangeTx::new(table_id, next_revision, pending_schema))
     }
 
-    /// Internal: apply a payload and drive `Lock → Sync → Ready`.
+    /// Internal: apply a payload and drive `Lock -> Sync -> Ready`.
     /// Called only from `SchemaChangeTx::commit`.
-    fn finalize_schema_change(&mut self, payload: SchemaChangePayload) -> DatabaseResult<()> {
+    pub(crate) fn finalize_schema_change(
+        &mut self,
+        payload: SchemaChangePayload,
+    ) -> DatabaseResult<()> {
         let table_id = common::normalize_identifier!(&payload.table_id);
         self.apply_schema_change(payload)?;
-        let table = self.tables.get_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.begin_sync()?;
         if !self.table_sync_acknowledged_stub(&table_id) {
             return Err(DatabaseError::SyncPending);
         }
-        let table = self.tables.get_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.complete_sync()
     }
 
-    /// Internal: release the lock without changing the schema (`Lock → Ready`).
+    /// Internal: release the lock without changing the schema (`Lock -> Ready`).
     /// Called only from `SchemaChangeTx::abort`.
-    fn release_schema_lock(&mut self, table_id: &str) -> DatabaseResult<()> {
+    pub(crate) fn release_schema_lock(&mut self, table_id: &str) -> DatabaseResult<()> {
         let table_id = common::normalize_identifier!(table_id);
-        let table = self.tables.get_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.abort()
     }
 
-    /// Internal: apply a schema payload directly.  Does not enforce or alter
-    /// table status.  Used by `finalize_schema_change` and WAL replay.
+    /// Internal: apply a schema payload directly. Does not enforce or alter
+    /// table status. Used by `finalize_schema_change` and WAL replay.
     pub fn apply_schema_change(&mut self, payload: SchemaChangePayload) -> DatabaseResult<()> {
-
         let table_id = common::normalize_identifier!(payload.table_id);
-        let table = self
-            .tables
-            .get_mut(&table_id)
-            .ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
 
         if payload.schema_revision <= table.schema_revision() {
             return Err(DatabaseError::SchemaRevisionOutOfOrder);
@@ -383,7 +201,6 @@ impl DatabaseCatalog {
 
         table.replace_schema(payload.schema_revision, payload.schema, indexes);
         Ok(())
-
     }
 
     pub fn replay_schema_from_log<L: TransactionLog>(
@@ -408,14 +225,11 @@ impl DatabaseCatalog {
     }
 
     pub fn ensure_ready_for_write(&self, table_id: &str) -> DatabaseResult<()> {
-        
         if self.status != ObjectStatus::Ready {
             return Err(DatabaseError::NotReadyForWrite);
         }
 
-        let table = self
-            .table(table_id)
-            .ok_or(DatabaseError::TableNotFound)?;
+        let table = self.table(table_id).ok_or(DatabaseError::TableNotFound)?;
 
         if table.status() != ObjectStatus::Ready {
             return Err(DatabaseError::NotReadyForWrite);
@@ -437,10 +251,16 @@ impl DatabaseCatalog {
     }
 
     pub fn table_ids(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
+        self.entities
+            .iter()
+            .filter_map(|(entity_id, entity)| match entity {
+                DatabaseEntity::Table(_) => Some(entity_id.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
-    /// Register a view definition with a pre-derived schema.  The schema is
+    /// Register a view definition with a pre-derived schema. The schema is
     /// resolved by the caller at `CREATE VIEW` time against the current table
     /// catalog and stored here so schema inspection never needs to re-execute
     /// the view SQL.
@@ -452,40 +272,64 @@ impl DatabaseCatalog {
     ) -> DatabaseResult<()> {
         let view_id = common::normalize_identifier!(view_id.into());
 
-        if self.views.contains_key(&view_id) {
+        if self.entities.contains_key(&view_id) {
             return Err(DatabaseError::DuplicateView);
         }
 
-        self.views.insert(
+        self.entities.insert(
             view_id.clone(),
-            DatabaseView { view_id, sql: sql.into(), schema },
+            DatabaseEntity::View(DatabaseView {
+                view_id,
+                sql: sql.into(),
+                schema,
+            }),
         );
 
         Ok(())
     }
 
     pub fn view(&self, view_id: &str) -> Option<&DatabaseView> {
-        self.views.get(&common::normalize_identifier!(view_id))
+        let normalized = common::normalize_identifier!(view_id);
+        match self.entities.get(&normalized) {
+            Some(DatabaseEntity::View(view)) => Some(view),
+            _ => None,
+        }
     }
 
     pub fn view_ids(&self) -> Vec<String> {
-        self.views.keys().cloned().collect()
+        self.entities
+            .iter()
+            .filter_map(|(entity_id, entity)| match entity {
+                DatabaseEntity::View(_) => Some(entity_id.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn view_schema(&self, view_id: &str) -> Option<&TableSchema> {
         self.view(view_id).map(|v| &v.schema)
     }
 
-    /// Returns `true` for tables, `false` for views.  Used at the query
+    /// Returns `true` for tables, `false` for views. Used at the query
     /// routing layer to reject write operations against view sources before
     /// any execution begins.
     pub fn is_writable(&self, object_id: &str) -> bool {
         let normalized = common::normalize_identifier!(object_id);
-        self.tables.contains_key(&normalized)
+        matches!(
+            self.entities.get(&normalized),
+            Some(DatabaseEntity::Table(_))
+        )
+    }
+
+    fn table_mut(&mut self, table_id: &str) -> Option<&mut DatabaseTable> {
+        let normalized = common::normalize_identifier!(table_id);
+        match self.entities.get_mut(&normalized) {
+            Some(DatabaseEntity::Table(table)) => Some(table),
+            _ => None,
+        }
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> DatabaseResult<Self> {
-
         let bytes = read_bytes(path).map_err(|_| DatabaseError::CatalogRead)?;
 
         common::helpers::format::verify_header(FileKind::Catalog, &bytes)
@@ -497,7 +341,6 @@ impl DatabaseCatalog {
 
         bincode::deserialize::<Self>(&bytes[common::helpers::format::HEADER_SIZE..])
             .map_err(|_| DatabaseError::CatalogDeserialize)
-            
     }
 
     pub fn save_in_directory(&self, directory: impl AsRef<Path>) -> DatabaseResult<()> {
@@ -521,8 +364,9 @@ impl DatabaseCatalog {
 
     // Stub for future p2p/quorum integration.
     // With zero configured replicas, sync can promote to Ready immediately.
-    fn table_sync_acknowledged_stub(&self, _table_id: &str) -> bool {
-        self.received_table_replica_acks_stub(_table_id) >= self.required_table_replica_acks_stub(_table_id)
+    fn table_sync_acknowledged_stub(&self, table_id: &str) -> bool {
+        self.received_table_replica_acks_stub(table_id)
+            >= self.required_table_replica_acks_stub(table_id)
     }
 
     fn required_database_replica_acks_stub(&self) -> usize {
@@ -541,35 +385,21 @@ impl DatabaseCatalog {
         0
     }
 
-    fn indexes_for_schema(
-        table_id: &str,
-        schema: &TableSchema,
-    ) -> HashMap<String, DatabaseIndex> {
+    fn indexes_for_schema(table_id: &str, schema: &TableSchema) -> HashMap<String, DatabaseIndex> {
         let mut indexes = HashMap::new();
         for field in &schema.fields {
-            if field.indexed {
+            if matches!(field.indexed, FieldIndex::Indexed | FieldIndex::PrimaryKey) {
                 let index = DatabaseIndex::from_table_field(table_id, field);
                 indexes.insert(index.index_id.0.clone(), index);
             }
         }
         indexes
     }
-
 }
 
 #[cfg(test)]
 mod tests {
-    
     use super::*;
-
-    #[test]
-    fn database_id_is_obscured_from_normalized_name() {
-        let id_a = DatabaseId::from_database_name("Sales").expect("valid database name");
-        let id_b = DatabaseId::from_database_name("sales").expect("valid database name");
-
-        assert_eq!(id_a, id_b);
-        assert_ne!(id_a.0, "sales");
-    }
 
     #[test]
     fn create_empty_catalog_from_name_sets_obscured_id() {
@@ -634,7 +464,7 @@ mod tests {
 
     #[test]
     fn lock_to_ready_is_valid_for_abort_path() {
-        // Lock → Ready is permitted so that table transactions can be aborted.
+        // Lock -> Ready is permitted so that table transactions can be aborted.
         // The catalog's own status follows the same state machine.
         let mut catalog =
             DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
@@ -663,7 +493,6 @@ mod tests {
 
     #[test]
     fn write_requires_database_and_table_ready() {
-
         let mut catalog =
             DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
@@ -683,7 +512,6 @@ mod tests {
 
         let allowed = catalog.ensure_ready_for_write("users");
         assert!(allowed.is_ok());
-
     }
 
     #[test]
@@ -743,12 +571,12 @@ mod tests {
 
         assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Lock));
 
-        tx.add_field(crate::engine::table_schema::FieldDef {
+        tx.add_field(crate::engine::database::table_schema::FieldDef {
             seqno: 1,
             field_name: "email".to_string(),
-            field_type: crate::engine::table_schema::FieldType::Text,
+            field_type: crate::engine::database::table_schema::FieldType::Text,
             nullable: false,
-            indexed: true,
+            indexed: FieldIndex::Indexed,
             default_value: None,
         })
         .expect("add_field should succeed");
@@ -762,20 +590,23 @@ mod tests {
 
         assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
         assert_eq!(catalog.table_schema_revision("users"), Some(1));
-        assert!(catalog.table_schema("users").and_then(|s| s.field("email")).is_some());
-        assert_eq!(captured_payload.unwrap().schema_revision, 1);
+        assert!(catalog
+            .table_schema("users")
+            .and_then(|s| s.field("email"))
+            .is_some());
+        assert_eq!(captured_payload.expect("captured payload").schema_revision, 1);
     }
 
     #[test]
     fn schema_change_tx_abort_returns_table_to_ready_without_schema_change() {
         let mut catalog =
             DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
-        let initial_schema = TableSchema::new(vec![crate::engine::table_schema::FieldDef {
+        let initial_schema = TableSchema::new(vec![crate::engine::database::table_schema::FieldDef {
             seqno: 1,
             field_name: "name".to_string(),
-            field_type: crate::engine::table_schema::FieldType::Text,
+            field_type: crate::engine::database::table_schema::FieldType::Text,
             nullable: false,
-            indexed: false,
+            indexed: FieldIndex::None,
             default_value: None,
         }]);
         catalog
@@ -791,7 +622,8 @@ mod tests {
         let mut tx = catalog
             .begin_schema_change("users")
             .expect("begin should lock the table");
-        tx.remove_field("name").expect("remove should succeed on pending schema");
+        tx.remove_field("name")
+            .expect("remove should succeed on pending schema");
 
         tx.abort(&mut catalog).expect("abort should release lock");
 
@@ -819,11 +651,10 @@ mod tests {
             .expect("begin should lock the table");
 
         let result = tx.commit::<DatabaseError, _>(&mut catalog, |_payload| {
-            Err(DatabaseError::NotReadyForWrite) // stand-in for a WAL failure
+            Err(DatabaseError::NotReadyForWrite)
         });
 
         assert!(result.is_err());
-        // table should be back to Ready, schema unchanged
         assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
         assert_eq!(catalog.table_schema("users"), Some(&initial_schema));
     }
@@ -839,12 +670,12 @@ mod tests {
         let wal = crate::engine::wal::ConcurrentWalManager::new();
         let actor = crate::core::identity::UserId::from_username("schema-tester");
 
-        let first_schema = TableSchema::new(vec![crate::engine::table_schema::FieldDef {
+        let first_schema = TableSchema::new(vec![crate::engine::database::table_schema::FieldDef {
             seqno: 1,
             field_name: "name".to_string(),
-            field_type: crate::engine::table_schema::FieldType::Text,
+            field_type: crate::engine::database::table_schema::FieldType::Text,
             nullable: false,
-            indexed: false,
+            indexed: FieldIndex::None,
             default_value: None,
         }]);
         let first_payload = SchemaChangePayload {
@@ -854,23 +685,23 @@ mod tests {
         };
         wal.append(
             "users",
-            crate::engine::transaction::TransactionRecord {
-                id: crate::engine::transaction::TransactionId(1),
+            crate::engine::database::transaction::TransactionRecord {
+                id: crate::engine::database::transaction::TransactionId(1),
                 refid: None,
                 timestamp_epoch_ms: 1,
                 actor: actor.clone(),
-                kind: crate::engine::transaction::TransactionKind::SchemaChange,
+                kind: crate::engine::database::transaction::TransactionKind::SchemaChange,
                 payload: first_payload.encode().expect("schema payload should encode"),
             },
         )
         .expect("first schema append should succeed");
 
-        let second_schema = TableSchema::new(vec![crate::engine::table_schema::FieldDef {
+        let second_schema = TableSchema::new(vec![crate::engine::database::table_schema::FieldDef {
             seqno: 1,
             field_name: "email".to_string(),
-            field_type: crate::engine::table_schema::FieldType::Text,
+            field_type: crate::engine::database::table_schema::FieldType::Text,
             nullable: false,
-            indexed: true,
+            indexed: FieldIndex::Indexed,
             default_value: None,
         }]);
         let second_payload = SchemaChangePayload {
@@ -880,12 +711,12 @@ mod tests {
         };
         wal.append(
             "users",
-            crate::engine::transaction::TransactionRecord {
-                id: crate::engine::transaction::TransactionId(2),
+            crate::engine::database::transaction::TransactionRecord {
+                id: crate::engine::database::transaction::TransactionId(2),
                 refid: None,
                 timestamp_epoch_ms: 2,
                 actor,
-                kind: crate::engine::transaction::TransactionKind::SchemaChange,
+                kind: crate::engine::database::transaction::TransactionKind::SchemaChange,
                 payload: second_payload.encode().expect("schema payload should encode"),
             },
         )
@@ -898,7 +729,6 @@ mod tests {
         assert_eq!(applied, 2);
         assert_eq!(catalog.table_schema("users"), Some(&second_schema));
         assert_eq!(catalog.table_schema_revision("users"), Some(2));
-        assert_eq!(catalog.index("users:email").is_some(), true);
+        assert!(catalog.index("users:email").is_some());
     }
-
 }

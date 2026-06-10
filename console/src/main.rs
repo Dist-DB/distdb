@@ -2,7 +2,7 @@
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorP2pConfig, ConnectorP2pEvent,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldType,
+    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldIndex, FieldType,
     MutationResult, QueryResult, QueryTimings, ResponseStatus,
 };
 
@@ -138,7 +138,7 @@ fn simulate_server_response(request_id: &str, command: &ConnectorCommand) -> Con
                     field_name: "result".to_string(),
                     field_type: FieldType::Text,
                     nullable: false,
-                    indexed: false,
+                    indexed: FieldIndex::None,
                     default_value: None,
                 }],
                 rows: vec![vec![format!("simulated connector boundary response: {:?}", command).into_bytes()]],

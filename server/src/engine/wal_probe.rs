@@ -1,4 +1,4 @@
-use serverlib::engine::transaction::{TransactionLog, TransactionRecord};
+use serverlib::engine::database::transaction::{TransactionLog, TransactionRecord};
 use serverlib::{ConcurrentWalManager, TransactionId, TransactionKind, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

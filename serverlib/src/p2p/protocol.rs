@@ -1,6 +1,6 @@
 use crate::core::cluster::NodeDescriptor;
 use crate::engine::replication::PublicationEvent;
-use crate::engine::transaction::TransactionId;
+use crate::engine::database::transaction::TransactionId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceMessage {

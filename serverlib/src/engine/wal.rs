@@ -8,7 +8,7 @@ use std::thread;
 use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE};
 use common::helpers::{append_bytes, read_bytes, stable_id, write_bytes};
 
-use crate::engine::transaction::{TransactionId, TransactionLog, TransactionRecord};
+use crate::engine::database::transaction::{TransactionId, TransactionLog, TransactionRecord};
 
 #[derive(Debug)]
 enum WalCommand {

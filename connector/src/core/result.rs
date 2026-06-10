@@ -1,4 +1,4 @@
-use common::schema::FieldKind;
+use common::schema::{FieldIndex as CommonFieldIndex, FieldKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResponseStatus {
@@ -28,6 +28,7 @@ pub struct MutationResult {
 }
 
 pub type FieldType = FieldKind;
+pub type FieldIndex = CommonFieldIndex;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FieldDef {
@@ -35,7 +36,7 @@ pub struct FieldDef {
     pub field_name: String,
     pub field_type: FieldType,
     pub nullable: bool,
-    pub indexed: bool,
+    pub indexed: FieldIndex,
     pub default_value: Option<Vec<u8>>,
 }
 

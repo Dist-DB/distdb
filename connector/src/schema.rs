@@ -1,4 +1,4 @@
-use common::schema::FieldKind;
+use common::schema::{FieldIndex, FieldKind};
 
 /// The data type a client assigns to a field.
 ///
@@ -15,7 +15,7 @@ pub struct FieldSpec {
     pub name: String,
     pub kind: FieldKind,
     pub nullable: bool,
-    pub indexed: bool,
+    pub indexed: FieldIndex,
     pub default_value: Option<Vec<u8>>,
 }
 
@@ -25,7 +25,7 @@ impl FieldSpec {
             name: name.into(),
             kind,
             nullable: false,
-            indexed: false,
+            indexed: FieldIndex::None,
             default_value: None,
         }
     }
@@ -36,7 +36,12 @@ impl FieldSpec {
     }
 
     pub fn indexed(mut self) -> Self {
-        self.indexed = true;
+        self.indexed = FieldIndex::Indexed;
+        self
+    }
+
+    pub fn primary_key(mut self) -> Self {
+        self.indexed = FieldIndex::PrimaryKey;
         self
     }
 }
@@ -89,7 +94,7 @@ mod tests {
     fn field_spec_builder_defaults_to_non_nullable_non_indexed() {
         let spec = FieldSpec::new("email", FieldKind::Text);
         assert!(!spec.nullable);
-        assert!(!spec.indexed);
+        assert_eq!(spec.indexed, FieldIndex::None);
         assert_eq!(spec.name, "email");
     }
 
@@ -97,7 +102,13 @@ mod tests {
     fn field_spec_builder_sets_flags() {
         let spec = FieldSpec::new("email", FieldKind::Text).nullable().indexed();
         assert!(spec.nullable);
-        assert!(spec.indexed);
+        assert_eq!(spec.indexed, FieldIndex::Indexed);
+    }
+
+    #[test]
+    fn field_spec_builder_sets_primary_key() {
+        let spec = FieldSpec::new("id", FieldKind::UInt(64)).primary_key();
+        assert_eq!(spec.indexed, FieldIndex::PrimaryKey);
     }
 
     #[test]

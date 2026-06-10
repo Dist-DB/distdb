@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use connector::{
-    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldType, QueryResult,
+    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldIndex, FieldType, QueryResult,
     QueryTimings,
 };
 use serverlib::{DatabaseCatalog, DatabaseId, SqlRequest};
@@ -92,7 +92,7 @@ fn execute_select(
                     field_name: "table_name".to_string(),
                     field_type: FieldType::Text,
                     nullable: false,
-                    indexed: false,
+                    indexed: FieldIndex::None,
                     default_value: None,
                 }],
                 rows,

@@ -200,8 +200,8 @@ mod tests {
         ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest,
         ConnectorResult, ConnectorTransport, ResponseStatus,
     };
-    use serverlib::{FieldDef, FieldType, SchemaChangePayload, TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId};
-    use serverlib::engine::transaction::TransactionLog;
+    use serverlib::{FieldDef, FieldIndex, FieldType, SchemaChangePayload, TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId};
+    use serverlib::engine::database::transaction::TransactionLog;
 
     #[derive(Debug)]
     struct InProcessServerTransport {
@@ -243,7 +243,7 @@ mod tests {
                     field_name: "name".to_string(),
                     field_type: FieldType::Text,
                     nullable: false,
-                    indexed: false,
+                    indexed: FieldIndex::None,
                     default_value: None,
                 }]),
             )
@@ -258,7 +258,7 @@ mod tests {
             field_name: "email".to_string(),
             field_type: FieldType::Text,
             nullable: false,
-            indexed: true,
+            indexed: FieldIndex::Indexed,
             default_value: None,
         }]);
 
@@ -324,7 +324,7 @@ mod tests {
                         field_name: "id".to_string(),
                         field_type: FieldType::Int(64),
                         nullable: false,
-                        indexed: false,
+                        indexed: FieldIndex::None,
                         default_value: None,
                     },
                     FieldDef {
@@ -332,7 +332,7 @@ mod tests {
                         field_name: "email".to_string(),
                         field_type: FieldType::Text,
                         nullable: false,
-                        indexed: true,
+                        indexed: FieldIndex::Indexed,
                         default_value: None,
                     },
                 ]),
@@ -399,7 +399,7 @@ mod tests {
                     field_name: "id".to_string(),
                     field_type: FieldType::Int(64),
                     nullable: false,
-                    indexed: false,
+                    indexed: FieldIndex::None,
                     default_value: None,
                 }]),
             )
@@ -413,7 +413,7 @@ mod tests {
                     field_name: "id".to_string(),
                     field_type: FieldType::Int(64),
                     nullable: false,
-                    indexed: false,
+                    indexed: FieldIndex::None,
                     default_value: None,
                 }]),
             )
@@ -484,7 +484,7 @@ mod tests {
                     field_name: "id".to_string(),
                     field_type: FieldType::Int(64),
                     nullable: false,
-                    indexed: false,
+                    indexed: FieldIndex::None,
                     default_value: None,
                 }]),
             )
@@ -498,7 +498,7 @@ mod tests {
                     field_name: "id".to_string(),
                     field_type: FieldType::Int(64),
                     nullable: false,
-                    indexed: false,
+                    indexed: FieldIndex::None,
                     default_value: None,
                 }]),
             )
@@ -568,7 +568,7 @@ mod tests {
                         field_name: "id".to_string(),
                         field_type: FieldType::Int(64),
                         nullable: false,
-                        indexed: false,
+                        indexed: FieldIndex::None,
                         default_value: None,
                     },
                     FieldDef {
@@ -576,7 +576,7 @@ mod tests {
                         field_name: "email".to_string(),
                         field_type: FieldType::Text,
                         nullable: false,
-                        indexed: true,
+                        indexed: FieldIndex::Indexed,
                         default_value: None,
                     },
                 ]),
@@ -649,7 +649,7 @@ mod tests {
                         field_name: "id".to_string(),
                         field_type: FieldType::Int(64),
                         nullable: false,
-                        indexed: false,
+                        indexed: FieldIndex::None,
                         default_value: None,
                     },
                     FieldDef {
@@ -657,7 +657,7 @@ mod tests {
                         field_name: "email".to_string(),
                         field_type: FieldType::Text,
                         nullable: false,
-                        indexed: true,
+                        indexed: FieldIndex::Indexed,
                         default_value: None,
                     },
                 ]),

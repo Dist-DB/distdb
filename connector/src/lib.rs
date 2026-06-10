@@ -9,7 +9,7 @@ pub use common::schema::FieldKind;
 pub use core::{
 	ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest,
 	ConnectorResponse, ConnectorResult, ConnectorTransport, DataMutation, DataQuery,
-	FieldDef, FieldType, FieldValue, MutationResult, QueryCacheBypassReason,
+	FieldDef, FieldIndex, FieldType, FieldValue, MutationResult, QueryCacheBypassReason,
 	QueryCacheObservation, QueryResult, QueryTimings, ResponseStatus, SchemaCommand,
 	SchemaResult,
 };

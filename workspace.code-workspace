@@ -1,6 +1,10 @@
 {
   "folders": [
     {
+      "name": ".github",
+      "path": "./.github"
+    },
+    {
       "name": "docs",
       "path": "./docs"
     },
@@ -40,7 +44,11 @@
       "env": true,
       "cargo run": true,
       "mv": true,
-      "cargo build": true
+      "cargo build": true,
+      "/^cd \"/Users/samcolak/Source Code/rust/distdb\" && perl -pi -e 's/indexed:\\\\s\\*false/indexed: FieldIndex::None/g; s/indexed:\\\\s\\*true/indexed: FieldIndex::Indexed/g' serverlib/src/engine/database\\.rs serverlib/src/engine/database_table\\.rs server/src/core/app\\.rs server/src/core/mappings/query\\.rs console/src/main\\.rs$/": {
+        "approve": true,
+        "matchCommandLine": true
+      }
     }
   }
 }
