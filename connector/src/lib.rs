@@ -9,7 +9,8 @@ pub use common::schema::FieldKind;
 pub use core::{
 	ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest,
 	ConnectorResponse, ConnectorResult, ConnectorTransport, DataMutation, DataQuery,
-	FieldValue, MutationResult, QueryResult, ResponseStatus, SchemaCommand,
+	FieldDef, FieldType, FieldValue, MutationResult, QueryCacheBypassReason,
+	QueryCacheObservation, QueryResult, QueryTimings, ResponseStatus, SchemaCommand,
 	SchemaResult,
 };
 pub use p2p::{

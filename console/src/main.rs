@@ -2,8 +2,8 @@
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorP2pConfig, ConnectorP2pEvent,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, DataQuery, MutationResult, QueryResult,
-    ResponseStatus,
+    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldType,
+    MutationResult, QueryResult, QueryTimings, ResponseStatus,
 };
 
 use std::env;
@@ -108,10 +108,54 @@ impl ConsoleSession {
             .handle_event(ConnectorP2pEvent::ResponseReceived(simulated_response))?;
 
         let client = ConnectorClient::new(self.runtime.transport().clone());
-        let response = client.execute(&request)?;
+        let request_start = std::time::Instant::now();
+        let mut response = client.execute(&request)?;
+        let round_trip_ms = request_start.elapsed().as_millis() as u64;
+
+        if let ConnectorResult::Query(result) = &mut response.result {
+            result.timings.network_round_trip_ms = Some(round_trip_ms);
+        }
+
         print_response(&response);
 
         Ok(true)
+    }
+}
+
+fn simulate_server_response(request_id: &str, command: &ConnectorCommand) -> ConnectorResponse {
+    match command {
+        ConnectorCommand::Mutation { .. } => ConnectorResponse {
+            request_id: request_id.to_string(),
+            status: ResponseStatus::Applied,
+            result: ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+        },
+        ConnectorCommand::Query { .. } => ConnectorResponse {
+            request_id: request_id.to_string(),
+            status: ResponseStatus::Applied,
+            result: ConnectorResult::Query(QueryResult {
+                columns: vec![FieldDef {
+                    seqno: 1,
+                    field_name: "result".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: false,
+                    default_value: None,
+                }],
+                rows: vec![vec![format!("simulated connector boundary response: {:?}", command).into_bytes()]],
+                timings: QueryTimings {
+                    server_parse_ms: 0,
+                    server_execute_ms: 0,
+                    server_total_ms: 0,
+                    network_round_trip_ms: None,
+                    cache: None,
+                },
+            }),
+        },
+        _ => ConnectorResponse {
+            request_id: request_id.to_string(),
+            status: ResponseStatus::Applied,
+            result: ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+        },
     }
 }
 
@@ -155,35 +199,18 @@ fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> 
     Ok(Some(ConsoleCommand::Sql(sql.to_string())))
 }
 
-fn simulate_server_response(request_id: &str, command: &ConnectorCommand) -> ConnectorResponse {
-    match command {
-        ConnectorCommand::Mutation { .. } => ConnectorResponse {
-            request_id: request_id.to_string(),
-            status: ResponseStatus::Applied,
-            result: ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-        },
-        ConnectorCommand::Query { .. } => ConnectorResponse {
-            request_id: request_id.to_string(),
-            status: ResponseStatus::Applied,
-            result: ConnectorResult::Query(QueryResult {
-                columns: vec!["result".to_string()],
-                rows: vec![vec![format!("simulated server-side parse + execution: {:?}", command).into_bytes()]],
-            }),
-        },
-        _ => ConnectorResponse {
-            request_id: request_id.to_string(),
-            status: ResponseStatus::Applied,
-            result: ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-        },
-    }
-}
-
 fn print_response(response: &ConnectorResponse) {
     match &response.result {
         ConnectorResult::Query(result) => {
             if !result.columns.is_empty() {
-                println!("{}", result.columns.join(" | "));
-                println!("{}", "-".repeat(result.columns.join(" | ").len()));
+                let header = result
+                    .columns
+                    .iter()
+                    .map(|field| field.field_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                println!("{}", header);
+                println!("{}", "-".repeat(header.len()));
             }
 
             for row in &result.rows {
@@ -195,6 +222,16 @@ fn print_response(response: &ConnectorResponse) {
                 println!("{}", rendered);
             }
             println!("{} row(s)", result.rows.len());
+            println!(
+                "timing: server_total={}ms parse={}ms execute={}ms network_rtt={}ms",
+                result.timings.server_total_ms,
+                result.timings.server_parse_ms,
+                result.timings.server_execute_ms,
+                result.timings.network_round_trip_ms.unwrap_or(0)
+            );
+            if let Some(cache) = &result.timings.cache {
+                println!("cache: {:?}", cache);
+            }
         }
         ConnectorResult::Mutation(result) => {
             println!("ok: {} row(s) affected", result.affected_rows);

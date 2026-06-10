@@ -14,9 +14,17 @@ pub fn normalize_identifier(value: impl AsRef<str>) -> String {
 }
 
 
-pub fn epoch() -> i64 {
+pub fn epoch() -> u64 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(_n) => _n.as_secs().try_into().unwrap(),
+        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+}
+
+
+pub fn epochabs() -> u128 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(_n) => _n.as_nanos().try_into().unwrap(),
         Err(_) => panic!("SystemTime before UNIX EPOCH!"),
     }
 }

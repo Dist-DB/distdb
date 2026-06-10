@@ -8,6 +8,7 @@ pub use command::{
 	FieldValue, SchemaCommand,
 };
 pub use result::{
-	ConnectorResponse, ConnectorResult, MutationResult, QueryResult,
+	ConnectorResponse, ConnectorResult, FieldDef, FieldType, MutationResult,
+	QueryCacheBypassReason, QueryCacheObservation, QueryResult, QueryTimings,
 	ResponseStatus, SchemaResult,
 };

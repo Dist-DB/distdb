@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub type DatabaseResult<T> = Result<T, DatabaseError>;
-pub use crate::engine::database_table::{DatabaseIndex, DatabaseRelationship, DatabaseTable, IndexId};
+pub use crate::engine::database_table::{DatabaseIndex, DatabaseRelationship, DatabaseTable, DatabaseView, IndexId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseError {
@@ -30,6 +30,9 @@ pub enum DatabaseError {
     SchemaRevisionOutOfOrder,
     SchemaChange(SchemaError),
     TableNotLocked,
+    DuplicateView,
+    ViewNotFound,
+    ViewNotWritable,
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -55,6 +58,9 @@ impl std::fmt::Display for DatabaseError {
             }
             Self::SchemaChange(e) => write!(f, "schema mutation error: {e}"),
             Self::TableNotLocked => write!(f, "table must be locked before a schema change can be prepared or committed"),
+            Self::DuplicateView => write!(f, "view already registered in database catalog"),
+            Self::ViewNotFound => write!(f, "view not found in database catalog"),
+            Self::ViewNotWritable => write!(f, "views are read-only; write operations are not permitted"),
         }
     }
 }
@@ -193,6 +199,7 @@ pub struct DatabaseCatalog {
     pub database_id: DatabaseId,
     status: ObjectStatus,
     tables: HashMap<String, DatabaseTable>,
+    views: HashMap<String, DatabaseView>,
     relationships: Vec<DatabaseRelationship>,
 }
 
@@ -203,6 +210,7 @@ impl DatabaseCatalog {
             database_id,
             status: ObjectStatus::Load,
             tables: HashMap::new(),
+            views: HashMap::new(),
             relationships: Vec::new(),
         }
     }
@@ -430,6 +438,50 @@ impl DatabaseCatalog {
 
     pub fn table_ids(&self) -> Vec<String> {
         self.tables.keys().cloned().collect()
+    }
+
+    /// Register a view definition with a pre-derived schema.  The schema is
+    /// resolved by the caller at `CREATE VIEW` time against the current table
+    /// catalog and stored here so schema inspection never needs to re-execute
+    /// the view SQL.
+    pub fn register_view(
+        &mut self,
+        view_id: impl Into<String>,
+        sql: impl Into<String>,
+        schema: TableSchema,
+    ) -> DatabaseResult<()> {
+        let view_id = common::normalize_identifier!(view_id.into());
+
+        if self.views.contains_key(&view_id) {
+            return Err(DatabaseError::DuplicateView);
+        }
+
+        self.views.insert(
+            view_id.clone(),
+            DatabaseView { view_id, sql: sql.into(), schema },
+        );
+
+        Ok(())
+    }
+
+    pub fn view(&self, view_id: &str) -> Option<&DatabaseView> {
+        self.views.get(&common::normalize_identifier!(view_id))
+    }
+
+    pub fn view_ids(&self) -> Vec<String> {
+        self.views.keys().cloned().collect()
+    }
+
+    pub fn view_schema(&self, view_id: &str) -> Option<&TableSchema> {
+        self.view(view_id).map(|v| &v.schema)
+    }
+
+    /// Returns `true` for tables, `false` for views.  Used at the query
+    /// routing layer to reject write operations against view sources before
+    /// any execution begins.
+    pub fn is_writable(&self, object_id: &str) -> bool {
+        let normalized = common::normalize_identifier!(object_id);
+        self.tables.contains_key(&normalized)
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> DatabaseResult<Self> {

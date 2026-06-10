@@ -5,11 +5,12 @@ use common::helpers::{create_dir, list_files};
 use common::helpers::format::FileKind;
 use connector::{
     ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult,
-    MutationResult, QueryResult,
+    MutationResult,
 };
 use serverlib::{ConcurrentWalManager, DatabaseCatalog};
 
 use crate::core::config::ServerRuntimeConfig;
+use crate::core::mappings::query::handle_query_command;
 use crate::engine::wal_probe::{WalProbeResult, run_wal_probe};
 use crate::helpers::ServerAppError;
 
@@ -69,7 +70,10 @@ impl ServerApp {
     }
 
     pub fn run_wal_smoke_test(&self) -> Result<WalProbeResult, ServerAppError> {
-        run_wal_probe(&self.wal).map_err(|msg| ServerAppError::Runtime(msg.to_string()))
+        // Keep startup probe isolated so repeated process boots do not mutate
+        // persisted WAL streams and trigger out-of-order validation errors.
+        let probe_wal = ConcurrentWalManager::new();
+        run_wal_probe(&probe_wal).map_err(|msg| ServerAppError::Runtime(msg.to_string()))
     }
 
     pub fn handle_connector_request(&mut self, request: &ConnectorRequest) -> ConnectorResponse {
@@ -91,45 +95,11 @@ impl ServerApp {
                     ),
                 }
             }
-            ConnectorCommand::Query { query } => {
-                match serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) {
-                    Ok(parsed) => {
-                        let rows = parsed
-                            .into_iter()
-                            .map(|statement| {
-                                vec![
-                                    statement.database_id.into_bytes(),
-                                    format!("{:?}", statement.directive).into_bytes(),
-                                    format!("{:?}", statement.operation).into_bytes(),
-                                    statement
-                                        .object_name
-                                        .unwrap_or_default()
-                                        .into_bytes(),
-                                    statement.sql.into_bytes(),
-                                ]
-                            })
-                            .collect::<Vec<_>>();
-
-                        ConnectorResponse::applied(
-                            request.request_id.clone(),
-                            ConnectorResult::Query(QueryResult {
-                                columns: vec![
-                                    "database_id".to_string(),
-                                    "directive".to_string(),
-                                    "operation".to_string(),
-                                    "object_name".to_string(),
-                                    "statement".to_string(),
-                                ],
-                                rows,
-                            }),
-                        )
-                    }
-                    Err(err) => ConnectorResponse::rejected(
-                        request.request_id.clone(),
-                        format!("sql parse failed: {err}"),
-                    ),
-                }
-            }
+            ConnectorCommand::Query { query } => handle_query_command(
+                &request.request_id,
+                query,
+                &self.catalogs,
+            ),
             ConnectorCommand::Schema { .. } => ConnectorResponse::rejected(
                 request.request_id.clone(),
                 "schema command execution is not wired yet",
@@ -222,10 +192,27 @@ impl ServerApp {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
-    use connector::{ConnectorCommand, ConnectorRequest, ConnectorResult, ResponseStatus};
+    use crate::core::mappings::perf::QueryTimingThresholds;
+    use connector::{
+        ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest,
+        ConnectorResult, ConnectorTransport, ResponseStatus,
+    };
     use serverlib::{FieldDef, FieldType, SchemaChangePayload, TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId};
     use serverlib::engine::transaction::TransactionLog;
+
+    #[derive(Debug)]
+    struct InProcessServerTransport {
+        app: RefCell<ServerApp>,
+    }
+
+    impl ConnectorTransport for InProcessServerTransport {
+        fn request(&self, request: &ConnectorRequest) -> Result<ConnectorResponse, ConnectorError> {
+            Ok(self.app.borrow_mut().handle_connector_request(request))
+        }
+    }
 
     #[test]
     fn bootstrap_replays_latest_schema_from_wal() {
@@ -309,7 +296,8 @@ mod tests {
     }
 
     #[test]
-    fn query_requests_are_parsed_server_side_into_directive_rows() {
+    fn select_query_returns_table_schema_columns() {
+
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
@@ -324,12 +312,41 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
+        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        catalog
+            .register_table(
+                "users",
+                TableSchema::new(vec![
+                    FieldDef {
+                        seqno: 1,
+                        field_name: "id".to_string(),
+                        field_type: FieldType::Int(64),
+                        nullable: false,
+                        indexed: false,
+                        default_value: None,
+                    },
+                    FieldDef {
+                        seqno: 2,
+                        field_name: "email".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: true,
+                        default_value: None,
+                    },
+                ]),
+            )
+            .expect("table should register");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
         let request = ConnectorRequest::new(
             "req-query-1",
             ConnectorCommand::Query {
                 query: connector::DataQuery {
                     database_id: "main".to_string(),
-                    sql: "select * from users; update users set active=1 where id=7".to_string(),
+                    sql: "select * from users".to_string(),
                 },
             },
         );
@@ -343,15 +360,376 @@ mod tests {
             panic!("expected query result");
         };
 
-        assert_eq!(
-            result.columns,
-            vec!["database_id", "directive", "operation", "object_name", "statement"]
+        let column_names = result
+            .columns
+            .iter()
+            .map(|field| field.field_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(column_names, vec!["id", "email"]);
+        assert!(result.rows.is_empty());
+
+    }
+
+    #[test]
+    fn show_tables_query_returns_table_name_rows() {
+        
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-show-tables-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        catalog
+            .register_table(
+                "users",
+                TableSchema::new(vec![FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: false,
+                    default_value: None,
+                }]),
+            )
+            .expect("users table should register");
+
+        catalog
+            .register_table(
+                "accounts",
+                TableSchema::new(vec![FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: false,
+                    default_value: None,
+                }]),
+            )
+            .expect("accounts table should register");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let request = ConnectorRequest::new(
+            "req-show-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "show tables".to_string(),
+                },
+            },
         );
+
+        let response = app.handle_connector_request(&request);
+
+        assert_eq!(response.request_id, "req-show-1");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = response.result else {
+            panic!("expected query result");
+        };
+
+        let column_names = result
+            .columns
+            .iter()
+            .map(|field| field.field_name.as_str())
+            .collect::<Vec<_>>();
+        
+        assert_eq!(column_names, vec!["table_name"]);
         assert_eq!(result.rows.len(), 2);
 
-        let first_row = result.rows.first().expect("first row should exist");
-        assert_eq!(String::from_utf8_lossy(&first_row[2]), "Select");
-        assert_eq!(String::from_utf8_lossy(&first_row[3]), "users");
+        let row_values = result
+            .rows
+            .iter()
+            .map(|row| String::from_utf8_lossy(&row[0]).to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(row_values, vec!["accounts", "users"]);
+
+    }
+
+    #[test]
+    fn connector_client_path_can_query_show_tables_without_simulation() {
+        
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-client-path-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        catalog
+            .register_table(
+                "users",
+                TableSchema::new(vec![FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: false,
+                    default_value: None,
+                }]),
+            )
+            .expect("users table should register");
+
+        catalog
+            .register_table(
+                "accounts",
+                TableSchema::new(vec![FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: false,
+                    default_value: None,
+                }]),
+            )
+            .expect("accounts table should register");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let transport = InProcessServerTransport {
+            app: RefCell::new(app),
+        };
+        let client = ConnectorClient::new(transport);
+
+        let request = ConnectorRequest::new(
+            "req-client-show-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "show tables".to_string(),
+                },
+            },
+        );
+
+        let response = client
+            .execute(&request)
+            .expect("connector client should receive applied response");
+
+        assert_eq!(response.request_id, "req-client-show-1");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = response.result else {
+            panic!("expected query result");
+        };
+
+        let row_values = result
+            .rows
+            .iter()
+            .map(|row| String::from_utf8_lossy(&row[0]).to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(row_values, vec!["accounts", "users"]);
+
+    }
+
+    #[test]
+    fn connector_client_path_can_query_select_without_simulation() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-client-select-path-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        catalog
+            .register_table(
+                "users",
+                TableSchema::new(vec![
+                    FieldDef {
+                        seqno: 1,
+                        field_name: "id".to_string(),
+                        field_type: FieldType::Int(64),
+                        nullable: false,
+                        indexed: false,
+                        default_value: None,
+                    },
+                    FieldDef {
+                        seqno: 2,
+                        field_name: "email".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: true,
+                        default_value: None,
+                    },
+                ]),
+            )
+            .expect("users table should register");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let transport = InProcessServerTransport {
+            app: RefCell::new(app),
+        };
+
+        let client = ConnectorClient::new(transport);
+
+        let request = ConnectorRequest::new(
+            "req-client-select-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select * from users".to_string(),
+                },
+            },
+        );
+
+        let response = client
+            .execute(&request)
+            .expect("connector client should receive applied response");
+
+        assert_eq!(response.request_id, "req-client-select-1");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = response.result else {
+            panic!("expected query result");
+        };
+
+        let column_names = result
+            .columns
+            .iter()
+            .map(|field| field.field_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(column_names, vec!["id", "email"]);
+        assert!(result.rows.is_empty());
+        
+    }
+
+    #[test]
+    fn query_path_stress_respects_timing_thresholds() {
+        
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-query-stress-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        catalog
+            .register_table(
+                "users",
+                TableSchema::new(vec![
+                    FieldDef {
+                        seqno: 1,
+                        field_name: "id".to_string(),
+                        field_type: FieldType::Int(64),
+                        nullable: false,
+                        indexed: false,
+                        default_value: None,
+                    },
+                    FieldDef {
+                        seqno: 2,
+                        field_name: "email".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: true,
+                        default_value: None,
+                    },
+                ]),
+            )
+            .expect("users table should register");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let thresholds = QueryTimingThresholds::from_env();
+        let mut durations_ms = Vec::with_capacity(thresholds.stress_iterations);
+
+        let batch_start = std::time::Instant::now();
+
+        for idx in 0..thresholds.stress_iterations {
+            let sql = if idx % 2 == 0 {
+                "select * from users"
+            } else {
+                "show tables"
+            };
+
+            let request = ConnectorRequest::new(
+                format!("stress-req-{idx}"),
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            );
+
+            let start = std::time::Instant::now();
+            let response = app.handle_connector_request(&request);
+            let elapsed_ms = start.elapsed().as_millis();
+
+            assert_eq!(response.status, ResponseStatus::Applied);
+            durations_ms.push(elapsed_ms);
+        }
+
+        let batch_elapsed_ms = batch_start.elapsed().as_millis();
+        durations_ms.sort_unstable();
+
+        let p95 = percentile(&durations_ms, 95);
+        let p99 = percentile(&durations_ms, 99);
+
+        assert!(
+            p95 <= thresholds.p95_max_ms,
+            "p95 latency exceeded threshold: p95={}ms threshold={}ms",
+            p95,
+            thresholds.p95_max_ms
+        );
+        assert!(
+            p99 <= thresholds.p99_max_ms,
+            "p99 latency exceeded threshold: p99={}ms threshold={}ms",
+            p99,
+            thresholds.p99_max_ms
+        );
+        assert!(
+            batch_elapsed_ms <= thresholds.batch_max_ms,
+            "batch duration exceeded threshold: batch={}ms threshold={}ms",
+            batch_elapsed_ms,
+            thresholds.batch_max_ms
+        );
+    }
+
+    fn percentile(sorted_values: &[u128], pct: usize) -> u128 {
+        if sorted_values.is_empty() {
+            return 0;
+        }
+
+        let rank = ((pct * sorted_values.len()) + 99) / 100;
+        let idx = rank.saturating_sub(1).min(sorted_values.len() - 1);
+        sorted_values[idx]
     }
     
 }

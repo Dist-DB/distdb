@@ -98,6 +98,18 @@ pub struct DatabaseRelationship {
     pub relation_name: String,
 }
 
+/// A named, stored SQL query.  Views are never writable; their schema is
+/// derived once at definition time and stored so `SHOW COLUMNS` and schema
+/// inspection work identically to tables without re-executing the query.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DatabaseView {
+    pub view_id: String,
+    /// The SQL SELECT expression that defines this view.
+    pub sql: String,
+    /// Column schema derived at `CREATE VIEW` time from the referenced tables.
+    pub schema: TableSchema,
+}
+
 impl DatabaseIndex {
 
     pub fn from_table_field(table_id: &str, field: &FieldDef) -> Self {
@@ -137,5 +149,5 @@ mod tests {
         assert_eq!(index.field_name, "userid");
         assert_eq!(index.index_id.0, "useraccounts:userid");
     }
-    
+
 }

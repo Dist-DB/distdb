@@ -1,13 +1,8 @@
-#![allow(dead_code)]
+use server::core::app::ServerApp;
+use server::core::config::ServerRuntimeConfig;
 
-pub mod core;
-pub mod helpers;
-pub mod engine;
-
-use crate::core::app::ServerApp;
-use crate::core::config::ServerRuntimeConfig;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -38,6 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.active_workers,
         result.records_in_primary_table
     );
+
+    log::info!("server process is running; press Ctrl+C to shutdown");
+    tokio::signal::ctrl_c().await?;
+    log::info!("shutdown signal received");
 
     app.shutdown()?;
     Ok(())

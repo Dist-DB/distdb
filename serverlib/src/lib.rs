@@ -13,7 +13,7 @@ pub use common::schema::{
 
 pub use engine::database::{
 	DatabaseCatalog, DatabaseError, DatabaseId, DatabaseIndex, DatabaseRelationship,
-	DatabaseReplicaState, DatabaseResult, DatabaseTable, IndexId, ObjectStatus,
+	DatabaseReplicaState, DatabaseResult, DatabaseTable, DatabaseView, IndexId, ObjectStatus,
 };
 pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use engine::sql::{
