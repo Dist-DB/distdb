@@ -101,10 +101,20 @@ impl ConnectorP2pRuntime {
         match event {
             ConnectorP2pEvent::PeerDiscovered(peer) => {
                 let peer_id = peer.peer_id.clone();
+                log::info!(
+                    "connector p2p peer discovered peer_id={} addrs={}",
+                    peer_id,
+                    peer.addrs.join(",")
+                );
                 self.transport.upsert_peer(peer);
                 Ok(ConnectorP2pHandleOutcome::PeerDiscovered { peer_id })
             }
             ConnectorP2pEvent::ResponseReceived(response) => {
+                log::debug!(
+                    "connector p2p response received request_id={} status={:?}",
+                    response.request_id,
+                    response.status
+                );
                 self.transport.queue_response(response.clone());
                 Ok(ConnectorP2pHandleOutcome::ResponseReceived(response))
             }
@@ -115,9 +125,11 @@ impl ConnectorP2pRuntime {
                 let prefix = request_id
                     .map(|id| format!("request_id={id}: "))
                     .unwrap_or_default();
+                log::error!("connector p2p error: {}{}", prefix, message);
                 Err(ConnectorError::Transport(format!("{prefix}{message}")))
             }
             ConnectorP2pEvent::Shutdown => {
+                log::info!("connector p2p runtime shutdown received");
                 self.running = false;
                 Ok(ConnectorP2pHandleOutcome::Shutdown)
             }

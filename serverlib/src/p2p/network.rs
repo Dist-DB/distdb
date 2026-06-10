@@ -19,18 +19,31 @@ impl<T: Transport> ServerP2pNetwork<T> {
     }
 
     pub fn discover_peers(&self) -> Vec<NodeDescriptor> {
-        self.discovery.discover_peers()
+        let peers = self.discovery.discover_peers();
+        log::debug!("server p2p discover peers count={}", peers.len());
+        peers
     }
 
     pub fn upsert_discovered_peer(&mut self, node: NodeDescriptor) {
+        log::debug!(
+            "server p2p upsert discovered peer peer_id={} addrs={}",
+            node.id.0,
+            node.addrs.join(",")
+        );
         self.discovery.upsert_peer(node);
     }
 
     pub fn broadcast_announce(&mut self, local: NodeDescriptor) -> Result<()> {
+        log::info!(
+            "server p2p broadcast announce peer_id={} addrs={}",
+            local.id.0,
+            local.addrs.join(",")
+        );
         self.transport.broadcast(ServiceMessage::NodeAnnounce(local))
     }
 
     pub fn send_message(&mut self, peer_id: &str, message: ServiceMessage) -> Result<()> {
+        log::debug!("server p2p send message to peer_id={} message={:?}", peer_id, message);
         self.transport.send(peer_id, message)
     }
 

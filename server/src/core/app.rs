@@ -5,7 +5,7 @@ use common::helpers::{create_dir, list_files};
 use common::helpers::format::FileKind;
 use connector::{
     ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult,
-    MutationResult,
+    DataMutation, MutationResult, SchemaCommand,
 };
 use serverlib::{ConcurrentWalManager, DatabaseCatalog};
 
@@ -77,7 +77,14 @@ impl ServerApp {
     }
 
     pub fn handle_connector_request(&mut self, request: &ConnectorRequest) -> ConnectorResponse {
-        match &request.command {
+        let command_path = describe_command_path(&request.command);
+        log::info!(
+            "connector request dispatch request_id={} path={}",
+            request.request_id,
+            command_path
+        );
+
+        let response = match &request.command {
             ConnectorCommand::CreateDatabase { database_name } => {
                 match DatabaseCatalog::create_new_database(database_name, &self.node_data_dir) {
                     Ok(catalog) => {
@@ -110,7 +117,30 @@ impl ServerApp {
                 request.request_id.clone(),
                 "mutation command execution is not wired yet",
             ),
+        };
+
+        match &response.result {
+            ConnectorResult::Error(message) => {
+                log::warn!(
+                    "connector request completed request_id={} path={} status={:?} error={}"
+                    ,
+                    request.request_id,
+                    command_path,
+                    response.status,
+                    message
+                );
+            }
+            _ => {
+                log::info!(
+                    "connector request completed request_id={} path={} status={:?}",
+                    request.request_id,
+                    command_path,
+                    response.status
+                );
+            }
         }
+
+        response
     }
 
     pub fn shutdown(&self) -> Result<(), ServerAppError> {
@@ -190,6 +220,45 @@ impl ServerApp {
 
     }
 
+}
+
+fn describe_command_path(command: &ConnectorCommand) -> String {
+    match command {
+        ConnectorCommand::CreateDatabase { database_name } => {
+            format!("create_database:{}", database_name)
+        }
+        ConnectorCommand::Query { query } => {
+            format!("query:{}", query.database_id)
+        }
+        ConnectorCommand::Schema {
+            database_id,
+            command,
+        } => match command {
+            SchemaCommand::CreateTable { table_id, .. } => {
+                format!("schema:create_table:{}:{}", database_id, table_id)
+            }
+            SchemaCommand::AlterTable { change } => {
+                format!("schema:alter_table:{}:{}", database_id, change.table_id)
+            }
+            SchemaCommand::DropTable { table_id } => {
+                format!("schema:drop_table:{}:{}", database_id, table_id)
+            }
+        },
+        ConnectorCommand::Mutation {
+            database_id,
+            mutation,
+        } => match mutation {
+            DataMutation::Insert { table_id, .. } => {
+                format!("mutation:insert:{}:{}", database_id, table_id)
+            }
+            DataMutation::Update { table_id, .. } => {
+                format!("mutation:update:{}:{}", database_id, table_id)
+            }
+            DataMutation::Delete { table_id, .. } => {
+                format!("mutation:delete:{}:{}", database_id, table_id)
+            }
+        },
+    }
 }
 
 #[cfg(test)]

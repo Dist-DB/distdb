@@ -505,6 +505,33 @@ fn execute_select(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
+    if statement.sql.to_ascii_lowercase().starts_with("show databases") {
+        let mut database_ids = catalogs.keys().cloned().collect::<Vec<_>>();
+        database_ids.sort();
+
+        let rows = database_ids
+            .into_iter()
+            .map(|database_id| vec![database_id.into_bytes()])
+            .collect::<Vec<_>>();
+
+        return ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Query(QueryResult {
+                columns: vec![FieldDef {
+                    seqno: 1,
+                    field_name: "database_name".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                }],
+                rows,
+                timings: empty_query_timings(),
+            }),
+        );
+
+    }
+
     if statement.sql.to_ascii_lowercase().starts_with("show tables") {
 
         let target_db = statement

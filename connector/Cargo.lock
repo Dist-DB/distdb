@@ -421,6 +421,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "common",
+ "log",
  "serde",
 ]
 

@@ -1,1 +1,1 @@
-RUST_LOG="warn,error,info,critical" RUST_BACKTRACE=1 cargo run datadir=./data
+RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run datadir=./data

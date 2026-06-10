@@ -8,3 +8,4 @@ authors = ["Sam Colak <sam@samcolak.com>"]
 common = { path = "../common" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
+log = "0.4"

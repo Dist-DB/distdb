@@ -102,6 +102,11 @@ impl<T: Transport> ServerP2pRuntime<T> {
         match event {
             ServerP2pEvent::PeerDiscovered(node) => {
                 let peer_id = node.id.0.clone();
+                log::info!(
+                    "server p2p peer discovered peer_id={} addrs={}",
+                    peer_id,
+                    node.addrs.join(",")
+                );
                 self.network.upsert_discovered_peer(node);
                 Ok(ServerP2pHandleOutcome::PeerDiscovered { peer_id })
             }
@@ -109,7 +114,13 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 from_peer_id,
                 message,
             } => {
+                log::debug!("server p2p message received from_peer_id={}", from_peer_id);
                 if let ServiceMessage::NodeAnnounce(node) = message {
+                    log::info!(
+                        "server p2p node announce received peer_id={} addrs={}",
+                        node.id.0,
+                        node.addrs.join(",")
+                    );
                     self.network.upsert_discovered_peer(node);
                 }
                 Ok(ServerP2pHandleOutcome::MessageReceived { from_peer_id })
@@ -121,11 +132,13 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 let source = from_peer_id
                     .map(|peer| format!("peer={peer}"))
                     .unwrap_or_else(|| "peer=unknown".to_string());
+                log::error!("server p2p runtime error from {}: {}", source, message);
                 Err(ServerLibError::Network(format!(
                     "p2p event error from {source}: {message}"
                 )))
             }
             ServerP2pEvent::Shutdown => {
+                log::info!("server p2p runtime shutdown received");
                 self.running = false;
                 Ok(ServerP2pHandleOutcome::Shutdown)
             }

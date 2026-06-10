@@ -1,6 +1,11 @@
 use crate::core::{ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorTransport};
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
+
+use common::DEFAULT_SERVER_PORT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectorDiscoveryMode {
@@ -39,6 +44,13 @@ pub struct ConnectorP2pTransport {
     peers: HashMap<String, ConnectorPeer>,
     active_peer_id: Option<String>,
     queued_responses: HashMap<String, ConnectorResponse>,
+    live_connection: Arc<Mutex<Option<LiveConnection>>>,
+}
+
+#[derive(Debug)]
+struct LiveConnection {
+    peer_id: String,
+    stream: TcpStream,
 }
 
 impl ConnectorP2pTransport {
@@ -48,6 +60,7 @@ impl ConnectorP2pTransport {
             peers: HashMap::new(),
             active_peer_id: None,
             queued_responses: HashMap::new(),
+            live_connection: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -59,8 +72,17 @@ impl ConnectorP2pTransport {
         &self.config.protocol
     }
 
+    pub fn bootstrap_peers(&self) -> &[String] {
+        &self.config.bootstrap_peers
+    }
+
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
         let peer_id = peer.peer_id.clone();
+        log::debug!(
+            "connector transport upsert peer peer_id={} addrs={}",
+            peer_id,
+            peer.addrs.join(",")
+        );
         self.peers.insert(peer_id.clone(), peer);
 
         // First discovered peer becomes the sticky session peer.
@@ -80,7 +102,11 @@ impl ConnectorP2pTransport {
     pub fn select_peer(&mut self, peer_id: impl AsRef<str>) -> Result<(), ConnectorError> {
         let peer_id = peer_id.as_ref();
         if self.peers.contains_key(peer_id) {
+            if self.active_peer_id.as_deref() != Some(peer_id) {
+                self.clear_live_connection("peer switch");
+            }
             self.active_peer_id = Some(peer_id.to_string());
+            log::info!("connector transport active peer set to {}", peer_id);
             return Ok(());
         }
 
@@ -98,35 +124,218 @@ impl ConnectorP2pTransport {
     /// Queue a response by request id. This is used by tests and by future
     /// network handlers that decode p2p responses and hand them to the client.
     pub fn queue_response(&mut self, response: ConnectorResponse) {
+        log::debug!(
+            "connector transport queue response request_id={} status={:?}",
+            response.request_id,
+            response.status
+        );
         self.queued_responses
             .insert(response.request_id.clone(), response);
+    }
+
+    pub fn queued_response_count(&self) -> usize {
+        self.queued_responses.len()
+    }
+
+    pub fn has_live_connection(&self) -> bool {
+        self.live_connection
+            .lock()
+            .map(|connection| connection.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn connect_active_peer(&self) -> Result<(), ConnectorError> {
+        let Some(peer) = self.active_peer() else {
+            return Err(ConnectorError::Transport(
+                "no connected peer selected for session routing".to_string(),
+            ));
+        };
+
+        ensure_live_connection(self, peer)
+    }
+
+    pub fn disconnect_active_peer(&self) {
+        self.clear_live_connection("disconnect directive");
+    }
+
+    fn clear_live_connection(&self, reason: &str) {
+        if let Ok(mut connection) = self.live_connection.lock() {
+            if let Some(live) = connection.take() {
+                log::info!(
+                    "connector transport disconnected peer={} reason={}",
+                    live.peer_id,
+                    reason
+                );
+            }
+        }
     }
 }
 
 impl ConnectorTransport for ConnectorP2pTransport {
     fn request(&self, request: &ConnectorRequest) -> Result<ConnectorResponse, ConnectorError> {
         if self.peers.is_empty() && self.config.bootstrap_peers.is_empty() {
+            log::warn!("connector transport request failed: no peers or bootstrap peers configured");
             return Err(ConnectorError::Transport(
                 "no Kademlia peers available for routing".to_string(),
             ));
         }
 
         if self.active_peer_id.is_none() {
+            log::warn!("connector transport request failed: no active peer selected");
             return Err(ConnectorError::Transport(
                 "no connected peer selected for session routing".to_string(),
             ));
+        }
+
+        if let Some(active_peer) = self.active_peer_id() {
+            log::debug!(
+                "connector transport routing request_id={} to peer={}",
+                request.request_id,
+                active_peer
+            );
+        }
+
+        if let Some(peer) = self.active_peer() {
+            match send_request_over_tcp(self, peer, request) {
+                Ok(response) => {
+                    log::debug!(
+                        "connector transport received network response request_id={} status={:?}",
+                        response.request_id,
+                        response.status
+                    );
+                    return Ok(response);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "connector transport network request failed for request_id={}: {}",
+                        request.request_id,
+                        err
+                    );
+                }
+            }
         }
 
         self.queued_responses
             .get(&request.request_id)
             .cloned()
             .ok_or_else(|| {
+                log::warn!(
+                    "connector transport has no queued response for request_id={}",
+                    request.request_id
+                );
                 ConnectorError::Transport(
-                    "no queued response for request_id (network loop not wired yet)"
+                    "no queued response for request_id; p2p request/response loop is not wired yet (enable DISTDB_CONSOLE_SIMULATE=1 or wire network handlers)"
                         .to_string(),
                 )
             })
     }
+}
+
+fn send_request_over_tcp(
+    transport: &ConnectorP2pTransport,
+    peer: &ConnectorPeer,
+    request: &ConnectorRequest,
+) -> Result<ConnectorResponse, ConnectorError> {
+    ensure_live_connection(transport, peer)?;
+
+    let mut connection = transport
+        .live_connection
+        .lock()
+        .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
+
+    let response = {
+        let Some(live) = connection.as_mut() else {
+            return Err(ConnectorError::Transport(
+                "active connection missing after connect".to_string(),
+            ));
+        };
+        send_request_frame(&mut live.stream, request)
+    };
+
+    if response.is_err() {
+        let _ = connection.take();
+    }
+
+    response
+}
+
+fn ensure_live_connection(
+    transport: &ConnectorP2pTransport,
+    peer: &ConnectorPeer,
+) -> Result<(), ConnectorError> {
+    let mut connection = transport
+        .live_connection
+        .lock()
+        .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
+
+    let should_reconnect = connection
+        .as_ref()
+        .map(|live| live.peer_id != peer.peer_id)
+        .unwrap_or(true);
+
+    if !should_reconnect {
+        return Ok(());
+    }
+
+    let Some(addr) = peer.addrs.first() else {
+        return Err(ConnectorError::Transport(
+            "active peer has no address for routing".to_string(),
+        ));
+    };
+
+    let socket_addr = normalize_peer_addr(addr);
+    let stream = TcpStream::connect(&socket_addr)
+        .map_err(|e| ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}")))?;
+
+    log::info!(
+        "connector transport established persistent stream peer={} addr={}",
+        peer.peer_id,
+        socket_addr
+    );
+
+    *connection = Some(LiveConnection {
+        peer_id: peer.peer_id.clone(),
+        stream,
+    });
+
+    Ok(())
+}
+
+fn send_request_frame(
+    stream: &mut TcpStream,
+    request: &ConnectorRequest,
+) -> Result<ConnectorResponse, ConnectorError> {
+    let payload = bincode::serialize(request).map_err(|e| {
+        ConnectorError::Transport(format!("failed to serialize request payload: {e}"))
+    })?;
+
+    let len = payload.len() as u32;
+    stream
+        .write_all(&len.to_le_bytes())
+        .and_then(|_| stream.write_all(&payload))
+        .map_err(|e| ConnectorError::Transport(format!("failed to write request: {e}")))?;
+
+    let mut response_len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut response_len_buf)
+        .map_err(|e| ConnectorError::Transport(format!("failed to read response length: {e}")))?;
+
+    let response_len = u32::from_le_bytes(response_len_buf) as usize;
+    let mut response_buf = vec![0u8; response_len];
+    stream
+        .read_exact(&mut response_buf)
+        .map_err(|e| ConnectorError::Transport(format!("failed to read response payload: {e}")))?;
+
+    bincode::deserialize::<ConnectorResponse>(&response_buf)
+        .map_err(|e| ConnectorError::Transport(format!("failed to decode response payload: {e}")))
+}
+
+fn normalize_peer_addr(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.contains(':') {
+        return trimmed.to_string();
+    }
+    format!("{}:{}", trimmed, DEFAULT_SERVER_PORT)
 }
 
 #[cfg(test)]
