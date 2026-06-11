@@ -24,11 +24,15 @@ pub struct SubscriptionKey {
 }
 
 impl SubscriptionKey {
+
     pub fn as_wire_key(&self) -> String {
         format!("{}:{}", self.database_id.0, self.table_id)
     }
+
 }
 
 pub trait ReplicationBus {
+
     fn publish(&mut self, key: &SubscriptionKey, event: PublicationEvent);
+    
 }

@@ -196,12 +196,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find_map(|arg| arg.strip_prefix("listen_addr=").map(ToOwned::to_owned))
         .unwrap_or_else(|| "0.0.0.0".to_string());
 
+    let port: u16 = std::env::args()
+        .find_map(|arg| {
+            arg.strip_prefix("port=")
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(common::DEFAULT_SERVER_PORT);
+
     log::info!("using data directory: {}", data_dir.display());
     log::info!("using listen address host: {}", listen_addr);
+    log::info!("using port: {}", port);
 
     let config = ServerRuntimeConfig::default_local_with_listen_addr(
         data_dir,
-        format!("/ip4/{listen_addr}/tcp/{}", common::DEFAULT_SERVER_PORT),
+        format!("/ip4/{listen_addr}/tcp/{port}"),
     );
 
     let mut app = ServerApp::new(config)?;
@@ -216,7 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.records_in_primary_table
     );
 
-    let tcp_bind_addr = format!("{}:{}", listen_addr, common::DEFAULT_SERVER_PORT);
+    let tcp_bind_addr = format!("{}:{}", listen_addr, port);
     let listener = TcpListener::bind(&tcp_bind_addr).await?;
     log::info!("connector request listener bound at {}", tcp_bind_addr);
 

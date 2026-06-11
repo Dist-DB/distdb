@@ -6,10 +6,11 @@ use common::helpers::format::FileKind;
 use common::helpers::{read_bytes, write_bytes};
 
 use super::core::{DatabaseError, DatabaseResult, ObjectStatus};
-use super::entity::{
-    DatabaseEntity, DatabaseEntityAspect, DatabaseEntityKind, DatabaseObjectRef,
-    DatabaseObjectType,
-};
+use super::entity::DatabaseEntity;
+use super::entity_aspect::DatabaseEntityAspect;
+use super::entity_kind::DatabaseEntityKind;
+use super::entity_object_ref::DatabaseObjectRef;
+use super::entity_object_type::DatabaseObjectType;
 use super::id::DatabaseId;
 use super::index::DatabaseIndex;
 use super::relationship::DatabaseRelationship;
@@ -87,6 +88,7 @@ impl DatabaseCatalog {
         );
 
         Ok(())
+        
     }
 
     pub fn create_table(
@@ -94,6 +96,7 @@ impl DatabaseCatalog {
         table_id: impl Into<String>,
         schema: TableSchema,
     ) -> DatabaseResult<()> {
+
         let table_id = common::normalize_identifier!(table_id.into());
         self.register_table(table_id.clone(), schema)?;
 
@@ -107,7 +110,9 @@ impl DatabaseCatalog {
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.complete_sync()?;
         self.bump_schema_epoch();
+        
         Ok(())
+
     }
 
     pub fn drop_object(
@@ -161,6 +166,7 @@ impl DatabaseCatalog {
             },
 
             DatabaseObjectType::Index => Err(DatabaseError::EntityNotFound),
+
         };
 
         if removed.is_ok() {
@@ -176,13 +182,17 @@ impl DatabaseCatalog {
     }
 
     pub fn register_relationship(&mut self, relationship: DatabaseRelationship) {
+
         let left = common::normalize_identifier!(&relationship.left_table_id);
         let right = common::normalize_identifier!(&relationship.right_table_id);
         let name = common::normalize_identifier!(&relationship.relation_name);
         let entity_id = format!("rel:{left}:{right}:{name}");
+        
         self.entities
             .insert(entity_id, DatabaseEntity::Relationship(relationship));
+        
         self.bump_schema_epoch();
+
     }
 
     pub fn table(&self, table_id: &str) -> Option<&DatabaseTable> {
@@ -401,6 +411,7 @@ impl DatabaseCatalog {
 
         table.replace_schema(payload.schema_revision, payload.schema, indexes);
         self.accept_schema_epoch(payload.schema_epoch);
+
         Ok(())
 
     }
@@ -618,14 +629,17 @@ impl DatabaseCatalog {
         let mut applied = 0usize;
 
         for record in log.since(wal_id, None) {
+
             if record.kind != TransactionKind::SchemaChange {
                 continue;
             }
 
             let payload = SchemaChangePayload::decode(&record.payload)
                 .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
+            
             self.apply_schema_change(payload)?;
             applied += 1;
+
         }
 
         Ok(applied)
@@ -915,11 +929,14 @@ impl DatabaseCatalog {
         &mut self,
         procedure_id: &str,
     ) -> Option<&mut DatabaseStoredProcedure> {
+        
         let normalized = common::normalize_identifier!(procedure_id);
+        
         match self.entities.get_mut(&normalized) {
             Some(DatabaseEntity::StoredProcedure(procedure)) => Some(procedure),
             _ => None,
         }
+
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> DatabaseResult<Self> {
@@ -1012,6 +1029,7 @@ impl DatabaseCatalog {
         let mut normalized_entities = HashMap::with_capacity(self.entities.len());
         
         for (_, mut entity) in std::mem::take(&mut self.entities) {
+
             entity.normalize_in_place();
 
             if let DatabaseEntity::Table(table) = &mut entity {
@@ -1022,6 +1040,7 @@ impl DatabaseCatalog {
             if normalized_entities.insert(key, entity).is_some() {
                 return Err(DatabaseError::CatalogDeserialize);
             }
+
         }
 
         self.entities = normalized_entities;

@@ -61,17 +61,17 @@ impl ConsoleSession {
             ConsoleCommand::Help => {
                 print_help();
                 Ok(true)
-            }
+            },
 
             ConsoleCommand::Exit => {
                 self.runtime.transport().disconnect_active_peer();
                 Ok(false)
-            }
+            },
 
             ConsoleCommand::ShowP2p => {
                 self.print_p2p_status();
                 Ok(true)
-            }
+            },
 
             ConsoleCommand::ShowPeers => {
                 let peers = self.runtime.transport().discovered_peers();
@@ -94,25 +94,28 @@ impl ConsoleSession {
                     }
                 }
                 Ok(true)
-            }
+            },
 
             ConsoleCommand::ConnectPeer { user, peer_id } => {
                 self.runtime.transport_mut().select_peer(&peer_id)?;
                 self.runtime.transport().connect_active_peer()?;
-                println!("connected session to {}@{}", user, peer_id);
+                println!(
+                    "notification: connection to {} is successful (session {}@{})",
+                    peer_id, user, peer_id
+                );
                 match self.runtime.transport().session_shared_authorization() {
                     Ok(Some(token)) => println!("shared_authorization={}", token),
                     Ok(None) => println!("shared_authorization=<none>"),
                     Err(_) => println!("shared_authorization=<unavailable>"),
                 }
                 Ok(true)
-            }
+            },
 
             ConsoleCommand::Disconnect => {
                 self.runtime.transport().disconnect_active_peer();
                 println!("disconnected active peer session");
                 Ok(true)
-            }
+            },
 
             ConsoleCommand::UseDatabase(database) => {
                 let probe_request = ConnectorRequest::new(
@@ -131,7 +134,7 @@ impl ConsoleSession {
                 self.current_database = database;
                 println!("database switched to {}", self.current_database);
                 Ok(true)
-            }
+            },
 
             ConsoleCommand::Sql(sql) => self.execute_sql(sql),
 
@@ -260,6 +263,25 @@ pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, Stri
     }
 
     let command_text = trimmed.trim_end_matches(';').trim();
+    if command_text.contains('\n') {
+        let lines: Vec<&str> = command_text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        if lines.len() > 1
+            && lines[..lines.len() - 1]
+                .iter()
+                .any(|line| is_console_command_fragment(line))
+        {
+            return Err(
+                "previous console command is missing ';' before starting a new command"
+                    .to_string(),
+            );
+        }
+    }
+
     let lowered = command_text.to_lowercase();
 
     if lowered == "help" || lowered == ".help" {
@@ -305,7 +327,7 @@ pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, Stri
     }
 
     Ok(Some(ConsoleCommand::Sql(sql.to_string())))
-    
+
 }
 
 pub fn print_response(response: &ConnectorResponse) {
@@ -403,6 +425,16 @@ pub fn parse_connect_target(target: &str) -> Result<(String, String), String> {
 
 }
 
+fn is_console_command_fragment(line: &str) -> bool {
+    let lowered = line.to_lowercase();
+
+    matches!(
+        lowered.as_str(),
+        "help" | ".help" | "exit" | "quit" | "\\q" | "show p2p" | "show peers" | "disconnect"
+    ) || lowered.starts_with("use ")
+        || lowered.starts_with("connect ")
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -447,6 +479,12 @@ mod tests {
             parse_console_command("select 1;"),
             Ok(Some(ConsoleCommand::Sql(_)))
         ));
+    }
+
+    #[test]
+    fn parse_rejects_new_command_when_previous_missing_semicolon() {
+        let result = parse_console_command("show peers\nconnect root@server-node-01;");
+        assert!(matches!(result, Err(message) if message.contains("missing ';'")));
     }
 
     #[test]

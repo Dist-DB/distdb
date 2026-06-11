@@ -1,6 +1,7 @@
 
 use super::core::ObjectStatus;
-use super::entity::{DatabaseEntityAspect, DatabaseEntityKind};
+use super::entity_aspect::DatabaseEntityAspect;
+use super::entity_kind::DatabaseEntityKind;
 use super::entity_metadata::EntityMetadata;
 use super::table_schema::TableSchema;
 

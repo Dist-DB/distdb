@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_address = env::args().nth(1).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: console <server-address>",
+            "usage: console <server-address>[:<port>]",
         )
     })?;
 

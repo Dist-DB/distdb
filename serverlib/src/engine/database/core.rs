@@ -8,10 +8,11 @@ pub use super::catalog::DatabaseCatalog;
 pub use super::id::DatabaseId;
 pub use super::replica_state::DatabaseReplicaState;
 pub use super::entity_metadata::EntityMetadata;
-pub use super::entity::{
-	DatabaseEntity, DatabaseEntityAspect, DatabaseEntityKind, DatabaseObjectRef,
-	DatabaseObjectType,
-};
+pub use super::entity::DatabaseEntity;
+pub use super::entity_aspect::DatabaseEntityAspect;
+pub use super::entity_kind::DatabaseEntityKind;
+pub use super::entity_object_ref::DatabaseObjectRef;
+pub use super::entity_object_type::DatabaseObjectType;
 pub use super::index::{DatabaseIndex, IndexId};
 pub use super::relationship::DatabaseRelationship;
 pub use super::schema_change_tx::SchemaChangeTx;

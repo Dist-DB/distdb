@@ -15,6 +15,7 @@ pub struct ClusterState {
 }
 
 impl ClusterState {
+
     pub fn upsert_node(&mut self, node: NodeDescriptor) {
         self.nodes.insert(node.id.clone(), node);
     }
@@ -26,4 +27,5 @@ impl ClusterState {
     pub fn get(&self, id: &NodeId) -> Option<&NodeDescriptor> {
         self.nodes.get(id)
     }
+    
 }
