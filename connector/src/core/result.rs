@@ -1,4 +1,4 @@
-use common::schema::{FieldIndex as CommonFieldIndex, FieldKind};
+use common::schema::{FieldIndex as CommonFieldIndex, FieldKind, FieldMetadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResponseStatus {
@@ -38,6 +38,8 @@ pub struct FieldDef {
     pub nullable: bool,
     pub indexed: FieldIndex,
     pub default_value: Option<Vec<u8>>,
+    #[serde(default)]
+    pub metadata: Option<FieldMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

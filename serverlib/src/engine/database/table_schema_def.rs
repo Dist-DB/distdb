@@ -1,3 +1,4 @@
+
 use common::schema::{normalize_field_name, validate_field_kind};
 
 use super::field_def::FieldDef;
@@ -9,6 +10,7 @@ pub struct TableSchema {
 }
 
 impl TableSchema {
+
     pub fn new(fields: Vec<FieldDef>) -> Self {
         Self { fields }
     }
@@ -21,6 +23,7 @@ impl TableSchema {
     /// Append a new field to the schema. The field name is normalized to
     /// lower-case; callers may pass any casing.
     pub fn add_field(&mut self, mut field: FieldDef) -> SchemaResult<()> {
+
         field.field_name = normalize_field_name(&field.field_name)
             .map_err(|_| SchemaError::InvalidFieldName)?;
         validate_field_kind(&field.field_type).map_err(|_| SchemaError::InvalidFieldType)?;
@@ -35,10 +38,12 @@ impl TableSchema {
 
         self.fields.push(field);
         Ok(())
+
     }
 
     /// Remove a field by name. Returns FieldNotFound when no such field exists.
     pub fn remove_field(&mut self, name: &str) -> SchemaResult<()> {
+
         let normalized = name.trim().to_ascii_lowercase();
         let pos = self
             .fields
@@ -47,27 +52,35 @@ impl TableSchema {
             .ok_or(SchemaError::FieldNotFound)?;
         self.fields.remove(pos);
         Ok(())
+
     }
 
     /// Replace the definition of an existing field (matched by name).
     /// The incoming field_name is normalized and must match a field that
     /// is already in the schema.
     pub fn update_field(&mut self, mut field: FieldDef) -> SchemaResult<()> {
+
         field.field_name = normalize_field_name(&field.field_name)
             .map_err(|_| SchemaError::InvalidFieldName)?;
+        
         validate_field_kind(&field.field_type).map_err(|_| SchemaError::InvalidFieldType)?;
+        
         let target = self
             .fields
             .iter_mut()
             .find(|f| f.field_name == field.field_name)
             .ok_or(SchemaError::FieldNotFound)?;
+        
         *target = field;
         Ok(())
+
     }
+
 }
 
 #[cfg(test)]
 mod tests {
+    
     use super::*;
     use crate::engine::database::field_types::{FieldIndex, FieldType};
 
@@ -79,6 +92,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::None,
             default_value: None,
+            metadata: None,
         }
     }
 
@@ -120,7 +134,9 @@ mod tests {
 
     #[test]
     fn update_field_replaces_existing_definition() {
+        
         let mut schema = TableSchema::new(vec![text_field(1, "email")]);
+        
         let updated = FieldDef {
             seqno: 1,
             field_name: "email".to_string(),
@@ -128,9 +144,13 @@ mod tests {
             nullable: true,
             indexed: FieldIndex::Indexed,
             default_value: None,
+            metadata: None,
         };
+
         schema.update_field(updated.clone()).unwrap();
+        
         assert_eq!(schema.field("email"), Some(&updated));
+
     }
 
     #[test]
@@ -139,4 +159,5 @@ mod tests {
         let err = schema.update_field(text_field(1, "ghost")).unwrap_err();
         assert!(matches!(err, SchemaError::FieldNotFound));
     }
+
 }

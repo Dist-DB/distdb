@@ -6,6 +6,7 @@ use sqlparser::dialect::{GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
 
 use crate::{FieldDef, FieldIndex, FieldType, TableSchema};
+use common::schema::FieldMetadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlCompatibilityTarget {
@@ -188,6 +189,7 @@ pub fn create_table_schema_from_statement(
     let mut fields = Vec::with_capacity(create_table.columns.len());
 
     for (idx, column) in create_table.columns.iter().enumerate() {
+        let metadata = extract_field_metadata(column);
         
         let nullable = !column
             .options
@@ -221,6 +223,7 @@ pub fn create_table_schema_from_statement(
             nullable,
             indexed,
             default_value: None,
+            metadata,
         });
 
     }
@@ -290,15 +293,19 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
         return FieldType::Blob;
     }
     
-    if lowered.contains("char(") {
-        let start = lowered.find("char(").unwrap_or(0) + 5;
-        let end = lowered[start..]
-            .find(')')
-            .map(|i| start + i)
-            .unwrap_or(start);
-        if let Ok(len) = lowered[start..end].trim().parse::<usize>() {
-            return FieldType::StringFixed(len.max(1));
-        }
+    if let Some(len) = parse_sql_type_len(&lowered, "varchar(") {
+        return FieldType::StringFixed(len.max(1));
+    }
+
+    if lowered.contains("varchar") {
+        return FieldType::StringFixed(255);
+    }
+
+    if let Some(len) = parse_sql_type_len(&lowered, "char(") {
+        return FieldType::StringFixed(len.max(1));
+    }
+
+    if lowered.contains("char") {
         return FieldType::StringFixed(32);
     }
     
@@ -308,6 +315,88 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
 
     FieldType::Text
 
+}
+
+fn parse_sql_type_len(lowered_type: &str, marker: &str) -> Option<usize> {
+    let start = lowered_type.find(marker)? + marker.len();
+    let end = lowered_type[start..].find(')')? + start;
+    lowered_type[start..end].trim().parse::<usize>().ok()
+}
+
+fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMetadata> {
+    let mut metadata = FieldMetadata::default();
+
+    for option in &column.options {
+        match &option.option {
+            ColumnOption::Comment(comment) => {
+                metadata.comment = Some(comment.clone());
+            }
+            ColumnOption::CharacterSet(charset) => {
+                metadata.character_set = Some(charset.to_string());
+            }
+            ColumnOption::DialectSpecific(tokens) => {
+                let lowered = tokens
+                    .iter()
+                    .map(|token| token.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase();
+
+                if lowered.contains("auto_increment") || lowered.contains("autoincrement") {
+                    metadata.auto_increment = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if metadata.collation.is_none() {
+        metadata.collation = extract_collation_from_column(column);
+    }
+
+    if metadata.comment.is_none()
+        && !metadata.auto_increment
+        && metadata.character_set.is_none()
+        && metadata.collation.is_none()
+    {
+        return None;
+    }
+
+    Some(metadata)
+}
+
+fn extract_collation_from_tokens(tokens: &[sqlparser::tokenizer::Token]) -> Option<String> {
+    
+    let rendered = tokens
+        .iter()
+        .map(|token| token.to_string())
+        .collect::<Vec<_>>();
+
+    for idx in 0..rendered.len() {
+        if rendered[idx].eq_ignore_ascii_case("collate") {
+            return rendered.get(idx + 1).cloned();
+        }
+    }
+
+    None
+}
+
+fn extract_collation_from_column(column: &sqlparser::ast::ColumnDef) -> Option<String> {
+    let rendered = column.to_string();
+    let segments = rendered.split_whitespace().collect::<Vec<_>>();
+    for idx in 0..segments.len() {
+        if segments[idx].eq_ignore_ascii_case("collate") {
+            return segments.get(idx + 1).map(|value| {
+                value
+                    .trim_matches('`')
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim_end_matches(',')
+                    .to_string()
+            });
+        }
+    }
+    None
 }
 
 fn classify_statement(
@@ -425,6 +514,11 @@ fn classify_statement(
             Some(obj_name.to_string()),
         ),
         Statement::ShowColumns { table_name, .. } => (
+            SqlDirective::Retrieve,
+            SqlOperation::Select,
+            Some(table_name.to_string()),
+        ),
+        Statement::ExplainTable { table_name, .. } => (
             SqlDirective::Retrieve,
             SqlOperation::Select,
             Some(table_name.to_string()),
@@ -899,6 +993,57 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::Retrieve);
         assert_eq!(requests[0].operation, SqlOperation::Select);
         assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn describe_table_maps_to_retrieve_operation() {
+        let requests = parse_mysql8_sql_requests("describe users", "main")
+            .expect("describe should parse");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+        assert_eq!(requests[0].operation, SqlOperation::Select);
+        assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn create_table_schema_maps_varchar_with_length() {
+        let (_, schema) = create_table_schema_from_statement(
+            "create table users (email varchar(34) not null)",
+        )
+        .expect("create table schema should parse");
+
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields[0].field_name, "email");
+        assert_eq!(schema.fields[0].field_type, FieldType::StringFixed(34));
+        assert!(!schema.fields[0].nullable);
+    }
+
+    #[test]
+    fn create_table_schema_captures_auto_increment_and_encoding_metadata() {
+        let (_, schema) = create_table_schema_from_statement(
+            "create table users (id bigint not null auto_increment primary key, username varchar(34) character set utf8mb3 collate utf8mb3_general_ci comment 'login handle')",
+        )
+        .expect("auto increment and encoding metadata should parse");
+
+        assert_eq!(schema.fields.len(), 2);
+
+        let id_metadata = schema.fields[0]
+            .metadata
+            .as_ref()
+            .expect("id field should include metadata");
+        assert!(id_metadata.auto_increment);
+
+        let username_metadata = schema.fields[1]
+            .metadata
+            .as_ref()
+            .expect("username field should include metadata");
+        assert_eq!(username_metadata.character_set.as_deref(), Some("utf8mb3"));
+        assert_eq!(
+            username_metadata.collation.as_deref(),
+            Some("utf8mb3_general_ci")
+        );
+        assert_eq!(username_metadata.comment.as_deref(), Some("login handle"));
     }
 
     #[test]

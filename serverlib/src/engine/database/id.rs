@@ -5,6 +5,7 @@ use super::core::{DatabaseError, DatabaseResult};
 pub struct DatabaseId(pub String);
 
 impl DatabaseId {
+    
     pub fn from_database_name(name: &str) -> DatabaseResult<Self> {
         let normalized = common::normalize_identifier!(name);
         if normalized.is_empty() {
@@ -12,6 +13,7 @@ impl DatabaseId {
         }
         Ok(Self(common::helpers::stable_id(&[&normalized])))
     }
+
 }
 
 #[cfg(test)]

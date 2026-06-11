@@ -22,6 +22,7 @@ pub struct SchemaChangeTx {
 }
 
 impl SchemaChangeTx {
+
     pub(crate) fn new(table_id: String, next_revision: u64, pending_schema: TableSchema) -> Self {
         Self {
             table_id,
@@ -91,4 +92,5 @@ impl SchemaChangeTx {
     pub fn abort(self, catalog: &mut DatabaseCatalog) -> DatabaseResult<()> {
         catalog.release_schema_lock(&self.table_id)
     }
+    
 }

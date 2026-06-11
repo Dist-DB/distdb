@@ -1,4 +1,5 @@
 use super::field_types::{FieldIndex, FieldType};
+use common::schema::FieldMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FieldDef {
@@ -8,4 +9,6 @@ pub struct FieldDef {
     pub nullable: bool,
     pub indexed: FieldIndex,
     pub default_value: Option<Vec<u8>>,
+    #[serde(default)]
+    pub metadata: Option<FieldMetadata>,
 }

@@ -1,4 +1,4 @@
-use common::schema::{FieldIndex, FieldKind};
+use common::schema::{FieldIndex, FieldKind, FieldMetadata};
 
 /// The data type a client assigns to a field.
 ///
@@ -17,6 +17,8 @@ pub struct FieldSpec {
     pub nullable: bool,
     pub indexed: FieldIndex,
     pub default_value: Option<Vec<u8>>,
+    #[serde(default)]
+    pub metadata: Option<FieldMetadata>,
 }
 
 impl FieldSpec {
@@ -27,6 +29,7 @@ impl FieldSpec {
             nullable: false,
             indexed: FieldIndex::None,
             default_value: None,
+            metadata: None,
         }
     }
 

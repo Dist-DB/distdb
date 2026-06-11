@@ -320,6 +320,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }]),
             )
             .expect("base table should register");
@@ -335,6 +336,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
+        metadata: None,
         }]);
 
         let payload = SchemaChangePayload {
@@ -401,6 +403,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }]),
             )
             .expect("base table should register");
@@ -560,6 +563,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::None,
                         default_value: None,
+                    metadata: None,
                     },
                     FieldDef {
                         seqno: 2,
@@ -568,6 +572,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::Indexed,
                         default_value: None,
+                    metadata: None,
                     },
                 ]),
             )
@@ -635,6 +640,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }]),
             )
             .expect("users table should register");
@@ -649,6 +655,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }]),
             )
             .expect("accounts table should register");
@@ -732,6 +739,76 @@ mod tests {
         assert_eq!(schema.fields[0].field_name, "id");
         assert_eq!(schema.fields[0].indexed, FieldIndex::PrimaryKey);
         assert_eq!(schema.fields[1].field_name, "email");
+    }
+
+    #[test]
+    fn describe_table_query_returns_schema_rows() {
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-describe-table-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let create_request = ConnectorRequest::new(
+            "req-create-table-2",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email varchar(255))"
+                        .to_string(),
+                },
+            },
+        );
+
+        let create_response = app.handle_connector_request(&create_request);
+        assert_eq!(create_response.status, ResponseStatus::Applied);
+
+        let describe_request = ConnectorRequest::new(
+            "req-describe-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "describe users".to_string(),
+                },
+            },
+        );
+
+        let describe_response = app.handle_connector_request(&describe_request);
+        assert_eq!(describe_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = describe_response.result else {
+            panic!("expected query result");
+        };
+
+        let column_names = result
+            .columns
+            .iter()
+            .map(|field| field.field_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(column_names, vec!["field", "type", "null", "key", "default"]);
+        assert_eq!(result.rows.len(), 2);
+
+        let first_row = result
+            .rows
+            .first()
+            .expect("describe should return first row");
+        assert_eq!(String::from_utf8_lossy(&first_row[0]), "id");
+        assert_eq!(String::from_utf8_lossy(&first_row[3]), "PRI");
+
+        let second_row = result
+            .rows
+            .get(1)
+            .expect("describe should return second row");
+        assert_eq!(String::from_utf8_lossy(&second_row[0]), "email");
     }
 
     #[test]
@@ -866,6 +943,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }]),
             )
             .expect("users table should register");
@@ -987,6 +1065,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }]),
             )
             .expect("users table should register");
@@ -1001,6 +1080,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }]),
             )
             .expect("accounts table should register");
@@ -1071,6 +1151,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::None,
                         default_value: None,
+                    metadata: None,
                     },
                     FieldDef {
                         seqno: 2,
@@ -1079,6 +1160,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::Indexed,
                         default_value: None,
+                    metadata: None,
                     },
                 ]),
             )
@@ -1152,6 +1234,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::None,
                         default_value: None,
+                    metadata: None,
                     },
                     FieldDef {
                         seqno: 2,
@@ -1160,6 +1243,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::Indexed,
                         default_value: None,
+                    metadata: None,
                     },
                 ]),
             )

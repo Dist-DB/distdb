@@ -358,6 +358,7 @@ fn execute_drop_entity_object(
     wal: &ConcurrentWalManager,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(object_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -429,6 +430,7 @@ fn execute_drop_entity_object(
     let timestamp = common::epochabs!() as u64;
 
     if object_type == DatabaseObjectType::Table {
+        
         let lifecycle_payload = TableLifecyclePayload {
             table_id: normalized_object_id,
             action: TableLifecycleAction::Drop,
@@ -458,7 +460,9 @@ fn execute_drop_entity_object(
                 format!("drop table lifecycle WAL append failed: {err}"),
             );
         }
+
     } else {
+
         let sql_payload = SqlDefinitionPayload {
             object_id: normalized_object_id,
             object_kind: sql_object_kind.expect("sql object kind should be present for non-table drop"),
@@ -490,12 +494,14 @@ fn execute_drop_entity_object(
                 format!("drop sql definition WAL append failed: {err}"),
             );
         }
+
     }
 
     ConnectorResponse::applied(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+
 }
 
 fn execute_select(
@@ -505,7 +511,9 @@ fn execute_select(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    if statement.sql.to_ascii_lowercase().starts_with("show databases") {
+    let statement_sql_lower = statement.sql.to_ascii_lowercase();
+
+    if statement_sql_lower.starts_with("show databases") {
         let mut database_ids = catalogs.keys().cloned().collect::<Vec<_>>();
         database_ids.sort();
 
@@ -524,6 +532,7 @@ fn execute_select(
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }],
                 rows,
                 timings: empty_query_timings(),
@@ -532,7 +541,7 @@ fn execute_select(
 
     }
 
-    if statement.sql.to_ascii_lowercase().starts_with("show tables") {
+    if statement_sql_lower.starts_with("show tables") {
 
         let target_db = statement
             .object_name
@@ -564,6 +573,7 @@ fn execute_select(
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
+                metadata: None,
                 }],
                 rows,
                 timings: empty_query_timings(),
@@ -578,6 +588,107 @@ fn execute_select(
             format!("database '{}' not found", query.database_id),
         );
     };
+
+    if statement_sql_lower.starts_with("describe ")
+        || statement_sql_lower.starts_with("desc ")
+        || statement_sql_lower.starts_with("show columns")
+    {
+        let Some(object_name) = statement.object_name.as_deref() else {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                "describe/show columns missing table identifier",
+            );
+        };
+
+        let table_id = object_name.rsplit('.').next().unwrap_or(object_name);
+        let Some(schema) = catalog.table_schema(table_id) else {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("table '{}' not found in database '{}'", table_id, query.database_id),
+            );
+        };
+
+        let rows = schema
+            .fields
+            .iter()
+            .map(|field| {
+                let nullable = if field.nullable { "YES" } else { "NO" };
+                let key = match field.indexed {
+                    FieldIndex::PrimaryKey => "PRI",
+                    FieldIndex::Indexed => "MUL",
+                    FieldIndex::None => "",
+                };
+                let default_value = field
+                    .default_value
+                    .as_ref()
+                    .map(|value| String::from_utf8_lossy(value).to_string())
+                    .unwrap_or_else(|| "NULL".to_string());
+
+                vec![
+                    field.field_name.clone().into_bytes(),
+                    format!("{:?}", field.field_type).into_bytes(),
+                    nullable.as_bytes().to_vec(),
+                    key.as_bytes().to_vec(),
+                    default_value.into_bytes(),
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        return ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Query(QueryResult {
+                columns: vec![
+                    FieldDef {
+                        seqno: 1,
+                        field_name: "field".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                    metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 2,
+                        field_name: "type".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                    metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 3,
+                        field_name: "null".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                    metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 4,
+                        field_name: "key".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                    metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 5,
+                        field_name: "default".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                    metadata: None,
+                    },
+                ],
+                rows,
+                timings: empty_query_timings(),
+            }),
+        );
+    }
 
     let Some(object_name) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
@@ -604,6 +715,7 @@ fn execute_select(
             nullable: field.nullable,
             indexed: field.indexed,
             default_value: field.default_value.clone(),
+            metadata: field.metadata.clone(),
         })
         .collect::<Vec<_>>();
 

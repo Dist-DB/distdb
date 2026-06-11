@@ -10,6 +10,7 @@ pub struct SchemaChangePayload {
 }
 
 impl SchemaChangePayload {
+    
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
         bincode::serialize(self).map_err(|_| "failed to serialize schema change payload")
     }
@@ -17,4 +18,5 @@ impl SchemaChangePayload {
     pub fn decode(payload: &[u8]) -> Result<Self, &'static str> {
         bincode::deserialize(payload).map_err(|_| "failed to deserialize schema change payload")
     }
+
 }

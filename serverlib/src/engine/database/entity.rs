@@ -48,6 +48,7 @@ pub enum DatabaseObjectRef<'a> {
 }
 
 impl<'a> DatabaseObjectRef<'a> {
+
     pub fn object_type(&self) -> DatabaseObjectType {
         match self {
             Self::Table(_) => DatabaseObjectType::Table,
@@ -58,6 +59,7 @@ impl<'a> DatabaseObjectRef<'a> {
             Self::Index(_) => DatabaseObjectType::Index,
         }
     }
+    
 }
 
 pub trait DatabaseEntityAspect {

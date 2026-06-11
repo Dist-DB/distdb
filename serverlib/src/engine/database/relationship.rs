@@ -13,6 +13,7 @@ pub struct DatabaseRelationship {
 }
 
 impl DatabaseRelationship {
+    
     pub fn new(left_table_id: String, right_table_id: String, relation_name: String) -> Self {
         Self {
             left_table_id,
@@ -21,6 +22,7 @@ impl DatabaseRelationship {
             metadata: EntityMetadata::default(),
         }
     }
+
 }
 
 impl DatabaseEntityAspect for DatabaseRelationship {

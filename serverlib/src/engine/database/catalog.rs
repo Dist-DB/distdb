@@ -51,6 +51,7 @@ impl DatabaseCatalog {
     }
 
     pub fn create_new_database(name: &str, directory: impl AsRef<Path>) -> DatabaseResult<Self> {
+        
         let mut catalog = Self::create_empty_from_name(name)?;
         catalog.transition_status(ObjectStatus::Sync)?;
         catalog.save_in_directory(&directory)?;
@@ -61,7 +62,9 @@ impl DatabaseCatalog {
 
         catalog.transition_status(ObjectStatus::Ready)?;
         catalog.save_in_directory(directory)?;
+        
         Ok(catalog)
+
     }
 
     pub fn register_table(
@@ -69,6 +72,7 @@ impl DatabaseCatalog {
         table_id: impl Into<String>,
         schema: TableSchema,
     ) -> DatabaseResult<()> {
+
         let table_id = common::normalize_identifier!(table_id.into());
 
         if self.entities.contains_key(&table_id) {
@@ -111,6 +115,7 @@ impl DatabaseCatalog {
         object_type: DatabaseObjectType,
         object_id: &str,
     ) -> DatabaseResult<()> {
+
         let normalized = common::normalize_identifier!(object_id);
 
         let removed = match object_type {
@@ -199,28 +204,34 @@ impl DatabaseCatalog {
         let normalized = common::normalize_identifier!(object_id);
         
         match object_type {
+
             DatabaseObjectType::Table => match self.entities.get(&normalized) {
                 Some(DatabaseEntity::Table(table)) => Some(DatabaseObjectRef::Table(table)),
                 _ => None,
             },
+            
             DatabaseObjectType::View => match self.entities.get(&normalized) {
                 Some(DatabaseEntity::View(view)) => Some(DatabaseObjectRef::View(view)),
                 _ => None,
             },
+            
             DatabaseObjectType::Relationship => self.entities.get(&normalized).and_then(|entity| match entity {
                 DatabaseEntity::Relationship(relationship) => Some(DatabaseObjectRef::Relationship(relationship)),
                 _ => None,
             }),
+            
             DatabaseObjectType::Trigger => match self.entities.get(&normalized) {
                 Some(DatabaseEntity::Trigger(trigger)) => Some(DatabaseObjectRef::Trigger(trigger)),
                 _ => None,
             },
+
             DatabaseObjectType::StoredProcedure => match self.entities.get(&normalized) {
                 Some(DatabaseEntity::StoredProcedure(procedure)) => {
                     Some(DatabaseObjectRef::StoredProcedure(procedure))
                 }
                 _ => None,
             },
+
             DatabaseObjectType::Index => {
                 self.entities.values().find_map(|entity| match entity {
                     DatabaseEntity::Table(table) => table
@@ -230,6 +241,7 @@ impl DatabaseCatalog {
                     _ => None,
                 })
             }
+
         }
         
     }
@@ -326,6 +338,7 @@ impl DatabaseCatalog {
     /// owns the pending schema mutations. The table stays locked until the
     /// returned transaction is either committed or aborted.
     pub fn begin_schema_change(&mut self, table_id: &str) -> DatabaseResult<SchemaChangeTx> {
+
         let table_id = common::normalize_identifier!(table_id);
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
 
@@ -378,8 +391,8 @@ impl DatabaseCatalog {
         if self.table(&table_id).is_none() {
             self.register_table(table_id.clone(), payload.schema.clone())?;
         }
-        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
 
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         if payload.schema_revision <= table.schema_revision() {
             return Err(DatabaseError::SchemaRevisionOutOfOrder);
         }
@@ -393,6 +406,7 @@ impl DatabaseCatalog {
     }
 
     pub fn apply_table_lifecycle(&mut self, payload: TableLifecyclePayload) -> DatabaseResult<()> {
+
         if !self.should_apply_schema_epoch(payload.schema_epoch) {
             return Ok(());
         }
@@ -416,6 +430,7 @@ impl DatabaseCatalog {
                 Err(e) => Err(e),
             },
         }
+
     }
 
     pub fn apply_entity_metadata(&mut self, payload: EntityMetadataPayload) -> DatabaseResult<()> {
@@ -443,11 +458,14 @@ impl DatabaseCatalog {
         entity_id: impl Into<String>,
         metadata: super::entity_metadata::EntityMetadata,
     ) -> DatabaseResult<()> {
+
         let payload = EntityMetadataPayload {
             entity_id: entity_id.into(),
             metadata,
         };
+        
         self.apply_entity_metadata(payload)
+    
     }
 
     pub fn apply_sql_definition(&mut self, payload: SqlDefinitionPayload) -> DatabaseResult<()> {
@@ -577,6 +595,7 @@ impl DatabaseCatalog {
         sql: impl Into<String>,
         dependencies: Vec<String>,
     ) -> DatabaseResult<()> {
+
         let payload = SqlDefinitionPayload {
             object_id: object_id.into(),
             object_kind,
@@ -585,7 +604,9 @@ impl DatabaseCatalog {
             sql: sql.into(),
             dependencies,
         };
+        
         self.apply_sql_definition(payload)
+    
     }
 
     pub fn replay_schema_from_log<L: TransactionLog>(
@@ -593,6 +614,7 @@ impl DatabaseCatalog {
         wal_id: &str,
         log: &L,
     ) -> DatabaseResult<usize> {
+
         let mut applied = 0usize;
 
         for record in log.since(wal_id, None) {
@@ -607,6 +629,7 @@ impl DatabaseCatalog {
         }
 
         Ok(applied)
+
     }
 
     pub fn replay_entity_construction_from_log<L: TransactionLog>(
@@ -648,6 +671,7 @@ impl DatabaseCatalog {
                     self.apply_sql_definition(payload)?;
                     applied += 1;
                 }
+
                 _ => {}
             
             }
@@ -706,6 +730,7 @@ impl DatabaseCatalog {
         sql: impl Into<String>,
         schema: TableSchema,
     ) -> DatabaseResult<()> {
+
         let view_id = common::normalize_identifier!(view_id.into());
 
         if self.entities.contains_key(&view_id) {
@@ -746,6 +771,7 @@ impl DatabaseCatalog {
         sql: impl Into<String>,
         dependencies: Vec<String>,
     ) -> DatabaseResult<()> {
+
         let trigger_id = common::normalize_identifier!(trigger_id.into());
 
         if self.entities.contains_key(&trigger_id) {
@@ -793,6 +819,7 @@ impl DatabaseCatalog {
         sql: impl Into<String>,
         dependencies: Vec<String>,
     ) -> DatabaseResult<()> {
+
         let procedure_id = common::normalize_identifier!(procedure_id.into());
 
         if self.entities.contains_key(&procedure_id) {
@@ -811,6 +838,7 @@ impl DatabaseCatalog {
         self.bump_schema_epoch();
 
         Ok(())
+
     }
 
     pub fn stored_procedure(&self, procedure_id: &str) -> Option<&DatabaseStoredProcedure> {
@@ -980,7 +1008,9 @@ impl DatabaseCatalog {
     }
 
     fn normalize_loaded_entities(&mut self) -> DatabaseResult<()> {
+
         let mut normalized_entities = HashMap::with_capacity(self.entities.len());
+        
         for (_, mut entity) in std::mem::take(&mut self.entities) {
             entity.normalize_in_place();
 
@@ -995,7 +1025,9 @@ impl DatabaseCatalog {
         }
 
         self.entities = normalized_entities;
+        
         Ok(())
+
     }
 }
 
@@ -1197,6 +1229,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
+        metadata: None,
         })
         .expect("add_field should succeed");
 
@@ -1228,6 +1261,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::None,
             default_value: None,
+        metadata: None,
         }]);
         catalog
             .create_table("users", initial_schema.clone())
@@ -1299,6 +1333,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::None,
             default_value: None,
+        metadata: None,
         }]);
 
         let first_payload = SchemaChangePayload {
@@ -1328,6 +1363,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
+        metadata: None,
         }]);
 
         let second_payload = SchemaChangePayload {
@@ -1754,6 +1790,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
+        metadata: None,
         }]);
 
         catalog
@@ -1789,6 +1826,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
+        metadata: None,
         }]);
 
         catalog
@@ -1862,6 +1900,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
+        metadata: None,
         }]);
 
         catalog
