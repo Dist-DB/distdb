@@ -92,6 +92,7 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
         let temp_path = self
             .data_dir
             .join(format!("{}.migrate.tmp", common::helpers::format::FileKind::Data.file_name(&stream_key)));
+        
         let backup_path = self
             .data_dir
             .join(format!("{}.migrate.bak", common::helpers::format::FileKind::Data.file_name(&stream_key)));
@@ -216,6 +217,7 @@ mod tests {
 
     #[test]
     fn noop_executor_returns_empty_progress() {
+        
         let executor = NoopSchemaMigrationExecutor;
         let progress = executor
             .rewrite_rows(&DatabaseCatalog::create_empty_from_name("test").unwrap(), "test_table")
@@ -224,6 +226,7 @@ mod tests {
         assert_eq!(progress.rows_rewritten, 0);
         assert_eq!(progress.rows_total, Some(0));
         assert!(progress.resume_token.is_none());
+
     }
 
     #[test]
@@ -245,7 +248,7 @@ mod tests {
                 SchemaMutationRuleSet::default(),
             )
             .expect("should set rules");
-        
+
     }
 
 }
