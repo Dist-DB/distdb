@@ -34,13 +34,25 @@ cd ./console
 './debug.sh'
 ```
 
-When the console loads, use the following directives
+When the console loads, use the following directives (if this is the first time)
 
 ```bash
-connect server-node-01;
+connect root@server-node-01;
+password password;
 create database main;
-use main;
 show databases;
+use main;
+disconnect;
+```
+
+If the table is already created
+
+```bash
+connect root@server-node-01;
+password password;
+show databases;
+use main;
+show tables;
 disconnect;
 ```
 

@@ -1,13 +1,149 @@
+
 use server::core::app::ServerApp;
 use server::core::config::ServerRuntimeConfig;
 
-use connector::{ConnectorRequest, ConnectorResponse};
+use connector::{
+    ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult,
+    MutationResult,
+};
+use common::{PeerSession, SessionLog, SessionLogEventType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
+
+// we change these later (accessing the database structures...)
+
+const SERVER_TEMP_PASSWORD: &str = "password";
+const SERVER_TEMP_USER: &str = "root";
+
+
+#[derive(Debug)]
+struct ServerConnectionSession {
+    peer_addr: String,
+    challenge_id: String,
+    session: PeerSession,
+    log: SessionLog,
+    authenticated: bool,
+}
+
+impl ServerConnectionSession {
+
+    fn new(peer_addr: String, connection_id: usize) -> Self {
+
+        let challenge_id = format!("challenge-{}-{connection_id}", now_millis());
+        let session = PeerSession::new().with_user_id(SERVER_TEMP_USER);
+        let mut log = SessionLog::new();
+        
+        log.add_entry(
+            SessionLogEventType::Connect,
+            format!("connector peer connected from {peer_addr}"),
+            true,
+        );
+        
+        log.add_entry(
+            SessionLogEventType::Authenticate,
+            format!(
+                "password challenge issued id={challenge_id} user={}",
+                SERVER_TEMP_USER
+            ),
+            true,
+        );
+
+        Self {
+            peer_addr,
+            challenge_id,
+            session,
+            log,
+            authenticated: false,
+        }
+
+    }
+
+    fn challenge_message(&self) -> String {
+        format!(
+            "password challenge required challenge_id={} peer={}"
+            ,
+            self.challenge_id,
+            self.peer_addr
+        )
+    }
+
+    fn record_request(&mut self, request: &ConnectorRequest) {
+
+        let event_type = match &request.command {
+
+            ConnectorCommand::Query { query } => {
+                self.session.current_database = Some(query.database_id.clone());
+                SessionLogEventType::QueryExecute
+            }
+
+            ConnectorCommand::Schema { database_id, .. } => {
+                self.session.current_database = Some(database_id.clone());
+                SessionLogEventType::SchemaChange
+            }
+
+            ConnectorCommand::Mutation { database_id, .. } => {
+                self.session.current_database = Some(database_id.clone());
+                SessionLogEventType::Other
+            }
+
+            ConnectorCommand::CreateDatabase { database_name } => {
+                self.session.current_database = Some(database_name.clone());
+                SessionLogEventType::Other
+            }
+
+        };
+
+        self.log.add_entry(
+            event_type,
+            format!(
+                "request_id={} routed by server session db={}",
+                request.request_id,
+                self.session
+                    .current_database
+                    .as_deref()
+                    .unwrap_or("<none>")
+            ),
+            true,
+        );
+
+    }
+
+    fn mark_disconnect(&mut self) {
+        self.log.add_entry(
+            SessionLogEventType::Disconnect,
+            "connector peer disconnected",
+            true,
+        );
+    }
+
+    fn authenticate_if_valid(&mut self, candidate_password: &str) -> bool {
+
+        if candidate_password == SERVER_TEMP_PASSWORD {
+            self.authenticated = true;
+            self.session.auth_token = Some(format!("{}-authenticated", SERVER_TEMP_USER));
+            self.log.add_entry(
+                SessionLogEventType::Authenticate,
+                format!("temporary password accepted user={}", SERVER_TEMP_USER),
+                true,
+            );
+            true
+        } else {
+            self.log.add_entry(
+                SessionLogEventType::Authenticate,
+                format!("temporary password rejected user={}", SERVER_TEMP_USER),
+                false,
+            );
+            false
+        }
+
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,9 +186,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_for_listener = Arc::clone(&app);
     let active_connections = Arc::new(AtomicUsize::new(0));
     let active_connections_for_listener = Arc::clone(&active_connections);
+    
     tokio::spawn(async move {
+
         loop {
+
             match listener.accept().await {
+
                 Ok((stream, peer_addr)) => {
                     let connection_id =
                         active_connections_for_listener.fetch_add(1, Ordering::SeqCst) + 1;
@@ -65,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let active_connections = Arc::clone(&active_connections_for_listener);
                     tokio::spawn(async move {
                         if let Err(err) =
-                            handle_connector_stream(stream, app, peer_addr.to_string()).await
+                            handle_connector_stream(stream, app, peer_addr.to_string(), connection_id).await
                         {
                             log::warn!(
                                 "connector stream handling failed for {}: {}",
@@ -81,11 +221,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     });
                 }
+                
                 Err(err) => {
                     log::warn!("listener accept failed: {}", err);
                 }
+
             }
+        
         }
+
     });
 
     log::info!("server process is running; press Ctrl+C to shutdown");
@@ -94,17 +238,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     app.lock().await.shutdown()?;
     Ok(())
+
 }
 
 async fn handle_connector_stream(
     mut stream: TcpStream,
     app: Arc<Mutex<ServerApp>>,
     peer_addr: String,
+    connection_id: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
+    let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
+    
+    write_response_frame(
+        &mut stream,
+        ConnectorResponse::rejected(
+            SERVER_PASSWORD_CHALLENGE_REQUEST_ID,
+            session.challenge_message(),
+        ),
+    )
+    .await?;
+
     loop {
+
         let mut len_buf = [0u8; 4];
         if let Err(err) = stream.read_exact(&mut len_buf).await {
             if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                session.mark_disconnect();
                 return Ok(());
             }
             return Err(Box::new(err));
@@ -121,13 +281,65 @@ async fn handle_connector_stream(
             peer_addr
         );
 
+        if !session.authenticated {
+            let auth_outcome = match &request.command {
+                ConnectorCommand::Query { query } => {
+                    extract_auth_password(&query.sql).map(|password| {
+                        session.authenticate_if_valid(password)
+                    })
+                }
+                _ => None,
+            };
+
+            let response = match auth_outcome {
+                Some(true) => ConnectorResponse::applied(
+                    request.request_id,
+                    ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+                ),
+                Some(false) => ConnectorResponse::rejected(
+                    request.request_id,
+                    "invalid password",
+                ),
+                None => ConnectorResponse::rejected(
+                    request.request_id,
+                    "authentication required; run `password <password>;` first",
+                ),
+            };
+
+            write_response_frame(&mut stream, response).await?;
+            continue;
+            
+        }
+
+        session.record_request(&request);
+
         let response = {
             let mut app = app.lock().await;
             app.handle_connector_request(&request)
         };
 
         write_response_frame(&mut stream, response).await?;
+    
     }
+
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn extract_auth_password(sql: &str) -> Option<&str> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next()?;
+    let password = parts.next()?;
+    if command.eq_ignore_ascii_case("password") {
+        return Some(password);
+    }
+    None
 }
 
 async fn write_response_frame(

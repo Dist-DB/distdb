@@ -1,4 +1,7 @@
-use crate::core::{ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorTransport};
+use crate::core::{
+    ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorResult,
+    ConnectorTransport, ResponseStatus,
+};
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -6,6 +9,8 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
 use common::DEFAULT_SERVER_PORT;
+
+const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectorDiscoveryMode {
@@ -284,8 +289,25 @@ fn ensure_live_connection(
     };
 
     let socket_addr = normalize_peer_addr(addr);
-    let stream = TcpStream::connect(&socket_addr)
+    let mut stream = TcpStream::connect(&socket_addr)
         .map_err(|e| ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}")))?;
+
+    let challenge = read_response_frame(&mut stream)?;
+    if challenge.request_id != SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
+        return Err(ConnectorError::InvalidResponse(format!(
+            "missing server password challenge on connect; received request_id='{}'",
+            challenge.request_id
+        )));
+    }
+
+    match (&challenge.status, &challenge.result) {
+        (ResponseStatus::Rejected, ConnectorResult::Error(_message)) => {}
+        _ => {
+            return Err(ConnectorError::InvalidResponse(
+                "server challenge frame had unexpected status/result".to_string(),
+            ));
+        }
+    }
 
     log::info!(
         "connector transport established persistent stream peer={} addr={}",
@@ -315,6 +337,10 @@ fn send_request_frame(
         .and_then(|_| stream.write_all(&payload))
         .map_err(|e| ConnectorError::Transport(format!("failed to write request: {e}")))?;
 
+    read_response_frame(stream)
+}
+
+fn read_response_frame(stream: &mut TcpStream) -> Result<ConnectorResponse, ConnectorError> {
     let mut response_len_buf = [0u8; 4];
     stream
         .read_exact(&mut response_len_buf)

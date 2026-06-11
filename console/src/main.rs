@@ -8,12 +8,14 @@ use connector::{
 use std::env;
 use std::io::{self, Write};
 
+const TEMP_CONNECT_USER: &str = "root";
+
 enum ConsoleCommand {
     Help,
     Exit,
     ShowP2p,
     ShowPeers,
-    ConnectPeer(String),
+    ConnectPeer { user: String, peer_id: String },
     Disconnect,
     UseDatabase(String),
     Sql(String),
@@ -86,10 +88,10 @@ impl ConsoleSession {
                 }
                 Ok(true)
             }
-            ConsoleCommand::ConnectPeer(peer_id) => {
+            ConsoleCommand::ConnectPeer { user, peer_id } => {
                 self.runtime.transport_mut().select_peer(&peer_id)?;
                 self.runtime.transport().connect_active_peer()?;
-                println!("connected session to peer={}", peer_id);
+                println!("connected session to {}@{}", user, peer_id);
                 Ok(true)
             }
             ConsoleCommand::Disconnect => {
@@ -184,6 +186,11 @@ fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> 
         return Ok(None);
     }
 
+    // Require commands to end with semicolon
+    if !trimmed.ends_with(';') {
+        return Ok(None);
+    }
+
     let command_text = trimmed.trim_end_matches(';').trim();
     let lowered = command_text.to_lowercase();
     if lowered == "help" || lowered == ".help" {
@@ -208,15 +215,17 @@ fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> 
         }
         return Ok(Some(ConsoleCommand::UseDatabase(database_name.to_string())));
     }
-    if let Some(peer_id) = command_text.strip_prefix("connect ") {
-        let peer_id = peer_id.trim();
-        if peer_id.is_empty() {
+    if let Some(target) = command_text.strip_prefix("connect ") {
+        let target = target.trim();
+        if target.is_empty() {
             return Err("connect requires a peer id".to_string());
         }
-        return Ok(Some(ConsoleCommand::ConnectPeer(peer_id.to_string())));
+
+        let (user, peer_id) = parse_connect_target(target)?;
+        return Ok(Some(ConsoleCommand::ConnectPeer { user, peer_id }));
     }
 
-    let sql = trimmed.trim_end_matches(';').trim();
+    let sql = command_text.trim();
     if sql.is_empty() {
         return Ok(None);
     }
@@ -277,12 +286,31 @@ fn print_help() {
     println!("distdb console commands:");
     println!("  help | .help              show this message");
     println!("  exit | quit | \\q          leave console");
-    println!("  use <database>            switch active database");
-    println!("  show p2p                  display connector/server p2p stack status");
-    println!("  show peers                list discovered p2p peers (* = active)");
-    println!("  connect <peer-id>         switch session to a discovered peer");
-    println!("  disconnect                close the active peer session connection");
-    println!("  <sql>                     run one or more SQL statements");
+    println!("  use <database>;           switch active database");
+    println!("  show p2p;                 display connector/server p2p stack status");
+    println!("  show peers;               list discovered p2p peers (* = active)");
+    println!("  connect <user@peer-id>;   switch session to a discovered peer");
+    println!("  disconnect;               close the active peer session connection");
+    println!("  <sql>;                    run SQL statements (multi-line supported)");
+    println!();
+    println!("Note: all commands must end with ';' to execute");
+}
+
+fn parse_connect_target(target: &str) -> Result<(String, String), String> {
+    let Some((user, peer_id)) = target.split_once('@') else {
+        return Err("connect requires format user@peer-id".to_string());
+    };
+
+    let user = user.trim();
+    let peer_id = peer_id.trim();
+    if user.is_empty() || peer_id.is_empty() {
+        return Err("connect requires format user@peer-id".to_string());
+    }
+    if user != TEMP_CONNECT_USER {
+        return Err("invalid user".to_string());
+    }
+
+    Ok((user.to_string(), peer_id.to_string()))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -299,7 +327,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("distdb console");
     println!("type help for commands, or \\q to quit");
+    println!("all commands must end with ';' to execute");
 
+    let mut accumulated_command = String::new();
     loop {
         print!("distdb:{}> ", session.current_database);
         io::stdout().flush()?;
@@ -307,12 +337,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut line = String::new();
         let bytes_read = io::stdin().read_line(&mut line)?;
         if bytes_read == 0 {
+            if !accumulated_command.trim().is_empty() {
+                accumulated_command.clear();
+                println!("aborted pending command");
+                continue;
+            }
             println!();
             break;
         }
 
-        match parse_console_command(&line) {
+        accumulated_command.push_str(&line);
+
+        match parse_console_command(&accumulated_command) {
             Ok(Some(command)) => {
+                accumulated_command.clear();
                 match session.execute(command) {
                     Ok(should_continue) => {
                         if !should_continue {
@@ -325,7 +363,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(None) => {}
-            Err(error) => println!("error: {error}"),
+            Err(error) => {
+                accumulated_command.clear();
+                println!("error: {error}");
+            }
         }
     }
 
