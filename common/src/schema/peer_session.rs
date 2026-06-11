@@ -53,6 +53,13 @@ impl PeerSession {
         self
     }
 
+    pub fn clear_connection_state(&mut self) {
+        self.current_database = None;
+        self.auth_token = None;
+        self.shared_authorization = None;
+        self.user_id = None;
+    }
+
 }
 
 #[cfg(test)]
@@ -76,6 +83,24 @@ mod tests {
         let t = PeerServiceType::Client;
         let copy = t;
         assert_eq!(t, copy);
+    }
+
+    #[test]
+    fn clear_connection_state_resets_connection_fields() {
+        let mut session = PeerSession::new()
+            .with_service_type(PeerServiceType::DataNode)
+            .with_database("main")
+            .with_auth_token("token")
+            .with_shared_authorization("shared")
+            .with_user_id("root");
+
+        session.clear_connection_state();
+
+        assert_eq!(session.service_type, PeerServiceType::DataNode);
+        assert_eq!(session.current_database, None);
+        assert_eq!(session.auth_token, None);
+        assert_eq!(session.shared_authorization, None);
+        assert_eq!(session.user_id, None);
     }
 
 }

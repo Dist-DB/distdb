@@ -10,7 +10,23 @@ pub fn unique_id() -> String {
 
 
 pub fn normalize_identifier(value: impl AsRef<str>) -> String {
-    value.as_ref().trim().to_ascii_lowercase()
+    let mut normalized = value.as_ref().trim();
+
+    // Accept SQL-delimited identifiers such as `users`, "users", or 'users'.
+    while normalized.len() >= 2 {
+        let quoted = (normalized.starts_with('`') && normalized.ends_with('`'))
+            || (normalized.starts_with('"') && normalized.ends_with('"'))
+            || (normalized.starts_with('\'') && normalized.ends_with('\''));
+
+        if !quoted {
+            break;
+        }
+
+        normalized = &normalized[1..normalized.len() - 1];
+        normalized = normalized.trim();
+    }
+
+    normalized.to_ascii_lowercase()
 }
 
 
@@ -44,4 +60,24 @@ pub fn md5_hash(stringin: &str) -> String {
 pub fn md5(bytes : &[u8]) -> String {
     let _digest = md5::compute(bytes);
     format!("{:x}", _digest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_identifier;
+
+    #[test]
+    fn normalize_identifier_strips_backtick_quotes() {
+        assert_eq!(normalize_identifier("`__Account`"), "__account");
+    }
+
+    #[test]
+    fn normalize_identifier_strips_double_quotes() {
+        assert_eq!(normalize_identifier("\"Users\""), "users");
+    }
+
+    #[test]
+    fn normalize_identifier_strips_single_quotes() {
+        assert_eq!(normalize_identifier("'Orders'"), "orders");
+    }
 }

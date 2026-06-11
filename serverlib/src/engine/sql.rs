@@ -4,6 +4,7 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::{GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
+use std::collections::HashSet;
 
 use crate::{FieldDef, FieldIndex, FieldType, TableSchema};
 use common::schema::FieldMetadata;
@@ -194,7 +195,10 @@ pub fn create_table_schema_from_statement(
         ));
     };
 
-    let table_id = create_table.name.to_string();
+    let table_id = common::normalize_identifier!(create_table.name.to_string());
+    let (primary_key_fields, indexed_fields) = derive_indexed_fields_from_constraints(
+        &create_table.constraints,
+    );
     let mut fields = Vec::with_capacity(create_table.columns.len());
 
     for (idx, column) in create_table.columns.iter().enumerate() {
@@ -222,9 +226,21 @@ pub fn create_table_schema_from_statement(
             .any(|opt| matches!(opt.option, ColumnOption::Unique { .. }))
         {
             FieldIndex::Indexed
+        } else if primary_key_fields.contains(&common::normalize_identifier!(&column.name.value)) {
+            FieldIndex::PrimaryKey
+        } else if indexed_fields.contains(&common::normalize_identifier!(&column.name.value)) {
+            FieldIndex::Indexed
         } else {
             FieldIndex::None
         };
+
+        let default_value = column
+            .options
+            .iter()
+            .find_map(|opt| match &opt.option {
+                ColumnOption::Default(expr) => parse_default_value(expr.to_string()),
+                _ => None,
+            });
 
         fields.push(FieldDef {
             seqno: (idx + 1) as u32,
@@ -232,13 +248,18 @@ pub fn create_table_schema_from_statement(
             field_type: map_sql_data_type(&column.data_type),
             nullable,
             indexed,
-            default_value: None,
+            default_value,
             metadata,
         });
 
     }
 
-    Ok((table_id, TableSchema::new(fields)))
+    let schema = TableSchema::new(fields);
+    schema.validate().map_err(|err| {
+        SqlParseError::UnsupportedStatement(format!("invalid CREATE TABLE schema: {err}"))
+    })?;
+
+    Ok((table_id, schema))
     
 }
 
@@ -260,9 +281,102 @@ fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
 
 }
 
+fn derive_indexed_fields_from_constraints(
+    constraints: &[sqlparser::ast::TableConstraint],
+) -> (HashSet<String>, HashSet<String>) {
+    let mut primary = HashSet::new();
+    let mut indexed = HashSet::new();
+
+    for constraint in constraints {
+        let rendered = constraint.to_string();
+        let lowered = rendered.to_ascii_lowercase();
+        let Some(columns) = extract_constraint_columns(&rendered) else {
+            continue;
+        };
+
+        if lowered.contains("primary key") {
+            for column in columns {
+                primary.insert(column.clone());
+                indexed.insert(column);
+            }
+            continue;
+        }
+
+        if lowered.starts_with("key ")
+            || lowered.starts_with("index ")
+            || lowered.starts_with("unique")
+        {
+            indexed.extend(columns);
+        }
+    }
+
+    (primary, indexed)
+}
+
+fn extract_constraint_columns(constraint: &str) -> Option<Vec<String>> {
+    let start = constraint.find('(')?;
+    let end = constraint.rfind(')')?;
+    if end <= start + 1 {
+        return None;
+    }
+
+    let columns = constraint[start + 1..end]
+        .split(',')
+        .filter_map(|segment| {
+            let raw = segment.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            Some(common::normalize_identifier!(raw))
+        })
+        .collect::<Vec<_>>();
+
+    if columns.is_empty() {
+        None
+    } else {
+        Some(columns)
+    }
+}
+
+fn parse_default_value(value: String) -> Option<Vec<u8>> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("null") {
+        return None;
+    }
+
+    Some(
+        trimmed
+            .trim_matches('`')
+            .trim_matches('"')
+            .trim_matches('\'')
+            .as_bytes()
+            .to_vec(),
+    )
+}
+
 fn map_sql_data_type(data_type: &DataType) -> FieldType {
 
-    let lowered = data_type.to_string().to_ascii_lowercase();
+    let rendered = data_type.to_string();
+    let lowered = rendered.to_ascii_lowercase();
+
+    if lowered.starts_with("enum(") {
+        if let Some(variants) = parse_enum_variants(&rendered) {
+            return FieldType::Enum(variants);
+        }
+        return FieldType::Text;
+    }
+
+    if lowered.starts_with("timestamp") {
+        return FieldType::Timestamp;
+    }
+
+    if lowered.starts_with("datetime") {
+        return FieldType::DateTime;
+    }
+
+    if lowered == "date" {
+        return FieldType::Date;
+    }
 
     if lowered.contains("unsigned") {
 
@@ -324,13 +438,53 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
     if lowered.contains("char") {
         return FieldType::StringFixed(32);
     }
-    
+
     if lowered.contains("text") || lowered.contains("varchar") || lowered.contains("string") {
         return FieldType::Text;
     }
 
     FieldType::Text
 
+}
+
+fn parse_enum_variants(sql_type: &str) -> Option<Vec<String>> {
+    let start = sql_type.find('(')?;
+    let end = sql_type.rfind(')')?;
+    if end <= start + 1 {
+        return None;
+    }
+
+    let mut variants = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut chars = sql_type[start + 1..end].chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if in_quote {
+            if ch == '\'' {
+                if matches!(chars.peek(), Some('\'')) {
+                    current.push('\'');
+                    let _ = chars.next();
+                } else {
+                    in_quote = false;
+                    variants.push(std::mem::take(&mut current));
+                }
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if ch == '\'' {
+            in_quote = true;
+        }
+    }
+
+    if in_quote || variants.is_empty() {
+        return None;
+    }
+
+    Some(variants)
 }
 
 fn parse_sql_type_len(lowered_type: &str, marker: &str) -> Option<usize> {
@@ -341,6 +495,7 @@ fn parse_sql_type_len(lowered_type: &str, marker: &str) -> Option<usize> {
 
 fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMetadata> {
     let mut metadata = FieldMetadata::default();
+    metadata.original_sql_type = Some(column.data_type.to_string());
 
     for option in &column.options {
 
@@ -379,6 +534,7 @@ fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMet
 
     if metadata.comment.is_none()
         && !metadata.auto_increment
+        && metadata.original_sql_type.is_none()
         && metadata.character_set.is_none()
         && metadata.collation.is_none()
     {
@@ -1064,12 +1220,103 @@ mod tests {
             .metadata
             .as_ref()
             .expect("username field should include metadata");
+        assert_eq!(username_metadata.original_sql_type.as_deref(), Some("VARCHAR(34)"));
         assert_eq!(username_metadata.character_set.as_deref(), Some("utf8mb3"));
         assert_eq!(
             username_metadata.collation.as_deref(),
             Some("utf8mb3_general_ci")
         );
         assert_eq!(username_metadata.comment.as_deref(), Some("login handle"));
+    }
+
+    #[test]
+    fn create_table_schema_maps_temporal_types_and_preserves_original_sql_type() {
+        let (_, schema) = create_table_schema_from_statement(
+            "create table events (created_on date, created_at datetime, updated_at timestamp)",
+        )
+        .expect("temporal types should parse");
+
+        assert_eq!(schema.fields.len(), 3);
+        assert_eq!(schema.fields[0].field_type, FieldType::Date);
+        assert_eq!(schema.fields[1].field_type, FieldType::DateTime);
+        assert_eq!(schema.fields[2].field_type, FieldType::Timestamp);
+
+        assert_eq!(
+            schema.fields[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.original_sql_type.as_deref()),
+            Some("DATE")
+        );
+        assert_eq!(
+            schema.fields[1]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.original_sql_type.as_deref()),
+            Some("DATETIME")
+        );
+        assert_eq!(
+            schema.fields[2]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.original_sql_type.as_deref()),
+            Some("TIMESTAMP")
+        );
+    }
+
+    #[test]
+    fn create_table_schema_tracks_table_level_keys_defaults_and_enum() {
+        let sql = "CREATE TABLE `__account` (
+          `uid` varchar(34) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci NOT NULL DEFAULT '',
+          `id_person` varchar(34) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci DEFAULT NULL,
+          `id_device` varchar(34) DEFAULT NULL,
+          `id_organization` varchar(34) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci DEFAULT NULL,
+          `role` enum('user','admin') CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci NOT NULL DEFAULT 'user',
+          `date_created` bigint NOT NULL DEFAULT '0',
+          `date_updated` bigint NOT NULL DEFAULT '0',
+          `date_lastlogin` bigint NOT NULL DEFAULT '0',
+          `is_verified` tinyint unsigned NOT NULL DEFAULT '0',
+          `is_deleted` tinyint unsigned NOT NULL DEFAULT '0',
+          PRIMARY KEY (`uid`),
+          KEY `id_device` (`id_device`),
+          KEY `id_person` (`id_person`),
+          CONSTRAINT `__account_ibfk_1` FOREIGN KEY (`id_device`) REFERENCES `__devices` (`uid`) ON DELETE CASCADE ON UPDATE CASCADE,
+          CONSTRAINT `__account_ibfk_2` FOREIGN KEY (`id_person`) REFERENCES `__person` (`uid`) ON DELETE CASCADE ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;";
+
+        let (table_id, schema) =
+            create_table_schema_from_statement(sql).expect("schema should parse");
+
+        assert_eq!(table_id, "__account");
+
+        let uid = schema.field("uid").expect("uid field should exist");
+        assert_eq!(uid.indexed, FieldIndex::PrimaryKey);
+        assert_eq!(uid.default_value.as_deref(), Some(&b""[..]));
+
+        let id_person = schema
+            .field("id_person")
+            .expect("id_person field should exist");
+        assert_eq!(id_person.indexed, FieldIndex::Indexed);
+        assert!(id_person.default_value.is_none());
+
+        let id_device = schema
+            .field("id_device")
+            .expect("id_device field should exist");
+        assert_eq!(id_device.indexed, FieldIndex::Indexed);
+        assert!(id_device.default_value.is_none());
+
+        let role = schema.field("role").expect("role field should exist");
+        assert_eq!(
+            role.field_type,
+            FieldType::Enum(vec!["user".to_string(), "admin".to_string()])
+        );
+        assert_eq!(role.default_value.as_deref(), Some(&b"user"[..]));
+        assert_eq!(
+            role.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.original_sql_type.as_deref()),
+            Some("ENUM('user', 'admin')")
+        );
     }
 
     #[test]

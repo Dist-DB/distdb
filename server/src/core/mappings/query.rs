@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use common::helpers::format::{make_header, FileKind, HEADER_SIZE};
+use common::helpers::write_bytes;
 use connector::{
     ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldIndex, FieldType, QueryResult,
     QueryTimings, MutationResult,
@@ -69,7 +71,9 @@ fn execute_parsed_query(
         SqlOperation::CreateDatabase => {
             execute_create_database(request_id, statement, catalogs, node_data_dir)
         }
-        SqlOperation::CreateTable => execute_create_table(request_id, query, catalogs, wal, statement),
+        SqlOperation::CreateTable => {
+            execute_create_table(request_id, query, catalogs, wal, node_data_dir, statement)
+        }
         SqlOperation::DropDatabase
         | SqlOperation::DropTable
         | SqlOperation::DropView
@@ -83,12 +87,14 @@ fn execute_parsed_query(
             statement,
         ),
         SqlOperation::Select => execute_select(request_id, query, catalogs, statement),
-        SqlOperation::CreateView => execute_create_view(request_id, query, catalogs, wal, statement),
+        SqlOperation::CreateView => {
+            execute_create_view(request_id, query, catalogs, wal, node_data_dir, statement)
+        }
         SqlOperation::CreateTrigger => {
-            execute_create_trigger(request_id, query, catalogs, wal, statement)
+            execute_create_trigger(request_id, query, catalogs, wal, node_data_dir, statement)
         }
         SqlOperation::CreateStoredProcedure => {
-            execute_create_stored_procedure(request_id, query, catalogs, wal, statement)
+            execute_create_stored_procedure(request_id, query, catalogs, wal, node_data_dir, statement)
         }
         _ => ConnectorResponse::rejected(
             request_id.to_string(),
@@ -133,6 +139,7 @@ fn execute_create_table(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    _node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
     let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
@@ -169,6 +176,7 @@ fn execute_create_table(
     }
 
     let wal_id = catalog.database_id.0.clone();
+    let entity_wal_id = normalized_table_id.clone();
     let schema_payload = SchemaChangePayload {
         table_id: normalized_table_id.clone(),
         schema_revision: 1,
@@ -190,12 +198,25 @@ fn execute_create_table(
         wal,
         &wal_id,
         TransactionKind::SchemaChange,
-        encoded_schema,
+        encoded_schema.clone(),
         created_at,
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create table schema WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &entity_wal_id,
+        TransactionKind::SchemaChange,
+        encoded_schema,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table entity WAL append failed: {err}"),
         );
     }
 
@@ -225,12 +246,25 @@ fn execute_create_table(
         wal,
         &wal_id,
         TransactionKind::TableLifecycle,
-        encoded_lifecycle,
+        encoded_lifecycle.clone(),
         created_at,
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create table lifecycle WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &entity_wal_id,
+        TransactionKind::TableLifecycle,
+        encoded_lifecycle,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table entity lifecycle WAL append failed: {err}"),
         );
     }
 
@@ -246,7 +280,7 @@ fn execute_create_table(
     }
 
     let metadata_payload = EntityMetadataPayload {
-        entity_id: normalized_table_id,
+        entity_id: normalized_table_id.clone(),
         metadata,
     };
 
@@ -264,12 +298,25 @@ fn execute_create_table(
         wal,
         &wal_id,
         TransactionKind::MetadataChange,
-        encoded_metadata,
+        encoded_metadata.clone(),
         created_at,
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create table metadata WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &entity_wal_id,
+        TransactionKind::MetadataChange,
+        encoded_metadata,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create table entity metadata WAL append failed: {err}"),
         );
     }
 
@@ -293,7 +340,7 @@ fn execute_drop_directive(
         | SqlOperation::DropView
         | SqlOperation::DropTrigger
         | SqlOperation::DropStoredProcedure => {
-            execute_drop_entity_object(request_id, query, catalogs, wal, statement)
+            execute_drop_entity_object(request_id, query, catalogs, wal, node_data_dir, statement)
         }
         _ => ConnectorResponse::rejected(
             request_id.to_string(),
@@ -356,6 +403,7 @@ fn execute_drop_entity_object(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -412,6 +460,13 @@ fn execute_drop_entity_object(
         );
     }
 
+    if let Err(err) = remove_entity_snapshot_file(node_data_dir, &normalized_object_id) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop {kind_label} entity snapshot cleanup failed: {err}"),
+        );
+    }
+
     let wal_id = catalog.database_id.0.clone();
 
     // Only remove a dedicated entity stream. SQL-backed objects currently
@@ -432,7 +487,7 @@ fn execute_drop_entity_object(
     if object_type == DatabaseObjectType::Table {
         
         let lifecycle_payload = TableLifecyclePayload {
-            table_id: normalized_object_id,
+            table_id: normalized_object_id.clone(),
             action: TableLifecycleAction::Drop,
             schema_epoch: catalog.schema_epoch(),
             schema: None,
@@ -458,6 +513,13 @@ fn execute_drop_entity_object(
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("drop table lifecycle WAL append failed: {err}"),
+            );
+        }
+
+        if let Err(err) = remove_table_stream_files(node_data_dir, &normalized_object_id) {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("drop table cleanup failed: {err}"),
             );
         }
 
@@ -626,7 +688,12 @@ fn execute_select(
 
                 vec![
                     field.field_name.clone().into_bytes(),
-                    format!("{:?}", field.field_type).into_bytes(),
+                    field
+                        .metadata
+                        .as_ref()
+                        .and_then(|meta| meta.original_sql_type.clone())
+                        .unwrap_or_else(|| format!("{:?}", field.field_type))
+                        .into_bytes(),
                     nullable.as_bytes().to_vec(),
                     key.as_bytes().to_vec(),
                     default_value.into_bytes(),
@@ -735,6 +802,7 @@ fn execute_create_view(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
     let Some(view_id) = statement.object_name.as_deref() else {
@@ -752,6 +820,7 @@ fn execute_create_view(
     };
 
     let wal_id = catalog.database_id.0.clone();
+    let entity_wal_id = common::normalize_identifier!(view_id);
     let created_at = common::epochabs!() as u64;
 
     match catalog.register_view(view_id, statement.sql.clone(), TableSchema::new(Vec::new())) {
@@ -784,12 +853,25 @@ fn execute_create_view(
                 wal,
                 &wal_id,
                 TransactionKind::MetadataChange,
-                encoded_metadata,
+                encoded_metadata.clone(),
                 created_at,
             ) {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("create view metadata WAL append failed: {err}"),
+                );
+            }
+
+            if let Err(err) = append_payload_record(
+                wal,
+                &entity_wal_id,
+                TransactionKind::MetadataChange,
+                encoded_metadata,
+                created_at,
+            ) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create view entity metadata WAL append failed: {err}"),
                 );
             }
 
@@ -814,12 +896,32 @@ fn execute_create_view(
                 wal,
                 &wal_id,
                 TransactionKind::SqlDefinitionChange,
-                encoded,
+                encoded.clone(),
                 created_at,
             ) {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("create view sql definition WAL append failed: {err}"),
+                );
+            }
+
+            if let Err(err) = append_payload_record(
+                wal,
+                &entity_wal_id,
+                TransactionKind::SqlDefinitionChange,
+                encoded,
+                created_at,
+            ) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create view entity sql WAL append failed: {err}"),
+                );
+            }
+
+            if let Err(err) = persist_entity_snapshot(catalog, view_id, node_data_dir) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create view entity snapshot write failed: {err}"),
                 );
             }
 
@@ -840,6 +942,7 @@ fn execute_create_trigger(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
     let Some(trigger_id) = statement.object_name.as_deref() else {
@@ -857,6 +960,7 @@ fn execute_create_trigger(
     };
 
     let wal_id = catalog.database_id.0.clone();
+    let entity_wal_id = common::normalize_identifier!(trigger_id);
     let created_at = common::epochabs!() as u64;
 
     let created = catalog.register_trigger(trigger_id, statement.sql.clone(), Vec::new());
@@ -906,12 +1010,25 @@ fn execute_create_trigger(
         wal,
         &wal_id,
         TransactionKind::MetadataChange,
-        encoded_metadata,
+        encoded_metadata.clone(),
         created_at,
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create trigger metadata WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &entity_wal_id,
+        TransactionKind::MetadataChange,
+        encoded_metadata,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create trigger entity metadata WAL append failed: {err}"),
         );
     }
 
@@ -936,12 +1053,32 @@ fn execute_create_trigger(
         wal,
         &wal_id,
         TransactionKind::SqlDefinitionChange,
-        encoded_sql,
+        encoded_sql.clone(),
         created_at,
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create trigger sql definition WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &entity_wal_id,
+        TransactionKind::SqlDefinitionChange,
+        encoded_sql,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create trigger entity sql WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = persist_entity_snapshot(catalog, trigger_id, node_data_dir) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create trigger entity snapshot write failed: {err}"),
         );
     }
 
@@ -956,6 +1093,7 @@ fn execute_create_stored_procedure(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
     let Some(procedure_id) = statement.object_name.as_deref() else {
@@ -973,6 +1111,7 @@ fn execute_create_stored_procedure(
     };
 
     let wal_id = catalog.database_id.0.clone();
+    let entity_wal_id = common::normalize_identifier!(procedure_id);
     let created_at = common::epochabs!() as u64;
 
     let created = catalog.register_stored_procedure(
@@ -1026,12 +1165,25 @@ fn execute_create_stored_procedure(
         wal,
         &wal_id,
         TransactionKind::MetadataChange,
-        encoded_metadata,
+        encoded_metadata.clone(),
         created_at,
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create procedure metadata WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &entity_wal_id,
+        TransactionKind::MetadataChange,
+        encoded_metadata,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create procedure entity metadata WAL append failed: {err}"),
         );
     }
 
@@ -1056,12 +1208,32 @@ fn execute_create_stored_procedure(
         wal,
         &wal_id,
         TransactionKind::SqlDefinitionChange,
-        encoded_sql,
+        encoded_sql.clone(),
         created_at,
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create procedure sql definition WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &entity_wal_id,
+        TransactionKind::SqlDefinitionChange,
+        encoded_sql,
+        created_at,
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create procedure entity sql WAL append failed: {err}"),
+        );
+    }
+
+    if let Err(err) = persist_entity_snapshot(catalog, procedure_id, node_data_dir) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create procedure entity snapshot write failed: {err}"),
         );
     }
 
@@ -1124,6 +1296,65 @@ fn append_payload_record(
         },
     )
     .map_err(|e| e.to_string())
+}
+
+fn remove_table_stream_files(node_data_dir: &Path, table_id: &str) -> Result<(), String> {
+    let normalized_table_id = common::normalize_identifier!(table_id);
+
+    // Keep compatibility with any legacy plain-name stream files while also
+    // deleting the obfuscated stream file naming currently used by WAL.
+    let candidates = [
+        FileKind::Data.file_name(&normalized_table_id),
+        FileKind::Data.file_name(common::helpers::stable_id(&[&normalized_table_id])),
+    ];
+
+    for file_name in candidates {
+        let path = node_data_dir.join(file_name);
+        if let Err(err) = fs::remove_file(&path) {
+            if err.kind() != ErrorKind::NotFound {
+                return Err(format!("cannot remove '{}': {err}", path.display()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn persist_entity_snapshot(
+    catalog: &DatabaseCatalog,
+    entity_id: &str,
+    node_data_dir: &Path,
+) -> Result<(), String> {
+    let normalized_entity_id = common::normalize_identifier!(entity_id);
+    let entity = catalog
+        .entity(&normalized_entity_id)
+        .ok_or_else(|| format!("entity '{}' not found in catalog", normalized_entity_id))?;
+
+    let payload = bincode::serialize(entity)
+        .map_err(|_| "failed to serialize entity snapshot".to_string())?;
+
+    let mut file = Vec::with_capacity(HEADER_SIZE + payload.len());
+    file.extend_from_slice(&make_header(FileKind::Entity));
+    file.extend_from_slice(&payload);
+
+    write_bytes(entity_snapshot_path(node_data_dir, &normalized_entity_id), &file)
+        .map_err(|err| err.to_string())
+}
+
+fn remove_entity_snapshot_file(node_data_dir: &Path, entity_id: &str) -> Result<(), String> {
+    let path = entity_snapshot_path(node_data_dir, entity_id);
+    if let Err(err) = fs::remove_file(&path) {
+        if err.kind() != ErrorKind::NotFound {
+            return Err(format!("cannot remove '{}': {err}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn entity_snapshot_path(node_data_dir: &Path, entity_id: &str) -> PathBuf {
+    let normalized_entity_id = common::normalize_identifier!(entity_id);
+    let entity_stem = common::helpers::stable_id(&[&normalized_entity_id]);
+    node_data_dir.join(FileKind::Entity.file_name(entity_stem))
 }
 
 fn resolve_catalog<'a>(

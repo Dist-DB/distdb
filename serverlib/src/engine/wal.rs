@@ -46,6 +46,15 @@ impl Default for ConcurrentWalManager {
 
 impl ConcurrentWalManager {
 
+    /// Build a memory-resident WAL manager.
+    ///
+    /// This mode never persists records to `.dtbl` files and is suitable
+    /// for tests, ephemeral nodes, or high-speed pipelines where durability
+    /// is handled elsewhere.
+    pub fn in_memory() -> Self {
+        Self::new()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -588,5 +597,20 @@ mod tests {
         assert!(!wal_file.exists());
 
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn in_memory_mode_appends_without_filesystem_backing() {
+        let wal = ConcurrentWalManager::in_memory();
+        let actor = UserId::from_username("tester");
+
+        wal.append("users", make_record(1, TransactionKind::Insert, &actor))
+            .expect("append should succeed");
+
+        assert!(wal.data_dir.is_none());
+
+        let records = wal.since("users", None);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, TransactionKind::Insert);
     }
 }

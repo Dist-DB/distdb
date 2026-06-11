@@ -20,6 +20,8 @@ pub mod entity_object_type;
 pub mod index;
 pub mod relationship;
 pub mod schema_change_tx;
+pub mod schema_change_state;
+pub mod schema_migration;
 pub mod schema_change_payload;
 pub mod sql_definition_payload;
 pub mod table;

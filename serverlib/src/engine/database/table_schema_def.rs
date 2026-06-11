@@ -1,5 +1,6 @@
 
 use common::schema::{normalize_field_name, validate_field_kind};
+use std::collections::HashSet;
 
 use super::field_def::FieldDef;
 use super::schema_error::{SchemaError, SchemaResult};
@@ -20,12 +21,41 @@ impl TableSchema {
         self.fields.iter().find(|f| f.field_name == normalized)
     }
 
+    /// Validate schema-level invariants required by row and schema-change
+    /// paths: each field must have a valid name/type and unique name/seqno.
+    pub fn validate(&self) -> SchemaResult<()> {
+
+        let mut seen_names = HashSet::with_capacity(self.fields.len());
+        let mut seen_seqnos = HashSet::with_capacity(self.fields.len());
+
+        for field in &self.fields {
+
+            let normalized_name = normalize_field_name(&field.field_name)
+                .map_err(|_| SchemaError::InvalidFieldName)?;
+
+            validate_field_kind(&field.field_type).map_err(|_| SchemaError::InvalidFieldType)?;
+
+            if !seen_names.insert(normalized_name) {
+                return Err(SchemaError::DuplicateField);
+            }
+
+            if !seen_seqnos.insert(field.seqno) {
+                return Err(SchemaError::SeqnoConflict);
+            }
+
+        }
+
+        Ok(())
+
+    }
+
     /// Append a new field to the schema. The field name is normalized to
     /// lower-case; callers may pass any casing.
     pub fn add_field(&mut self, mut field: FieldDef) -> SchemaResult<()> {
 
         field.field_name = normalize_field_name(&field.field_name)
             .map_err(|_| SchemaError::InvalidFieldName)?;
+
         validate_field_kind(&field.field_type).map_err(|_| SchemaError::InvalidFieldType)?;
 
         if self.fields.iter().any(|f| f.field_name == field.field_name) {
@@ -37,6 +67,7 @@ impl TableSchema {
         }
 
         self.fields.push(field);
+
         Ok(())
 
     }
@@ -50,7 +81,9 @@ impl TableSchema {
             .iter()
             .position(|f| f.field_name == normalized)
             .ok_or(SchemaError::FieldNotFound)?;
+
         self.fields.remove(pos);
+        
         Ok(())
 
     }
@@ -65,13 +98,23 @@ impl TableSchema {
         
         validate_field_kind(&field.field_type).map_err(|_| SchemaError::InvalidFieldType)?;
         
-        let target = self
+        let target_idx = self
             .fields
-            .iter_mut()
-            .find(|f| f.field_name == field.field_name)
+            .iter()
+            .position(|f| f.field_name == field.field_name)
             .ok_or(SchemaError::FieldNotFound)?;
+
+        if self
+            .fields
+            .iter()
+            .enumerate()
+            .any(|(idx, f)| idx != target_idx && f.seqno == field.seqno)
+        {
+            return Err(SchemaError::SeqnoConflict);
+        }
+
+        self.fields[target_idx] = field;
         
-        *target = field;
         Ok(())
 
     }
@@ -158,6 +201,34 @@ mod tests {
         let mut schema = TableSchema::new(Vec::new());
         let err = schema.update_field(text_field(1, "ghost")).unwrap_err();
         assert!(matches!(err, SchemaError::FieldNotFound));
+    }
+
+    #[test]
+    fn update_field_rejects_seqno_conflict_with_other_field() {
+
+        let mut schema = TableSchema::new(vec![text_field(1, "email"), text_field(2, "name")]);
+
+        let err = schema
+            .update_field(FieldDef {
+                seqno: 2,
+                field_name: "email".to_string(),
+                field_type: FieldType::Text,
+                nullable: false,
+                indexed: FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, SchemaError::SeqnoConflict));
+
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_seqno_from_raw_schema() {
+        let schema = TableSchema::new(vec![text_field(1, "email"), text_field(1, "name")]);
+        let err = schema.validate().unwrap_err();
+        assert!(matches!(err, SchemaError::SeqnoConflict));
     }
 
 }

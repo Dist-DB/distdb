@@ -60,7 +60,12 @@ pub fn validate_field_kind(kind: &FieldKind) -> Result<(), SchemaValidationError
             }
         }
 
-        FieldKind::Text | FieldKind::Spatial | FieldKind::Blob => {}
+        FieldKind::Date
+        | FieldKind::DateTime
+        | FieldKind::Timestamp
+        | FieldKind::Text
+        | FieldKind::Spatial
+        | FieldKind::Blob => {}
     }
 
     Ok(())

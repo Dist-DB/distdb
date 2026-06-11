@@ -130,6 +130,7 @@ impl ServerConnectionSession {
     }
 
     fn mark_disconnect(&mut self) {
+        self.session.clear_connection_state();
         self.log.add_entry(
             SessionLogEventType::Disconnect,
             "connector peer disconnected",

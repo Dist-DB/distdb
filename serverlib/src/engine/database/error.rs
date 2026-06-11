@@ -2,6 +2,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseError {
     InvalidDatabaseName,
+    DuplicateEntity,
     DuplicateTable,
     TableNotFound,
     InvalidStatusTransition,
@@ -18,6 +19,7 @@ pub enum DatabaseError {
     SqlDefinitionPayloadDeserialize,
     SchemaRevisionOutOfOrder,
     SchemaChange(super::schema_error::SchemaError),
+    SchemaChangeInProgress,
     TableNotLocked,
     DuplicateView,
     ViewNotFound,
@@ -37,6 +39,7 @@ impl std::fmt::Display for DatabaseError {
         match self {
 
             Self::InvalidDatabaseName               => write!(f, "database name must not be empty"),
+            Self::DuplicateEntity                   => write!(f, "entity id already registered in database catalog"),
             Self::DuplicateTable                    => write!(f, "table already registered in database catalog"),
             Self::TableNotFound                     => write!(f, "table not found in database catalog"),
             Self::InvalidStatusTransition           => write!(f, "invalid database/table status transition"),
@@ -53,6 +56,7 @@ impl std::fmt::Display for DatabaseError {
             Self::SqlDefinitionPayloadDeserialize   => write!(f, "failed to deserialize sql definition payload"),
             Self::SchemaRevisionOutOfOrder          => write!(f, "schema revision must advance monotonically"),
             Self::SchemaChange(e)     => write!(f, "schema mutation error: {e}"),
+            Self::SchemaChangeInProgress         => write!(f, "another schema change is currently in progress"),
             Self::TableNotLocked                    => write!(f, "table must be locked before a schema change can be prepared or committed"),
             Self::DuplicateView                     => write!(f, "view already registered in database catalog"),
             Self::ViewNotFound                      => write!(f, "view not found in database catalog"),

@@ -15,6 +15,8 @@ use super::id::DatabaseId;
 use super::index::DatabaseIndex;
 use super::relationship::DatabaseRelationship;
 use super::schema_change_tx::SchemaChangeTx;
+use super::schema_migration::{run_schema_migration, SchemaMigrationExecutor};
+use super::schema_change_state::{ActiveSchemaChange, SchemaChangePhase};
 use super::stored_procedure::DatabaseStoredProcedure;
 use super::table::DatabaseTable;
 use super::table_lifecycle_payload::{TableLifecycleAction, TableLifecyclePayload};
@@ -32,6 +34,8 @@ pub struct DatabaseCatalog {
     status: ObjectStatus,
     #[serde(default)]
     schema_epoch: u64,
+    #[serde(default)]
+    active_schema_change: Option<ActiveSchemaChange>,
     entities: HashMap<String, DatabaseEntity>,
 }
 
@@ -42,6 +46,7 @@ impl DatabaseCatalog {
             database_id,
             status: ObjectStatus::Load,
             schema_epoch: 0,
+            active_schema_change: None,
             entities: HashMap::new(),
         }
     }
@@ -76,8 +81,12 @@ impl DatabaseCatalog {
 
         let table_id = common::normalize_identifier!(table_id.into());
 
+        schema
+            .validate()
+            .map_err(DatabaseError::SchemaChange)?;
+
         if self.entities.contains_key(&table_id) {
-            return Err(DatabaseError::DuplicateTable);
+            return Err(DatabaseError::DuplicateEntity);
         }
 
         let indexes = Self::indexes_for_schema(&table_id, &schema);
@@ -181,17 +190,23 @@ impl DatabaseCatalog {
         self.drop_object(DatabaseObjectType::Table, table_id)
     }
 
-    pub fn register_relationship(&mut self, relationship: DatabaseRelationship) {
+    pub fn register_relationship(&mut self, relationship: DatabaseRelationship) -> DatabaseResult<()> {
 
         let left = common::normalize_identifier!(&relationship.left_table_id);
         let right = common::normalize_identifier!(&relationship.right_table_id);
         let name = common::normalize_identifier!(&relationship.relation_name);
         let entity_id = format!("rel:{left}:{right}:{name}");
+
+        if self.entities.contains_key(&entity_id) {
+            return Err(DatabaseError::DuplicateEntity);
+        }
         
         self.entities
             .insert(entity_id, DatabaseEntity::Relationship(relationship));
         
         self.bump_schema_epoch();
+
+        Ok(())
 
     }
 
@@ -328,6 +343,18 @@ impl DatabaseCatalog {
         self.schema_epoch
     }
 
+    pub fn active_schema_change(&self) -> Option<&ActiveSchemaChange> {
+        self.active_schema_change.as_ref()
+    }
+
+    pub fn execute_schema_migration<E: SchemaMigrationExecutor>(
+        &mut self,
+        table_id: &str,
+        executor: &E,
+    ) -> DatabaseResult<()> {
+        run_schema_migration(self, table_id, executor)
+    }
+
     pub fn transition_status(&mut self, next: ObjectStatus) -> DatabaseResult<()> {
         if !self.status.can_transition_to(next) {
             return Err(DatabaseError::InvalidStatusTransition);
@@ -350,6 +377,11 @@ impl DatabaseCatalog {
     pub fn begin_schema_change(&mut self, table_id: &str) -> DatabaseResult<SchemaChangeTx> {
 
         let table_id = common::normalize_identifier!(table_id);
+
+        if self.active_schema_change.is_some() {
+            return Err(DatabaseError::SchemaChangeInProgress);
+        }
+
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
 
         let pending_schema = table.schema().clone();
@@ -357,7 +389,65 @@ impl DatabaseCatalog {
 
         table.lock()?;
 
+        self.active_schema_change = Some(ActiveSchemaChange::begin(
+            table_id.clone(),
+            next_revision,
+            self.schema_epoch.saturating_add(1),
+        ));
+
         Ok(SchemaChangeTx::new(table_id, next_revision, pending_schema))
+
+    }
+
+    pub(crate) fn transition_schema_change_phase(
+        &mut self,
+        table_id: &str,
+        phase: SchemaChangePhase,
+    ) -> DatabaseResult<()> {
+
+        let normalized = common::normalize_identifier!(table_id);
+        let active = self
+            .active_schema_change
+            .as_mut()
+            .ok_or(DatabaseError::TableNotLocked)?;
+
+        if active.table_id != normalized {
+            return Err(DatabaseError::TableNotLocked);
+        }
+
+        if !active.phase.can_transition_to(phase) {
+            return Err(DatabaseError::InvalidStatusTransition);
+        }
+
+        active.phase = phase;
+        
+        Ok(())
+
+    }
+
+    pub(crate) fn checkpoint_schema_change_progress(
+        &mut self,
+        table_id: &str,
+        rows_rewritten: u64,
+        rows_total: Option<u64>,
+        resume_token: Option<String>,
+    ) -> DatabaseResult<()> {
+
+        let normalized = common::normalize_identifier!(table_id);
+        
+        let active = self
+            .active_schema_change
+            .as_mut()
+            .ok_or(DatabaseError::TableNotLocked)?;
+
+        if active.table_id != normalized {
+            return Err(DatabaseError::TableNotLocked);
+        }
+
+        active.update_progress(rows_rewritten, rows_total, resume_token);
+        
+        Ok(())
+
     }
 
     /// Internal: apply a payload and drive `Lock -> Sync -> Ready`.
@@ -369,24 +459,39 @@ impl DatabaseCatalog {
 
         let table_id = common::normalize_identifier!(&payload.table_id);
         self.apply_schema_change(payload)?;
+        self.transition_schema_change_phase(&table_id, SchemaChangePhase::Syncing)?;
 
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         table.begin_sync()?;
+
         if !self.table_sync_acknowledged_stub(&table_id) {
             return Err(DatabaseError::SyncPending);
         }
         
-        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;        
-        table.complete_sync()
+        self.transition_schema_change_phase(&table_id, SchemaChangePhase::Cutover)?;
+
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        table.complete_sync()?;
+        
+        self.active_schema_change = None;
+
+        Ok(())
 
     }
 
     /// Internal: release the lock without changing the schema (`Lock -> Ready`).
     /// Called only from `SchemaChangeTx::abort`.
     pub(crate) fn release_schema_lock(&mut self, table_id: &str) -> DatabaseResult<()> {
+        
         let table_id = common::normalize_identifier!(table_id);
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
-        table.abort()
+        
+        table.abort()?;
+
+        self.active_schema_change = None;
+        
+        Ok(())
+        
     }
 
     /// Internal: apply a schema payload directly. Does not enforce or alter
@@ -748,7 +853,7 @@ impl DatabaseCatalog {
         let view_id = common::normalize_identifier!(view_id.into());
 
         if self.entities.contains_key(&view_id) {
-            return Err(DatabaseError::DuplicateView);
+            return Err(DatabaseError::DuplicateEntity);
         }
 
         self.entities.insert(
@@ -789,7 +894,7 @@ impl DatabaseCatalog {
         let trigger_id = common::normalize_identifier!(trigger_id.into());
 
         if self.entities.contains_key(&trigger_id) {
-            return Err(DatabaseError::DuplicateTrigger);
+            return Err(DatabaseError::DuplicateEntity);
         }
 
         self.entities.insert(
@@ -837,7 +942,7 @@ impl DatabaseCatalog {
         let procedure_id = common::normalize_identifier!(procedure_id.into());
 
         if self.entities.contains_key(&procedure_id) {
-            return Err(DatabaseError::DuplicateStoredProcedure);
+            return Err(DatabaseError::DuplicateEntity);
         }
 
         self.entities.insert(
@@ -1056,6 +1161,7 @@ mod tests {
 
     use super::*;
     use crate::EntityMetadata;
+    use std::path::PathBuf;
 
     #[test]
     fn create_empty_catalog_from_name_sets_obscured_id() {
@@ -1084,6 +1190,20 @@ mod tests {
 
         assert!(first.is_ok());
         assert!(second.is_err());
+    }
+
+    #[test]
+    fn cross_type_entity_id_collision_is_rejected() {
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        catalog
+            .register_view("users", "select 1", TableSchema::new(Vec::new()))
+            .expect("view register should succeed");
+
+        let result = catalog.register_table("users", TableSchema::new(Vec::new()));
+
+        assert!(matches!(result, Err(DatabaseError::DuplicateEntity)));
     }
 
     #[test]
@@ -1305,17 +1425,83 @@ mod tests {
     }
 
     #[test]
+    fn begin_schema_change_rejects_when_another_is_in_progress() {
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let schema = TableSchema::new(Vec::new());
+        catalog
+            .create_table("users", schema.clone())
+            .expect("users table should be created");
+        catalog
+            .create_table("accounts", schema)
+            .expect("accounts table should be created");
+
+        catalog
+            .transition_status(ObjectStatus::Sync)
+            .expect("load->sync");
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .expect("sync->ready");
+
+        let tx = catalog
+            .begin_schema_change("users")
+            .expect("first schema change should begin");
+
+        let second_attempt = catalog.begin_schema_change("accounts");
+        assert!(matches!(
+            second_attempt,
+            Err(DatabaseError::SchemaChangeInProgress)
+        ));
+
+        tx.abort(&mut catalog).expect("abort should release schema lock");
+
+        let retry = catalog.begin_schema_change("accounts");
+        assert!(retry.is_ok());
+    }
+
+    #[test]
+    fn begin_schema_change_records_locked_state() {
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb")
+            .expect("catalog should be created");
+
+        catalog
+            .create_table("users", TableSchema::new(Vec::new()))
+            .expect("users table should be created");
+        catalog
+            .transition_status(ObjectStatus::Sync)
+            .expect("load->sync");
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .expect("sync->ready");
+
+        let _tx = catalog
+            .begin_schema_change("users")
+            .expect("begin should lock users");
+
+        let active = catalog
+            .active_schema_change()
+            .expect("active schema change should be present");
+        assert_eq!(active.table_id, "users");
+        assert_eq!(active.target_revision, 1);
+        assert_eq!(active.phase, super::SchemaChangePhase::Locked);
+    }
+
+    #[test]
     fn schema_change_tx_commit_aborts_when_persist_fails() {
 
         let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
         let initial_schema = TableSchema::new(Vec::new());
+        
         catalog
             .create_table("users", initial_schema.clone())
             .expect("table should be created");
+
         catalog
             .transition_status(ObjectStatus::Sync)
             .expect("load->sync");
+
         catalog
             .transition_status(ObjectStatus::Ready)
             .expect("sync->ready");
@@ -1331,6 +1517,222 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
         assert_eq!(catalog.table_schema("users"), Some(&initial_schema));
+
+    }
+
+    #[test]
+    fn schema_change_commit_releases_global_schema_change_guard() {
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+        let schema = TableSchema::new(Vec::new());
+
+        catalog
+            .create_table("users", schema.clone())
+            .expect("users table should be created");
+        
+        catalog
+            .create_table("accounts", schema)
+            .expect("accounts table should be created");
+
+        catalog
+            .transition_status(ObjectStatus::Sync)
+            .expect("load->sync");
+
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .expect("sync->ready");
+
+        let tx = catalog
+            .begin_schema_change("users")
+            .expect("begin should lock users");
+
+        tx.commit::<DatabaseError, _>(&mut catalog, |_payload| Ok(()))
+            .expect("commit should succeed");
+
+        let next = catalog.begin_schema_change("accounts");
+        
+        assert!(next.is_ok());
+
+    }
+
+    #[test]
+    fn transition_schema_change_phase_updates_active_state() {
+        
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb")
+            .expect("catalog should be created");
+
+        catalog
+            .create_table("users", TableSchema::new(Vec::new()))
+            .expect("users table should be created");
+
+        catalog
+            .transition_status(ObjectStatus::Sync)
+            .expect("load->sync");
+
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .expect("sync->ready");
+
+        let _tx = catalog
+            .begin_schema_change("users")
+            .expect("begin should lock users");
+
+        catalog
+            .transition_schema_change_phase(
+                "users",
+                super::SchemaChangePhase::Rewriting,
+            )
+            .expect("phase transition should succeed");
+
+        let phase = catalog
+            .active_schema_change()
+            .map(|state| state.phase)
+            .expect("active schema change should exist");
+
+        assert_eq!(
+            phase,
+            super::SchemaChangePhase::Rewriting
+        );
+
+    }
+
+    #[test]
+    fn transition_schema_change_phase_rejects_invalid_order() {
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb")
+            .expect("catalog should be created");
+
+        catalog
+            .create_table("users", TableSchema::new(Vec::new()))
+            .expect("users table should be created");
+        catalog
+            .transition_status(ObjectStatus::Sync)
+            .expect("load->sync");
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .expect("sync->ready");
+
+        let _tx = catalog
+            .begin_schema_change("users")
+            .expect("begin should lock users");
+
+        let result = catalog.transition_schema_change_phase("users", super::SchemaChangePhase::Syncing);
+        assert!(matches!(result, Err(DatabaseError::InvalidStatusTransition)));
+    }
+
+    #[test]
+    fn checkpoint_schema_change_progress_updates_active_state() {
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb")
+            .expect("catalog should be created");
+
+        catalog
+            .create_table("users", TableSchema::new(Vec::new()))
+            .expect("users table should be created");
+
+        catalog
+            .transition_status(ObjectStatus::Sync)
+            .expect("load->sync");
+
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .expect("sync->ready");
+
+        let _tx = catalog
+            .begin_schema_change("users")
+            .expect("begin should lock users");
+
+        catalog
+            .transition_schema_change_phase("users", super::SchemaChangePhase::Rewriting)
+            .expect("phase transition should succeed");
+
+        catalog
+            .checkpoint_schema_change_progress(
+                "users",
+                77,
+                Some(1000),
+                Some("pk:users:77".to_string()),
+            )
+            .expect("progress checkpoint should succeed");
+
+        let active = catalog
+            .active_schema_change()
+            .expect("active schema change should exist");
+        
+        assert_eq!(active.rows_rewritten, 77);
+        assert_eq!(active.rows_total, Some(1000));
+        assert_eq!(active.resume_token.as_deref(), Some("pk:users:77"));
+
+    }
+
+    #[test]
+    fn active_schema_change_state_is_persisted_in_catalog_file() {
+
+        let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb")
+            .expect("catalog should be created");
+
+        catalog
+            .create_table("users", TableSchema::new(Vec::new()))
+            .expect("users table should be created");
+
+        catalog
+            .transition_status(ObjectStatus::Sync)
+            .expect("load->sync");
+
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .expect("sync->ready");
+
+        let _tx = catalog
+            .begin_schema_change("users")
+            .expect("begin should lock users");
+
+        catalog
+            .transition_schema_change_phase("users", super::SchemaChangePhase::Rewriting)
+            .expect("phase transition should succeed");
+
+        catalog
+            .checkpoint_schema_change_progress(
+                "users",
+                12,
+                Some(20),
+                Some("pk:users:12".to_string()),
+            )
+            .expect("progress checkpoint should succeed");
+
+        let mut dir = std::env::temp_dir();
+        
+        dir.push(format!(
+            "distdb-catalog-test-{}",
+            common::helpers::utils::unique_id()
+        ));
+
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+
+        catalog
+            .save_in_directory(&dir)
+            .expect("catalog save should succeed");
+
+        let loaded = DatabaseCatalog::load_from_path(catalog_path_for_test(&catalog, &dir))
+            .expect("catalog load should succeed");
+
+        let active = loaded
+            .active_schema_change()
+            .expect("active schema change should persist");
+
+        assert_eq!(active.table_id, "users");
+        assert!(!active.job_id.is_empty());
+        assert_eq!(active.phase, super::SchemaChangePhase::Rewriting);
+        assert_eq!(active.rows_rewritten, 12);
+        assert_eq!(active.rows_total, Some(20));
+        assert_eq!(active.resume_token.as_deref(), Some("pk:users:12"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+    }
+
+    fn catalog_path_for_test(catalog: &DatabaseCatalog, directory: &PathBuf) -> PathBuf {
+        directory.join(catalog.file_name())
     }
 
     #[test]
@@ -1487,6 +1889,7 @@ mod tests {
         assert_eq!(view.metadata.created_at_epoch_ms, Some(100));
         assert_eq!(view.sql, "select id, email from users");
         assert_eq!(view.dependencies, vec!["users", "accounts"]);
+
     }
 
     #[test]
@@ -1773,11 +2176,13 @@ mod tests {
             .register_view("users_view", "select * from users", TableSchema::new(Vec::new()))
             .expect("view register should succeed");
 
-        catalog.register_relationship(DatabaseRelationship::new(
-            "users".to_string(),
-            "accounts".to_string(),
-            "owns".to_string(),
-        ));
+        catalog
+            .register_relationship(DatabaseRelationship::new(
+                "users".to_string(),
+                "accounts".to_string(),
+                "owns".to_string(),
+            ))
+            .expect("relationship register should succeed");
 
         assert_eq!(catalog.entity_status("users"), Some(ObjectStatus::Load));
         assert_eq!(catalog.entity_wal_stream_id("users"), Some("users".to_string()));
@@ -1785,13 +2190,13 @@ mod tests {
 
         assert_eq!(
             catalog.entity_wal_stream_id("users_view"),
-            Some(catalog.database_id.0.clone())
+            Some("users_view".to_string())
         );
         assert_eq!(catalog.entity_schema_revision("users_view"), None);
 
         assert_eq!(
             catalog.entity_wal_stream_id("rel:users:accounts:owns"),
-            Some(catalog.database_id.0.clone())
+            Some("rel:users:accounts:owns".to_string())
         );
 
     }
@@ -1854,11 +2259,13 @@ mod tests {
         catalog
             .register_view("users_view", "select * from users", schema)
             .expect("view register should succeed");
-        catalog.register_relationship(DatabaseRelationship::new(
-            "users".to_string(),
-            "accounts".to_string(),
-            "owns".to_string(),
-        ));
+        catalog
+            .register_relationship(DatabaseRelationship::new(
+                "users".to_string(),
+                "accounts".to_string(),
+                "owns".to_string(),
+            ))
+            .expect("relationship register should succeed");
         catalog
             .register_trigger(
                 "audit_insert",
@@ -1930,11 +2337,13 @@ mod tests {
             .register_view("users_view", "select * from users", schema)
             .expect("view register should succeed");
 
-        catalog.register_relationship(DatabaseRelationship::new(
-            "users".to_string(),
-            "accounts".to_string(),
-            "owns".to_string(),
-        ));
+        catalog
+            .register_relationship(DatabaseRelationship::new(
+                "users".to_string(),
+                "accounts".to_string(),
+                "owns".to_string(),
+            ))
+            .expect("relationship register should succeed");
 
         assert!(matches!(catalog.object_by_id("users"), Some(DatabaseObjectRef::Table(_))));
         assert!(matches!(catalog.object_by_id("users_view"), Some(DatabaseObjectRef::View(_))));

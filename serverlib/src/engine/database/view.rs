@@ -49,8 +49,8 @@ impl DatabaseEntityAspect for DatabaseView {
         &self.metadata
     }
 
-    fn wal_stream_id(&self, database_wal_id: &str) -> String {
-        database_wal_id.to_string()
+    fn wal_stream_id(&self, _database_wal_id: &str) -> String {
+        self.storage_key()
     }
 
     fn schema_revision(&self) -> Option<u64> {

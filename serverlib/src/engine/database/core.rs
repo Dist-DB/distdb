@@ -16,6 +16,11 @@ pub use super::entity_object_type::DatabaseObjectType;
 pub use super::index::{DatabaseIndex, IndexId};
 pub use super::relationship::DatabaseRelationship;
 pub use super::schema_change_tx::SchemaChangeTx;
+pub use super::schema_change_state::{ActiveSchemaChange, SchemaChangePhase};
+pub use super::schema_migration::{
+	run_schema_migration, NoopSchemaMigrationExecutor, SchemaMigrationExecutor,
+	SchemaMigrationProgress,
+};
 pub use super::stored_procedure::DatabaseStoredProcedure;
 pub use super::table::DatabaseTable;
 pub use super::trigger::DatabaseTrigger;

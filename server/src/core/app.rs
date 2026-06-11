@@ -831,6 +831,21 @@ mod tests {
             .expect("users table should register");
         app.catalogs.insert("main".to_string(), catalog);
 
+        let normalized_table_id = common::normalize_identifier!("users");
+        let legacy_table_stream_file = app
+            .node_data_dir
+            .join(FileKind::Data.file_name(&normalized_table_id));
+        let hashed_table_stream_file = app
+            .node_data_dir
+            .join(FileKind::Data.file_name(common::helpers::stable_id(&[
+                &normalized_table_id,
+            ])));
+
+        std::fs::write(&legacy_table_stream_file, b"legacy stream")
+            .expect("legacy table stream file should be created");
+        std::fs::write(&hashed_table_stream_file, b"hashed stream")
+            .expect("hashed table stream file should be created");
+
         let request = ConnectorRequest::new(
             "req-drop-table-1",
             ConnectorCommand::Query {
@@ -846,6 +861,8 @@ mod tests {
 
         let catalog = app.catalogs.get("main").expect("main catalog should exist");
         assert!(catalog.table("users").is_none());
+        assert!(!legacy_table_stream_file.exists());
+        assert!(!hashed_table_stream_file.exists());
     }
 
     #[test]
@@ -989,6 +1006,33 @@ mod tests {
         assert_eq!(create_trigger_response.status, ResponseStatus::Applied);
         assert_eq!(create_procedure_response.status, ResponseStatus::Applied);
 
+        let view_snapshot = app
+            .node_data_dir
+            .join(FileKind::Entity.file_name(common::helpers::stable_id(&["users_v"])));
+        let trigger_snapshot = app.node_data_dir.join(FileKind::Entity.file_name(
+            common::helpers::stable_id(&["trg_users_bi"]),
+        ));
+        let procedure_snapshot = app
+            .node_data_dir
+            .join(FileKind::Entity.file_name(common::helpers::stable_id(&["p_sync"])));
+
+        let view_wal = app
+            .node_data_dir
+            .join(FileKind::Data.file_name(common::helpers::stable_id(&["users_v"])));
+        let trigger_wal = app.node_data_dir.join(FileKind::Data.file_name(
+            common::helpers::stable_id(&["trg_users_bi"]),
+        ));
+        let procedure_wal = app
+            .node_data_dir
+            .join(FileKind::Data.file_name(common::helpers::stable_id(&["p_sync"])));
+
+        assert!(view_snapshot.exists());
+        assert!(trigger_snapshot.exists());
+        assert!(procedure_snapshot.exists());
+        assert!(view_wal.exists());
+        assert!(trigger_wal.exists());
+        assert!(procedure_wal.exists());
+
         let catalog = app.catalogs.get("main").expect("main catalog should exist");
         assert!(catalog.view("users_v").is_some());
         assert!(catalog.trigger("trg_users_bi").is_some());
@@ -1036,6 +1080,12 @@ mod tests {
         assert!(catalog.view("users_v").is_none());
         assert!(catalog.trigger("trg_users_bi").is_none());
         assert!(catalog.stored_procedure("p_sync").is_none());
+        assert!(!view_snapshot.exists());
+        assert!(!trigger_snapshot.exists());
+        assert!(!procedure_snapshot.exists());
+        assert!(!view_wal.exists());
+        assert!(!trigger_wal.exists());
+        assert!(!procedure_wal.exists());
     }
 
     #[test]

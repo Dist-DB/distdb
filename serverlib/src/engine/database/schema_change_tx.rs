@@ -1,6 +1,7 @@
 
 use super::core::DatabaseResult;
 use super::catalog::DatabaseCatalog;
+use super::schema_change_state::SchemaChangePhase;
 use super::table_schema::{FieldDef, TableSchema};
 use super::transaction::SchemaChangePayload;
 
@@ -14,6 +15,8 @@ use super::transaction::SchemaChangePayload;
 /// tx.add_field(field)?;
 /// tx.commit(&mut catalog, |payload| wal.append(wal_id, make_record(payload)))?;
 /// ```
+
+
 #[derive(Debug, Clone)]
 pub struct SchemaChangeTx {
     table_id: String,
@@ -45,21 +48,27 @@ impl SchemaChangeTx {
     }
 
     pub fn add_field(&mut self, field: FieldDef) -> DatabaseResult<()> {
+        
         self.pending_schema
             .add_field(field)
             .map_err(super::core::DatabaseError::SchemaChange)
+
     }
 
     pub fn remove_field(&mut self, name: &str) -> DatabaseResult<()> {
+
         self.pending_schema
             .remove_field(name)
             .map_err(super::core::DatabaseError::SchemaChange)
+
     }
 
     pub fn update_field(&mut self, field: FieldDef) -> DatabaseResult<()> {
+
         self.pending_schema
             .update_field(field)
             .map_err(super::core::DatabaseError::SchemaChange)
+
     }
 
     /// Persist the change via `persist`, then if successful apply the schema
@@ -72,6 +81,10 @@ impl SchemaChangeTx {
         F: FnOnce(&SchemaChangePayload) -> Result<(), E>,
         E: From<super::core::DatabaseError>,
     {
+
+        catalog.transition_schema_change_phase(&self.table_id, SchemaChangePhase::Rewriting)?;
+        catalog.checkpoint_schema_change_progress(&self.table_id, 0, None, None)?;
+
         let payload = SchemaChangePayload {
             table_id: self.table_id.clone(),
             schema_revision: self.next_revision,
@@ -85,7 +98,10 @@ impl SchemaChangeTx {
             return Err(e);
         }
 
+        catalog.transition_schema_change_phase(&self.table_id, SchemaChangePhase::Reindexing)?;
+
         catalog.finalize_schema_change(payload).map_err(E::from)
+
     }
 
     /// Release the lock without altering the schema.
