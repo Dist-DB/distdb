@@ -18,8 +18,9 @@ pub use super::relationship::DatabaseRelationship;
 pub use super::schema_change_tx::SchemaChangeTx;
 pub use super::schema_change_state::{ActiveSchemaChange, SchemaChangePhase};
 pub use super::schema_migration::{
-	run_schema_migration, NoopSchemaMigrationExecutor, SchemaMigrationExecutor,
-	SchemaMigrationProgress,
+	run_schema_migration, DiskToMemorySchemaMigrationExecutor, NoopSchemaMigrationExecutor, 
+	SchemaMigrationExecutor, SchemaMigrationProgress, FieldTypeChangeRule, SchemaMutationRuleSet,
+	TypeConversionPolicy,
 };
 pub use super::stored_procedure::DatabaseStoredProcedure;
 pub use super::table::DatabaseTable;

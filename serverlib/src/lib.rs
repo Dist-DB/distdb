@@ -18,6 +18,9 @@ pub use engine::database::core::{
 	EntityMetadata,
 	DatabaseObjectRef, DatabaseObjectType,
 	DatabaseView, IndexId, ObjectStatus,
+	DiskToMemorySchemaMigrationExecutor, FieldTypeChangeRule, NoopSchemaMigrationExecutor,
+	run_schema_migration, SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet,
+	TypeConversionPolicy,
 };
 
 pub use engine::database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};

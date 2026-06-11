@@ -98,7 +98,7 @@ fn execute_parsed_query(
             execute_create_stored_procedure(request_id, query, catalogs, wal, node_data_dir, statement)
         }
         SqlOperation::AlterTable => {
-            execute_alter_table(request_id, query, catalogs, wal, statement)
+            execute_alter_table(request_id, query, catalogs, wal, node_data_dir, statement)
         }
         _ => ConnectorResponse::rejected(
             request_id.to_string(),
@@ -115,6 +115,7 @@ fn execute_alter_table(
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
     let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
@@ -152,6 +153,11 @@ fn execute_alter_table(
         }
     };
 
+    let mut renames = Vec::new();
+    let mut removals = Vec::new();
+    let mut additions = Vec::new();
+    let mut type_changes = Vec::new();
+
     for operation in plan.operations {
         let apply_result = match operation {
             AlterTableChangeOp::AddField(mut field) => {
@@ -164,13 +170,18 @@ fn execute_alter_table(
                     .unwrap_or(0)
                     .saturating_add(1);
                 field.seqno = next_seqno;
+                additions.push((field.field_name.clone(), field.field_type.clone()));
                 tx.add_field(field)
             }
-            AlterTableChangeOp::DropField(name) => tx.remove_field(&name),
+            AlterTableChangeOp::DropField(name) => {
+                removals.push(name.clone());
+                tx.remove_field(&name)
+            }
             AlterTableChangeOp::RenameField { from, to } => {
                 let existing = tx.pending_schema().field(&from).cloned();
                 match existing {
                     Some(mut field) => {
+                        renames.push((from.clone(), to.clone()));
                         if let Err(err) = tx.remove_field(&from) {
                             Err(err)
                         } else {
@@ -182,6 +193,13 @@ fn execute_alter_table(
                         serverlib::SchemaError::FieldNotFound,
                     )),
                 }
+            }
+            AlterTableChangeOp::ModifyField { field_name, new_type } => {
+                type_changes.push(serverlib::FieldTypeChangeRule {
+                    field_name: field_name.clone(),
+                    target_type: new_type.clone(),
+                });
+                Ok(())
             }
         };
 
@@ -227,6 +245,33 @@ fn execute_alter_table(
             request_id.to_string(),
             format!("alter table failed: {err}"),
         );
+    }
+
+    // If there are type changes or field modifications, run the migration executor
+    if !type_changes.is_empty() {
+        let mutation_rule_set = serverlib::SchemaMutationRuleSet {
+            renames,
+            removals,
+            additions: additions.into_iter().map(|(name, _)| (name, vec![])).collect(),
+            type_changes,
+            conversion_policy: serverlib::TypeConversionPolicy::Safe,
+        };
+
+        let executor = serverlib::DiskToMemorySchemaMigrationExecutor::new(node_data_dir.to_path_buf());
+        executor
+            .set_rules_for_table(&table_id, mutation_rule_set)
+            .ok();
+
+        if let Err(err) = serverlib::run_schema_migration(catalog, &table_id, &executor) {
+            log::warn!(
+                "schema migration failed for table '{}': {err}",
+                table_id
+            );
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table schema migration failed: {err}"),
+            );
+        }
     }
 
     ConnectorResponse::applied(

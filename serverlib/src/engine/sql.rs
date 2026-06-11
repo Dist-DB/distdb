@@ -76,6 +76,10 @@ pub enum AlterTableChangeOp {
         from: String,
         to: String,
     },
+    ModifyField {
+        field_name: String,
+        new_type: FieldType,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1558,7 +1562,7 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
         assert_eq!(requests[0].operation, SqlOperation::AlterOther);
         assert!(requests[0].object_name.is_none());
-        
+
     }
 
     #[test]
