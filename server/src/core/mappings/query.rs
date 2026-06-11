@@ -12,6 +12,7 @@ use connector::{
 };
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
+    AlterTableChangeOp,
     ConcurrentWalManager, DatabaseCatalog, DatabaseId, EntityMetadata, EntityMetadataPayload,
     SchemaChangePayload,
     DatabaseObjectType,
@@ -96,6 +97,9 @@ fn execute_parsed_query(
         SqlOperation::CreateStoredProcedure => {
             execute_create_stored_procedure(request_id, query, catalogs, wal, node_data_dir, statement)
         }
+        SqlOperation::AlterTable => {
+            execute_alter_table(request_id, query, catalogs, wal, statement)
+        }
         _ => ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -104,6 +108,131 @@ fn execute_parsed_query(
             ),
         ),
     }
+}
+
+fn execute_alter_table(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let plan = match serverlib::parse_alter_table_change_plan_from_statement(&statement.sql) {
+        Ok(plan) => plan,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table parse failed: {err}"),
+            )
+        }
+    };
+
+    let table_id = common::normalize_identifier!(plan.table_id);
+    if catalog.table(&table_id).is_none() {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("alter table failed: table '{}' not found", table_id),
+        );
+    }
+
+    let mut tx = match catalog.begin_schema_change(&table_id) {
+        Ok(tx) => tx,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table failed: {err}"),
+            )
+        }
+    };
+
+    for operation in plan.operations {
+        let apply_result = match operation {
+            AlterTableChangeOp::AddField(mut field) => {
+                let next_seqno = tx
+                    .pending_schema()
+                    .fields
+                    .iter()
+                    .map(|f| f.seqno)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                field.seqno = next_seqno;
+                tx.add_field(field)
+            }
+            AlterTableChangeOp::DropField(name) => tx.remove_field(&name),
+            AlterTableChangeOp::RenameField { from, to } => {
+                let existing = tx.pending_schema().field(&from).cloned();
+                match existing {
+                    Some(mut field) => {
+                        if let Err(err) = tx.remove_field(&from) {
+                            Err(err)
+                        } else {
+                            field.field_name = to;
+                            tx.add_field(field)
+                        }
+                    }
+                    None => Err(serverlib::DatabaseError::SchemaChange(
+                        serverlib::SchemaError::FieldNotFound,
+                    )),
+                }
+            }
+        };
+
+        if let Err(err) = apply_result {
+            let _ = tx.abort(catalog);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table failed: {err}"),
+            );
+        }
+    }
+
+    let wal_id = catalog.database_id.0.clone();
+    let entity_wal_id = table_id.clone();
+    let created_at = common::epochabs!() as u64;
+
+    if let Err(err) = tx.commit::<serverlib::DatabaseError, _>(catalog, |payload| {
+        let encoded = payload
+            .encode()
+            .map_err(|_| serverlib::DatabaseError::CatalogSerialize)?;
+
+        append_payload_record(
+            wal,
+            &wal_id,
+            TransactionKind::SchemaChange,
+            encoded.clone(),
+            created_at,
+        )
+        .map_err(|_| serverlib::DatabaseError::CatalogWrite)?;
+
+        append_payload_record(
+            wal,
+            &entity_wal_id,
+            TransactionKind::SchemaChange,
+            encoded,
+            created_at,
+        )
+        .map_err(|_| serverlib::DatabaseError::CatalogWrite)?;
+
+        Ok(())
+    }) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("alter table failed: {err}"),
+        );
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+    )
 }
 
 fn execute_create_database(

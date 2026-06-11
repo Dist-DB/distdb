@@ -794,6 +794,7 @@ mod tests {
             .iter()
             .map(|field| field.field_name.as_str())
             .collect::<Vec<_>>();
+        
         assert_eq!(column_names, vec!["field", "type", "null", "key", "default"]);
         assert_eq!(result.rows.len(), 2);
 
@@ -808,7 +809,9 @@ mod tests {
             .rows
             .get(1)
             .expect("describe should return second row");
+        
         assert_eq!(String::from_utf8_lossy(&second_row[0]), "email");
+
     }
 
     #[test]
@@ -866,7 +869,65 @@ mod tests {
     }
 
     #[test]
+    fn alter_table_query_updates_schema() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-alter-table-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let create_request = ConnectorRequest::new(
+            "req-create-table-alter-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email varchar(255))"
+                        .to_string(),
+                },
+            },
+        );
+
+        let create_response = app.handle_connector_request(&create_request);
+        assert_eq!(create_response.status, ResponseStatus::Applied);
+
+        let alter_request = ConnectorRequest::new(
+            "req-alter-table-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "alter table users add column status varchar(20) not null default 'active', rename column email to login_email"
+                        .to_string(),
+                },
+            },
+        );
+
+        let alter_response = app.handle_connector_request(&alter_request);
+        assert_eq!(alter_response.status, ResponseStatus::Applied);
+
+        let catalog = app.catalogs.get("main").expect("main catalog should exist");
+        let schema = catalog
+            .table_schema("users")
+            .expect("users schema should exist");
+
+        assert!(schema.field("status").is_some());
+        assert!(schema.field("login_email").is_some());
+        assert!(schema.field("email").is_none());
+
+    }
+
+    #[test]
     fn create_database_query_creates_catalog() {
+
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -891,10 +952,12 @@ mod tests {
         let response = app.handle_connector_request(&request);
         assert_eq!(response.status, ResponseStatus::Applied);
         assert!(!app.catalogs().is_empty());
+
     }
 
     #[test]
     fn drop_database_query_removes_catalog() {
+
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -932,6 +995,7 @@ mod tests {
         assert_eq!(response.status, ResponseStatus::Applied);
         assert!(app.catalogs().get("analytics").is_none());
         assert!(!catalog_file.exists());
+
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use sqlparser::ast::{
+    AlterTableOperation,
     ColumnOption, DataType, Delete, FromTable, GrantObjects, ObjectName, ObjectType, Query,
     SchemaName, SetExpr, SetOperator, Statement, TableFactor, TableWithJoins, Use,
 };
@@ -59,6 +60,22 @@ pub struct SqlRequest {
     pub operation: SqlOperation,
     pub object_name: Option<String>,
     pub compatibility_target: SqlCompatibilityTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableChangePlan {
+    pub table_id: String,
+    pub operations: Vec<AlterTableChangeOp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTableChangeOp {
+    AddField(FieldDef),
+    DropField(String),
+    RenameField {
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +278,106 @@ pub fn create_table_schema_from_statement(
 
     Ok((table_id, schema))
     
+}
+
+pub fn parse_alter_table_change_plan_from_statement(
+    statement: &str,
+) -> Result<AlterTableChangePlan, SqlParseError> {
+
+    let parsed = parse_mysql_statements(statement)?;
+    let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
+
+    let Statement::AlterTable {
+        name,
+        operations,
+        ..
+    } = single
+    else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not ALTER TABLE".to_string(),
+        ));
+    };
+
+    let table_id = common::normalize_identifier!(name.to_string());
+    let mut plan_ops = Vec::new();
+
+    for operation in operations {
+
+        match operation {
+
+            AlterTableOperation::AddColumn { column_def, .. } => {
+
+                let nullable = !column_def
+                    .options
+                    .iter()
+                    .any(|opt| matches!(opt.option, ColumnOption::NotNull));
+
+                let indexed = if column_def.options.iter().any(|opt| {
+                    matches!(
+                        opt.option,
+                        ColumnOption::Unique {
+                            is_primary: true,
+                            ..
+                        }
+                    )
+                }) {
+                    FieldIndex::PrimaryKey
+                } else if column_def
+                    .options
+                    .iter()
+                    .any(|opt| matches!(opt.option, ColumnOption::Unique { .. }))
+                {
+                    FieldIndex::Indexed
+                } else {
+                    FieldIndex::None
+                };
+
+                let default_value = column_def.options.iter().find_map(|opt| match &opt.option {
+                    ColumnOption::Default(expr) => parse_default_value(expr.to_string()),
+                    _ => None,
+                });
+
+                plan_ops.push(AlterTableChangeOp::AddField(FieldDef {
+                    seqno: 0,
+                    field_name: column_def.name.value.clone(),
+                    field_type: map_sql_data_type(&column_def.data_type),
+                    nullable,
+                    indexed,
+                    default_value,
+                    metadata: extract_field_metadata(column_def),
+                }));
+
+            },
+
+            AlterTableOperation::DropColumn { column_name, .. } => {
+                plan_ops.push(AlterTableChangeOp::DropField(column_name.value.clone()));
+            },
+
+            AlterTableOperation::RenameColumn {
+                old_column_name,
+                new_column_name,
+            } => {
+                plan_ops.push(AlterTableChangeOp::RenameField {
+                    from: old_column_name.value.clone(),
+                    to: new_column_name.value.clone(),
+                });
+            },
+
+            _ => {
+                return Err(SqlParseError::UnsupportedStatement(format!(
+                    "unsupported ALTER TABLE operation: {operation}"
+                )));
+            }
+
+        }
+
+    }
+
+    Ok(AlterTableChangePlan {
+        table_id,
+        operations: plan_ops,
+    })
+
 }
 
 fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
@@ -1320,7 +1437,42 @@ mod tests {
     }
 
     #[test]
+    fn alter_table_change_plan_parses_add_drop_and_rename() {
+
+        let plan = parse_alter_table_change_plan_from_statement(
+            "alter table users add column status varchar(20) not null default 'active', drop column legacy, rename column email to login_email",
+        )
+        .expect("alter table should parse");
+
+        assert_eq!(plan.table_id, "users");
+        assert_eq!(plan.operations.len(), 3);
+
+        match &plan.operations[0] {
+            AlterTableChangeOp::AddField(field) => {
+                assert_eq!(field.field_name, "status");
+                assert_eq!(field.default_value.as_deref(), Some(&b"active"[..]));
+            }
+            _ => panic!("expected add field operation"),
+        }
+
+        match &plan.operations[1] {
+            AlterTableChangeOp::DropField(name) => assert_eq!(name, "legacy"),
+            _ => panic!("expected drop field operation"),
+        }
+
+        match &plan.operations[2] {
+            AlterTableChangeOp::RenameField { from, to } => {
+                assert_eq!(from, "email");
+                assert_eq!(to, "login_email");
+            }
+            _ => panic!("expected rename field operation"),
+        }
+
+    }
+
+    #[test]
     fn use_database_maps_to_alter_schema_other_operation() {
+
         let requests = parse_mysql8_sql_requests("use analytics", "main")
             .expect("use database should parse");
 
@@ -1328,10 +1480,12 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
         assert_eq!(requests[0].operation, SqlOperation::AlterOther);
         assert_eq!(requests[0].object_name.as_deref(), Some("analytics"));
+
     }
 
     #[test]
     fn create_index_maps_to_create_other_operation() {
+
         let requests = parse_mysql8_sql_requests("create index idx_users_id on users(id)", "main")
             .expect("create index should parse");
 
@@ -1339,10 +1493,12 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::Create);
         assert_eq!(requests[0].operation, SqlOperation::CreateOther);
         assert_eq!(requests[0].object_name.as_deref(), Some("idx_users_id"));
+
     }
 
     #[test]
     fn set_names_maps_to_alter_schema_other_operation() {
+
         let requests = parse_mysql8_sql_requests("set names utf8mb4", "main")
             .expect("set names should parse");
 
@@ -1350,10 +1506,12 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
         assert_eq!(requests[0].operation, SqlOperation::AlterOther);
         assert_eq!(requests[0].object_name.as_deref(), Some("utf8mb4"));
+
     }
 
     #[test]
     fn set_variable_maps_to_alter_schema_other_operation() {
+        
         let requests = parse_mysql8_sql_requests("set autocommit = 0", "main")
             .expect("set variable should parse");
 
@@ -1361,10 +1519,12 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
         assert_eq!(requests[0].operation, SqlOperation::AlterOther);
         assert_eq!(requests[0].object_name.as_deref(), Some("autocommit"));
+
     }
 
     #[test]
     fn show_create_table_maps_to_retrieve_operation() {
+
         let requests = parse_mysql8_sql_requests("show create table users", "main")
             .expect("show create table should parse");
 
@@ -1372,10 +1532,12 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::Retrieve);
         assert_eq!(requests[0].operation, SqlOperation::Select);
         assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+
     }
 
     #[test]
     fn show_tables_from_database_maps_to_retrieve_operation() {
+
         let requests = parse_mysql8_sql_requests("show tables from analytics", "main")
             .expect("show tables from db should parse");
 
@@ -1383,10 +1545,12 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::Retrieve);
         assert_eq!(requests[0].operation, SqlOperation::Select);
         assert_eq!(requests[0].object_name.as_deref(), Some("analytics"));
+
     }
 
     #[test]
     fn start_transaction_maps_to_alter_schema_other_operation() {
+
         let requests = parse_mysql8_sql_requests("start transaction", "main")
             .expect("start transaction should parse");
 
@@ -1394,6 +1558,7 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
         assert_eq!(requests[0].operation, SqlOperation::AlterOther);
         assert!(requests[0].object_name.is_none());
+        
     }
 
     #[test]
