@@ -134,7 +134,7 @@ impl ConcurrentWalManager {
         }
 
         Ok(())
-        
+
     }
 
     fn get_or_spawn_worker(&self, wal_id: &str) -> Result<Sender<WalCommand>, &'static str> {
@@ -304,13 +304,17 @@ fn ensure_wal_file(path: &Path) -> Result<(), &'static str> {
 }
 
 fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'static str> {
+    
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&make_header(FileKind::Data));
+    
     for record in records {
         let frame = frame_record(record)?;
         bytes.extend_from_slice(&frame);
     }
+    
     write_bytes(path, &bytes).map_err(|_| "failed to rewrite compacted WAL file")
+
 }
 
 fn compact_entries_to_latest_schema_and_metadata(
@@ -318,6 +322,7 @@ fn compact_entries_to_latest_schema_and_metadata(
     actor: UserId,
     timestamp_epoch_ms: u64,
 ) {
+
     let last_id = entries.last().map(|record| record.id).unwrap_or(TransactionId(0));
 
     let latest_schema = entries
@@ -325,6 +330,7 @@ fn compact_entries_to_latest_schema_and_metadata(
         .rev()
         .find(|record| record.kind == TransactionKind::SchemaChange)
         .cloned();
+
     let latest_metadata = entries
         .iter()
         .rev()
@@ -338,9 +344,11 @@ fn compact_entries_to_latest_schema_and_metadata(
     if let Some(schema) = latest_schema {
         retained.push(schema);
     }
+    
     if let Some(metadata) = latest_metadata {
         retained.push(metadata);
     }
+
     retained.sort_by_key(|record| record.id.0);
 
     retained.push(TransactionRecord {
@@ -353,6 +361,7 @@ fn compact_entries_to_latest_schema_and_metadata(
     });
 
     *entries = retained;
+
 }
 
 fn spawn_worker(
