@@ -8,7 +8,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
-use common::DEFAULT_SERVER_PORT;
+use common::{DEFAULT_SERVER_PORT, PeerSession};
+use common::helpers::utils::{epochabs, md5};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 
@@ -56,6 +57,7 @@ pub struct ConnectorP2pTransport {
 struct LiveConnection {
     peer_id: String,
     stream: TcpStream,
+    session: PeerSession,
 }
 
 impl ConnectorP2pTransport {
@@ -163,6 +165,52 @@ impl ConnectorP2pTransport {
         self.clear_live_connection("disconnect directive");
     }
 
+    pub fn set_session_auth_token(&self, token: Option<String>) -> Result<(), ConnectorError> {
+        let mut connection = self
+            .live_connection
+            .lock()
+            .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
+
+        let Some(live) = connection.as_mut() else {
+            return Err(ConnectorError::Transport(
+                "no active peer connection for auth token update".to_string(),
+            ));
+        };
+
+        live.session.auth_token = token;
+        Ok(())
+    }
+
+    pub fn session_auth_token(&self) -> Result<Option<String>, ConnectorError> {
+        let connection = self
+            .live_connection
+            .lock()
+            .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
+
+        let Some(live) = connection.as_ref() else {
+            return Err(ConnectorError::Transport(
+                "no active peer connection for auth token retrieval".to_string(),
+            ));
+        };
+
+        Ok(live.session.auth_token.clone())
+    }
+
+    pub fn session_shared_authorization(&self) -> Result<Option<String>, ConnectorError> {
+        let connection = self
+            .live_connection
+            .lock()
+            .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
+
+        let Some(live) = connection.as_ref() else {
+            return Err(ConnectorError::Transport(
+                "no active peer connection for shared authorization retrieval".to_string(),
+            ));
+        };
+
+        Ok(live.session.shared_authorization.clone())
+    }
+
     fn clear_live_connection(&self, reason: &str) {
         if let Ok(mut connection) = self.live_connection.lock() {
             if let Some(live) = connection.take() {
@@ -192,6 +240,8 @@ impl ConnectorTransport for ConnectorP2pTransport {
             ));
         }
 
+        let has_live_connection = self.has_live_connection();
+
         if let Some(active_peer) = self.active_peer_id() {
             log::debug!(
                 "connector transport routing request_id={} to peer={}",
@@ -200,7 +250,8 @@ impl ConnectorTransport for ConnectorP2pTransport {
             );
         }
 
-        if let Some(peer) = self.active_peer() {
+        if has_live_connection {
+            if let Some(peer) = self.active_peer() {
             match send_request_over_tcp(self, peer, request) {
                 Ok(response) => {
                     log::debug!(
@@ -218,6 +269,7 @@ impl ConnectorTransport for ConnectorP2pTransport {
                     );
                 }
             }
+            }
         }
 
         self.queued_responses
@@ -228,10 +280,17 @@ impl ConnectorTransport for ConnectorP2pTransport {
                     "connector transport has no queued response for request_id={}",
                     request.request_id
                 );
-                ConnectorError::Transport(
-                    "no queued response for request_id; p2p request/response loop is not wired yet"
-                        .to_string(),
-                )
+                if !has_live_connection {
+                    ConnectorError::Transport(
+                        "no active peer connection; run `connect <user@peer-id>;` first"
+                            .to_string(),
+                    )
+                } else {
+                    ConnectorError::Transport(
+                        "no queued response for request_id; p2p request/response loop is not wired yet"
+                            .to_string(),
+                    )
+                }
             })
     }
 }
@@ -315,9 +374,19 @@ fn ensure_live_connection(
         socket_addr
     );
 
+    let server_shared_authorization = match &challenge.result {
+        ConnectorResult::Error(message) => extract_shared_authorization(message),
+        _ => None,
+    };
+    let shared_session_token = generate_shared_session_token(
+        &peer.peer_id,
+        server_shared_authorization.as_deref(),
+    );
+
     *connection = Some(LiveConnection {
         peer_id: peer.peer_id.clone(),
         stream,
+        session: PeerSession::new().with_shared_authorization(shared_session_token),
     });
 
     Ok(())
@@ -362,6 +431,28 @@ fn normalize_peer_addr(raw: &str) -> String {
         return trimmed.to_string();
     }
     format!("{}:{}", trimmed, DEFAULT_SERVER_PORT)
+}
+
+fn extract_shared_authorization(message: &str) -> Option<String> {
+    for part in message.split_whitespace() {
+        if let Some(value) = part.strip_prefix("shared_authorization=") {
+            let token = value.trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn generate_shared_session_token(peer_id: &str, server_token: Option<&str>) -> String {
+    let entropy = format!(
+        "{}:{}:{}",
+        peer_id,
+        epochabs(),
+        server_token.unwrap_or("server-token-unavailable")
+    );
+    md5(entropy.as_bytes())
 }
 
 #[cfg(test)]

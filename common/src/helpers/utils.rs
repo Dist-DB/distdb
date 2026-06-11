@@ -34,3 +34,14 @@ pub fn epoch_to_utcdate(epochin: i64, format: &str) -> String {
     let datetime = DateTime::from_timestamp(epochin, 0).unwrap();
     datetime.format(format).to_string()
 }
+
+
+pub fn md5_hash(stringin: &str) -> String {
+    md5(stringin.as_bytes())
+}
+
+
+pub fn md5(bytes : &[u8]) -> String {
+    let _digest = md5::compute(bytes);
+    format!("{:x}", _digest)
+}

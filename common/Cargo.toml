@@ -14,3 +14,4 @@ uuid = { version = "1.22.0", features = ["serde", "v4", "v7", "fast-rng"] }
 libp2p = { version = "0.55", default-features = false, features = ["cbor", "identify", "macros", "mdns", "noise", "ping", "quic", "request-response", "serde", "tcp", "tokio", "yamux"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 openssl = "*"
+md5 = "*"

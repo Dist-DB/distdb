@@ -2,8 +2,9 @@
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorP2pConfig, ConnectorP2pEvent,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, DataQuery,
+    ConnectorResponse, ConnectorResult, DataQuery, ResponseStatus,
 };
+use common::helpers::utils::md5_hash;
 
 use std::env;
 use std::io::{self, Write};
@@ -92,6 +93,11 @@ impl ConsoleSession {
                 self.runtime.transport_mut().select_peer(&peer_id)?;
                 self.runtime.transport().connect_active_peer()?;
                 println!("connected session to {}@{}", user, peer_id);
+                match self.runtime.transport().session_shared_authorization() {
+                    Ok(Some(token)) => println!("shared_authorization={}", token),
+                    Ok(None) => println!("shared_authorization=<none>"),
+                    Err(_) => println!("shared_authorization=<unavailable>"),
+                }
                 Ok(true)
             }
             ConsoleCommand::Disconnect => {
@@ -122,11 +128,17 @@ impl ConsoleSession {
     }
 
     fn execute_sql(&mut self, sql: String) -> Result<bool, Box<dyn std::error::Error>> {
+        let auth_token_for_session = extract_password_token_input(&sql).map(md5_hash);
+        let wire_sql = auth_token_for_session
+            .as_ref()
+            .map(|token| format!("password_token {token}"))
+            .unwrap_or_else(|| sql.clone());
+
         let request_id = self.next_request_id();
         let command = ConnectorCommand::Query {
             query: DataQuery {
                 database_id: self.current_database.clone(),
-                sql,
+                sql: wire_sql,
             },
         };
 
@@ -141,12 +153,23 @@ impl ConsoleSession {
             result.timings.network_round_trip_ms = Some(round_trip_ms);
         }
 
+        if let Some(token) = auth_token_for_session {
+            if response.status == ResponseStatus::Rejected {
+                let _ = self.runtime.transport().set_session_auth_token(None);
+            } else {
+                self.runtime
+                    .transport()
+                    .set_session_auth_token(Some(token))?;
+            }
+        }
+
         print_response(&response);
 
         Ok(true)
     }
 
     fn print_p2p_status(&self) {
+
         let transport = self.runtime.transport();
         let mode = match transport.discovery_mode() {
             connector::ConnectorDiscoveryMode::Kademlia => "kademlia",
@@ -176,7 +199,31 @@ impl ConsoleSession {
         println!(
             "  visibility=not exposed by connector API yet (request/response path is active)"
         );
+
+        match transport.session_auth_token() {
+            Ok(Some(_)) => println!("  auth_token=<set>"),
+            Ok(None) => println!("  auth_token=<none>"),
+            Err(_) => println!("  auth_token=<unavailable>"),
+        }
+        match transport.session_shared_authorization() {
+            Ok(Some(_)) => println!("  shared_authorization=<set>"),
+            Ok(None) => println!("  shared_authorization=<none>"),
+            Err(_) => println!("  shared_authorization=<unavailable>"),
+        }
+
     }
+    
+}
+
+fn extract_password_token_input(sql: &str) -> Option<&str> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next()?;
+    let password = parts.next()?;
+    if command.eq_ignore_ascii_case("password") {
+        return Some(password);
+    }
+    None
 }
 
 fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> {
@@ -234,8 +281,11 @@ fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> 
 }
 
 fn print_response(response: &ConnectorResponse) {
+
     match &response.result {
+
         ConnectorResult::Query(result) => {
+
             if !result.columns.is_empty() {
                 let header = result
                     .columns
@@ -266,20 +316,26 @@ fn print_response(response: &ConnectorResponse) {
             if let Some(cache) = &result.timings.cache {
                 println!("cache: {:?}", cache);
             }
+
         }
+
         ConnectorResult::Mutation(result) => {
             println!("ok: {} row(s) affected", result.affected_rows);
         }
+
         ConnectorResult::Schema(result) => {
             println!(
                 "schema updated: table={} revision={}",
                 result.table_id, result.schema_revision
             );
         }
+
         ConnectorResult::Error(message) => {
             println!("error: {}", message);
         }
+
     }
+    
 }
 
 fn print_help() {

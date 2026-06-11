@@ -6,6 +6,8 @@ use connector::{
     ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult,
     MutationResult,
 };
+use common::helpers::{aes_decrypt, aes_encrypt};
+use common::helpers::utils::md5_hash;
 use common::{PeerSession, SessionLog, SessionLogEventType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -20,15 +22,18 @@ const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 
 const SERVER_TEMP_PASSWORD: &str = "password";
 const SERVER_TEMP_USER: &str = "root";
+const SERVER_TEMP_TOKEN_SALT: &[u8; 8] = b"distdbv1";
 
 
 #[derive(Debug)]
 struct ServerConnectionSession {
     peer_addr: String,
     challenge_id: String,
+    shared_authorization_token: String,
     session: PeerSession,
     log: SessionLog,
     authenticated: bool,
+    encrypted_password_md5_token: String,
 }
 
 impl ServerConnectionSession {
@@ -36,7 +41,14 @@ impl ServerConnectionSession {
     fn new(peer_addr: String, connection_id: usize) -> Self {
 
         let challenge_id = format!("challenge-{}-{connection_id}", now_millis());
+        let shared_authorization_token = md5_hash(
+            format!("{}:{}:{}", SERVER_TEMP_USER, peer_addr, challenge_id).as_str(),
+        );
         let session = PeerSession::new().with_user_id(SERVER_TEMP_USER);
+        let expected_md5_token = md5_hash(SERVER_TEMP_PASSWORD);
+        let security_secret = security_context_secret(SERVER_TEMP_USER, "bootstrap");
+        let encrypted_password_md5_token =
+            aes_encrypt(&expected_md5_token, &security_secret, SERVER_TEMP_TOKEN_SALT);
         let mut log = SessionLog::new();
         
         log.add_entry(
@@ -57,18 +69,21 @@ impl ServerConnectionSession {
         Self {
             peer_addr,
             challenge_id,
+            shared_authorization_token,
             session,
             log,
             authenticated: false,
+            encrypted_password_md5_token,
         }
 
     }
 
     fn challenge_message(&self) -> String {
         format!(
-            "password challenge required challenge_id={} peer={}"
+            "password challenge required challenge_id={} shared_authorization={} peer={}"
             ,
             self.challenge_id,
+            self.shared_authorization_token,
             self.peer_addr
         )
     }
@@ -122,27 +137,50 @@ impl ServerConnectionSession {
         );
     }
 
-    fn authenticate_if_valid(&mut self, candidate_password: &str) -> bool {
+    fn authenticate_if_valid_token(&mut self, candidate_password_md5_token: &str) -> bool {
 
-        if candidate_password == SERVER_TEMP_PASSWORD {
+        let security_secret = security_context_secret(SERVER_TEMP_USER, "bootstrap");
+        let expected_password_md5_token = aes_decrypt(&self.encrypted_password_md5_token, &security_secret);
+
+        if candidate_password_md5_token == expected_password_md5_token {
+
             self.authenticated = true;
             self.session.auth_token = Some(format!("{}-authenticated", SERVER_TEMP_USER));
+            
             self.log.add_entry(
                 SessionLogEventType::Authenticate,
-                format!("temporary password accepted user={}", SERVER_TEMP_USER),
+                format!(
+                    "temporary password accepted user={} token={}",
+                    SERVER_TEMP_USER,
+                    candidate_password_md5_token
+                ),
                 true,
             );
+
             true
+
         } else {
+
             self.log.add_entry(
                 SessionLogEventType::Authenticate,
-                format!("temporary password rejected user={}", SERVER_TEMP_USER),
+                format!(
+                    "temporary password rejected user={} token={}",
+                    SERVER_TEMP_USER,
+                    candidate_password_md5_token
+                ),
                 false,
             );
+
             false
+
         }
 
     }
+
+}
+
+fn security_context_secret(user_id: &str, database_id: &str) -> String {
+    format!("distdb-security:{}:{}", user_id, database_id)
 }
 
 #[tokio::main]
@@ -284,9 +322,8 @@ async fn handle_connector_stream(
         if !session.authenticated {
             let auth_outcome = match &request.command {
                 ConnectorCommand::Query { query } => {
-                    extract_auth_password(&query.sql).map(|password| {
-                        session.authenticate_if_valid(password)
-                    })
+                    extract_auth_token(&query.sql)
+                        .map(|token| session.authenticate_if_valid_token(token))
                 }
                 _ => None,
             };
@@ -331,13 +368,13 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-fn extract_auth_password(sql: &str) -> Option<&str> {
+fn extract_auth_token(sql: &str) -> Option<&str> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let mut parts = trimmed.split_whitespace();
     let command = parts.next()?;
-    let password = parts.next()?;
-    if command.eq_ignore_ascii_case("password") {
-        return Some(password);
+    let token = parts.next()?;
+    if command.eq_ignore_ascii_case("password_token") {
+        return Some(token);
     }
     None
 }
