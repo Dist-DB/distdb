@@ -91,6 +91,7 @@ pub struct SchemaResult {
 }
 
 impl ConnectorResponse {
+
     pub fn applied(request_id: impl Into<String>, result: ConnectorResult) -> Self {
         Self {
             request_id: request_id.into(),
@@ -106,4 +107,5 @@ impl ConnectorResponse {
             result: ConnectorResult::Error(message.into()),
         }
     }
+    
 }

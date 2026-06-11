@@ -78,6 +78,7 @@ impl ConnectorRequest {
 
 #[cfg(test)]
 mod tests {
+    
     use super::*;
 
     #[test]
@@ -95,4 +96,5 @@ mod tests {
 
         assert_eq!(decoded, req);
     }
+
 }

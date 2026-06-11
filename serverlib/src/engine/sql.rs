@@ -68,17 +68,25 @@ pub enum SqlParseError {
 }
 
 impl std::fmt::Display for SqlParseError {
+    
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
         match self {
+            
             Self::EmptyStatement => write!(f, "sql statement is empty"),
+
             Self::MissingIdentifier { keyword, statement } => {
                 write!(f, "sql statement '{statement}' is missing an identifier after '{keyword}'")
-            }
+            },
+
             Self::UnsupportedStatement(statement) => {
                 write!(f, "unsupported sql statement '{statement}'")
-            }
+            },
+
         }
+        
     }
+
 }
 
 impl std::error::Error for SqlParseError {}
@@ -97,6 +105,7 @@ pub fn parse_sql_requests(
 ) -> Result<Vec<SqlRequest>, SqlParseError> {
     
     let database_id = database_id.into();
+
     let statements = match parse_mysql_statements(sql) {
         Ok(statements) => statements,
         Err(parse_error) => {
@@ -189,6 +198,7 @@ pub fn create_table_schema_from_statement(
     let mut fields = Vec::with_capacity(create_table.columns.len());
 
     for (idx, column) in create_table.columns.iter().enumerate() {
+
         let metadata = extract_field_metadata(column);
         
         let nullable = !column
@@ -233,15 +243,21 @@ pub fn create_table_schema_from_statement(
 }
 
 fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
+    
     let mysql = MySqlDialect {};
+    
     match Parser::parse_sql(&mysql, sql) {
+
         Ok(statements) => Ok(statements),
+        
         Err(mysql_error) => {
             let generic = GenericDialect {};
             Parser::parse_sql(&generic, sql)
                 .map_err(|_| SqlParseError::UnsupportedStatement(mysql_error.to_string()))
         }
+
     }
+
 }
 
 fn map_sql_data_type(data_type: &DataType) -> FieldType {
@@ -327,13 +343,17 @@ fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMet
     let mut metadata = FieldMetadata::default();
 
     for option in &column.options {
+
         match &option.option {
+
             ColumnOption::Comment(comment) => {
                 metadata.comment = Some(comment.clone());
-            }
+            },
+
             ColumnOption::CharacterSet(charset) => {
                 metadata.character_set = Some(charset.to_string());
-            }
+            },
+
             ColumnOption::DialectSpecific(tokens) => {
                 let lowered = tokens
                     .iter()
@@ -345,9 +365,12 @@ fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMet
                 if lowered.contains("auto_increment") || lowered.contains("autoincrement") {
                     metadata.auto_increment = true;
                 }
-            }
+            },
+
             _ => {}
+
         }
+
     }
 
     if metadata.collation.is_none() {
@@ -382,8 +405,10 @@ fn extract_collation_from_tokens(tokens: &[sqlparser::tokenizer::Token]) -> Opti
 }
 
 fn extract_collation_from_column(column: &sqlparser::ast::ColumnDef) -> Option<String> {
+
     let rendered = column.to_string();
     let segments = rendered.split_whitespace().collect::<Vec<_>>();
+    
     for idx in 0..segments.len() {
         if segments[idx].eq_ignore_ascii_case("collate") {
             return segments.get(idx + 1).map(|value| {
@@ -396,6 +421,7 @@ fn extract_collation_from_column(column: &sqlparser::ast::ColumnDef) -> Option<S
             });
         }
     }
+
     None
 }
 

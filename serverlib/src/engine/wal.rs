@@ -82,8 +82,10 @@ impl ConcurrentWalManager {
         actor: UserId,
         timestamp_epoch_ms: u64,
     ) -> Result<(), &'static str> {
+
         let sender = self.get_or_spawn_worker(wal_id)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
+
         sender
             .send(WalCommand::CompactToLatestSchemaAndMetadata {
                 actor,
@@ -95,9 +97,11 @@ impl ConcurrentWalManager {
         ack_rx
             .recv()
             .map_err(|_| "failed to receive WAL compact acknowledgement")?
+
     }
 
     pub fn delete_stream(&self, wal_id: &str) -> Result<(), &'static str> {
+
         let stream_key = obfuscated_stream_key(wal_id)?;
 
         let sender = {
@@ -130,10 +134,13 @@ impl ConcurrentWalManager {
         }
 
         Ok(())
+        
     }
 
     fn get_or_spawn_worker(&self, wal_id: &str) -> Result<Sender<WalCommand>, &'static str> {
+
         let stream_key = obfuscated_stream_key(wal_id)?;
+        
         let mut workers = self
             .workers
             .lock()
@@ -149,8 +156,11 @@ impl ConcurrentWalManager {
             .map(|dir| dir.join(FileKind::Data.file_name(&stream_key)));
 
         let sender = spawn_worker(stream_key.clone(), Arc::clone(&self.storage), wal_path);
+        
         workers.insert(stream_key, sender.clone());
+        
         Ok(sender)
+
     }
 
 }
@@ -158,8 +168,10 @@ impl ConcurrentWalManager {
 impl TransactionLog for ConcurrentWalManager {
 
     fn append(&self, wal_id: &str, record: TransactionRecord) -> Result<(), &'static str> {
+        
         let sender = self.get_or_spawn_worker(wal_id)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
+
         sender
             .send(WalCommand::Append {
                 record,
@@ -170,9 +182,11 @@ impl TransactionLog for ConcurrentWalManager {
         ack_rx
             .recv()
             .map_err(|_| "failed to receive WAL append acknowledgement")?
+
     }
 
     fn since(&self, wal_id: &str, from: Option<TransactionId>) -> Vec<TransactionRecord> {
+
         let stream_key = match obfuscated_stream_key(wal_id) {
             Ok(k) => k,
             Err(_) => return Vec::new(),
@@ -202,24 +216,31 @@ impl TransactionLog for ConcurrentWalManager {
 }
 
 fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
-    let encoded =
-        bincode::serialize(record).map_err(|_| "failed to serialize WAL record")?;
+
+    let encoded = bincode::serialize(record).map_err(|_| "failed to serialize WAL record")?;
     let len = encoded.len() as u64;
     let mut frame = Vec::with_capacity(8 + encoded.len());
+
     frame.extend_from_slice(&len.to_le_bytes());
     frame.extend_from_slice(&encoded);
+
     Ok(frame)
+
 }
 
 fn obfuscated_stream_key(wal_id: &str) -> Result<String, &'static str> {
+
     let normalized = wal_id.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return Err("wal_id must not be empty");
     }
+
     Ok(stable_id(&[&normalized]))
+
 }
 
 fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
+
     let bytes = match read_bytes(path) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
@@ -232,17 +253,21 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
 
     let mut records = Vec::new();
     let mut pos = HEADER_SIZE;
+    
     while pos + 8 <= bytes.len() {
+
         let len = u64::from_le_bytes(
             bytes[pos..pos + 8]
                 .try_into()
                 .expect("slice is exactly 8 bytes"),
         ) as usize;
+        
         pos += 8;
         if pos + len > bytes.len() {
             log::warn!("truncated WAL frame at byte offset {}, stopping replay", pos);
             break;
         }
+        
         match bincode::deserialize::<TransactionRecord>(&bytes[pos..pos + len]) {
             Ok(record) => records.push(record),
             Err(e) => {
@@ -251,22 +276,31 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
             }
         }
         pos += len;
+
     }
+    
     records
+
 }
 
 fn ensure_wal_file(path: &Path) -> Result<(), &'static str> {
+
     match read_bytes(path) {
+
         Ok(existing) => {
             verify_header(FileKind::Data, &existing).map_err(|_| "invalid WAL file header/version")?;
             Ok(())
-        }
+        },
+
         Err(e) if e.kind() == ErrorKind::NotFound => {
             write_bytes(path, &make_header(FileKind::Data))
                 .map_err(|_| "failed to initialize WAL file header")
-        }
+        },
+
         Err(_) => Err("failed to inspect WAL file"),
+
     }
+
 }
 
 fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'static str> {
@@ -326,8 +360,11 @@ fn spawn_worker(
     storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
     wal_path: Option<PathBuf>,
 ) -> Sender<WalCommand> {
+    
     let (tx, rx) = mpsc::channel::<WalCommand>();
+
     thread::spawn(move || {
+
         if let Some(ref path) = wal_path {
             if let Err(e) = ensure_wal_file(path) {
                 log::error!("failed to initialize WAL file '{}': {}", path.display(), e);
@@ -440,7 +477,9 @@ fn spawn_worker(
             }
         }
     });
+    
     tx
+
 }
 
 #[cfg(test)]

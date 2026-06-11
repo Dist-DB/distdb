@@ -30,11 +30,13 @@ pub struct ConnectorClient<T: ConnectorTransport> {
 }
 
 impl<T: ConnectorTransport> ConnectorClient<T> {
+
     pub fn new(transport: T) -> Self {
         Self { transport }
     }
 
     pub fn execute(&self, request: &ConnectorRequest) -> Result<ConnectorResponse, ConnectorError> {
+
         let response = self.transport.request(request)?;
 
         if response.request_id != request.request_id {
@@ -53,7 +55,9 @@ impl<T: ConnectorTransport> ConnectorClient<T> {
         }
 
         Ok(response)
+
     }
+    
 }
 
 #[cfg(test)]

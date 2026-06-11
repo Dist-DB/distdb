@@ -280,6 +280,7 @@ fn resolve_database_for_sql(
 }
 
 fn is_global_sql_without_database(sql: &str) -> bool {
+    
     let tokens = sql
         .trim()
         .trim_end_matches(';')
@@ -295,6 +296,7 @@ fn is_global_sql_without_database(sql: &str) -> bool {
         (tokens[0].as_str(), tokens[1].as_str()),
         ("show", "databases") | ("create", "database") | ("drop", "database")
     )
+    
 }
 
 pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> {
@@ -416,22 +418,22 @@ pub fn print_response(response: &ConnectorResponse) {
                 println!("cache: {:?}", cache);
             }
 
-        }
+        },
 
         ConnectorResult::Mutation(result) => {
             println!("ok: {} row(s) affected", result.affected_rows);
-        }
+        },
 
         ConnectorResult::Schema(result) => {
             println!(
                 "schema updated: table={} revision={}",
                 result.table_id, result.schema_revision
             );
-        }
+        },
 
         ConnectorResult::Error(message) => {
             println!("error: {}", message);
-        }
+        },
 
     }
 
@@ -473,6 +475,7 @@ pub fn parse_connect_target(target: &str) -> Result<(String, String), String> {
 }
 
 fn is_console_command_fragment(line: &str) -> bool {
+
     let lowered = line.to_lowercase();
 
     matches!(
@@ -480,6 +483,7 @@ fn is_console_command_fragment(line: &str) -> bool {
         "help" | ".help" | "exit" | "quit" | "\\q" | "show p2p" | "show peers" | "disconnect"
     ) || lowered.starts_with("use ")
         || lowered.starts_with("connect ")
+
 }
 
 #[cfg(test)]
