@@ -24,7 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
 
-        print!("distdb:{}> ", session.current_database);
+        print!(
+            "distdb:{}> ",
+            session.current_database.as_deref().unwrap_or("<none>")
+        );
+        
         io::stdout().flush()?;
 
         let mut line = String::new();

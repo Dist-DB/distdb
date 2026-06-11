@@ -7,6 +7,7 @@ use connector::{
 use common::helpers::utils::md5_hash;
 
 pub const TEMP_CONNECT_USER: &str = "root";
+const AUTH_FALLBACK_DATABASE: &str = "main";
 
 pub enum ConsoleCommand {
     Help,
@@ -21,7 +22,7 @@ pub enum ConsoleCommand {
 
 pub struct ConsoleSession {
     pub runtime: ConnectorP2pRuntime,
-    pub current_database: String,
+    pub current_database: Option<String>,
     request_seq: u64,
 }
 
@@ -43,7 +44,7 @@ impl ConsoleSession {
 
         Ok(Self {
             runtime,
-            current_database: "main".to_string(),
+            current_database: None,
             request_seq: 0,
         })
 
@@ -118,6 +119,7 @@ impl ConsoleSession {
             },
 
             ConsoleCommand::UseDatabase(database) => {
+
                 let probe_request = ConnectorRequest::new(
                     self.next_request_id(),
                     ConnectorCommand::Query {
@@ -131,8 +133,13 @@ impl ConsoleSession {
                 let client = ConnectorClient::new(self.runtime.transport().clone());
                 client.execute(&probe_request)?;
 
-                self.current_database = database;
-                println!("database switched to {}", self.current_database);
+                self.current_database = Some(database);
+
+                println!(
+                    "database switched to {}",
+                    self.current_database.as_deref().unwrap_or("<none>")
+                );
+                
                 Ok(true)
             },
 
@@ -145,6 +152,7 @@ impl ConsoleSession {
     fn execute_sql(&mut self, sql: String) -> Result<bool, Box<dyn std::error::Error>> {
 
         let auth_token_for_session = extract_password_token_input(&sql).map(md5_hash);
+        let is_auth_request = auth_token_for_session.is_some();
 
         let wire_sql = auth_token_for_session
             .as_ref()
@@ -152,10 +160,15 @@ impl ConsoleSession {
             .unwrap_or_else(|| sql.clone());
 
         let request_id = self.next_request_id();
+        let database_id = resolve_database_for_sql(
+            self.current_database.as_deref(),
+            is_auth_request,
+            &sql,
+        )?;
 
         let command = ConnectorCommand::Query {
             query: DataQuery {
-                database_id: self.current_database.clone(),
+                database_id,
                 sql: wire_sql,
             },
         };
@@ -248,6 +261,40 @@ pub fn extract_password_token_input(sql: &str) -> Option<&str> {
     
     None
 
+}
+
+fn resolve_database_for_sql(
+    current_database: Option<&str>,
+    is_auth_request: bool,
+    sql: &str,
+) -> Result<String, &'static str> {
+    if let Some(database) = current_database {
+        return Ok(database.to_string());
+    }
+
+    if is_auth_request || is_global_sql_without_database(sql) {
+        return Ok(AUTH_FALLBACK_DATABASE.to_string());
+    }
+
+    Err("no active database selected; run `use <database>;` first")
+}
+
+fn is_global_sql_without_database(sql: &str) -> bool {
+    let tokens = sql
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if tokens.len() < 2 {
+        return false;
+    }
+
+    matches!(
+        (tokens[0].as_str(), tokens[1].as_str()),
+        ("show", "databases") | ("create", "database") | ("drop", "database")
+    )
 }
 
 pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> {
@@ -498,6 +545,29 @@ mod tests {
         assert_eq!(extract_password_token_input("password secret;"), Some("secret"));
         assert_eq!(extract_password_token_input("PASSWORD secret"), Some("secret"));
         assert_eq!(extract_password_token_input("select 1"), None);
+    }
+
+    #[test]
+    fn resolve_database_for_auth_without_selection_uses_fallback() {
+        let database = resolve_database_for_sql(None, true, "password secret;")
+            .expect("auth should allow fallback");
+        assert_eq!(database, "main");
+    }
+
+    #[test]
+    fn resolve_database_without_selection_rejects_non_auth() {
+        let result = resolve_database_for_sql(None, false, "select 1;");
+        assert!(matches!(
+            result,
+            Err("no active database selected; run `use <database>;` first")
+        ));
+    }
+
+    #[test]
+    fn resolve_database_without_selection_allows_show_databases() {
+        let database = resolve_database_for_sql(None, false, "show databases;")
+            .expect("show databases should not require explicit selection");
+        assert_eq!(database, "main");
     }
 
 }
