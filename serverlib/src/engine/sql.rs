@@ -1,7 +1,7 @@
 use sqlparser::ast::{
-    AlterTableOperation,
+    AlterTableOperation, Expr,
     ColumnOption, DataType, Delete, FromTable, GrantObjects, ObjectName, ObjectType, Query,
-    SchemaName, SetExpr, SetOperator, Statement, TableFactor, TableWithJoins, Use,
+    SchemaName, SetExpr, SetOperator, Statement, TableFactor, TableWithJoins, Use, Value,
 };
 use sqlparser::dialect::{GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
@@ -69,6 +69,13 @@ pub struct AlterTableChangePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertRowsPlan {
+    pub table_id: String,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<Vec<u8>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTableChangeOp {
     AddField(FieldDef),
     DropField(String),
@@ -113,6 +120,14 @@ impl std::fmt::Display for SqlParseError {
 
 impl std::error::Error for SqlParseError {}
 
+enum ParsedOrFallback {
+    Parsed(Vec<Statement>),
+    Fallback {
+        trimmed_sql: String,
+        metadata: (SqlDirective, SqlOperation, Option<String>),
+    },
+}
+
 pub fn parse_mysql8_sql_requests(
     sql: &str,
     database_id: impl Into<String>,
@@ -128,22 +143,24 @@ pub fn parse_sql_requests(
     
     let database_id = database_id.into();
 
-    let statements = match parse_mysql_statements(sql) {
-        Ok(statements) => statements,
-        Err(parse_error) => {
-            let trimmed = sql.trim();
-            if let Some((directive, operation, object_name)) = classify_text_fallback(trimmed) {
-                return Ok(vec![SqlRequest {
-                    database_id,
-                    sql: trimmed.to_string(),
-                    directive,
-                    operation,
-                    object_name,
-                    compatibility_target,
-                }]);
-            }
-            return Err(parse_error);
+    let statements = match parse_or_fallback(sql)? {
+
+        ParsedOrFallback::Parsed(statements) => statements,
+
+        ParsedOrFallback::Fallback {
+            trimmed_sql,
+            metadata: (directive, operation, object_name),
+        } => {
+            return Ok(vec![SqlRequest {
+                database_id,
+                sql: trimmed_sql,
+                directive,
+                operation,
+                object_name,
+                compatibility_target,
+            }]);
         }
+
     };
 
     if statements.is_empty() {
@@ -153,6 +170,7 @@ pub fn parse_sql_requests(
     statements
         .into_iter()
         .map(|statement| {
+            
             let statement_sql = statement.to_string();
             let (directive, operation, object_name) = classify_statement(&statement, &statement_sql)?;
 
@@ -164,6 +182,7 @@ pub fn parse_sql_requests(
                 object_name,
                 compatibility_target,
             })
+
         })
         .collect()
 
@@ -173,14 +192,9 @@ pub fn sql_statement_metadata(
     statement: &str,
 ) -> Result<(SqlDirective, SqlOperation, Option<String>), SqlParseError> {
 
-    let parsed = match parse_mysql_statements(statement) {
-        Ok(parsed) => parsed,
-        Err(parse_error) => {
-            if let Some(metadata) = classify_text_fallback(statement.trim()) {
-                return Ok(metadata);
-            }
-            return Err(parse_error);
-        }
+    let parsed = match parse_or_fallback(statement)? {
+        ParsedOrFallback::Parsed(parsed) => parsed,
+        ParsedOrFallback::Fallback { metadata, .. } => return Ok(metadata),
     };
 
     let single = parsed
@@ -217,9 +231,7 @@ pub fn create_table_schema_from_statement(
     };
 
     let table_id = common::normalize_identifier!(create_table.name.to_string());
-    let (primary_key_fields, indexed_fields) = derive_indexed_fields_from_constraints(
-        &create_table.constraints,
-    );
+    let (primary_key_fields, indexed_fields) = derive_indexed_fields_from_constraints(&create_table.constraints,);    
     let mut fields = Vec::with_capacity(create_table.columns.len());
 
     for (idx, column) in create_table.columns.iter().enumerate() {
@@ -276,6 +288,7 @@ pub fn create_table_schema_from_statement(
     }
 
     let schema = TableSchema::new(fields);
+
     schema.validate().map_err(|err| {
         SqlParseError::UnsupportedStatement(format!("invalid CREATE TABLE schema: {err}"))
     })?;
@@ -384,6 +397,112 @@ pub fn parse_alter_table_change_plan_from_statement(
 
 }
 
+pub fn parse_insert_rows_from_statement(
+    statement: &str,
+) -> Result<InsertRowsPlan, SqlParseError> {
+
+    let parsed = parse_mysql_statements(statement)?;
+    let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
+
+    let Statement::Insert(insert) = single else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not INSERT".to_string(),
+        ));
+    };
+
+    let table_id = common::normalize_identifier!(insert.table_name.to_string());
+    let columns = insert
+        .columns
+        .iter()
+        .map(|column| common::normalize_identifier!(&column.value))
+        .collect::<Vec<_>>();
+
+    let Some(source) = &insert.source else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "INSERT without a VALUES source is not supported".to_string(),
+        ));
+    };
+
+    let SetExpr::Values(values) = &*source.body else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "only INSERT ... VALUES is currently supported".to_string(),
+        ));
+    };
+
+    if values.rows.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "INSERT VALUES must contain at least one row".to_string(),
+        ));
+    }
+
+    let mut rows = Vec::with_capacity(values.rows.len());
+
+    for row in &values.rows {
+
+        if !columns.is_empty() && row.len() != columns.len() {
+            return Err(SqlParseError::UnsupportedStatement(
+                "INSERT values count must match provided columns".to_string(),
+            ));
+        }
+
+        let mut parsed_row = Vec::with_capacity(row.len());
+        for expr in row {
+            parsed_row.push(parse_insert_literal(expr)?);
+        }
+        
+        rows.push(parsed_row);
+
+    }
+
+    Ok(InsertRowsPlan {
+        table_id,
+        columns,
+        rows,
+    })
+
+}
+
+fn parse_insert_literal(expr: &Expr) -> Result<Option<Vec<u8>>, SqlParseError> {
+    match expr {
+        Expr::Value(value) => parse_insert_value(value),
+        _ => Err(SqlParseError::UnsupportedStatement(format!(
+            "INSERT literal '{expr}' is not supported"
+        ))),
+    }
+}
+
+fn parse_insert_value(value: &Value) -> Result<Option<Vec<u8>>, SqlParseError> {
+
+    match value {
+
+        Value::Null => Ok(None),
+        Value::Boolean(v) => Ok(Some(v.to_string().into_bytes())),
+        Value::Number(v, _) => Ok(Some(v.to_string().into_bytes())),
+        Value::SingleQuotedString(v)
+        | Value::DoubleQuotedString(v)
+        | Value::TripleSingleQuotedString(v)
+        | Value::TripleDoubleQuotedString(v)
+        | Value::EscapedStringLiteral(v)
+        | Value::UnicodeStringLiteral(v)
+        | Value::SingleQuotedByteStringLiteral(v)
+        | Value::DoubleQuotedByteStringLiteral(v)
+        | Value::TripleSingleQuotedByteStringLiteral(v)
+        | Value::TripleDoubleQuotedByteStringLiteral(v)
+        | Value::SingleQuotedRawStringLiteral(v)
+        | Value::DoubleQuotedRawStringLiteral(v)
+        | Value::TripleSingleQuotedRawStringLiteral(v)
+        | Value::TripleDoubleQuotedRawStringLiteral(v)
+        | Value::NationalStringLiteral(v)
+        | Value::HexStringLiteral(v) => Ok(Some(v.as_bytes().to_vec())),
+        Value::DollarQuotedString(v) => Ok(Some(v.value.as_bytes().to_vec())),
+        Value::Placeholder(v) => Err(SqlParseError::UnsupportedStatement(format!(
+            "INSERT placeholder '{v}' is not supported"
+        ))),
+
+    }
+
+}
+
 fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
     
     let mysql = MySqlDialect {};
@@ -402,9 +521,32 @@ fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {
 
 }
 
+fn parse_or_fallback(sql: &str) -> Result<ParsedOrFallback, SqlParseError> {
+
+    match parse_mysql_statements(sql) {
+
+        Ok(statements) => Ok(ParsedOrFallback::Parsed(statements)),
+
+        Err(parse_error) => {
+            let trimmed = sql.trim();
+            if let Some(metadata) = classify_text_fallback(trimmed) {
+                Ok(ParsedOrFallback::Fallback {
+                    trimmed_sql: trimmed.to_string(),
+                    metadata,
+                })
+            } else {
+                Err(parse_error)
+            }
+        }
+
+    }
+
+}
+
 fn derive_indexed_fields_from_constraints(
     constraints: &[sqlparser::ast::TableConstraint],
 ) -> (HashSet<String>, HashSet<String>) {
+
     let mut primary = HashSet::new();
     let mut indexed = HashSet::new();
 
@@ -432,11 +574,14 @@ fn derive_indexed_fields_from_constraints(
     }
 
     (primary, indexed)
+
 }
 
 fn extract_constraint_columns(constraint: &str) -> Option<Vec<String>> {
+
     let start = constraint.find('(')?;
     let end = constraint.rfind(')')?;
+    
     if end <= start + 1 {
         return None;
     }
@@ -457,9 +602,11 @@ fn extract_constraint_columns(constraint: &str) -> Option<Vec<String>> {
     } else {
         Some(columns)
     }
+
 }
 
 fn parse_default_value(value: String) -> Option<Vec<u8>> {
+
     let trimmed = value.trim();
     if trimmed.eq_ignore_ascii_case("null") {
         return None;
@@ -473,6 +620,7 @@ fn parse_default_value(value: String) -> Option<Vec<u8>> {
             .as_bytes()
             .to_vec(),
     )
+
 }
 
 fn map_sql_data_type(data_type: &DataType) -> FieldType {
@@ -569,6 +717,7 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
 }
 
 fn parse_enum_variants(sql_type: &str) -> Option<Vec<String>> {
+
     let start = sql_type.find('(')?;
     let end = sql_type.rfind(')')?;
     if end <= start + 1 {
@@ -606,6 +755,7 @@ fn parse_enum_variants(sql_type: &str) -> Option<Vec<String>> {
     }
 
     Some(variants)
+
 }
 
 fn parse_sql_type_len(lowered_type: &str, marker: &str) -> Option<usize> {
@@ -615,6 +765,7 @@ fn parse_sql_type_len(lowered_type: &str, marker: &str) -> Option<usize> {
 }
 
 fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMetadata> {
+
     let mut metadata = FieldMetadata::default();
     metadata.original_sql_type = Some(column.data_type.to_string());
 
@@ -663,6 +814,7 @@ fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMet
     }
 
     Some(metadata)
+
 }
 
 fn extract_collation_from_tokens(tokens: &[sqlparser::tokenizer::Token]) -> Option<String> {
@@ -710,6 +862,7 @@ fn classify_statement(
     let normalized = statement_sql.trim();
 
     let (directive, operation, object_name) = match statement {
+
         Statement::Query(query) => {
             let has_union = query_contains_operator(query, SetOperator::Union);
             let object_name = first_object_name_in_set_expr(&query.body);
@@ -719,52 +872,62 @@ fn classify_statement(
             } else {
                 (SqlDirective::Retrieve, SqlOperation::Select, object_name)
             }
-        }
+        },
+
         Statement::Insert(insert) => (
             SqlDirective::Create,
             SqlOperation::Insert,
             Some(insert.table_name.to_string()),
         ),
+
         Statement::Update { table, .. } => (
             SqlDirective::Update,
             SqlOperation::Update,
             first_object_name_in_table_with_joins(table),
         ),
+
         Statement::Delete(delete) => (
             SqlDirective::Delete,
             SqlOperation::Delete,
             first_object_name_in_delete(delete),
         ),
+
         Statement::CreateDatabase { db_name, .. } => (
             SqlDirective::Create,
             SqlOperation::CreateDatabase,
             Some(db_name.to_string()),
         ),
+
         Statement::CreateSchema { schema_name, .. } => (
             SqlDirective::Create,
             SqlOperation::CreateDatabase,
             schema_name_to_string(schema_name),
         ),
+
         Statement::CreateTable(create_table) => (
             SqlDirective::Create,
             SqlOperation::CreateTable,
             Some(create_table.name.to_string()),
         ),
+
         Statement::CreateView { name, .. } => (
             SqlDirective::Create,
             SqlOperation::CreateView,
             Some(name.to_string()),
         ),
+
         Statement::CreateTrigger { name, .. } => (
             SqlDirective::Create,
             SqlOperation::CreateTrigger,
             Some(name.to_string()),
         ),
+
         Statement::CreateProcedure { name, .. } => (
             SqlDirective::Create,
             SqlOperation::CreateStoredProcedure,
             Some(name.to_string()),
         ),
+
         Statement::CreateIndex(create_index) => (
             SqlDirective::Create,
             SqlOperation::CreateOther,
@@ -774,16 +937,19 @@ fn classify_statement(
                 .map(ObjectName::to_string)
                 .or_else(|| Some(create_index.table_name.to_string())),
         ),
+
         Statement::DropTrigger { trigger_name, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::DropTrigger,
             Some(trigger_name.to_string()),
         ),
+
         Statement::DropProcedure { proc_desc, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::DropStoredProcedure,
             proc_desc.first().map(|desc| desc.name.to_string()),
         ),
+
         Statement::Drop {
             object_type, names, ..
         } => {
@@ -795,42 +961,50 @@ fn classify_statement(
                 _ => SqlOperation::DropOther,
             };
             (SqlDirective::AlterSchema, operation, object_name)
-        }
+        },
+
         Statement::AlterTable { name, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterTable,
             Some(name.to_string()),
         ),
+
         Statement::AlterView { name, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterView,
             Some(name.to_string()),
         ),
+
         Statement::Truncate { table_names, .. } => (
             SqlDirective::Delete,
             SqlOperation::TruncateTable,
             table_names.first().map(|target| target.name.to_string()),
         ),
+
         Statement::ShowCreate { obj_name, .. } => (
             SqlDirective::Retrieve,
             SqlOperation::Select,
             Some(obj_name.to_string()),
         ),
+
         Statement::ShowColumns { table_name, .. } => (
             SqlDirective::Retrieve,
             SqlOperation::Select,
             Some(table_name.to_string()),
         ),
+
         Statement::ExplainTable { table_name, .. } => (
             SqlDirective::Retrieve,
             SqlOperation::Select,
             Some(table_name.to_string()),
         ),
+
         Statement::ShowTables { db_name, .. } => (
             SqlDirective::Retrieve,
             SqlOperation::Select,
             db_name.as_ref().map(|name| name.to_string()),
         ),
+
         Statement::ShowFunctions { .. }
         | Statement::ShowStatus { .. }
         | Statement::ShowVariables { .. }
@@ -840,41 +1014,50 @@ fn classify_statement(
             SqlOperation::Select,
             variable.first().map(|name| name.to_string()),
         ),
+
         Statement::SetVariable { variables, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterOther,
             variables.first().map(ObjectName::to_string),
         ),
+
         Statement::SetNames { charset_name, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterOther,
             Some(charset_name.clone()),
         ),
+
         Statement::SetNamesDefault {}
         | Statement::SetRole { .. }
         | Statement::SetTimeZone { .. }
         | Statement::SetTransaction { .. } => {
             (SqlDirective::AlterSchema, SqlOperation::AlterOther, None)
-        }
+        },
+
         Statement::StartTransaction { .. } | Statement::Commit { .. } => {
             (SqlDirective::AlterSchema, SqlOperation::AlterOther, None)
-        }
+        },
+
         Statement::Rollback { savepoint, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterOther,
             savepoint.as_ref().map(|name| name.to_string()),
         ),
+
         Statement::Grant { objects, .. } | Statement::Revoke { objects, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterOther,
             first_object_name_in_grant_objects(objects),
         ),
+
         Statement::Use(use_target) => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterOther,
             use_target_to_object_name(use_target),
         ),
+
         _ => return Err(SqlParseError::UnsupportedStatement(normalized.to_string())),
+
     };
 
     if matches!(
@@ -904,6 +1087,7 @@ fn classify_statement(
 }
 
 fn set_expr_contains_operator(set_expr: &SetExpr, needle: SetOperator) -> bool {
+
     match set_expr {
         SetExpr::SetOperation {
             op,
@@ -918,9 +1102,11 @@ fn set_expr_contains_operator(set_expr: &SetExpr, needle: SetOperator) -> bool {
         SetExpr::Query(query) => query_contains_operator(query, needle),
         _ => false,
     }
+
 }
 
 fn query_contains_operator(query: &Query, needle: SetOperator) -> bool {
+
     set_expr_contains_operator(&query.body, needle)
         || query
             .with
@@ -1024,11 +1210,11 @@ fn classify_text_fallback(statement: &str) -> Option<(SqlDirective, SqlOperation
     let object_name = fallback_object_name_after_tokens(&tokens, &verb, object_idx);
 
     match (verb.as_str(), object_kind.as_str()) {
-        ("create", "trigger") => Some((SqlDirective::Create, SqlOperation::CreateTrigger, object_name)),
-        ("drop", "trigger") => Some((SqlDirective::AlterSchema, SqlOperation::DropTrigger, object_name)),
+        ("create", "trigger")   => Some((SqlDirective::Create, SqlOperation::CreateTrigger, object_name)),
+        ("drop", "trigger")     => Some((SqlDirective::AlterSchema, SqlOperation::DropTrigger, object_name)),
         ("create", "procedure") => Some((SqlDirective::Create, SqlOperation::CreateStoredProcedure, object_name)),
-        ("drop", "procedure") => Some((SqlDirective::AlterSchema, SqlOperation::DropStoredProcedure, object_name)),
-        ("drop", "database") => Some((SqlDirective::AlterSchema, SqlOperation::DropDatabase, object_name)),
+        ("drop", "procedure")   => Some((SqlDirective::AlterSchema, SqlOperation::DropStoredProcedure, object_name)),
+        ("drop", "database")    => Some((SqlDirective::AlterSchema, SqlOperation::DropDatabase, object_name)),
         // Intentionally unsupported for now.
         ("create", "function") | ("drop", "function") => None,
         _ => None,
@@ -1260,6 +1446,22 @@ mod tests {
         assert_eq!(requests[0].directive, SqlDirective::Create);
         assert_eq!(requests[0].operation, SqlOperation::Insert);
         assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn insert_values_helper_extracts_rows() {
+        let plan = parse_insert_rows_from_statement(
+            "insert into users (id, email, is_active, nickname) values (1, 'sam@example.com', true, null)",
+        )
+        .expect("insert values should parse");
+
+        assert_eq!(plan.table_id, "users");
+        assert_eq!(plan.columns, vec!["id", "email", "is_active", "nickname"]);
+        assert_eq!(plan.rows.len(), 1);
+        assert_eq!(plan.rows[0][0], Some(b"1".to_vec()));
+        assert_eq!(plan.rows[0][1], Some(b"sam@example.com".to_vec()));
+        assert_eq!(plan.rows[0][2], Some(b"true".to_vec()));
+        assert_eq!(plan.rows[0][3], None);
     }
 
     #[test]

@@ -77,16 +77,23 @@ impl ServerApp {
     }
 
     pub fn handle_connector_request(&mut self, request: &ConnectorRequest) -> ConnectorResponse {
-        let command_path = describe_command_path(&request.command);
+        let command_info = command_info(&request.command);
+        let command_path = command_info.path;
         log::info!(
             "connector request dispatch request_id={} path={}",
             request.request_id,
             command_path
         );
 
-        let response = match &request.command {
-            ConnectorCommand::CreateDatabase { database_name } => {
+        let response = match command_info.kind {
+
+            CommandKind::CreateDatabase => {
+                let ConnectorCommand::CreateDatabase { database_name } = &request.command else {
+                    unreachable!("command info kind must align with command variant")
+                };
+
                 match DatabaseCatalog::create_new_database(database_name, &self.node_data_dir) {
+
                     Ok(catalog) => {
                         self.catalogs
                             .insert(catalog.database_id.0.clone(), catalog);
@@ -95,31 +102,44 @@ impl ServerApp {
                             request.request_id.clone(),
                             ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
                         )
-                    }
+                    },
+
                     Err(err) => ConnectorResponse::rejected(
                         request.request_id.clone(),
                         format!("create database failed: {err}"),
                     ),
+
                 }
-            }
-            ConnectorCommand::Query { query } => handle_query_command(
-                &request.request_id,
-                query,
-                &mut self.catalogs,
-                &self.wal,
-                &self.node_data_dir,
-            ),
-            ConnectorCommand::Schema { .. } => ConnectorResponse::rejected(
+            },
+
+            CommandKind::Query => {
+                let ConnectorCommand::Query { query } = &request.command else {
+                    unreachable!("command info kind must align with command variant")
+                };
+
+                handle_query_command(
+                    &request.request_id,
+                    query,
+                    &mut self.catalogs,
+                    &self.wal,
+                    &self.node_data_dir,
+                )
+            },
+
+            CommandKind::Schema => ConnectorResponse::rejected(
                 request.request_id.clone(),
                 "schema command execution is not wired yet",
             ),
-            ConnectorCommand::Mutation { .. } => ConnectorResponse::rejected(
+
+            CommandKind::Mutation => ConnectorResponse::rejected(
                 request.request_id.clone(),
                 "mutation command execution is not wired yet",
             ),
+
         };
 
         match &response.result {
+            
             ConnectorResult::Error(message) => {
                 log::warn!(
                     "connector request completed request_id={} path={} status={:?} error={}"
@@ -129,7 +149,8 @@ impl ServerApp {
                     response.status,
                     message
                 );
-            }
+            },
+
             _ => {
                 log::info!(
                     "connector request completed request_id={} path={} status={:?}",
@@ -138,6 +159,7 @@ impl ServerApp {
                     response.status
                 );
             }
+
         }
 
         response
@@ -158,6 +180,7 @@ impl ServerApp {
             .map_err(|e| ServerAppError::Runtime(format!("failed to list data directory: {e}")))?;
 
         for file in files {
+
             let ext = file
                 .extension()
                 .and_then(|value| value.to_str())
@@ -193,6 +216,7 @@ impl ServerApp {
 
             self.catalogs
                 .insert(catalog.database_id.0.clone(), catalog);
+
         }
 
         Ok(())
@@ -222,43 +246,85 @@ impl ServerApp {
 
 }
 
-fn describe_command_path(command: &ConnectorCommand) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandKind {
+    CreateDatabase,
+    Query,
+    Schema,
+    Mutation,
+}
+
+#[derive(Debug, Clone)]
+struct CommandInfo {
+    kind: CommandKind,
+    path: String,
+}
+
+fn command_info(command: &ConnectorCommand) -> CommandInfo {
+
     match command {
-        ConnectorCommand::CreateDatabase { database_name } => {
-            format!("create_database:{}", database_name)
-        }
-        ConnectorCommand::Query { query } => {
-            format!("query:{}", query.database_id)
-        }
+
+        ConnectorCommand::CreateDatabase { database_name } => CommandInfo {
+            kind: CommandKind::CreateDatabase,
+            path: format!("create_database:{database_name}"),
+        },
+
+        ConnectorCommand::Query { query } => CommandInfo {
+            kind: CommandKind::Query,
+            path: format!("query:{}", query.database_id),
+        },
+
         ConnectorCommand::Schema {
             database_id,
             command,
-        } => match command {
-            SchemaCommand::CreateTable { table_id, .. } => {
-                format!("schema:create_table:{}:{}", database_id, table_id)
-            }
-            SchemaCommand::AlterTable { change } => {
-                format!("schema:alter_table:{}:{}", database_id, change.table_id)
-            }
-            SchemaCommand::DropTable { table_id } => {
-                format!("schema:drop_table:{}:{}", database_id, table_id)
+        } => {
+            let path = match command {
+                SchemaCommand::CreateTable { table_id, .. } => {
+                    format!("schema:create_table:{database_id}:{table_id}")
+                },
+                SchemaCommand::AlterTable { change } => {
+                    format!("schema:alter_table:{database_id}:{}", change.table_id)
+                },
+                SchemaCommand::DropTable { table_id } => {
+                    format!("schema:drop_table:{database_id}:{table_id}")
+                }
+            };
+
+            CommandInfo {
+                kind: CommandKind::Schema,
+                path,
             }
         },
+
         ConnectorCommand::Mutation {
             database_id,
             mutation,
-        } => match mutation {
-            DataMutation::Insert { table_id, .. } => {
-                format!("mutation:insert:{}:{}", database_id, table_id)
-            }
-            DataMutation::Update { table_id, .. } => {
-                format!("mutation:update:{}:{}", database_id, table_id)
-            }
-            DataMutation::Delete { table_id, .. } => {
-                format!("mutation:delete:{}:{}", database_id, table_id)
+        } => {
+            let path = match mutation {
+                DataMutation::Insert { table_id, .. } => {
+                    format!("mutation:insert:{database_id}:{table_id}")
+                },
+                DataMutation::Update { table_id, .. } => {
+                    format!("mutation:update:{database_id}:{table_id}")
+                },
+                DataMutation::Delete { table_id, .. } => {
+                    format!("mutation:delete:{database_id}:{table_id}")
+                }
+            };
+
+            CommandInfo {
+                kind: CommandKind::Mutation,
+                path,
             }
         },
+
     }
+
+}
+
+fn describe_command_path(command: &ConnectorCommand) -> String {
+    command_info(command).path
+
 }
 
 #[cfg(test)]
@@ -702,6 +768,7 @@ mod tests {
 
     #[test]
     fn create_table_query_registers_table_with_schema() {
+
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -739,6 +806,72 @@ mod tests {
         assert_eq!(schema.fields[0].field_name, "id");
         assert_eq!(schema.fields[0].indexed, FieldIndex::PrimaryKey);
         assert_eq!(schema.fields[1].field_name, "email");
+
+    }
+
+    #[test]
+    fn insert_query_appends_insert_record_to_table_wal() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-insert-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let create_request = ConnectorRequest::new(
+            "req-create-table-insert-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email varchar(255) not null)"
+                        .to_string(),
+                },
+            },
+        );
+
+        let create_response = app.handle_connector_request(&create_request);
+        assert_eq!(create_response.status, ResponseStatus::Applied);
+
+        let insert_request = ConnectorRequest::new(
+            "req-insert-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "insert into users (id, email) values (1, 'sam@example.com')".to_string(),
+                },
+            },
+        );
+
+        let insert_response = app.handle_connector_request(&insert_request);
+        assert_eq!(insert_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Mutation(mutation) = insert_response.result else {
+            panic!("expected mutation result");
+        };
+        assert_eq!(mutation.affected_rows, 1);
+
+        let records = app.wal.since("users", None);
+        let insert_record = records
+            .iter()
+            .find(|record| record.kind == TransactionKind::Insert)
+            .expect("insert transaction should be present in table WAL");
+
+        let payload: std::collections::HashMap<String, Vec<u8>> =
+            bincode::deserialize(&insert_record.payload).expect("insert payload should deserialize");
+
+        assert_eq!(payload.get("id"), Some(&b"1".to_vec()));
+        assert_eq!(payload.get("email"), Some(&b"sam@example.com".to_vec()));
+
     }
 
     #[test]

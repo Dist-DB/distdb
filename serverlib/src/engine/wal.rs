@@ -15,16 +15,20 @@ use crate::TransactionKind;
 
 #[derive(Debug)]
 enum WalCommand {
+
     Append {
         record: TransactionRecord,
         ack: Sender<Result<(), &'static str>>,
     },
+
     CompactToLatestSchemaAndMetadata {
         actor: UserId,
         timestamp_epoch_ms: u64,
         ack: Sender<Result<(), &'static str>>,
     },
+
     Shutdown,
+    
 }
 
 #[derive(Debug)]
@@ -35,6 +39,7 @@ pub struct ConcurrentWalManager {
 }
 
 impl Default for ConcurrentWalManager {
+
     fn default() -> Self {
         Self {
             workers: Mutex::new(HashMap::new()),
@@ -42,6 +47,7 @@ impl Default for ConcurrentWalManager {
             data_dir: None,
         }
     }
+
 }
 
 impl ConcurrentWalManager {
@@ -75,14 +81,18 @@ impl ConcurrentWalManager {
     }
 
     pub fn shutdown_all(&self) -> Result<(), &'static str> {
+
         let workers = self
             .workers
             .lock()
             .map_err(|_| "failed to lock WAL workers")?;
+        
         for sender in workers.values() {
             let _ = sender.send(WalCommand::Shutdown);
         }
+
         Ok(())
+
     }
 
     pub fn compact_stream_to_latest_schema_and_metadata(
@@ -164,7 +174,11 @@ impl ConcurrentWalManager {
             .as_ref()
             .map(|dir| dir.join(FileKind::Data.file_name(&stream_key)));
 
-        let sender = spawn_worker(stream_key.clone(), Arc::clone(&self.storage), wal_path);
+        let (sender, ready_rx) = spawn_worker(stream_key.clone(), Arc::clone(&self.storage), wal_path);
+
+        ready_rx
+            .recv()
+            .map_err(|_| "failed to receive WAL worker startup acknowledgement")?;
         
         workers.insert(stream_key, sender.clone());
         
@@ -200,6 +214,23 @@ impl TransactionLog for ConcurrentWalManager {
             Ok(k) => k,
             Err(_) => return Vec::new(),
         };
+
+        if let Some(data_dir) = &self.data_dir {
+            let needs_hydration = match self.storage.lock() {
+                Ok(store) => !store.contains_key(&stream_key),
+                Err(_) => return Vec::new(),
+            };
+
+            if needs_hydration {
+                let wal_path = data_dir.join(FileKind::Data.file_name(&stream_key));
+                if wal_path.exists() {
+                    let existing = load_records_from_file(&wal_path);
+                    if let Ok(mut store) = self.storage.lock() {
+                        store.entry(stream_key.clone()).or_insert(existing);
+                    }
+                }
+            }
+        }
 
         let store = match self.storage.lock() {
             Ok(store) => store,
@@ -377,34 +408,52 @@ fn spawn_worker(
     stream_key: String,
     storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
     wal_path: Option<PathBuf>,
-) -> Sender<WalCommand> {
+) -> (Sender<WalCommand>, mpsc::Receiver<()>) {
     
     let (tx, rx) = mpsc::channel::<WalCommand>();
+    let (ready_tx, ready_rx) = mpsc::channel::<()>();
 
     thread::spawn(move || {
 
         if let Some(ref path) = wal_path {
+
             if let Err(e) = ensure_wal_file(path) {
                 log::error!("failed to initialize WAL file '{}': {}", path.display(), e);
             }
+
             let existing = load_records_from_file(path);
-            let count = existing.len();
+            let mut count = 0usize;
+
             if let Ok(mut state) = storage.lock() {
-                state.entry(stream_key.clone()).or_default().extend(existing);
+                let entries = state.entry(stream_key.clone()).or_default();
+                if entries.is_empty() {
+                    count = existing.len();
+                    entries.extend(existing);
+                } else {
+                    count = entries.len();
+                }
             }
+
             log::info!(
                 "WAL worker started for stream={} (replayed {} record(s) from disk)",
                 stream_key,
                 count
             );
+
         } else {
             log::info!("WAL worker started for stream={} (in-memory only)", stream_key);
         }
 
+        let _ = ready_tx.send(());
+
         while let Ok(command) = rx.recv() {
+
             match command {
+
                 WalCommand::Append { record, ack } => {
+
                     if let Ok(mut state) = storage.lock() {
+
                         let entries = state.entry(stream_key.clone()).or_default();
                         let is_ordered = entries
                             .last()
@@ -435,6 +484,7 @@ fn spawn_worker(
                             }
                             entries.push(record);
                             let _ = ack.send(Ok(()));
+                        
                         } else {
                             log::warn!(
                                 "out-of-order transaction rejected for stream={}",
@@ -444,7 +494,9 @@ fn spawn_worker(
                                 "out-of-order transaction id for table WAL stream",
                             ));
                         }
+
                     } else {
+
                         log::error!(
                             "failed to acquire WAL storage lock for stream={}",
                             stream_key
@@ -452,7 +504,8 @@ fn spawn_worker(
                         let _ = ack.send(Err("failed to lock WAL storage"));
                         break;
                     }
-                }
+                },
+
                 WalCommand::CompactToLatestSchemaAndMetadata {
                     actor,
                     timestamp_epoch_ms,
@@ -487,21 +540,26 @@ fn spawn_worker(
                         let _ = ack.send(Err("failed to lock WAL storage"));
                         break;
                     }
-                }
+                },
+
                 WalCommand::Shutdown => {
                     log::info!("WAL worker shutting down for stream={}", stream_key);
                     break;
                 }
+
             }
+
         }
+
     });
     
-    tx
+    (tx, ready_rx)
 
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn make_record(id: u64, kind: TransactionKind, actor: &UserId) -> TransactionRecord {
