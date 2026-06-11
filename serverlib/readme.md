@@ -1,35 +1,98 @@
 # Server Library
 
-The server component platform enabling the distributed database - The core service components
+serverlib is the domain and infrastructure core for distdb. It provides the database catalog model, schema and migration lifecycle, WAL behavior, replication contracts, and p2p interfaces that higher layers compose into a full runtime.
 
-## High-Level Structure
+## Architectural Intent
 
-The `serverlib` crate is split into four functional planes:
+The crate is designed around explicit boundaries:
 
-1. `core`
-- Node bootstrap and runtime boundaries.
-- Cluster/node identity and topology state.
+1. core
+- Runtime-facing abstractions and identity surfaces.
+- Cross-module types that should remain stable and small.
 
-2. `engine`
-- Database schema, SQL directive intent, transaction log primitives.
-- Replication event metadata and subscription key surfaces.
-- Security domain primitives for user credentials and role grants.
+2. engine
+- Catalog, schema, transaction, WAL, SQL intent, and migration orchestration.
+- The authoritative state machine for object status and schema evolution.
 
-3. `p2p`
-- Discovery, transport, pub/sub topic and wire-message contracts.
-- Integration surface for Kademlia/discovery and pub/sub pump behavior.
+3. p2p
+- Discovery and transport contracts for cluster communication.
+- Event propagation surfaces for replication and sync behavior.
 
-4. `helpers`
-- Shared error/result model.
-- Utility helpers for epoch time and deterministic key construction.
+4. helpers
+- Shared utility helpers and lightweight support functions.
 
-## Current Scaffold
+## Design Principles
 
-`server` composes runtime behavior from `serverlib` traits and domain types.
-`connector` binds remote client flow to `serverlib::p2p` message contracts.
-`common` remains the cross-crate utility layer used by all crates.
+1. Readability through split responsibilities
+- Keep modules focused on one concern.
+- Prefer explicit state transitions over hidden behavior.
+- Move orchestration into dedicated units instead of long mixed functions.
 
-## WAL Concurrency Model
+2. Coverage as a first-class quality gate
+- Add targeted unit tests with each behavioral change.
+- Validate lifecycle transitions and failure paths, not only happy paths.
+- Preserve deterministic outcomes for schema, WAL, and catalog operations.
 
-The transaction log is table-scoped and backed by a WAL manager that spawns a dedicated worker per table identifier on demand.
-This supports multiple table WAL streams concurrently, while keeping append operations lightweight for the caller.
+3. Safety before convenience
+- Reject invalid transitions early.
+- Keep lock ownership and schema-change phase tracking explicit.
+- Make recovery state durable where long-running operations are involved.
+
+4. Deterministic distributed behavior
+- Normalize identifiers and derive stable keys consistently.
+- Make replay and synchronization rules monotonic and idempotent where possible.
+
+## Enterprise Requirements and ACID Philosophy
+
+distdb targets enterprise reliability characteristics. serverlib contributes the following ACID-oriented design direction:
+
+1. Atomicity
+- Schema migration paths are modeled as explicit phases with guarded cutover.
+- Cutover operations use temporary artifacts and rollback-aware file replacement.
+
+2. Consistency
+- Catalog and schema transitions are validated before acceptance.
+- Field-index invariants and schema revision ordering are enforced by engine paths.
+
+3. Isolation
+- Schema change locking and single active migration guard prevent overlapping destructive operations.
+- Table/object state transitions gate writes when objects are not ready.
+
+4. Durability
+- WAL streams provide append-first mutation history.
+- Catalog and schema-change progress are serialized for restart recovery.
+
+## WAL and p2p in the Design Philosophy
+
+WAL and p2p are complementary, not competing, layers:
+
+1. WAL
+- Table/entity scoped transaction streams.
+- In-memory mode for high-speed temporary processing.
+- Disk-backed mode for durable replay and restart recovery.
+
+2. p2p
+- Distribution layer for cluster state propagation.
+- Sync and acknowledgment surfaces that can be extended to quorum workflows.
+
+3. Combined model
+- WAL captures ordered local intent.
+- p2p propagates and coordinates remote convergence.
+
+## Schema Evolution and Rebuild Strategy
+
+Current schema migration architecture supports a phased rebuild model:
+
+1. Lock and stage schema change metadata.
+2. Rewrite records (disk source to memory-resident staging).
+3. Rebuild indexes on staged data.
+4. Flush temporary artifact.
+5. Atomic cutover.
+
+Progress metadata (rows processed and resume token) is checkpointed to support resumable migration behavior.
+
+## Workspace Role
+
+- server composes runtime behavior from serverlib domain and engine components.
+- connector uses serverlib contracts for remote interaction.
+- common remains the shared utility and schema support layer across crates.
