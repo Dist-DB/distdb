@@ -38,9 +38,12 @@ pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use engine::sql::{
 	create_table_schema_from_statement, parse_mysql8_sql_requests, parse_sql_requests,
 	parse_insert_rows_from_statement,
+	parse_select_read_plan_from_statement,
+	parse_select_projection_from_statement,
 	parse_alter_table_change_plan_from_statement,
 	sql_directive_for_statement,
 	InsertRowsPlan,
+	SelectComparisonOp, SelectCondition, SelectPredicate, SelectProjectionItem, SelectReadPlan,
 	AlterTableChangeOp, AlterTableChangePlan,
 	SqlCompatibilityTarget, SqlDirective, SqlOperation, SqlParseError, SqlRequest,
 };

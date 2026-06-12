@@ -10,6 +10,7 @@ pub mod stored_procedure;
 pub mod entity_metadata_payload;
 pub mod field_def;
 pub mod field_types;
+pub mod inbuilt;
 pub mod index_id;
 pub mod replica_state;
 pub mod entity;

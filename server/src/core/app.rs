@@ -342,6 +342,7 @@ mod tests {
         ConnectorResult, ConnectorTransport, ResponseStatus,
     };
     use serverlib::{
+        DatabaseIndex, DatabaseIndexKind,
         EntityMetadata, EntityMetadataPayload, FieldDef, FieldIndex, FieldType,
         SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind,
         TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
@@ -439,12 +440,20 @@ mod tests {
 
         assert_eq!(loaded.table_schema("users"), Some(&schema));
         assert_eq!(loaded.table_schema_revision("users"), Some(2));
-        assert!(loaded.index("users:email").is_some());
+        let email_index_id = DatabaseIndex::from_table_fields(
+            "users",
+            DatabaseIndexKind::Indexed,
+            vec!["email".to_string()],
+        )
+        .index_id
+        .0;
+        assert!(loaded.index(&email_index_id).is_some());
         
     }
 
     #[test]
     fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
+        
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
@@ -875,6 +884,94 @@ mod tests {
 
         assert_eq!(payload.get("id"), Some(&b"1".to_vec()));
         assert_eq!(payload.get("email"), Some(&b"sam@example.com".to_vec()));
+
+    }
+
+    #[test]
+    fn select_alias_where_pk_falls_back_to_scan_when_runtime_index_is_empty() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-empty-index-fallback-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let create_request = ConnectorRequest::new(
+            "req-create-table-empty-index-fallback-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email varchar(255) not null)"
+                        .to_string(),
+                },
+            },
+        );
+
+        let create_response = app.handle_connector_request(&create_request);
+        assert_eq!(create_response.status, ResponseStatus::Applied);
+
+        let insert_request = ConnectorRequest::new(
+            "req-insert-empty-index-fallback-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "insert into users (id, email) values (1, 'sam@example.com')".to_string(),
+                },
+            },
+        );
+
+        let insert_response = app.handle_connector_request(&insert_request);
+        assert_eq!(insert_response.status, ResponseStatus::Applied);
+
+        // Simulate stale runtime index state: index registered but no entries.
+        app.runtime_indexes = RuntimeIndexStore::new();
+        let index_defs = {
+            let catalog = app.catalogs.get("main").expect("main catalog should exist");
+            let table = catalog.table("users").expect("users table should exist");
+            table.indexes.values().cloned().collect::<Vec<_>>()
+        };
+
+        let primary_index_id = index_defs
+            .iter()
+            .find(|index| index.is_primary_key())
+            .map(|index| index.index_id.0.clone())
+            .expect("primary key index should exist");
+
+        for index in index_defs {
+            app.runtime_indexes.register_index(index);
+        }
+
+        assert_eq!(app.runtime_indexes.cardinality(&primary_index_id), Some(0));
+
+        let query_request = ConnectorRequest::new(
+            "req-select-empty-index-fallback-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.* from users u where u.id = '1'".to_string(),
+                },
+            },
+        );
+
+        let query_response = app.handle_connector_request(&query_request);
+        assert_eq!(query_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = query_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(String::from_utf8_lossy(&result.rows[0][0]), "1");
+        assert_eq!(String::from_utf8_lossy(&result.rows[0][1]), "sam@example.com");
 
     }
 

@@ -10,6 +10,7 @@ use connector::{
     ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldIndex, FieldType, QueryResult,
     QueryTimings, MutationResult,
 };
+use serverlib::engine::database::inbuilt::evaluate_inbuilt_sql_function;
 use serverlib::engine::database::runtime_index::derived_indexes_for_table;
 use serverlib::{primary_key_index, RuntimeIndexStore};
 use serverlib::engine::database::transaction::TransactionLog;
@@ -18,6 +19,8 @@ use serverlib::{
     ConcurrentWalManager, DatabaseCatalog, DatabaseId, EntityMetadata, EntityMetadataPayload,
     SchemaChangePayload,
     DatabaseObjectType,
+    SelectComparisonOp, SelectCondition, SelectPredicate,
+    SelectProjectionItem,
     SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind, SqlOperation, SqlRequest,
     TableLifecycleAction, TableLifecyclePayload,
     TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
@@ -90,6 +93,10 @@ fn execute_parsed_query(
         return execute_insert(request_id, query, catalogs, wal, node_data_dir, runtime_indexes, statement);
     }
 
+    if statement.operation == SqlOperation::Select {
+        return execute_select(request_id, query, catalogs, wal, node_data_dir, runtime_indexes, statement);
+    }
+
     let handler: Option<QueryOperationHandler> = match statement.operation {
         SqlOperation::CreateDatabase => Some(execute_create_database),
         SqlOperation::CreateTable => Some(execute_create_table),
@@ -98,7 +105,6 @@ fn execute_parsed_query(
         | SqlOperation::DropView
         | SqlOperation::DropTrigger
         | SqlOperation::DropStoredProcedure => Some(execute_drop_directive),
-        SqlOperation::Select => Some(execute_select),
         SqlOperation::CreateView => Some(execute_create_view),
         SqlOperation::CreateTrigger => Some(execute_create_trigger),
         SqlOperation::CreateStoredProcedure => Some(execute_create_stored_procedure),
@@ -964,6 +970,7 @@ fn execute_select(
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
+    runtime_indexes: &RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -1151,14 +1158,84 @@ fn execute_select(
         );
     }
 
-    let Some(object_name) = statement.object_name.as_deref() else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            "select statements without a table source are not wired yet",
-        );
+    let read_plan = match serverlib::parse_select_read_plan_from_statement(&statement.sql) {
+        Ok(plan) => plan,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("select parse failed: {err}"),
+            )
+        }
     };
 
-    let table_id = object_name.rsplit('.').next().unwrap_or(object_name);
+    let table_id = read_plan.table_id.as_str();
+
+    if table_id.is_empty() {
+        if read_plan.is_explain {
+            return explain_select_plan(
+                request_id,
+                "<no-from>",
+                read_plan
+                    .where_condition
+                    .as_ref()
+                    .map(count_condition_predicates)
+                    .unwrap_or(0),
+                None,
+                runtime_indexes,
+            );
+        }
+
+        let mut columns = Vec::with_capacity(read_plan.projection_items.len());
+        let mut row = Vec::with_capacity(read_plan.projection_items.len());
+
+        for (seq, projection_item) in read_plan.projection_items.iter().enumerate() {
+            match projection_item {
+                SelectProjectionItem::InbuiltFunction {
+                    output_name,
+                    function,
+                } => {
+                    let value = match evaluate_inbuilt_sql_function(function) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("select failed: inbuilt projection evaluation failed: {err}"),
+                            )
+                        }
+                    };
+
+                    columns.push(FieldDef {
+                        seqno: (seq + 1) as u32,
+                        field_name: output_name.clone(),
+                        field_type: FieldType::Text,
+                        nullable: true,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    });
+
+                    row.push(value.unwrap_or_else(|| b"NULL".to_vec()));
+                }
+
+                SelectProjectionItem::Column { .. } => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        "select without FROM only supports inbuilt projection functions",
+                    )
+                }
+            }
+        }
+
+        return ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Query(QueryResult {
+                columns,
+                rows: vec![row],
+                timings: empty_query_timings(),
+            }),
+        );
+    }
+
     let Some(schema) = catalog.table_schema(table_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -1166,19 +1243,138 @@ fn execute_select(
         );
     };
 
-    let columns = schema
-        .fields
-        .iter()
-        .map(|field| FieldDef {
-            seqno: field.seqno,
-            field_name: field.field_name.clone(),
-            field_type: field.field_type.clone(),
-            nullable: field.nullable,
-            indexed: field.indexed,
-            default_value: field.default_value.clone(),
-            metadata: field.metadata.clone(),
-        })
-        .collect::<Vec<_>>();
+    let Some(table) = catalog.table(table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("table '{}' not found in database '{}'", table_id, query.database_id),
+        );
+    };
+
+    let projection_items = if read_plan.projection_is_wildcard {
+        schema
+            .fields
+            .iter()
+            .map(|field| SelectProjectionItem::Column {
+                field_name: field.field_name.clone(),
+                output_name: field.field_name.clone(),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        read_plan.projection_items.clone()
+    };
+
+    let mut columns = Vec::with_capacity(projection_items.len());
+
+    for (seq, projection_item) in projection_items.iter().enumerate() {
+        
+        match projection_item {
+
+            SelectProjectionItem::Column {
+                field_name,
+                output_name,
+            } => {
+                let Some(field) = schema.field(field_name) else {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("select failed: unknown column '{}'", field_name),
+                    );
+                };
+
+                columns.push(FieldDef {
+                    seqno: (seq + 1) as u32,
+                    field_name: output_name.clone(),
+                    field_type: field.field_type.clone(),
+                    nullable: field.nullable,
+                    indexed: field.indexed,
+                    default_value: field.default_value.clone(),
+                    metadata: field.metadata.clone(),
+                });
+            },
+
+            SelectProjectionItem::InbuiltFunction { output_name, .. } => {
+                columns.push(FieldDef {
+                    seqno: (seq + 1) as u32,
+                    field_name: output_name.clone(),
+                    field_type: FieldType::Text,
+                    nullable: true,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                });
+            }
+        
+        }
+
+    }
+
+    let mut static_projection_values = Vec::with_capacity(projection_items.len());
+
+    for projection_item in &projection_items {
+
+        match projection_item {
+
+            SelectProjectionItem::InbuiltFunction { function, .. } => {
+                let value = match evaluate_inbuilt_sql_function(function) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("select failed: inbuilt projection evaluation failed: {err}"),
+                        )
+                    }
+                };
+                static_projection_values.push(Some(value));
+            },
+            
+            SelectProjectionItem::Column { .. } => static_projection_values.push(None),
+
+        }
+
+    }
+
+    let mut index_filter_map = HashMap::new();
+    let allow_index_short_circuit = read_plan
+        .where_condition
+        .as_ref()
+        .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+        .unwrap_or(true);
+
+    let index_lookup = if allow_index_short_circuit {
+        choose_index_lookup(table, &index_filter_map)
+    } else {
+        None
+    };
+
+    if read_plan.is_explain {
+        return explain_select_plan(
+            request_id,
+            table_id,
+            read_plan
+                .where_condition
+                .as_ref()
+                .map(count_condition_predicates)
+                .unwrap_or(0),
+            index_lookup,
+            runtime_indexes,
+        );
+    }
+
+    if let Some((index, lookup_key)) = &index_lookup {
+        if let Some(state) = runtime_indexes.index(&index.index_id.0) {
+            // Only trust an index miss when the runtime state is populated.
+            // Empty index state can be stale relative to WAL and must fall back to scan.
+            if state.cardinality() > 0 && !state.contains(lookup_key) {
+                return ConnectorResponse::applied(
+                    request_id.to_string(),
+                    ConnectorResult::Query(QueryResult {
+                        columns,
+                        rows: Vec::new(),
+                        timings: empty_query_timings(),
+                    }),
+                );
+            }
+        }
+    }
 
     // Replay the table's WAL to reconstruct live rows:
     // - Insert records add a row
@@ -1190,11 +1386,190 @@ fn execute_select(
     let mut deleted_ids: HashSet<u64> = HashSet::new();
 
     for record in &wal_records {
+
         match record.kind {
+
             TransactionKind::Insert => {
                 match bincode::deserialize::<HashMap<String, Vec<u8>>>(&record.payload) {
                     Ok(row_map) => live_rows.push((record.id.0, row_map)),
                     Err(_) => continue,
+                }
+            },
+
+            TransactionKind::Delete => {
+                if let Some(refid) = record.refid {
+                    deleted_ids.insert(refid.0);
+                }
+            }
+
+            _ => {}
+            
+        }
+    }
+
+    let rows = live_rows
+        .into_iter()
+        .filter(|(id, _)| !deleted_ids.contains(id))
+        .filter(|(_, row_map)| {
+            row_matches_condition(
+                row_map,
+                read_plan.where_condition.as_ref(),
+                catalog,
+                wal,
+                query,
+            )
+        })
+        .map(|(_, row_map)| {
+            
+            projection_items
+                .iter()
+                .enumerate()
+                .map(|(projection_idx, projection_item)| {
+                    match projection_item {
+                        SelectProjectionItem::Column { field_name, .. } => match row_map.get(field_name) {
+                            Some(value) => value.clone(),
+                            None if columns[projection_idx].nullable => b"NULL".to_vec(),
+                            None => Vec::new(),
+                        },
+
+                        SelectProjectionItem::InbuiltFunction { .. } => {
+                            let static_value = static_projection_values
+                                .get(projection_idx)
+                                .and_then(|entry| entry.as_ref())
+                                .cloned()
+                                .flatten();
+
+                            static_value.unwrap_or_else(|| b"NULL".to_vec())
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+
+        })
+        .collect::<Vec<_>>();
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Query(QueryResult {
+            columns,
+            rows,
+            timings: empty_query_timings(),
+        }),
+    )
+
+}
+
+fn row_matches_condition(
+    row_map: &HashMap<String, Vec<u8>>,
+    condition: Option<&SelectCondition>,
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    query: &DataQuery,
+) -> bool {
+    let Some(condition) = condition else {
+        return true;
+    };
+
+    match condition {
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| row_matches_condition(row_map, Some(child), catalog, wal, query)),
+
+        SelectCondition::Or(children) => children
+            .iter()
+            .any(|child| row_matches_condition(row_map, Some(child), catalog, wal, query)),
+
+        SelectCondition::Not(child) => !row_matches_condition(row_map, Some(child), catalog, wal, query),
+
+        SelectCondition::Predicate(predicate) => match predicate {
+            SelectPredicate::Comparison {
+                field_name,
+                op,
+                value,
+            } => match row_map.get(field_name) {
+                Some(actual) => compare_row_value(actual, value, op),
+                None => false,
+            },
+
+            SelectPredicate::InList {
+                field_name,
+                values,
+                negated,
+            } => {
+                let found = row_map
+                    .get(field_name)
+                    .map(|actual| values.iter().any(|candidate| candidate == actual))
+                    .unwrap_or(false);
+                if *negated {
+                    !found
+                } else {
+                    found
+                }
+            }
+
+            SelectPredicate::IsNull { field_name, negated } => {
+                let is_null = !row_map.contains_key(field_name);
+                if *negated {
+                    !is_null
+                } else {
+                    is_null
+                }
+            }
+
+            SelectPredicate::InSubquery {
+                field_name,
+                subquery,
+                negated,
+            } => {
+                let Some(actual) = row_map.get(field_name) else {
+                    return false;
+                };
+
+                let values = collect_subquery_projection_values(catalog, wal, query, subquery);
+                let found = values.contains(actual);
+
+                if *negated {
+                    !found
+                } else {
+                    found
+                }
+            }
+        },
+    }
+}
+
+fn collect_subquery_projection_values(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    query: &DataQuery,
+    subquery: &serverlib::SelectReadPlan,
+) -> HashSet<Vec<u8>> {
+    let Some(schema) = catalog.table_schema(&subquery.table_id) else {
+        return HashSet::new();
+    };
+
+    let Some(field_name) = subquery
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.first())
+    else {
+        return HashSet::new();
+    };
+
+    if schema.field(field_name).is_none() {
+        return HashSet::new();
+    }
+
+    let wal_records = wal.since(&subquery.table_id, None);
+
+    let mut live_rows: Vec<(u64, HashMap<String, Vec<u8>>)> = Vec::new();
+    let mut deleted_ids: HashSet<u64> = HashSet::new();
+
+    for record in &wal_records {
+        match record.kind {
+            TransactionKind::Insert => {
+                if let Ok(row_map) = bincode::deserialize::<HashMap<String, Vec<u8>>>(&record.payload) {
+                    live_rows.push((record.id.0, row_map));
                 }
             }
             TransactionKind::Delete => {
@@ -1206,21 +1581,248 @@ fn execute_select(
         }
     }
 
-    let rows = live_rows
+    live_rows
         .into_iter()
         .filter(|(id, _)| !deleted_ids.contains(id))
-        .map(|(_, row_map)| {
-            columns
-                .iter()
-                .map(|col| {
-                    row_map
-                        .get(&col.field_name)
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect::<Vec<_>>()
+        .filter(|(_, row_map)| {
+            row_matches_condition(
+                row_map,
+                subquery.where_condition.as_ref(),
+                catalog,
+                wal,
+                query,
+            )
         })
-        .collect::<Vec<_>>();
+        .filter_map(|(_, row_map)| row_map.get(field_name).cloned())
+        .collect()
+}
+
+fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp) -> bool {
+    let ordering = compare_scalar_bytes(actual, expected);
+
+    match op {
+        SelectComparisonOp::Eq => ordering == std::cmp::Ordering::Equal,
+        SelectComparisonOp::NotEq => ordering != std::cmp::Ordering::Equal,
+        SelectComparisonOp::Gt => ordering == std::cmp::Ordering::Greater,
+        SelectComparisonOp::Gte => ordering != std::cmp::Ordering::Less,
+        SelectComparisonOp::Lt => ordering == std::cmp::Ordering::Less,
+        SelectComparisonOp::Lte => ordering != std::cmp::Ordering::Greater,
+    }
+}
+
+fn compare_scalar_bytes(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+    let left_text = String::from_utf8_lossy(left);
+    let right_text = String::from_utf8_lossy(right);
+
+    match (left_text.parse::<i128>(), right_text.parse::<i128>()) {
+        (Ok(lhs), Ok(rhs)) => lhs.cmp(&rhs),
+        _ => left_text.cmp(&right_text),
+    }
+}
+
+fn collect_indexable_equality_filters(
+    condition: &SelectCondition,
+    filters: &mut HashMap<String, Vec<u8>>,
+) -> bool {
+    match condition {
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| collect_indexable_equality_filters(child, filters)),
+
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name,
+            op: SelectComparisonOp::Eq,
+            value,
+        }) => {
+            filters.insert(field_name.clone(), value.clone());
+            true
+        }
+
+        SelectCondition::Predicate(_) => true,
+
+        SelectCondition::Or(_) | SelectCondition::Not(_) => false,
+    }
+}
+
+fn count_condition_predicates(condition: &SelectCondition) -> usize {
+    match condition {
+        SelectCondition::And(children) | SelectCondition::Or(children) => {
+            children.iter().map(count_condition_predicates).sum()
+        }
+        SelectCondition::Not(child) => count_condition_predicates(child),
+        SelectCondition::Predicate(_) => 1,
+    }
+}
+
+fn choose_index_lookup<'a>(
+    table: &'a serverlib::DatabaseTable,
+    filters: &HashMap<String, Vec<u8>>,
+) -> Option<(&'a serverlib::DatabaseIndex, Vec<Vec<u8>>)> {
+
+    let mut selected: Option<(&serverlib::DatabaseIndex, Vec<Vec<u8>>, usize)> = None;
+
+    for index in derived_indexes_for_table(table) {
+        let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
+            vec![index.field_name.clone()]
+        } else {
+            index.field_names.clone()
+        };
+
+        if field_names.is_empty() {
+            continue;
+        }
+
+        let mut lookup_key = Vec::with_capacity(field_names.len());
+        let mut all_present = true;
+        for field_name in &field_names {
+            match filters.get(field_name) {
+                Some(value) => lookup_key.push(value.clone()),
+                None => {
+                    all_present = false;
+                    break;
+                }
+            }
+        }
+
+        if !all_present {
+            continue;
+        }
+
+        let score = field_names.len();
+        let should_replace = selected
+            .as_ref()
+            .map(|(_, _, best_score)| score > *best_score)
+            .unwrap_or(true);
+        if should_replace {
+            selected = Some((index, lookup_key, score));
+        }
+    }
+
+    selected.map(|(index, lookup_key, _)| (index, lookup_key))
+
+}
+
+fn explain_select_plan(
+    request_id: &str,
+    table_id: &str,
+    filter_count: usize,
+    index_lookup: Option<(&serverlib::DatabaseIndex, Vec<Vec<u8>>)>,
+    runtime_indexes: &RuntimeIndexStore,
+) -> ConnectorResponse {
+
+    let columns = vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "table".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "access_path".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 3,
+            field_name: "index_id".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 4,
+            field_name: "lookup_key".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 5,
+            field_name: "index_cardinality".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 6,
+            field_name: "lookup_hit".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 7,
+            field_name: "filters".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ];
+
+    let (access_path, index_id, lookup_key, cardinality, lookup_hit) = if let Some((index, key)) = index_lookup {
+        let state = runtime_indexes.index(&index.index_id.0);
+        let hit = state
+            .map(|s| s.contains(&key))
+            .unwrap_or(false);
+        let card = state
+            .map(|s| s.cardinality())
+            .unwrap_or(0);
+
+        let key_text = key
+            .iter()
+            .map(|part| String::from_utf8_lossy(part).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let path = if state.is_none() || card == 0 || hit {
+            "index_lookup_then_scan"
+        } else {
+            "index_lookup_empty"
+        };
+
+        (
+            path.to_string(),
+            index.index_id.0.clone(),
+            key_text,
+            card.to_string(),
+            if hit { "true" } else { "false" }.to_string(),
+        )
+    } else {
+        (
+            "full_scan".to_string(),
+            "".to_string(),
+            "".to_string(),
+            "0".to_string(),
+            "".to_string(),
+        )
+    };
+
+    let rows = vec![vec![
+        table_id.as_bytes().to_vec(),
+        access_path.into_bytes(),
+        index_id.into_bytes(),
+        lookup_key.into_bytes(),
+        cardinality.into_bytes(),
+        lookup_hit.into_bytes(),
+        filter_count.to_string().into_bytes(),
+    ]];
 
     ConnectorResponse::applied(
         request_id.to_string(),
@@ -1241,6 +1843,7 @@ fn execute_create_view(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(view_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),

@@ -1841,12 +1841,21 @@ mod tests {
         assert_eq!(applied, 2);
         assert_eq!(catalog.table_schema("users"), Some(&second_schema));
         assert_eq!(catalog.table_schema_revision("users"), Some(2));
-        assert!(catalog.index("users:email").is_some());
+
+        let email_index_id = DatabaseIndex::from_table_fields(
+            "users",
+            DatabaseIndexKind::Indexed,
+            vec!["email".to_string()],
+        )
+        .index_id
+        .0;
+        assert!(catalog.index(&email_index_id).is_some());
 
     }
 
     #[test]
     fn metadata_and_sql_definition_replay_builds_view_state() {
+
         let mut catalog = DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
         catalog
@@ -2045,12 +2054,14 @@ mod tests {
 
     #[test]
     fn drop_helpers_remove_sql_backed_entities() {
+
         let mut catalog =
             DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
         catalog
             .register_view("users_view", "select * from users", TableSchema::new(Vec::new()))
             .expect("view register should succeed");
+
         catalog
             .register_trigger(
                 "audit_insert",
@@ -2058,6 +2069,7 @@ mod tests {
                 vec!["users".to_string()],
             )
             .expect("trigger register should succeed");
+
         catalog
             .register_stored_procedure(
                 "refresh_accounts",
@@ -2067,9 +2079,11 @@ mod tests {
             .expect("procedure register should succeed");
 
         catalog.drop_view("users_view").expect("view drop should succeed");
+
         catalog
             .drop_trigger("audit_insert")
             .expect("trigger drop should succeed");
+
         catalog
             .drop_stored_procedure("refresh_accounts")
             .expect("procedure drop should succeed");
@@ -2077,6 +2091,7 @@ mod tests {
         assert!(catalog.view("users_view").is_none());
         assert!(catalog.trigger("audit_insert").is_none());
         assert!(catalog.stored_procedure("refresh_accounts").is_none());
+        
     }
 
     #[test]
@@ -2260,7 +2275,14 @@ mod tests {
 
         assert!(catalog.entities.contains_key("users"));
         assert!(!catalog.entities.contains_key("Users"));
-        assert!(catalog.index("users:userid").is_some());
+        let user_id_index_id = DatabaseIndex::from_table_fields(
+            "users",
+            DatabaseIndexKind::Indexed,
+            vec!["userid".to_string()],
+        )
+        .index_id
+        .0;
+        assert!(catalog.index(&user_id_index_id).is_some());
 
     }
 
@@ -2333,8 +2355,16 @@ mod tests {
             Some(DatabaseObjectRef::StoredProcedure(_))
         ));
         
+        let email_index_id = DatabaseIndex::from_table_fields(
+            "users",
+            DatabaseIndexKind::Indexed,
+            vec!["email".to_string()],
+        )
+        .index_id
+        .0;
+
         assert!(matches!(
-            catalog.object(DatabaseObjectType::Index, "users:email"),
+            catalog.object(DatabaseObjectType::Index, &email_index_id),
             Some(DatabaseObjectRef::Index(_))
         ));
 
@@ -2405,8 +2435,16 @@ mod tests {
             Some(DatabaseObjectRef::StoredProcedure(_))
         ));
         
+        let email_index_id = DatabaseIndex::from_table_fields(
+            "users",
+            DatabaseIndexKind::Indexed,
+            vec!["email".to_string()],
+        )
+        .index_id
+        .0;
+
         assert!(matches!(
-            catalog.object_by_id("users:email"),
+            catalog.object_by_id(&email_index_id),
             Some(DatabaseObjectRef::Index(_))
         ));
 
