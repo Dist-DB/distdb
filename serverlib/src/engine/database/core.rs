@@ -13,7 +13,7 @@ pub use super::entity_aspect::DatabaseEntityAspect;
 pub use super::entity_kind::DatabaseEntityKind;
 pub use super::entity_object_ref::DatabaseObjectRef;
 pub use super::entity_object_type::DatabaseObjectType;
-pub use super::index::{DatabaseIndex, IndexId};
+pub use super::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin, IndexId};
 pub use super::relationship::DatabaseRelationship;
 pub use super::schema_change_tx::SchemaChangeTx;
 pub use super::schema_change_state::{ActiveSchemaChange, SchemaChangePhase};

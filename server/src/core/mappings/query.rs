@@ -10,6 +10,8 @@ use connector::{
     ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldIndex, FieldType, QueryResult,
     QueryTimings, MutationResult,
 };
+use serverlib::engine::database::runtime_index::derived_indexes_for_table;
+use serverlib::{primary_key_index, RuntimeIndexStore};
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
     AlterTableChangeOp,
@@ -27,6 +29,7 @@ pub(crate) fn handle_query_command(
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
 ) -> ConnectorResponse {
 
     let request_start = Instant::now();
@@ -42,6 +45,7 @@ pub(crate) fn handle_query_command(
                 catalogs,
                 wal,
                 node_data_dir,
+                runtime_indexes,
                 parsed,
             );
             with_query_timings(response, make_query_timings(request_start, parse_ms))
@@ -68,6 +72,7 @@ fn execute_parsed_query(
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
     parsed: Vec<SqlRequest>,
 ) -> ConnectorResponse {
 
@@ -80,6 +85,11 @@ fn execute_parsed_query(
 
     let statement = &parsed[0];
 
+    // Insert is handled separately because it needs mutable access to runtime_indexes.
+    if statement.operation == SqlOperation::Insert {
+        return execute_insert(request_id, query, catalogs, wal, node_data_dir, runtime_indexes, statement);
+    }
+
     let handler: Option<QueryOperationHandler> = match statement.operation {
         SqlOperation::CreateDatabase => Some(execute_create_database),
         SqlOperation::CreateTable => Some(execute_create_table),
@@ -88,7 +98,6 @@ fn execute_parsed_query(
         | SqlOperation::DropView
         | SqlOperation::DropTrigger
         | SqlOperation::DropStoredProcedure => Some(execute_drop_directive),
-        SqlOperation::Insert => Some(execute_insert),
         SqlOperation::Select => Some(execute_select),
         SqlOperation::CreateView => Some(execute_create_view),
         SqlOperation::CreateTrigger => Some(execute_create_trigger),
@@ -747,6 +756,7 @@ fn execute_insert(
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -768,6 +778,17 @@ fn execute_insert(
     };
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "table '{}' not found in database '{}'",
+                plan.table_id,
+                query.database_id
+            ),
+        );
+    };
+
+    let Some(table) = catalog.table(&plan.table_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -870,6 +891,34 @@ fn execute_insert(
 
         }
 
+        // Primary key uniqueness check
+        if let Some(pk_index) = primary_key_index(table) {
+            let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
+                vec![pk_index.field_name.clone()]
+            } else {
+                pk_index.field_names.clone()
+            };
+
+            let incoming_pk = pk_fields
+                .iter()
+                .map(|pk| payload_row.get(pk).cloned().unwrap_or_default())
+                .collect::<Vec<_>>();
+
+            let pk_runtime = runtime_indexes.index(&pk_index.index_id.0);
+            if pk_runtime.map(|idx| idx.contains(&incoming_pk)).unwrap_or(false) {
+                let pk_display = pk_fields
+                    .iter()
+                    .zip(incoming_pk.iter())
+                    .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("insert failed: duplicate primary key ({})", pk_display),
+                );
+            }
+        }
+
         let encoded = match bincode::serialize(&payload_row) {
 
             Ok(encoded) => encoded,
@@ -883,9 +932,11 @@ fn execute_insert(
 
         };
 
-        if let Err(err) = append_payload_record(
+        if let Err(err) = append_row_payload_record(
             wal,
             &plan.table_id,
+            table,
+            runtime_indexes,
             TransactionKind::Insert,
             encoded,
             common::epochabs!() as u64,
@@ -911,7 +962,7 @@ fn execute_select(
     request_id: &str,
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
-    _wal: &ConcurrentWalManager,
+    wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
@@ -1129,11 +1180,53 @@ fn execute_select(
         })
         .collect::<Vec<_>>();
 
+    // Replay the table's WAL to reconstruct live rows:
+    // - Insert records add a row
+    // - Delete records (by refid) remove a row
+    let wal_records = wal.since(table_id, None);
+
+    // Track rows by their WAL transaction id so Delete records can remove them.
+    let mut live_rows: Vec<(u64, HashMap<String, Vec<u8>>)> = Vec::new();
+    let mut deleted_ids: HashSet<u64> = HashSet::new();
+
+    for record in &wal_records {
+        match record.kind {
+            TransactionKind::Insert => {
+                match bincode::deserialize::<HashMap<String, Vec<u8>>>(&record.payload) {
+                    Ok(row_map) => live_rows.push((record.id.0, row_map)),
+                    Err(_) => continue,
+                }
+            }
+            TransactionKind::Delete => {
+                if let Some(refid) = record.refid {
+                    deleted_ids.insert(refid.0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let rows = live_rows
+        .into_iter()
+        .filter(|(id, _)| !deleted_ids.contains(id))
+        .map(|(_, row_map)| {
+            columns
+                .iter()
+                .map(|col| {
+                    row_map
+                        .get(&col.field_name)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
     ConnectorResponse::applied(
         request_id.to_string(),
         ConnectorResult::Query(QueryResult {
             columns,
-            rows: Vec::new(),
+            rows,
             timings: empty_query_timings(),
         }),
     )
@@ -1426,6 +1519,9 @@ fn make_query_timings(request_start: Instant, parse_ms: u64) -> QueryTimings {
     }
 }
 
+/// Scans the WAL for a table and returns the set of PK value tuples for all live rows
+/// (inserts minus deletes). Each entry is a Vec of raw byte values, one per PK field,
+/// in the same order as `pk_fields`.
 fn append_payload_record(
     wal: &ConcurrentWalManager,
     wal_id: &str,
@@ -1451,6 +1547,45 @@ fn append_payload_record(
         },
     )
     .map_err(|e| e.to_string())
+}
+
+fn append_row_payload_record(
+    wal: &ConcurrentWalManager,
+    wal_id: &str,
+    table: &serverlib::DatabaseTable,
+    runtime_indexes: &mut RuntimeIndexStore,
+    kind: TransactionKind,
+    payload: Vec<u8>,
+    timestamp_epoch_ms: u64,
+) -> Result<(), String> {
+
+    let existing = wal.since(wal_id, None);
+    let last = existing.last();
+    let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
+    let refid = last.map(|record| record.id);
+
+    let row_map = bincode::deserialize::<HashMap<String, Vec<u8>>>(&payload)
+        .map_err(|err| format!("row payload decode failed: {err}"))?;
+
+    let record = TransactionRecord {
+        id: next_id,
+        refid,
+        timestamp_epoch_ms,
+        actor: UserId::from_username("server"),
+        kind: kind.clone(),
+        payload,
+    };
+
+    wal.append(wal_id, record)
+        .map_err(|e| e.to_string())?;
+
+    runtime_indexes.apply_table_row_mutation(
+        derived_indexes_for_table(table),
+        kind,
+        &row_map,
+    );
+
+    Ok(())
 }
 
 fn append_payload_record_pair(

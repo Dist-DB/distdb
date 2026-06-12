@@ -545,9 +545,9 @@ fn parse_or_fallback(sql: &str) -> Result<ParsedOrFallback, SqlParseError> {
 
 fn derive_indexed_fields_from_constraints(
     constraints: &[sqlparser::ast::TableConstraint],
-) -> (HashSet<String>, HashSet<String>) {
+) -> (Vec<String>, HashSet<String>) {
 
-    let mut primary = HashSet::new();
+    let mut primary = Vec::new();
     let mut indexed = HashSet::new();
 
     for constraint in constraints {
@@ -559,7 +559,9 @@ fn derive_indexed_fields_from_constraints(
 
         if lowered.contains("primary key") {
             for column in columns {
-                primary.insert(column.clone());
+                if !primary.contains(&column) {
+                    primary.push(column.clone());
+                }
                 indexed.insert(column);
             }
             continue;

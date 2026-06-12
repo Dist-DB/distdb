@@ -3,7 +3,6 @@ use super::core::{DatabaseError, DatabaseResult, ObjectStatus};
 use super::entity_aspect::DatabaseEntityAspect;
 use super::entity_kind::DatabaseEntityKind;
 use super::entity_metadata::EntityMetadata;
-use super::index::IndexId;
 use super::table_schema::TableSchema;
 
 use std::collections::HashMap;
@@ -131,10 +130,24 @@ impl DatabaseEntityAspect for DatabaseTable {
         let mut normalized_indexes = HashMap::with_capacity(self.indexes.len());
         
         for (_, mut index) in std::mem::take(&mut self.indexes) {
+
             index.table_id = normalized_table_id.clone();
-            index.field_name = common::normalize_identifier!(&index.field_name);
-            index.index_id = IndexId(format!("{}:{}", index.table_id, index.field_name));
+
+                if index.field_names.is_empty() && !index.field_name.is_empty() {
+                    index.field_names = vec![index.field_name.clone()];
+                }
+
+                index.field_names = index
+                    .field_names
+                    .into_iter()
+                    .map(|field_name| common::normalize_identifier!(field_name))
+                    .collect::<Vec<_>>();
+
+                index.field_name = index.field_names.first().cloned().unwrap_or_default();
+                index.refresh_index_id();
+
             normalized_indexes.insert(index.index_id.0.clone(), index);
+            
         }
         
         self.indexes = normalized_indexes;

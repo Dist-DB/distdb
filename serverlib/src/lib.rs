@@ -14,6 +14,7 @@ pub use common::schema::{
 
 pub use engine::database::core::{
 	DatabaseCatalog, DatabaseEntity, DatabaseError, DatabaseId, DatabaseIndex,
+	DatabaseIndexKind, DatabaseIndexOrigin,
 	DatabaseEntityAspect, DatabaseEntityKind, DatabaseRelationship, DatabaseReplicaState,
 	DatabaseResult, DatabaseStoredProcedure, DatabaseTable, DatabaseTrigger,
 	EntityMetadata,
@@ -23,6 +24,8 @@ pub use engine::database::core::{
 	run_schema_migration, SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet,
 	TypeConversionPolicy,
 };
+
+pub use engine::database::runtime_index::{index_value_tuple, primary_key_index, RuntimeIndexStore};
 
 pub use engine::database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
 pub use engine::database::transaction::{

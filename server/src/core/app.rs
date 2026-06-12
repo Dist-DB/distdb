@@ -7,7 +7,7 @@ use connector::{
     ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult,
     DataMutation, MutationResult, SchemaCommand,
 };
-use serverlib::{ConcurrentWalManager, DatabaseCatalog};
+use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore};
 
 use crate::core::config::ServerRuntimeConfig;
 use crate::core::mappings::query::handle_query_command;
@@ -20,6 +20,7 @@ pub struct ServerApp {
     node_data_dir: PathBuf,
     wal: ConcurrentWalManager,
     catalogs: HashMap<String, DatabaseCatalog>,
+    runtime_indexes: RuntimeIndexStore,
 }
 
 impl ServerApp {
@@ -46,6 +47,7 @@ impl ServerApp {
             node_data_dir,
             wal,
             catalogs: HashMap::new(),
+            runtime_indexes: RuntimeIndexStore::new(),
         })
 
     }
@@ -53,6 +55,7 @@ impl ServerApp {
     pub fn bootstrap(&mut self) -> Result<(), ServerAppError> {
         self.load_catalogs_from_disk()?;
         self.replay_catalog_state_from_wal()?;
+        self.runtime_indexes.bootstrap_from_catalogs(&self.catalogs, &self.wal);
         log::info!("server bootstrap complete for node_id={} data_dir={}", self.config.node_id, self.node_data_dir.display());
         Ok(())
     }
@@ -123,6 +126,7 @@ impl ServerApp {
                     &mut self.catalogs,
                     &self.wal,
                     &self.node_data_dir,
+                    &mut self.runtime_indexes,
                 )
             },
 

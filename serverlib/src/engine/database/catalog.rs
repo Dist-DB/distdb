@@ -12,7 +12,7 @@ use super::entity_kind::DatabaseEntityKind;
 use super::entity_object_ref::DatabaseObjectRef;
 use super::entity_object_type::DatabaseObjectType;
 use super::id::DatabaseId;
-use super::index::DatabaseIndex;
+use super::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin};
 use super::relationship::DatabaseRelationship;
 use super::schema_change_tx::SchemaChangeTx;
 use super::schema_migration::{run_schema_migration, SchemaMigrationExecutor};
@@ -1108,9 +1108,36 @@ impl DatabaseCatalog {
 
     fn indexes_for_schema(table_id: &str, schema: &TableSchema) -> HashMap<String, DatabaseIndex> {
         let mut indexes = HashMap::new();
+        let primary_key_fields = schema
+            .fields
+            .iter()
+            .filter(|field| field.indexed == FieldIndex::PrimaryKey)
+            .map(|field| field.field_name.clone())
+            .collect::<Vec<_>>();
+
+        if !primary_key_fields.is_empty() {
+            let index = DatabaseIndex::from_table_fields_with_origin(
+                table_id,
+                DatabaseIndexKind::PrimaryKey,
+                DatabaseIndexOrigin::Derived,
+                None,
+                primary_key_fields,
+            );
+            indexes.insert(index.index_id.0.clone(), index);
+        }
+
         for field in &schema.fields {
-            if matches!(field.indexed, FieldIndex::Indexed | FieldIndex::PrimaryKey) {
-                let index = DatabaseIndex::from_table_field(table_id, field);
+            if matches!(field.indexed, FieldIndex::Indexed) {
+                let index_kind = match field.indexed {
+                    _ => DatabaseIndexKind::Indexed,
+                };
+                let index = DatabaseIndex::from_table_fields_with_origin(
+                    table_id,
+                    index_kind,
+                    DatabaseIndexOrigin::Derived,
+                    None,
+                    vec![field.field_name.clone()],
+                );
                 indexes.insert(index.index_id.0.clone(), index);
             }
         }

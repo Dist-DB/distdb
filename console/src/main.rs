@@ -1,7 +1,9 @@
 use console::{parse_console_command, ConsoleSession};
 
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 use std::env;
-use std::io::{self, Write};
+use std::io;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
@@ -15,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let mut session = ConsoleSession::new(server_address)?;
+    let mut editor = DefaultEditor::new()?;
 
     println!("distdb console");
     println!("type help for commands, or \\q to quit");
@@ -24,51 +27,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
 
-        print!(
-            "distdb:{}> ",
-            session.current_database.as_deref().unwrap_or("<none>")
-        );
-        
-        io::stdout().flush()?;
+        let prompt = if accumulated_command.trim().is_empty() {
+            format!("distdb:{}> ", session.current_database.as_deref().unwrap_or("<none>"))
+        } else {
+            "      -> ".to_string()
+        };
 
-        let mut line = String::new();
-        let bytes_read = io::stdin().read_line(&mut line)?;
+        match editor.readline(&prompt) {
 
-        if bytes_read == 0 {
-            
-            if !accumulated_command.trim().is_empty() {
-                accumulated_command.clear();
-                println!("aborted pending command");
-                continue;
-            }
-            
-            println!();
-            break;
-        }
+            Ok(line) => {
+                accumulated_command.push_str(&line);
+                accumulated_command.push('\n');
 
-        accumulated_command.push_str(&line);
+                match parse_console_command(&accumulated_command) {
 
-        match parse_console_command(&accumulated_command) {
-            
-            Ok(Some(command)) => {
-                accumulated_command.clear();
-                match session.execute(command) {
-                    Ok(should_continue) => {
-                        if !should_continue {
-                            break;
+                    Ok(Some(command)) => {
+                        // Add completed command to history (trimmed, without trailing newline)
+                        let _ = editor.add_history_entry(accumulated_command.trim());
+                        accumulated_command.clear();
+                        match session.execute(command) {
+                            Ok(should_continue) => {
+                                if !should_continue {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("error: {error}");
+                            }
                         }
                     }
+
+                    Ok(None) => {}
+
                     Err(error) => {
-                        eprintln!("error: {error}");
+                        accumulated_command.clear();
+                        println!("error: {error}");
                     }
+
                 }
             }
-            
-            Ok(None) => {}
-            
+
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                if !accumulated_command.trim().is_empty() {
+                    accumulated_command.clear();
+                    println!("aborted pending command");
+                } else {
+                    println!();
+                    break;
+                }
+            }
+
             Err(error) => {
-                accumulated_command.clear();
-                println!("error: {error}");
+                eprintln!("error: {error}");
+                break;
             }
 
         }
