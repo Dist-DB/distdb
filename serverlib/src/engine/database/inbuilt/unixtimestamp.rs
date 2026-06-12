@@ -14,6 +14,7 @@ impl InbuiltServerCommand for UnixTimestampCommand {
     }
 
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
+
         if !function_args(function)?.is_empty() {
             return Err(format!(
                 "{} currently supports only zero arguments",
@@ -27,6 +28,7 @@ impl InbuiltServerCommand for UnixTimestampCommand {
             .as_secs();
 
         Ok(Some(now.to_string().into_bytes()))
+        
     }
-    
+
 }
