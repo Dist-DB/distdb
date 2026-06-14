@@ -87,7 +87,6 @@ The database platform conforms to the following principles
 - fieldsizes for int, uint and float are 8,16,32,64
 - nullability for int, uint and float default to 0
 - spatial default is {long: 0.0, lat: 0.0, ele: 0.0}
-
 - tables have indexes based upon the schema definition
 - all tables are subject to crud directives (create, retreive, update, delete)
 ```
