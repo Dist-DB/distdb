@@ -43,12 +43,34 @@ cd ./console
 './debug.sh'
 ```
 
+## Multi-Server Testing
+
+On Server 1
+
+```bash
+RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run datadir=./data listen_addr=0.0.0.0 port=4001 node_id=sam01
+```
+
+On Server 2
+
+```bash
+RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run datadir=./data listen_addr=0.0.0.0 port=4002 node_id=sam02 servers=127.0.0.1:4001
+```
+
+Note that server 2 points to server 1 using the 'servers' directive
+
+## Connecting the Conole
+
 You can also provide bootstrap peer candidates directly when launching console:
 
 ```bash
 cd ./console
-cargo run 127.0.0.1:9400 servers=127.0.0.1:9400,10.0.0.5:9400
+cargo run 127.0.0.1:9400 servers=127.0.0.1:4001
 ```
+
+You should specify the server address that you wish to connect to - This will discover other datanodes in the p2p network
+
+## Testing Console Functionality
 
 When the console loads, use the following directives (if this is the first time)
 
@@ -71,6 +93,8 @@ use main;
 show tables;
 disconnect;
 ```
+
+
 
 There is also a 'help' feature that will provide other commands. The service WILL BE 100% compatible with the MySQL8.0.x SQL dialect (in time).
 
