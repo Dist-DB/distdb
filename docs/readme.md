@@ -56,6 +56,7 @@ This platform features a number of optimizations that provide extensive improvem
 
 The database platform conforms to the following principles
 
+```bash
 - The platform is architected to be a number (1 or more) server nodes 
 - A servernode has a distinct identifier - this must be expressed at startup together with a data directory
 - All nodes are interconnected over a p2p network using a common swarm/version identifier
@@ -92,6 +93,7 @@ The database platform conforms to the following principles
 
 - tables have indexes based upon the schema definition
 - all tables are subject to crud directives (create, retreive, update, delete)
+```
 
 ## SQL Compatibility Target
 
