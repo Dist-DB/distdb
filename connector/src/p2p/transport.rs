@@ -90,10 +90,37 @@ impl ConnectorP2pTransport {
             peer_id,
             peer.addrs.join(",")
         );
+
+        let stale_peer_ids = self
+            .peers
+            .iter()
+            .filter(|(existing_peer_id, existing_peer)| {
+                **existing_peer_id != peer_id
+                    && existing_peer
+                        .addrs
+                        .iter()
+                        .any(|existing_addr| peer.addrs.iter().any(|new_addr| new_addr == existing_addr))
+            })
+            .map(|(existing_peer_id, _)| existing_peer_id.clone())
+            .collect::<Vec<_>>();
+
+        let active_was_stale = stale_peer_ids
+            .iter()
+            .any(|stale_peer_id| self.active_peer_id.as_deref() == Some(stale_peer_id.as_str()));
+
+        for stale_peer_id in stale_peer_ids {
+            log::debug!(
+                "connector transport replacing stale peer identity old_peer_id={} new_peer_id={}",
+                stale_peer_id,
+                peer_id
+            );
+            self.peers.remove(&stale_peer_id);
+        }
+
         self.peers.insert(peer_id.clone(), peer);
 
         // First discovered peer becomes the sticky session peer.
-        if self.active_peer_id.is_none() {
+        if self.active_peer_id.is_none() || active_was_stale {
             self.active_peer_id = Some(peer_id);
         }
     }
@@ -441,6 +468,23 @@ fn read_response_frame(stream: &mut TcpStream) -> Result<ConnectorResponse, Conn
 fn normalize_peer_addr(raw: &str) -> String {
 
     let trimmed = raw.trim();
+
+    if let Some(rest) = trimmed.strip_prefix("/ip4/") {
+        if let Some((host, port)) = rest.split_once("/tcp/") {
+            if !host.is_empty() && port.parse::<u16>().is_ok() {
+                return format!("{host}:{port}");
+            }
+        }
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/dns/") {
+        if let Some((host, port)) = rest.split_once("/tcp/") {
+            if !host.is_empty() && port.parse::<u16>().is_ok() {
+                return format!("{host}:{port}");
+            }
+        }
+    }
+
     if trimmed.contains(':') {
         return trimmed.to_string();
     }
@@ -576,6 +620,47 @@ mod tests {
             .expect("peer switch should succeed");
 
         assert_eq!(transport.active_peer_id(), Some("peer-2"));
+    }
+
+    #[test]
+    fn upsert_peer_replaces_stale_identity_when_addr_matches() {
+        let mut transport = ConnectorP2pTransport::new(ConnectorP2pConfig::new("/distdb/kad/1.0.0"));
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "server-node-01".to_string(),
+            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+        });
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "sam01".to_string(),
+            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+        });
+
+        let peers = transport.discovered_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "sam01");
+        assert_eq!(transport.active_peer_id(), Some("sam01"));
+    }
+
+    #[test]
+    fn normalize_peer_addr_parses_supported_multiaddrs() {
+        assert_eq!(
+            normalize_peer_addr("/ip4/127.0.0.1/tcp/4001"),
+            "127.0.0.1:4001"
+        );
+        assert_eq!(
+            normalize_peer_addr("/dns/server-node-01/tcp/9400"),
+            "server-node-01:9400"
+        );
+    }
+
+    #[test]
+    fn normalize_peer_addr_keeps_host_port_and_defaults_port() {
+        assert_eq!(normalize_peer_addr("127.0.0.1:4001"), "127.0.0.1:4001");
+        assert_eq!(
+            normalize_peer_addr("localhost"),
+            format!("localhost:{}", DEFAULT_SERVER_PORT)
+        );
     }
     
 }

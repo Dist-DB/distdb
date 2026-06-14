@@ -4,10 +4,13 @@ use connector::{
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
     ConnectorResponse, ConnectorResult, DataQuery, ResponseStatus,
 };
+use common::DEFAULT_SERVER_PORT;
 use common::helpers::utils::md5_hash;
+use std::{collections::HashSet, net::Ipv4Addr};
 
 pub const TEMP_CONNECT_USER: &str = "root";
 const AUTH_FALLBACK_DATABASE: &str = "main";
+const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
 
 pub enum ConsoleCommand {
     Help,
@@ -36,19 +39,26 @@ pub struct ConsoleSession {
 
 impl ConsoleSession {
 
-    pub fn new(server_address: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(server_list: Vec<String>) -> Result<Self, Box<dyn std::error::Error>> {
+        let bootstrap_peers = normalize_bootstrap_peers(server_list);
+
+        if bootstrap_peers.is_empty() {
+            return Err("at least one server address is required".into());
+        }
 
         let transport = ConnectorP2pTransport::new(
             ConnectorP2pConfig::new("/distdb/kad/1.0.0")
-                .with_bootstrap_peers(vec![server_address.clone()]),
+                .with_bootstrap_peers(bootstrap_peers.clone()),
         );
 
         let mut runtime = ConnectorP2pRuntime::new(transport);
 
-        runtime.handle_event(ConnectorP2pEvent::PeerDiscovered(ConnectorPeer {
-            peer_id: "server-node-01".to_string(),
-            addrs: vec![server_address],
-        }))?;
+        for (idx, server_address) in bootstrap_peers.into_iter().enumerate() {
+            runtime.handle_event(ConnectorP2pEvent::PeerDiscovered(ConnectorPeer {
+                peer_id: format!("server-node-{:02}", idx + 1),
+                addrs: vec![server_address],
+            }))?;
+        }
 
         Ok(Self {
             runtime,
@@ -93,6 +103,7 @@ impl ConsoleSession {
             },
 
             ConsoleCommand::ShowPeers => {
+                self.refresh_discovered_peers_from_server()?;
                 let peers = self.runtime.transport().discovered_peers();
                 let active_peer_id = self.runtime.transport().active_peer_id();
                 if peers.is_empty() {
@@ -229,6 +240,68 @@ impl ConsoleSession {
 
     }
 
+    fn refresh_discovered_peers_from_server(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.runtime.transport().has_live_connection() {
+            if let Err(err) = self.runtime.transport().connect_active_peer() {
+                log::debug!("server peer refresh skipped: unable to connect active peer: {}", err);
+                return Ok(());
+            }
+        }
+
+        let database_id = self
+            .current_database
+            .clone()
+            .unwrap_or_else(|| AUTH_FALLBACK_DATABASE.to_string());
+
+        let request = ConnectorRequest::new(
+            self.next_request_id(),
+            ConnectorCommand::Query {
+                query: DataQuery {
+                    database_id,
+                    sql: SERVER_PEER_DISCOVERY_SQL.to_string(),
+                },
+            },
+        );
+
+        let client = ConnectorClient::new(self.runtime.transport().clone());
+        let response = match client.execute(&request) {
+            Ok(response) => response,
+            Err(err) => {
+                log::debug!("server peer refresh request failed: {}", err);
+                return Ok(());
+            }
+        };
+
+        let ConnectorResult::Query(result) = response.result else {
+            return Ok(());
+        };
+
+        for row in result.rows {
+            if row.len() < 2 {
+                continue;
+            }
+
+            let peer_id = String::from_utf8_lossy(&row[0]).trim().to_string();
+            if peer_id.is_empty() {
+                continue;
+            }
+
+            let addrs = String::from_utf8_lossy(&row[1])
+                .split(',')
+                .map(|addr| addr.trim().to_string())
+                .filter(|addr| !addr.is_empty())
+                .collect::<Vec<_>>();
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            self.runtime.transport_mut().upsert_peer(ConnectorPeer { peer_id, addrs });
+        }
+
+        Ok(())
+    }
+
     fn print_p2p_status(&self) {
 
         let transport = self.runtime.transport();
@@ -293,6 +366,93 @@ impl ConsoleSession {
             println!("[{}] {}", entry.seqno, entry.message);
         }
     }
+
+}
+
+pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('/') {
+        return Some(trimmed.to_string());
+    }
+
+    if let Ok(port) = trimmed.parse::<u16>() {
+        return Some(format!("/ip4/127.0.0.1/tcp/{port}"));
+    }
+
+    if let Some(port_str) = trimmed.strip_prefix(':') {
+        let port = port_str.parse::<u16>().ok()?;
+        return Some(format!("/ip4/127.0.0.1/tcp/{port}"));
+    }
+
+    let (host, port) = match trimmed.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let parsed_port = port_str.parse::<u16>().ok()?;
+            (host.trim(), parsed_port)
+        }
+        None => (trimmed, DEFAULT_SERVER_PORT),
+    };
+
+    if host.is_empty() {
+        return None;
+    }
+
+    let host_prefix = if host.parse::<Ipv4Addr>().is_ok() {
+        "ip4"
+    } else {
+        "dns"
+    };
+
+    Some(format!("/{host_prefix}/{host}/tcp/{port}"))
+}
+
+pub fn normalize_bootstrap_peers<I>(peers: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for peer in peers {
+        let Some(peer) = normalize_bootstrap_addr(&peer) else {
+            continue;
+        };
+
+        if seen.insert(peer.clone()) {
+            normalized.push(peer);
+        }
+    }
+
+    normalized
+}
+
+pub fn bootstrap_peers_from_cli_args(args: &[String]) -> Vec<String> {
+
+    let listed = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("servers=").map(ToOwned::to_owned))
+        .map(|list| {
+            list.split(',')
+                .map(|addr| addr.trim().to_string())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+
+    let mut candidates = Vec::new();
+
+    if let Some(primary_server) = args.iter().find(|arg| !arg.contains('=')) {
+        let primary_server = primary_server.trim().to_string();
+        if !primary_server.is_empty() {
+            candidates.push(primary_server);
+        }
+    }
+
+    candidates.extend(listed);
+    
+    normalize_bootstrap_peers(candidates)
 
 }
 
@@ -699,6 +859,54 @@ mod tests {
         let database = resolve_database_for_sql(None, false, "show databases;")
             .expect("show databases should not require explicit selection");
         assert_eq!(database, "main");
+    }
+
+    #[test]
+    fn normalize_bootstrap_addr_accepts_multiaddr_passthrough() {
+        let addr = "/ip4/127.0.0.1/tcp/9400";
+        assert_eq!(normalize_bootstrap_addr(addr), Some(addr.to_string()));
+    }
+
+    #[test]
+    fn normalize_bootstrap_addr_parses_host_port() {
+        assert_eq!(
+            normalize_bootstrap_addr("127.0.0.1:9400"),
+            Some("/ip4/127.0.0.1/tcp/9400".to_string())
+        );
+        assert_eq!(
+            normalize_bootstrap_addr("node.local:9400"),
+            Some("/dns/node.local/tcp/9400".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_bootstrap_addr_parses_bare_port() {
+        assert_eq!(
+            normalize_bootstrap_addr("4001"),
+            Some("/ip4/127.0.0.1/tcp/4001".to_string())
+        );
+        assert_eq!(
+            normalize_bootstrap_addr(":4002"),
+            Some("/ip4/127.0.0.1/tcp/4002".to_string())
+        );
+    }
+
+    #[test]
+    fn bootstrap_peers_from_cli_args_dedups_and_preserves_order() {
+        let args = vec![
+            "127.0.0.1:9400".to_string(),
+            "servers=node.local:9400,127.0.0.1:9400".to_string(),
+        ];
+
+        let peers = bootstrap_peers_from_cli_args(&args);
+
+        assert_eq!(
+            peers,
+            vec![
+                "/ip4/127.0.0.1/tcp/9400".to_string(),
+                "/dns/node.local/tcp/9400".to_string(),
+            ]
+        );
     }
 
 }

@@ -1,0 +1,23 @@
+@startuml
+
+    component sam
+
+    component server1
+    component server2
+    component server3
+    component server4
+
+    component client1
+    component client2
+
+    server1 <--> sam
+
+    sam <--> server2
+    sam <--> server3
+    sam <--> server4    
+
+
+    client1 <--> server1
+    client2 <--> server2
+
+@enduml

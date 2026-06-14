@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use common::DEFAULT_SERVER_PORT;
 use serverlib::NodeConfig;
 
-const DEFAULT_LOCAL_NODE_ID: &str = "server-node-01";
+pub const DEFAULT_LOCAL_NODE_ID: &str = "server-node-01";
+pub const DEFAULT_LOCAL_SWARM_ID: &str = "distdb-devnet";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerRuntimeConfig {
@@ -22,7 +23,7 @@ impl ServerRuntimeConfig {
     pub fn default_local_with_data_dir(data_dir: PathBuf) -> Self {
         Self {
             node_id: DEFAULT_LOCAL_NODE_ID.to_string(),
-            swarm_id: "distdb-devnet".to_string(),
+            swarm_id: DEFAULT_LOCAL_SWARM_ID.to_string(),
             data_dir,
             listen_addrs: vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")],
         }
@@ -34,7 +35,7 @@ impl ServerRuntimeConfig {
     ) -> Self {
         Self {
             node_id: DEFAULT_LOCAL_NODE_ID.to_string(),
-            swarm_id: "distdb-devnet".to_string(),
+            swarm_id: DEFAULT_LOCAL_SWARM_ID.to_string(),
             data_dir,
             listen_addrs: vec![listen_addr.into()],
         }

@@ -60,7 +60,7 @@ The database platform conforms to the following principles
 - The platform is architected to be a number (1 or more) server nodes 
 - A servernode has a distinct identifier - this must be expressed at startup together with a data directory
 - All nodes are interconnected over a p2p network using a common swarm/version identifier
-- The p2p network uses Kadema for IP discovery for remote nodes
+- The p2p network uses Kademlia for IP discovery for remote nodes
 - A database may reside on any of the server nodes (one or more)
 - Each database instance coordinates transactions with other database replicas
 - A database follows a versioned SQL compatibility target based on MySQL 8.0.x for the supported statement set

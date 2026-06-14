@@ -1,4 +1,4 @@
-use console::{parse_console_command, ConsoleSession};
+use console::{bootstrap_peers_from_cli_args, parse_console_command, ConsoleSession};
 
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -9,14 +9,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let server_address = env::args().nth(1).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "usage: console <server-address>[:<port>]",
-        )
-    })?;
+    let args = env::args().skip(1).collect::<Vec<_>>();
 
-    let mut session = ConsoleSession::new(server_address)?;
+    let server_list = bootstrap_peers_from_cli_args(&args);
+
+    if server_list.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: console <server-address>[:<port>] [servers=host1[:port],host2[:port]]",
+        )
+        .into());
+    }
+
+    let mut session = ConsoleSession::new(server_list.clone())?;
+    log::info!("console bootstrap peers: {}", server_list.join(", "));
+
     let mut editor = DefaultEditor::new()?;
 
     println!("distdb console");
@@ -87,5 +94,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-
 }

@@ -21,6 +21,15 @@ cd ./server
 
 The server will run in debug mode presenting all output to the console (using log) - This can be supressed by running the service in release mode (cargo run --release) as needed. Since this project is not production ready, i recommend using the debug version at the moment.
 
+You can provide bootstrap peers for Kademlia discovery at startup:
+
+```bash
+cd ./server
+cargo run datadir=./data servers=127.0.0.1:9400,10.0.0.5:9400
+```
+
+Bootstrap peer entries accept either `host:port` or multiaddr values such as `/ip4/127.0.0.1/tcp/9400`.
+
 ## Client
 
 An example application featuring a range of features available to the platform - this is (at the moment) behind the core application development cycle - interested parties should look at the console application first
@@ -32,6 +41,13 @@ Using the same function to run server,
 ```bash
 cd ./console
 './debug.sh'
+```
+
+You can also provide bootstrap peer candidates directly when launching console:
+
+```bash
+cd ./console
+cargo run 127.0.0.1:9400 servers=127.0.0.1:9400,10.0.0.5:9400
 ```
 
 When the console loads, use the following directives (if this is the first time)
