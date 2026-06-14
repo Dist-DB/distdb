@@ -107,14 +107,19 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
             .get(&common::normalize_identifier!(table_id))
             .cloned();
 
+        let schema = _catalog
+            .table_schema(table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
+
         let mut rewritten = Vec::new();
+
         for mut record in source_records
             .into_iter()
             .filter(|record| record.kind != TransactionKind::Delete)
         {
             if matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
                 if let Some(ref rule_set) = rules {
-                    record.payload = apply_schema_rules_to_payload(&record.payload, rule_set)?;
+                    record.payload = apply_schema_rules_to_payload(&record.payload, rule_set, schema)?;
                 }
             }
             rewritten.push(record);
@@ -153,7 +158,9 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
             .staged
             .lock()
             .map_err(|_| DatabaseError::CatalogWrite)?;
+
         let key = common::normalize_identifier!(table_id);
+        
         if staged.contains_key(&key) {
             Ok(())
         } else {
@@ -165,10 +172,12 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
     fn flush_temp_image(&self, _catalog: &DatabaseCatalog, table_id: &str) -> DatabaseResult<()> {
 
         let key = common::normalize_identifier!(table_id);
+        
         let staged = self
             .staged
             .lock()
             .map_err(|_| DatabaseError::CatalogWrite)?;
+
         let image = staged.get(&key).ok_or(DatabaseError::TableNotLocked)?;
 
         let file_bytes =
@@ -181,10 +190,12 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
     fn cutover(&self, _catalog: &DatabaseCatalog, table_id: &str) -> DatabaseResult<()> {
 
         let key = common::normalize_identifier!(table_id);
+        
         let mut staged = self
             .staged
             .lock()
             .map_err(|_| DatabaseError::CatalogWrite)?;
+
         let image = staged.remove(&key).ok_or(DatabaseError::TableNotLocked)?;
 
         let _ = fs::remove_file(&image.backup_path);
@@ -211,44 +222,7 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
 
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn noop_executor_returns_empty_progress() {
-        
-        let executor = NoopSchemaMigrationExecutor;
-        let progress = executor
-            .rewrite_rows(&DatabaseCatalog::create_empty_from_name("test").unwrap(), "test_table")
-            .expect("should return progress");
-
-        assert_eq!(progress.rows_rewritten, 0);
-        assert_eq!(progress.rows_total, Some(0));
-        assert!(progress.resume_token.is_none());
-
-    }
-
-    #[test]
-    fn disk_executor_set_rules_normalizes_table_id() {
-
-        let temp_dir = std::env::temp_dir().join("schema-migration-test");
-        let executor = DiskToMemorySchemaMigrationExecutor::new(temp_dir);
-
-        executor
-            .set_rules_for_table(
-                "USERS",
-                SchemaMutationRuleSet::default(),
-            )
-            .expect("should set rules");
-
-        executor
-            .set_rules_for_table(
-                "users",
-                SchemaMutationRuleSet::default(),
-            )
-            .expect("should set rules");
-
-    }
-
-}
+#[path = "executor_test.rs"]
+mod tests;

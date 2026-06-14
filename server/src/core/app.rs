@@ -8,6 +8,8 @@ use connector::{
     DataMutation, MutationResult, SchemaCommand,
 };
 use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore};
+#[cfg(test)]
+use serverlib::decode_row_payload;
 
 use crate::core::config::ServerRuntimeConfig;
 use crate::core::mappings::query::handle_query_command;
@@ -282,6 +284,7 @@ fn command_info(command: &ConnectorCommand) -> CommandInfo {
             database_id,
             command,
         } => {
+
             let path = match command {
                 SchemaCommand::CreateTable { table_id, .. } => {
                     format!("schema:create_table:{database_id}:{table_id}")
@@ -298,12 +301,14 @@ fn command_info(command: &ConnectorCommand) -> CommandInfo {
                 kind: CommandKind::Schema,
                 path,
             }
+
         },
 
         ConnectorCommand::Mutation {
             database_id,
             mutation,
         } => {
+
             let path = match mutation {
                 DataMutation::Insert { table_id, .. } => {
                     format!("mutation:insert:{database_id}:{table_id}")
@@ -320,6 +325,7 @@ fn command_info(command: &ConnectorCommand) -> CommandInfo {
                 kind: CommandKind::Mutation,
                 path,
             }
+            
         },
 
     }
@@ -879,12 +885,1414 @@ mod tests {
             .find(|record| record.kind == TransactionKind::Insert)
             .expect("insert transaction should be present in table WAL");
 
-        let payload: std::collections::HashMap<String, Vec<u8>> =
-            bincode::deserialize(&insert_record.payload).expect("insert payload should deserialize");
+        let schema = app
+            .catalogs
+            .get("main")
+            .and_then(|catalog| catalog.table_schema("users"))
+            .expect("users schema should exist");
+
+        let payload = decode_row_payload(schema, &insert_record.payload)
+            .expect("insert payload should deserialize");
 
         assert_eq!(payload.get("id"), Some(&b"1".to_vec()));
         assert_eq!(payload.get("email"), Some(&b"sam@example.com".to_vec()));
 
+    }
+
+    #[test]
+    fn update_query_updates_live_row() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-update-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let create_request = ConnectorRequest::new(
+            "req-create-table-update-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email varchar(255) not null)"
+                        .to_string(),
+                },
+            },
+        );
+
+        let create_response = app.handle_connector_request(&create_request);
+        assert_eq!(create_response.status, ResponseStatus::Applied);
+
+        let insert_request = ConnectorRequest::new(
+            "req-insert-update-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "insert into users (id, email) values (1, 'sam@example.com')".to_string(),
+                },
+            },
+        );
+
+        let insert_response = app.handle_connector_request(&insert_request);
+        assert_eq!(insert_response.status, ResponseStatus::Applied);
+
+        let update_request = ConnectorRequest::new(
+            "req-update-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "update users set email='sam+updated@example.com' where id=1".to_string(),
+                },
+            },
+        );
+
+        let update_response = app.handle_connector_request(&update_request);
+        assert_eq!(update_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Mutation(update_mutation) = update_response.result else {
+            panic!("expected mutation result");
+        };
+        assert_eq!(update_mutation.affected_rows, 1);
+
+        let select_request = ConnectorRequest::new(
+            "req-select-update-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select id, email from users where id=1".to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], b"1".to_vec());
+        assert_eq!(result.rows[0][1], b"sam+updated@example.com".to_vec());
+
+    }
+
+    #[test]
+    fn delete_query_removes_live_row() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-delete-query-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let create_request = ConnectorRequest::new(
+            "req-create-table-delete-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email varchar(255) not null)"
+                        .to_string(),
+                },
+            },
+        );
+
+        let create_response = app.handle_connector_request(&create_request);
+        assert_eq!(create_response.status, ResponseStatus::Applied);
+
+        let insert_request = ConnectorRequest::new(
+            "req-insert-delete-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "insert into users (id, email) values (1, 'sam@example.com')".to_string(),
+                },
+            },
+        );
+
+        let insert_response = app.handle_connector_request(&insert_request);
+        assert_eq!(insert_response.status, ResponseStatus::Applied);
+
+        let delete_request = ConnectorRequest::new(
+            "req-delete-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "delete from users where id=1".to_string(),
+                },
+            },
+        );
+
+        let delete_response = app.handle_connector_request(&delete_request);
+        assert_eq!(delete_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Mutation(delete_mutation) = delete_response.result else {
+            panic!("expected mutation result");
+        };
+        assert_eq!(delete_mutation.affected_rows, 1);
+
+        let select_request = ConnectorRequest::new(
+            "req-select-delete-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select id, email from users where id=1".to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert!(result.rows.is_empty());
+
+    }
+
+    #[test]
+    fn update_query_with_join_updates_matching_target_row() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-update-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-update-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-update-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-update-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-update-join-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-profiles-update-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(
+                response.status,
+                ResponseStatus::Applied,
+                "request '{}' failed with result {:?}",
+                request_id,
+                response.result,
+            );
+        }
+
+        let update_request = ConnectorRequest::new(
+            "req-update-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "update users u join profiles p on u.id = p.user_id set email='sam+updated@example.com' where p.name = 'Sam'"
+                        .to_string(),
+                },
+            },
+        );
+
+        let update_response = app.handle_connector_request(&update_request);
+        assert_eq!(update_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Mutation(mutation) = update_response.result else {
+            panic!("expected mutation result");
+        };
+        assert_eq!(mutation.affected_rows, 1);
+
+        let select_request = ConnectorRequest::new(
+            "req-select-update-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select id, email from users".to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 2);
+
+        let mut emails = result
+            .rows
+            .iter()
+            .map(|row| String::from_utf8(row[1].clone()).expect("email should be valid utf8"))
+            .collect::<Vec<_>>();
+
+        emails.sort();
+
+        assert_eq!(
+            emails,
+            vec![
+                "alex@example.com".to_string(),
+                "sam+updated@example.com".to_string(),
+            ]
+        );
+
+    }
+
+    #[test]
+    fn delete_query_with_left_outer_join_removes_unmatched_target_row() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-delete-left-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-delete-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-delete-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-delete-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-delete-join-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-profiles-delete-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(
+                response.status,
+                ResponseStatus::Applied,
+                "request '{}' failed with result {:?}",
+                request_id,
+                response.result,
+            );
+        }
+
+        let delete_request = ConnectorRequest::new(
+            "req-delete-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "delete u from users u left join profiles p on u.id = p.user_id where p.name is null"
+                        .to_string(),
+                },
+            },
+        );
+
+        let delete_response = app.handle_connector_request(&delete_request);
+        assert_eq!(delete_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Mutation(mutation) = delete_response.result else {
+            panic!("expected mutation result");
+        };
+        assert_eq!(mutation.affected_rows, 1);
+
+        let select_request = ConnectorRequest::new(
+            "req-select-delete-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select id, email from users".to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], b"1".to_vec());
+
+    }
+
+    #[test]
+    fn select_inner_join_returns_matching_rows() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-profiles-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(
+                response.status,
+                ResponseStatus::Applied,
+                "request '{}' failed with result {:?}",
+                request_id,
+                response.result,
+            );
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.email, p.name from users u inner join profiles p on u.id = p.user_id where u.id = 1"
+                        .to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], b"sam@example.com".to_vec());
+        assert_eq!(result.rows[0][1], b"Sam".to_vec());
+
+    }
+
+    #[test]
+    fn select_inner_join_preserves_one_to_many_matches() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-join-many-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-join-many-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-join-many-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-join-many-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-profiles-join-many-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+            (
+                "req-insert-profiles-join-many-2",
+                "insert into profiles (id, user_id, name) values (11, 1, 'Samuel')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(
+                response.status,
+                ResponseStatus::Applied,
+                "request '{}' failed with result {:?}",
+                request_id,
+                response.result,
+            );
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-join-many-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.email, p.name from users u inner join profiles p on u.id = p.user_id where u.id = 1"
+                        .to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 2);
+
+        let mut names = result
+            .rows
+            .iter()
+            .map(|row| String::from_utf8(row[1].clone()).expect("name should be valid utf8"))
+            .collect::<Vec<_>>();
+
+        names.sort();
+
+        assert_eq!(names, vec!["Sam".to_string(), "Samuel".to_string()]);
+
+        for row in &result.rows {
+            assert_eq!(row[0], b"sam@example.com".to_vec());
+        }
+
+    }
+
+    #[test]
+    fn select_left_join_returns_unmatched_left_rows_with_nulls() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-left-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-left-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-left-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-left-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-left-join-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-profiles-left-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(
+                response.status,
+                ResponseStatus::Applied,
+                "request '{}' failed with result {:?}",
+                request_id,
+                response.result,
+            );
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-left-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.email, p.name from users u left join profiles p on u.id = p.user_id"
+                        .to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 2);
+
+        let mut rows = result
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    String::from_utf8(row[0].clone()).expect("email should be valid utf8"),
+                    String::from_utf8(row[1].clone()).expect("name should be valid utf8"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        rows.sort();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("alex@example.com".to_string(), "NULL".to_string()),
+                ("sam@example.com".to_string(), "Sam".to_string()),
+            ]
+        );
+
+    }
+
+    #[test]
+    fn select_left_join_where_right_field_is_null_filters_after_tuple_formation() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-left-join-where-null-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-left-join-null-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-left-join-null-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-left-join-null-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-left-join-null-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-profiles-left-join-null-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(
+                response.status,
+                ResponseStatus::Applied,
+                "request '{}' failed with result {:?}",
+                request_id,
+                response.result,
+            );
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-left-join-null-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.email from users u left join profiles p on u.id = p.user_id where p.name is null"
+                        .to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], b"alex@example.com".to_vec());
+
+    }
+
+    #[test]
+    fn select_left_outer_join_null_extends_unmatched_rows() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-left-outer-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-left-outer-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-left-outer-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-left-outer-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-left-outer-join-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-profiles-left-outer-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(response.status, ResponseStatus::Applied);
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-left-outer-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.email, p.name from users u left outer join profiles p on u.id = p.user_id"
+                        .to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 2);
+
+        let mut rows = result
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    String::from_utf8(row[0].clone()).expect("email should be valid utf8"),
+                    String::from_utf8(row[1].clone()).expect("name should be valid utf8"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        rows.sort();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("alex@example.com".to_string(), "NULL".to_string()),
+                ("sam@example.com".to_string(), "Sam".to_string()),
+            ]
+        );
+
+    }
+
+    #[test]
+    fn select_right_outer_join_null_extends_unmatched_rows() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-right-outer-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-right-outer-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-right-outer-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-right-outer-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-profiles-right-outer-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+            (
+                "req-insert-profiles-right-outer-join-2",
+                "insert into profiles (id, user_id, name) values (11, 2, 'Orphan')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(response.status, ResponseStatus::Applied);
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-right-outer-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.email, p.name from users u right outer join profiles p on u.id = p.user_id"
+                        .to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 2);
+
+        let mut rows = result
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    String::from_utf8(row[0].clone()).expect("email should be valid utf8"),
+                    String::from_utf8(row[1].clone()).expect("name should be valid utf8"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        rows.sort();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("NULL".to_string(), "Orphan".to_string()),
+                ("sam@example.com".to_string(), "Sam".to_string()),
+            ]
+        );
+
+    }
+
+    #[test]
+    fn select_full_outer_join_null_extends_both_sides() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-select-full-outer-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-full-outer-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-full-outer-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-full-outer-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-full-outer-join-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-profiles-full-outer-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+            (
+                "req-insert-profiles-full-outer-join-2",
+                "insert into profiles (id, user_id, name) values (11, 3, 'Orphan')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(response.status, ResponseStatus::Applied);
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-full-outer-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select u.email, p.name from users u full outer join profiles p on u.id = p.user_id"
+                        .to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 3);
+
+        let mut rows = result
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    String::from_utf8(row[0].clone()).expect("email should be valid utf8"),
+                    String::from_utf8(row[1].clone()).expect("name should be valid utf8"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        rows.sort();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("NULL".to_string(), "Orphan".to_string()),
+                ("alex@example.com".to_string(), "NULL".to_string()),
+                ("sam@example.com".to_string(), "Sam".to_string()),
+            ]
+        );
+
+    }
+
+    #[test]
+    fn explain_select_with_multiple_joins_returns_join_steps() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-explain-multi-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-explain-multi-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-explain-multi-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-create-teams-explain-multi-join-1",
+                "create table teams (id bigint not null primary key, profile_id bigint not null, label varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-explain-multi-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-profiles-explain-multi-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+            (
+                "req-insert-teams-explain-multi-join-1",
+                "insert into teams (id, profile_id, label) values (100, 10, 'core')",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(response.status, ResponseStatus::Applied);
+        }
+
+        let explain_request = ConnectorRequest::new(
+            "req-explain-multi-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "explain select u.email, p.name, t.label from users u inner join profiles p on u.id = p.user_id left join teams t on p.id = t.profile_id where u.id = 1"
+                        .to_string(),
+                },
+            },
+        );
+
+        let explain_response = app.handle_connector_request(&explain_request);
+        assert_eq!(explain_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = explain_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0][1], b"base".to_vec());
+        assert_eq!(result.rows[1][1], b"inner".to_vec());
+        assert_eq!(result.rows[2][1], b"left".to_vec());
+    }
+
+    #[test]
+    fn explain_insert_update_delete_return_plan_details() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-explain-mutations-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        let explain_insert = ConnectorRequest::new(
+            "req-explain-insert-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "explain insert into users (id, email) values (1, 'sam@example.com')"
+                        .to_string(),
+                },
+            },
+        );
+
+        let insert_response = app.handle_connector_request(&explain_insert);
+        assert_eq!(insert_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(insert_result) = insert_response.result else {
+            panic!("expected query result");
+        };
+
+        assert!(insert_result
+            .rows
+            .iter()
+            .any(|row| row == &vec![b"operation".to_vec(), b"insert".to_vec()]));
+
+        let explain_update = ConnectorRequest::new(
+            "req-explain-update-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "explain update users u join profiles p on u.id = p.user_id left join teams t on p.id = t.profile_id set u.email = 'sam+updated@example.com' where t.label = 'core'"
+                        .to_string(),
+                },
+            },
+        );
+
+        let update_response = app.handle_connector_request(&explain_update);
+        assert_eq!(update_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(update_result) = update_response.result else {
+            panic!("expected query result");
+        };
+
+        assert!(update_result
+            .rows
+            .iter()
+            .any(|row| row == &vec![b"join_count".to_vec(), b"2".to_vec()]));
+        assert!(update_result
+            .rows
+            .iter()
+            .any(|row| row == &vec![b"join[0].kind".to_vec(), b"inner".to_vec()]));
+        assert!(update_result
+            .rows
+            .iter()
+            .any(|row| row == &vec![b"join[1].kind".to_vec(), b"left".to_vec()]));
+
+        let explain_delete = ConnectorRequest::new(
+            "req-explain-delete-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "explain delete u from users u join profiles p on u.id = p.user_id left join teams t on p.id = t.profile_id where t.label is null"
+                        .to_string(),
+                },
+            },
+        );
+
+        let delete_response = app.handle_connector_request(&explain_delete);
+        assert_eq!(delete_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(delete_result) = delete_response.result else {
+            panic!("expected query result");
+        };
+
+        assert!(delete_result
+            .rows
+            .iter()
+            .any(|row| row == &vec![b"operation".to_vec(), b"delete".to_vec()]));
+        assert!(delete_result
+            .rows
+            .iter()
+            .any(|row| row == &vec![b"join_count".to_vec(), b"2".to_vec()]));
+    }
+
+    #[test]
+    fn insert_select_copies_rows_into_target_table() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-insert-select-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-insert-select-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-users-archive-insert-select-1",
+                "create table users_archive (id bigint not null, email varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-insert-select-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-insert-select-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-select-run-1",
+                "insert into users_archive (id, email) select id, email from users where id = 1",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(
+                response.status,
+                ResponseStatus::Applied,
+                "request '{}' failed with result {:?}",
+                request_id,
+                response.result,
+            );
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-users-archive-insert-select-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select id, email from users_archive".to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], b"1".to_vec());
+        assert_eq!(result.rows[0][1], b"sam@example.com".to_vec());
+    }
+
+    #[test]
+    fn insert_select_with_join_materializes_joined_source_rows() {
+
+        let unique_suffix = common::epochabs!();
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "distdb-server-insert-select-join-{}-{}",
+            std::process::id(),
+            unique_suffix
+        ));
+
+        let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+
+        let catalog = DatabaseCatalog::create_empty_from_name("main")
+            .expect("catalog should be created");
+
+        app.catalogs.insert("main".to_string(), catalog);
+
+        for (request_id, sql) in [
+            (
+                "req-create-users-insert-select-join-1",
+                "create table users (id bigint not null primary key, email varchar(255) not null)",
+            ),
+            (
+                "req-create-profiles-insert-select-join-1",
+                "create table profiles (id bigint not null primary key, user_id bigint not null, name varchar(255) not null)",
+            ),
+            (
+                "req-create-flat-insert-select-join-1",
+                "create table user_profile_flat (email varchar(255) not null, profile_name varchar(255) not null)",
+            ),
+            (
+                "req-insert-users-insert-select-join-1",
+                "insert into users (id, email) values (1, 'sam@example.com')",
+            ),
+            (
+                "req-insert-users-insert-select-join-2",
+                "insert into users (id, email) values (2, 'alex@example.com')",
+            ),
+            (
+                "req-insert-profiles-insert-select-join-1",
+                "insert into profiles (id, user_id, name) values (10, 1, 'Sam')",
+            ),
+            (
+                "req-insert-select-join-run-1",
+                "insert into user_profile_flat (email, profile_name) select u.email, p.name from users u inner join profiles p on u.id = p.user_id",
+            ),
+        ] {
+            let response = app.handle_connector_request(&ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: sql.to_string(),
+                    },
+                },
+            ));
+
+            assert_eq!(response.status, ResponseStatus::Applied);
+        }
+
+        let select_request = ConnectorRequest::new(
+            "req-select-flat-insert-select-join-1",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "select email, profile_name from user_profile_flat".to_string(),
+                },
+            },
+        );
+
+        let select_response = app.handle_connector_request(&select_request);
+        assert_eq!(select_response.status, ResponseStatus::Applied);
+
+        let ConnectorResult::Query(result) = select_response.result else {
+            panic!("expected query result");
+        };
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], b"sam@example.com".to_vec());
+        assert_eq!(result.rows[0][1], b"Sam".to_vec());
     }
 
     #[test]

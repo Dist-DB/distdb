@@ -21,15 +21,18 @@ pub(super) fn classify_statement(
             return Err(SqlParseError::EmptyStatement);
         };
 
-        if let Statement::Query(query) = single_inner {
-            return Ok((
-                SqlDirective::Retrieve,
-                SqlOperation::Select,
-                first_object_name_in_set_expr(&query.body),
-            ));
+        let inner_sql = single_inner.to_string();
+        let (_, inner_operation, inner_object_name) =
+            classify_statement(single_inner, &inner_sql)?;
+
+        if !matches!(
+            inner_operation,
+            SqlOperation::Select | SqlOperation::Insert | SqlOperation::Update | SqlOperation::Delete
+        ) {
+            return Err(SqlParseError::UnsupportedStatement(normalized.to_string()));
         }
 
-        return Err(SqlParseError::UnsupportedStatement(normalized.to_string()));
+        return Ok((SqlDirective::Retrieve, inner_operation, inner_object_name));
     }
 
     let (directive, operation, object_name) = match statement {

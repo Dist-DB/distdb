@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::row_payload::decode_row_payload;
 use super::table::DatabaseTable;
 use super::transaction::TransactionLog;
 use crate::{ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin, TransactionKind};
@@ -148,22 +149,26 @@ impl RuntimeIndexStore {
                     let mut deleted: HashSet<u64> = HashSet::new();
 
                     for record in &records {
+
                         match record.kind {
+
                             TransactionKind::Insert => {
-                                if let Ok(row_map) =
-                                    bincode::deserialize::<HashMap<String, Vec<u8>>>(&record.payload)
-                                {
+                                if let Ok(row_map) = decode_row_payload(&table.schema, &record.payload) {
                                     let key = index_value_tuple(index, &row_map);
                                     live.push((record.id.0, key));
                                 }
-                            }
+                            },
+
                             TransactionKind::Delete => {
                                 if let Some(refid) = record.refid {
                                     deleted.insert(refid.0);
                                 }
-                            }
+                            },
+
                             _ => {}
+
                         }
+
                     }
 
                     let state = self.index_mut(&index.index_id.0);
@@ -192,6 +197,7 @@ impl RuntimeIndexStore {
 }
 
 pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) -> Vec<Vec<u8>> {
+
     let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
         vec![index.field_name.clone()]
     } else {
@@ -202,7 +208,9 @@ pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8
         .into_iter()
         .map(|field_name| row_map.get(&field_name).cloned().unwrap_or_default())
         .collect()
+
 }
+
 
 pub fn primary_key_index<'a>(table: &'a DatabaseTable) -> Option<&'a DatabaseIndex> {
     table.indexes.values().find(|index| index.is_primary_key())

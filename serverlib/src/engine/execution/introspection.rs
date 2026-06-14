@@ -1,0 +1,107 @@
+use crate::{FieldDef, FieldIndex, FieldType, TableSchema};
+
+use super::select::SelectExecutionResult;
+
+pub fn show_databases_result<I>(database_ids: I) -> SelectExecutionResult
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut database_ids = database_ids.into_iter().collect::<Vec<_>>();
+    database_ids.sort();
+
+    single_text_column_result(
+        "database_name",
+        database_ids
+            .into_iter()
+            .map(|database_id| vec![database_id.into_bytes()])
+            .collect(),
+    )
+}
+
+pub fn show_tables_result<I>(table_ids: I) -> SelectExecutionResult
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut table_ids = table_ids.into_iter().collect::<Vec<_>>();
+    table_ids.sort();
+
+    single_text_column_result(
+        "table_name",
+        table_ids
+            .into_iter()
+            .map(|table_id| vec![table_id.into_bytes()])
+            .collect(),
+    )
+}
+
+pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {
+
+    let rows = schema
+        .fields
+        .iter()
+        .map(|field| {
+            let nullable = if field.nullable { "YES" } else { "NO" };
+            let key = match field.indexed {
+                FieldIndex::PrimaryKey => "PRI",
+                FieldIndex::Indexed => "MUL",
+                FieldIndex::None => "",
+            };
+            let default_value = field
+                .default_value
+                .as_ref()
+                .map(|value| String::from_utf8_lossy(value).to_string())
+                .unwrap_or_else(|| "NULL".to_string());
+
+            vec![
+                field.field_name.clone().into_bytes(),
+                field
+                    .metadata
+                    .as_ref()
+                    .and_then(|meta| meta.original_sql_type.clone())
+                    .unwrap_or_else(|| format!("{:?}", field.field_type))
+                    .into_bytes(),
+                nullable.as_bytes().to_vec(),
+                key.as_bytes().to_vec(),
+                default_value.into_bytes(),
+            ]
+        })
+        .collect();
+
+    SelectExecutionResult {
+        columns: vec![
+            text_column(1, "field"),
+            text_column(2, "type"),
+            text_column(3, "null"),
+            text_column(4, "key"),
+            text_column(5, "default"),
+        ],
+        rows,
+    }
+
+}
+
+fn single_text_column_result(field_name: &str, rows: Vec<Vec<Vec<u8>>>) -> SelectExecutionResult {
+
+    SelectExecutionResult {
+        columns: vec![text_column(1, field_name)],
+        rows,
+    }
+    
+}
+
+fn text_column(seqno: u32, field_name: &str) -> FieldDef {
+    FieldDef {
+        seqno,
+        field_name: field_name.to_string(),
+        field_type: FieldType::Text,
+        nullable: false,
+        indexed: FieldIndex::None,
+        default_value: None,
+        metadata: None,
+    }
+}
+
+
+#[cfg(test)]
+#[path = "introspection_test.rs"]
+mod tests;

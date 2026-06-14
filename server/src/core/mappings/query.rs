@@ -7,20 +7,23 @@ use std::time::Instant;
 use common::helpers::format::{make_header, FileKind, HEADER_SIZE};
 use common::helpers::write_bytes;
 use connector::{
-    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, FieldIndex, FieldType, QueryResult,
-    QueryTimings, MutationResult,
+    ConnectorResponse, ConnectorResult, DataQuery, FieldDef, QueryResult, QueryTimings,
+    MutationResult,
 };
 use serverlib::engine::database::inbuilt::evaluate_inbuilt_sql_function;
 use serverlib::engine::database::runtime_index::derived_indexes_for_table;
-use serverlib::{primary_key_index, RuntimeIndexStore};
+use serverlib::{
+    collect_indexable_equality_filters, count_condition_predicates, decode_row_payload,
+    encode_row_payload, index_value_tuple, load_live_rows, plan_relation_access,
+    primary_key_index, RuntimeIndexStore,
+};
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
     AlterTableChangeOp,
     ConcurrentWalManager, DatabaseCatalog, DatabaseId, EntityMetadata, EntityMetadataPayload,
     SchemaChangePayload,
     DatabaseObjectType,
-    SelectComparisonOp, SelectCondition, SelectPredicate,
-    SelectProjectionItem,
+    SelectCondition, SelectJoin, SelectRelation,
     SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind, SqlOperation, SqlRequest,
     TableLifecycleAction, TableLifecyclePayload,
     TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
@@ -91,6 +94,14 @@ fn execute_parsed_query(
     // Insert is handled separately because it needs mutable access to runtime_indexes.
     if statement.operation == SqlOperation::Insert {
         return execute_insert(request_id, query, catalogs, wal, node_data_dir, runtime_indexes, statement);
+    }
+
+    if statement.operation == SqlOperation::Update {
+        return execute_update(request_id, query, catalogs, wal, node_data_dir, runtime_indexes, statement);
+    }
+
+    if statement.operation == SqlOperation::Delete {
+        return execute_delete(request_id, query, catalogs, wal, node_data_dir, runtime_indexes, statement);
     }
 
     if statement.operation == SqlOperation::Select {
@@ -773,7 +784,9 @@ fn execute_insert(
         );
     };
 
-    let plan = match serverlib::parse_insert_rows_from_statement(&statement.sql) {
+    let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
+
+    let plan = match serverlib::parse_insert_rows_from_statement(statement_sql) {
         Ok(plan) => plan,
         Err(err) => {
             return ConnectorResponse::rejected(
@@ -782,6 +795,34 @@ fn execute_insert(
             )
         }
     };
+
+    if is_explain {
+        let mut rows = vec![
+            vec!["operation".to_string(), "insert".to_string()],
+            vec!["table".to_string(), plan.table_id.clone()],
+            vec!["column_count".to_string(), plan.columns.len().to_string()],
+        ];
+
+        match &plan.source {
+            serverlib::InsertRowsSource::Values(values) => {
+                rows.push(vec!["source".to_string(), "values".to_string()]);
+                rows.push(vec!["row_count".to_string(), values.len().to_string()]);
+            }
+            serverlib::InsertRowsSource::Select(select_plan) => {
+                rows.push(vec!["source".to_string(), "select".to_string()]);
+                rows.push(vec![
+                    "source_relations".to_string(),
+                    select_plan.relations.len().to_string(),
+                ]);
+                rows.push(vec![
+                    "source_joins".to_string(),
+                    select_plan.joins.len().to_string(),
+                ]);
+            }
+        }
+
+        return explain_mutation_plan(request_id, rows);
+    }
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
         return ConnectorResponse::rejected(
@@ -834,8 +875,18 @@ fn execute_insert(
 
     }
 
+    let insert_rows = match materialize_insert_source_rows(
+        catalog,
+        wal,
+        runtime_indexes,
+        &plan.source,
+    ) {
+        Ok(rows) => rows,
+        Err(message) => return ConnectorResponse::rejected(request_id.to_string(), message),
+    };
+
     let mut affected_rows = 0u64;
-    for row in &plan.rows {
+    for row in &insert_rows {
 
         if row.len() != columns.len() {
             return ConnectorResponse::rejected(
@@ -899,6 +950,7 @@ fn execute_insert(
 
         // Primary key uniqueness check
         if let Some(pk_index) = primary_key_index(table) {
+            
             let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
                 vec![pk_index.field_name.clone()]
             } else {
@@ -911,6 +963,7 @@ fn execute_insert(
                 .collect::<Vec<_>>();
 
             let pk_runtime = runtime_indexes.index(&pk_index.index_id.0);
+            
             if pk_runtime.map(|idx| idx.contains(&incoming_pk)).unwrap_or(false) {
                 let pk_display = pk_fields
                     .iter()
@@ -923,9 +976,10 @@ fn execute_insert(
                     format!("insert failed: duplicate primary key ({})", pk_display),
                 );
             }
+
         }
 
-        let encoded = match bincode::serialize(&payload_row) {
+        let encoded = match encode_row_payload(schema, &payload_row) {
 
             Ok(encoded) => encoded,
             
@@ -946,6 +1000,7 @@ fn execute_insert(
             TransactionKind::Insert,
             encoded,
             common::epochabs!() as u64,
+            None,
         ) {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -964,6 +1019,527 @@ fn execute_insert(
 
 }
 
+fn materialize_insert_source_rows(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    source: &serverlib::InsertRowsSource,
+) -> Result<Vec<Vec<Option<Vec<u8>>>>, String> {
+    match source {
+        serverlib::InsertRowsSource::Values(rows) => Ok(rows.clone()),
+
+        serverlib::InsertRowsSource::Select(read_plan) => {
+            let select_result = if !read_plan.joins.is_empty() {
+                serverlib::execute_joined_select_plan(
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                    read_plan,
+                    &mut |function| evaluate_inbuilt_sql_function(function),
+                    &mut |row_map, condition| {
+                        serverlib::row_matches_select_condition(
+                            row_map,
+                            condition,
+                            catalog,
+                            wal,
+                            runtime_indexes,
+                        )
+                    },
+                    &mut |row_tuple, condition| {
+                        serverlib::row_matches_select_condition(
+                            row_tuple,
+                            condition,
+                            catalog,
+                            wal,
+                            runtime_indexes,
+                        )
+                    },
+                )
+            } else if read_plan.table_id.is_empty() {
+                serverlib::execute_projection_only_select_plan(
+                    read_plan,
+                    &mut |function| evaluate_inbuilt_sql_function(function),
+                )
+            } else {
+                let table_id = read_plan.table_id.as_str();
+
+                let schema = catalog
+                    .table_schema(table_id)
+                    .ok_or_else(|| format!("insert select failed: table '{}' not found", table_id))?;
+
+                let table = catalog
+                    .table(table_id)
+                    .ok_or_else(|| format!("insert select failed: table '{}' not found", table_id))?;
+
+                let mut index_filter_map = HashMap::new();
+                let allow_index_short_circuit = read_plan
+                    .where_condition
+                    .as_ref()
+                    .map(|condition| {
+                        collect_indexable_equality_filters(condition, &mut index_filter_map)
+                    })
+                    .unwrap_or(true);
+
+                let access_plan = plan_relation_access(
+                    table,
+                    allow_index_short_circuit,
+                    index_filter_map,
+                );
+
+                serverlib::execute_relation_select_plan(
+                    wal,
+                    table,
+                    schema,
+                    runtime_indexes,
+                    read_plan,
+                    &access_plan,
+                    &mut |function| evaluate_inbuilt_sql_function(function),
+                    &mut |row_map, condition| {
+                        serverlib::row_matches_select_condition(
+                            row_map,
+                            condition,
+                            catalog,
+                            wal,
+                            runtime_indexes,
+                        )
+                    },
+                )
+            }
+            .map_err(|message| format!("insert select failed: {message}"))?;
+
+            let rows = select_result
+                .rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            if select_result
+                                .columns
+                                .get(index)
+                                .is_some_and(|column| column.nullable && value == b"NULL".to_vec())
+                            {
+                                None
+                            } else {
+                                Some(value)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            Ok(rows)
+        }
+    }
+}
+
+fn execute_update(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    _node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
+
+    let plan = match serverlib::parse_update_rows_from_statement(statement_sql) {
+        Ok(plan) => plan,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("update parse failed: {err}"),
+            )
+        }
+    };
+
+    if is_explain {
+        return explain_join_mutation_plan(
+            request_id,
+            "update",
+            &plan.table_id,
+            &plan.relations,
+            &plan.joins,
+            &plan.pushdown_conditions,
+            plan.assignments.len(),
+            plan.where_condition.is_some(),
+        );
+    }
+
+    let Some(schema) = catalog.table_schema(&plan.table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "table '{}' not found in database '{}'",
+                plan.table_id,
+                query.database_id
+            ),
+        );
+    };
+
+    let Some(table) = catalog.table(&plan.table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "table '{}' not found in database '{}'",
+                plan.table_id,
+                query.database_id
+            ),
+        );
+    };
+
+    for assignment in &plan.assignments {
+        if schema.field(&assignment.field_name).is_none() {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("update failed: unknown column '{}'", assignment.field_name),
+            );
+        }
+    }
+
+    let mutation_uses_joins = !plan.joins.is_empty();
+
+    let current_live_rows = match load_mutation_rows(
+        catalog,
+        wal,
+        runtime_indexes,
+        schema,
+        &plan.table_id,
+        &plan.relations,
+        &plan.pushdown_conditions,
+        &plan.joins,
+        plan.where_condition.as_ref(),
+    ) {
+        Ok(rows) => rows,
+        Err(message) => {
+            return ConnectorResponse::rejected(request_id.to_string(), message);
+        }
+    };
+
+    let mut pk_keys = if let Some(pk_index) = primary_key_index(table) {
+        current_live_rows
+            .iter()
+            .map(|(_, row_map)| index_value_tuple(pk_index, row_map))
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+
+    let mut affected_rows = 0u64;
+
+    for (row_id, row_map) in current_live_rows {
+
+        if !mutation_uses_joins
+            && !serverlib::row_matches_select_condition(
+                &row_map,
+                plan.where_condition.as_ref(),
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+        {
+            continue;
+        }
+
+        let mut updated_row = row_map.clone();
+
+        for assignment in &plan.assignments {
+            match &assignment.value {
+                Some(value) => {
+                    updated_row.insert(assignment.field_name.clone(), value.clone());
+                },
+                None => {
+                    updated_row.remove(&assignment.field_name);
+                }
+            }
+        }
+
+        for field in &schema.fields {
+            if !updated_row.contains_key(&field.field_name) && !field.nullable {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("update failed: column '{}' cannot be null", field.field_name),
+                );
+            }
+        }
+
+        if let Some(pk_index) = primary_key_index(table) {
+            let old_pk = index_value_tuple(pk_index, &row_map);
+            let new_pk = index_value_tuple(pk_index, &updated_row);
+
+            if old_pk != new_pk && pk_keys.contains(&new_pk) {
+                let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
+                    vec![pk_index.field_name.clone()]
+                } else {
+                    pk_index.field_names.clone()
+                };
+
+                let pk_display = pk_fields
+                    .iter()
+                    .zip(new_pk.iter())
+                    .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("update failed: duplicate primary key ({})", pk_display),
+                );
+            }
+
+            pk_keys.remove(&old_pk);
+            pk_keys.insert(new_pk);
+        }
+
+        let delete_payload = match encode_row_payload(schema, &row_map) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("update delete payload encode failed: {err}"),
+                )
+            }
+        };
+
+        if let Err(err) = append_row_payload_record(
+            wal,
+            &plan.table_id,
+            table,
+            runtime_indexes,
+            TransactionKind::Delete,
+            delete_payload,
+            common::epochabs!() as u64,
+            Some(TransactionId(row_id)),
+        ) {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("update delete WAL append failed: {err}"),
+            );
+        }
+
+        let insert_payload = match encode_row_payload(schema, &updated_row) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("update insert payload encode failed: {err}"),
+                )
+            }
+        };
+
+        if let Err(err) = append_row_payload_record(
+            wal,
+            &plan.table_id,
+            table,
+            runtime_indexes,
+            TransactionKind::Insert,
+            insert_payload,
+            common::epochabs!() as u64,
+            None,
+        ) {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("update insert WAL append failed: {err}"),
+            );
+        }
+
+        affected_rows = affected_rows.saturating_add(1);
+
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows }),
+    )
+
+}
+
+fn execute_delete(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    _node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
+
+    let plan = match serverlib::parse_delete_rows_from_statement(statement_sql) {
+        Ok(plan) => plan,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("delete parse failed: {err}"),
+            )
+        }
+    };
+
+    if is_explain {
+        return explain_join_mutation_plan(
+            request_id,
+            "delete",
+            &plan.table_id,
+            &plan.relations,
+            &plan.joins,
+            &plan.pushdown_conditions,
+            0,
+            plan.where_condition.is_some(),
+        );
+    }
+
+    let Some(schema) = catalog.table_schema(&plan.table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "table '{}' not found in database '{}'",
+                plan.table_id,
+                query.database_id
+            ),
+        );
+    };
+
+    let Some(table) = catalog.table(&plan.table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "table '{}' not found in database '{}'",
+                plan.table_id,
+                query.database_id
+            ),
+        );
+    };
+
+    let mutation_uses_joins = !plan.joins.is_empty();
+
+    let current_live_rows = match load_mutation_rows(
+        catalog,
+        wal,
+        runtime_indexes,
+        schema,
+        &plan.table_id,
+        &plan.relations,
+        &plan.pushdown_conditions,
+        &plan.joins,
+        plan.where_condition.as_ref(),
+    ) {
+        Ok(rows) => rows,
+        Err(message) => {
+            return ConnectorResponse::rejected(request_id.to_string(), message);
+        }
+    };
+
+    let mut affected_rows = 0u64;
+
+    for (row_id, row_map) in current_live_rows {
+
+        if !mutation_uses_joins
+            && !serverlib::row_matches_select_condition(
+                &row_map,
+                plan.where_condition.as_ref(),
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+        {
+            continue;
+        }
+
+        let delete_payload = match encode_row_payload(schema, &row_map) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("delete payload encode failed: {err}"),
+                )
+            }
+        };
+
+        if let Err(err) = append_row_payload_record(
+            wal,
+            &plan.table_id,
+            table,
+            runtime_indexes,
+            TransactionKind::Delete,
+            delete_payload,
+            common::epochabs!() as u64,
+            Some(TransactionId(row_id)),
+        ) {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("delete WAL append failed: {err}"),
+            );
+        }
+
+        affected_rows = affected_rows.saturating_add(1);
+
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows }),
+    )
+
+}
+
+fn load_mutation_rows(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    schema: &TableSchema,
+    table_id: &str,
+    relations: &[serverlib::SelectRelation],
+    pushdown_conditions: &[Option<SelectCondition>],
+    joins: &[serverlib::SelectJoin],
+    where_condition: Option<&SelectCondition>,
+) -> Result<Vec<(u64, HashMap<String, Vec<u8>>)>, String> {
+    
+    if joins.is_empty() {
+        return Ok(load_live_rows(wal, table_id, schema));
+    }
+
+    serverlib::select_mutation_target_rows(
+        catalog,
+        wal,
+        runtime_indexes,
+        relations,
+        pushdown_conditions,
+        joins,
+        where_condition,
+        &mut |row_map, condition| {
+            serverlib::row_matches_select_condition(
+                row_map,
+                condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+        },
+    )
+    .map(|rows| rows.into_iter()
+        .map(|row| (row.row_id, row.row_map))
+        .collect()
+    )
+
+}
+
 fn execute_select(
     request_id: &str,
     query: &DataQuery,
@@ -977,27 +1553,13 @@ fn execute_select(
     let statement_sql_lower = statement.sql.to_ascii_lowercase();
 
     if statement_sql_lower.starts_with("show databases") {
-        let mut database_ids = catalogs.keys().cloned().collect::<Vec<_>>();
-        database_ids.sort();
-
-        let rows = database_ids
-            .into_iter()
-            .map(|database_id| vec![database_id.into_bytes()])
-            .collect::<Vec<_>>();
+        let result = serverlib::show_databases_result(catalogs.keys().cloned());
 
         return ConnectorResponse::applied(
             request_id.to_string(),
             ConnectorResult::Query(QueryResult {
-                columns: vec![FieldDef {
-                    seqno: 1,
-                    field_name: "database_name".to_string(),
-                    field_type: FieldType::Text,
-                    nullable: false,
-                    indexed: FieldIndex::None,
-                    default_value: None,
-                metadata: None,
-                }],
-                rows,
+                columns: connector_field_defs(result.columns),
+                rows: result.rows,
                 timings: empty_query_timings(),
             }),
         );
@@ -1018,27 +1580,13 @@ fn execute_select(
             );
         };
 
-        let mut table_ids = catalog.table_ids();
-        table_ids.sort();
-        
-        let rows = table_ids
-            .into_iter()
-            .map(|table_id| vec![table_id.into_bytes()])
-            .collect::<Vec<_>>();
+        let result = serverlib::show_tables_result(catalog.table_ids());
 
         return ConnectorResponse::applied(
             request_id.to_string(),
             ConnectorResult::Query(QueryResult {
-                columns: vec![FieldDef {
-                    seqno: 1,
-                    field_name: "table_name".to_string(),
-                    field_type: FieldType::Text,
-                    nullable: false,
-                    indexed: FieldIndex::None,
-                    default_value: None,
-                metadata: None,
-                }],
-                rows,
+                columns: connector_field_defs(result.columns),
+                rows: result.rows,
                 timings: empty_query_timings(),
             }),
         );
@@ -1071,88 +1619,13 @@ fn execute_select(
             );
         };
 
-        let rows = schema
-            .fields
-            .iter()
-            .map(|field| {
-                let nullable = if field.nullable { "YES" } else { "NO" };
-                let key = match field.indexed {
-                    FieldIndex::PrimaryKey => "PRI",
-                    FieldIndex::Indexed => "MUL",
-                    FieldIndex::None => "",
-                };
-                let default_value = field
-                    .default_value
-                    .as_ref()
-                    .map(|value| String::from_utf8_lossy(value).to_string())
-                    .unwrap_or_else(|| "NULL".to_string());
-
-                vec![
-                    field.field_name.clone().into_bytes(),
-                    field
-                        .metadata
-                        .as_ref()
-                        .and_then(|meta| meta.original_sql_type.clone())
-                        .unwrap_or_else(|| format!("{:?}", field.field_type))
-                        .into_bytes(),
-                    nullable.as_bytes().to_vec(),
-                    key.as_bytes().to_vec(),
-                    default_value.into_bytes(),
-                ]
-            })
-            .collect::<Vec<_>>();
+        let result = serverlib::describe_table_result(schema);
 
         return ConnectorResponse::applied(
             request_id.to_string(),
             ConnectorResult::Query(QueryResult {
-                columns: vec![
-                    FieldDef {
-                        seqno: 1,
-                        field_name: "field".to_string(),
-                        field_type: FieldType::Text,
-                        nullable: false,
-                        indexed: FieldIndex::None,
-                        default_value: None,
-                    metadata: None,
-                    },
-                    FieldDef {
-                        seqno: 2,
-                        field_name: "type".to_string(),
-                        field_type: FieldType::Text,
-                        nullable: false,
-                        indexed: FieldIndex::None,
-                        default_value: None,
-                    metadata: None,
-                    },
-                    FieldDef {
-                        seqno: 3,
-                        field_name: "null".to_string(),
-                        field_type: FieldType::Text,
-                        nullable: false,
-                        indexed: FieldIndex::None,
-                        default_value: None,
-                    metadata: None,
-                    },
-                    FieldDef {
-                        seqno: 4,
-                        field_name: "key".to_string(),
-                        field_type: FieldType::Text,
-                        nullable: false,
-                        indexed: FieldIndex::None,
-                        default_value: None,
-                    metadata: None,
-                    },
-                    FieldDef {
-                        seqno: 5,
-                        field_name: "default".to_string(),
-                        field_type: FieldType::Text,
-                        nullable: false,
-                        indexed: FieldIndex::None,
-                        default_value: None,
-                    metadata: None,
-                    },
-                ],
-                rows,
+                columns: connector_field_defs(result.columns),
+                rows: result.rows,
                 timings: empty_query_timings(),
             }),
         );
@@ -1168,69 +1641,42 @@ fn execute_select(
         }
     };
 
+    if !read_plan.joins.is_empty() {
+        return execute_joined_select(request_id, query, catalog, wal, runtime_indexes, &read_plan);
+    }
+
     let table_id = read_plan.table_id.as_str();
 
     if table_id.is_empty() {
         if read_plan.is_explain {
             return explain_select_plan(
                 request_id,
-                "<no-from>",
-                read_plan
-                    .where_condition
-                    .as_ref()
-                    .map(count_condition_predicates)
-                    .unwrap_or(0),
-                None,
-                runtime_indexes,
+                serverlib::explain_select_plan_result(
+                    "<no-from>",
+                    read_plan
+                        .where_condition
+                        .as_ref()
+                        .map(count_condition_predicates)
+                        .unwrap_or(0),
+                    None,
+                    runtime_indexes,
+                ),
             );
         }
 
-        let mut columns = Vec::with_capacity(read_plan.projection_items.len());
-        let mut row = Vec::with_capacity(read_plan.projection_items.len());
-
-        for (seq, projection_item) in read_plan.projection_items.iter().enumerate() {
-            match projection_item {
-                SelectProjectionItem::InbuiltFunction {
-                    output_name,
-                    function,
-                } => {
-                    let value = match evaluate_inbuilt_sql_function(function) {
-                        Ok(value) => value,
-                        Err(err) => {
-                            return ConnectorResponse::rejected(
-                                request_id.to_string(),
-                                format!("select failed: inbuilt projection evaluation failed: {err}"),
-                            )
-                        }
-                    };
-
-                    columns.push(FieldDef {
-                        seqno: (seq + 1) as u32,
-                        field_name: output_name.clone(),
-                        field_type: FieldType::Text,
-                        nullable: true,
-                        indexed: FieldIndex::None,
-                        default_value: None,
-                        metadata: None,
-                    });
-
-                    row.push(value.unwrap_or_else(|| b"NULL".to_vec()));
-                }
-
-                SelectProjectionItem::Column { .. } => {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        "select without FROM only supports inbuilt projection functions",
-                    )
-                }
-            }
-        }
+        let result = match serverlib::execute_projection_only_select_plan(
+            &read_plan,
+            &mut |function| evaluate_inbuilt_sql_function(function),
+        ) {
+            Ok(result) => result,
+            Err(message) => return ConnectorResponse::rejected(request_id.to_string(), message),
+        };
 
         return ConnectorResponse::applied(
             request_id.to_string(),
             ConnectorResult::Query(QueryResult {
-                columns,
-                rows: vec![row],
+                columns: connector_field_defs(result.columns),
+                rows: result.rows,
                 timings: empty_query_timings(),
             }),
         );
@@ -1250,88 +1696,6 @@ fn execute_select(
         );
     };
 
-    let projection_items = if read_plan.projection_is_wildcard {
-        schema
-            .fields
-            .iter()
-            .map(|field| SelectProjectionItem::Column {
-                field_name: field.field_name.clone(),
-                output_name: field.field_name.clone(),
-            })
-            .collect::<Vec<_>>()
-    } else {
-        read_plan.projection_items.clone()
-    };
-
-    let mut columns = Vec::with_capacity(projection_items.len());
-
-    for (seq, projection_item) in projection_items.iter().enumerate() {
-        
-        match projection_item {
-
-            SelectProjectionItem::Column {
-                field_name,
-                output_name,
-            } => {
-                let Some(field) = schema.field(field_name) else {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("select failed: unknown column '{}'", field_name),
-                    );
-                };
-
-                columns.push(FieldDef {
-                    seqno: (seq + 1) as u32,
-                    field_name: output_name.clone(),
-                    field_type: field.field_type.clone(),
-                    nullable: field.nullable,
-                    indexed: field.indexed,
-                    default_value: field.default_value.clone(),
-                    metadata: field.metadata.clone(),
-                });
-            },
-
-            SelectProjectionItem::InbuiltFunction { output_name, .. } => {
-                columns.push(FieldDef {
-                    seqno: (seq + 1) as u32,
-                    field_name: output_name.clone(),
-                    field_type: FieldType::Text,
-                    nullable: true,
-                    indexed: FieldIndex::None,
-                    default_value: None,
-                    metadata: None,
-                });
-            }
-        
-        }
-
-    }
-
-    let mut static_projection_values = Vec::with_capacity(projection_items.len());
-
-    for projection_item in &projection_items {
-
-        match projection_item {
-
-            SelectProjectionItem::InbuiltFunction { function, .. } => {
-                let value = match evaluate_inbuilt_sql_function(function) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        return ConnectorResponse::rejected(
-                            request_id.to_string(),
-                            format!("select failed: inbuilt projection evaluation failed: {err}"),
-                        )
-                    }
-                };
-                static_projection_values.push(Some(value));
-            },
-            
-            SelectProjectionItem::Column { .. } => static_projection_values.push(None),
-
-        }
-
-    }
-
     let mut index_filter_map = HashMap::new();
     let allow_index_short_circuit = read_plan
         .where_condition
@@ -1339,500 +1703,255 @@ fn execute_select(
         .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
         .unwrap_or(true);
 
-    let index_lookup = if allow_index_short_circuit {
-        choose_index_lookup(table, &index_filter_map)
-    } else {
-        None
-    };
+    let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+    let index_lookup = access_plan.runtime_index_lookup(table);
 
     if read_plan.is_explain {
         return explain_select_plan(
             request_id,
-            table_id,
-            read_plan
-                .where_condition
-                .as_ref()
-                .map(count_condition_predicates)
-                .unwrap_or(0),
-            index_lookup,
-            runtime_indexes,
+            serverlib::explain_select_plan_result(
+                table_id,
+                read_plan
+                    .where_condition
+                    .as_ref()
+                    .map(count_condition_predicates)
+                    .unwrap_or(0),
+                index_lookup,
+                runtime_indexes,
+            ),
         );
     }
 
-    if let Some((index, lookup_key)) = &index_lookup {
-        if let Some(state) = runtime_indexes.index(&index.index_id.0) {
-            // Only trust an index miss when the runtime state is populated.
-            // Empty index state can be stale relative to WAL and must fall back to scan.
-            if state.cardinality() > 0 && !state.contains(lookup_key) {
-                return ConnectorResponse::applied(
-                    request_id.to_string(),
-                    ConnectorResult::Query(QueryResult {
-                        columns,
-                        rows: Vec::new(),
-                        timings: empty_query_timings(),
-                    }),
-                );
-            }
-        }
-    }
-
-    // Replay the table's WAL to reconstruct live rows:
-    // - Insert records add a row
-    // - Delete records (by refid) remove a row
-    let wal_records = wal.since(table_id, None);
-
-    // Track rows by their WAL transaction id so Delete records can remove them.
-    let mut live_rows: Vec<(u64, HashMap<String, Vec<u8>>)> = Vec::new();
-    let mut deleted_ids: HashSet<u64> = HashSet::new();
-
-    for record in &wal_records {
-
-        match record.kind {
-
-            TransactionKind::Insert => {
-                match bincode::deserialize::<HashMap<String, Vec<u8>>>(&record.payload) {
-                    Ok(row_map) => live_rows.push((record.id.0, row_map)),
-                    Err(_) => continue,
-                }
-            },
-
-            TransactionKind::Delete => {
-                if let Some(refid) = record.refid {
-                    deleted_ids.insert(refid.0);
-                }
-            }
-
-            _ => {}
-            
-        }
-    }
-
-    let rows = live_rows
-        .into_iter()
-        .filter(|(id, _)| !deleted_ids.contains(id))
-        .filter(|(_, row_map)| {
-            row_matches_condition(
+    let result = match serverlib::execute_relation_select_plan(
+        wal,
+        table,
+        schema,
+        runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, condition| {
+            serverlib::row_matches_select_condition(
                 row_map,
-                read_plan.where_condition.as_ref(),
+                condition,
                 catalog,
                 wal,
-                query,
+                runtime_indexes,
             )
-        })
-        .map(|(_, row_map)| {
-            
-            projection_items
-                .iter()
-                .enumerate()
-                .map(|(projection_idx, projection_item)| {
-                    match projection_item {
-                        SelectProjectionItem::Column { field_name, .. } => match row_map.get(field_name) {
-                            Some(value) => value.clone(),
-                            None if columns[projection_idx].nullable => b"NULL".to_vec(),
-                            None => Vec::new(),
-                        },
-
-                        SelectProjectionItem::InbuiltFunction { .. } => {
-                            let static_value = static_projection_values
-                                .get(projection_idx)
-                                .and_then(|entry| entry.as_ref())
-                                .cloned()
-                                .flatten();
-
-                            static_value.unwrap_or_else(|| b"NULL".to_vec())
-                        }
-                    }
-                })
-                .collect::<Vec<_>>()
-
-        })
-        .collect::<Vec<_>>();
+        },
+    ) {
+        Ok(result) => result,
+        Err(message) => return ConnectorResponse::rejected(request_id.to_string(), message),
+    };
 
     ConnectorResponse::applied(
         request_id.to_string(),
         ConnectorResult::Query(QueryResult {
-            columns,
-            rows,
+            columns: connector_field_defs(result.columns),
+            rows: result.rows,
             timings: empty_query_timings(),
         }),
     )
 
 }
 
-fn row_matches_condition(
-    row_map: &HashMap<String, Vec<u8>>,
-    condition: Option<&SelectCondition>,
+fn execute_joined_select(
+    request_id: &str,
+    _query: &DataQuery,
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
-    query: &DataQuery,
-) -> bool {
-    let Some(condition) = condition else {
-        return true;
-    };
+    runtime_indexes: &RuntimeIndexStore,
+    read_plan: &serverlib::SelectReadPlan,
+) -> ConnectorResponse {
 
-    match condition {
-        SelectCondition::And(children) => children
-            .iter()
-            .all(|child| row_matches_condition(row_map, Some(child), catalog, wal, query)),
-
-        SelectCondition::Or(children) => children
-            .iter()
-            .any(|child| row_matches_condition(row_map, Some(child), catalog, wal, query)),
-
-        SelectCondition::Not(child) => !row_matches_condition(row_map, Some(child), catalog, wal, query),
-
-        SelectCondition::Predicate(predicate) => match predicate {
-            SelectPredicate::Comparison {
-                field_name,
-                op,
-                value,
-            } => match row_map.get(field_name) {
-                Some(actual) => compare_row_value(actual, value, op),
-                None => false,
-            },
-
-            SelectPredicate::InList {
-                field_name,
-                values,
-                negated,
-            } => {
-                let found = row_map
-                    .get(field_name)
-                    .map(|actual| values.iter().any(|candidate| candidate == actual))
-                    .unwrap_or(false);
-                if *negated {
-                    !found
-                } else {
-                    found
-                }
-            }
-
-            SelectPredicate::IsNull { field_name, negated } => {
-                let is_null = !row_map.contains_key(field_name);
-                if *negated {
-                    !is_null
-                } else {
-                    is_null
-                }
-            }
-
-            SelectPredicate::InSubquery {
-                field_name,
-                subquery,
-                negated,
-            } => {
-                let Some(actual) = row_map.get(field_name) else {
-                    return false;
-                };
-
-                let values = collect_subquery_projection_values(catalog, wal, query, subquery);
-                let found = values.contains(actual);
-
-                if *negated {
-                    !found
-                } else {
-                    found
-                }
-            }
-        },
+    if read_plan.is_explain {
+        return explain_select_plan(
+            request_id,
+            serverlib::explain_joined_select_plan_result(read_plan),
+        );
     }
-}
-
-fn collect_subquery_projection_values(
-    catalog: &DatabaseCatalog,
-    wal: &ConcurrentWalManager,
-    query: &DataQuery,
-    subquery: &serverlib::SelectReadPlan,
-) -> HashSet<Vec<u8>> {
-    let Some(schema) = catalog.table_schema(&subquery.table_id) else {
-        return HashSet::new();
-    };
-
-    let Some(field_name) = subquery
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.first())
-    else {
-        return HashSet::new();
-    };
-
-    if schema.field(field_name).is_none() {
-        return HashSet::new();
-    }
-
-    let wal_records = wal.since(&subquery.table_id, None);
-
-    let mut live_rows: Vec<(u64, HashMap<String, Vec<u8>>)> = Vec::new();
-    let mut deleted_ids: HashSet<u64> = HashSet::new();
-
-    for record in &wal_records {
-        match record.kind {
-            TransactionKind::Insert => {
-                if let Ok(row_map) = bincode::deserialize::<HashMap<String, Vec<u8>>>(&record.payload) {
-                    live_rows.push((record.id.0, row_map));
-                }
-            }
-            TransactionKind::Delete => {
-                if let Some(refid) = record.refid {
-                    deleted_ids.insert(refid.0);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    live_rows
-        .into_iter()
-        .filter(|(id, _)| !deleted_ids.contains(id))
-        .filter(|(_, row_map)| {
-            row_matches_condition(
+    
+    let result = match serverlib::execute_joined_select_plan(
+        catalog,
+        wal,
+        runtime_indexes,
+        read_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, condition| {
+            serverlib::row_matches_select_condition(
                 row_map,
-                subquery.where_condition.as_ref(),
+                condition,
                 catalog,
                 wal,
-                query,
+                runtime_indexes,
             )
+        },
+        &mut |row_tuple, condition| {
+            serverlib::row_matches_select_condition(
+                row_tuple,
+                condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+        },
+    ) {
+        Ok(result) => result,
+        Err(message) => return ConnectorResponse::rejected(request_id.to_string(), message),
+    };
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Query(QueryResult {
+            columns: connector_field_defs(result.columns),
+            rows: result.rows,
+            timings: empty_query_timings(),
+        }),
+    )
+
+}
+
+fn connector_field_defs(fields: Vec<serverlib::FieldDef>) -> Vec<FieldDef> {
+    fields
+        .into_iter()
+        .map(|field| FieldDef {
+            seqno: field.seqno,
+            field_name: field.field_name,
+            field_type: field.field_type,
+            nullable: field.nullable,
+            indexed: field.indexed,
+            default_value: field.default_value,
+            metadata: field.metadata,
         })
-        .filter_map(|(_, row_map)| row_map.get(field_name).cloned())
         .collect()
-}
-
-fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp) -> bool {
-    let ordering = compare_scalar_bytes(actual, expected);
-
-    match op {
-        SelectComparisonOp::Eq => ordering == std::cmp::Ordering::Equal,
-        SelectComparisonOp::NotEq => ordering != std::cmp::Ordering::Equal,
-        SelectComparisonOp::Gt => ordering == std::cmp::Ordering::Greater,
-        SelectComparisonOp::Gte => ordering != std::cmp::Ordering::Less,
-        SelectComparisonOp::Lt => ordering == std::cmp::Ordering::Less,
-        SelectComparisonOp::Lte => ordering != std::cmp::Ordering::Greater,
-    }
-}
-
-fn compare_scalar_bytes(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
-    let left_text = String::from_utf8_lossy(left);
-    let right_text = String::from_utf8_lossy(right);
-
-    match (left_text.parse::<i128>(), right_text.parse::<i128>()) {
-        (Ok(lhs), Ok(rhs)) => lhs.cmp(&rhs),
-        _ => left_text.cmp(&right_text),
-    }
-}
-
-fn collect_indexable_equality_filters(
-    condition: &SelectCondition,
-    filters: &mut HashMap<String, Vec<u8>>,
-) -> bool {
-    match condition {
-        SelectCondition::And(children) => children
-            .iter()
-            .all(|child| collect_indexable_equality_filters(child, filters)),
-
-        SelectCondition::Predicate(SelectPredicate::Comparison {
-            field_name,
-            op: SelectComparisonOp::Eq,
-            value,
-        }) => {
-            filters.insert(field_name.clone(), value.clone());
-            true
-        }
-
-        SelectCondition::Predicate(_) => true,
-
-        SelectCondition::Or(_) | SelectCondition::Not(_) => false,
-    }
-}
-
-fn count_condition_predicates(condition: &SelectCondition) -> usize {
-    match condition {
-        SelectCondition::And(children) | SelectCondition::Or(children) => {
-            children.iter().map(count_condition_predicates).sum()
-        }
-        SelectCondition::Not(child) => count_condition_predicates(child),
-        SelectCondition::Predicate(_) => 1,
-    }
-}
-
-fn choose_index_lookup<'a>(
-    table: &'a serverlib::DatabaseTable,
-    filters: &HashMap<String, Vec<u8>>,
-) -> Option<(&'a serverlib::DatabaseIndex, Vec<Vec<u8>>)> {
-
-    let mut selected: Option<(&serverlib::DatabaseIndex, Vec<Vec<u8>>, usize)> = None;
-
-    for index in derived_indexes_for_table(table) {
-        let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
-            vec![index.field_name.clone()]
-        } else {
-            index.field_names.clone()
-        };
-
-        if field_names.is_empty() {
-            continue;
-        }
-
-        let mut lookup_key = Vec::with_capacity(field_names.len());
-        let mut all_present = true;
-        for field_name in &field_names {
-            match filters.get(field_name) {
-                Some(value) => lookup_key.push(value.clone()),
-                None => {
-                    all_present = false;
-                    break;
-                }
-            }
-        }
-
-        if !all_present {
-            continue;
-        }
-
-        let score = field_names.len();
-        let should_replace = selected
-            .as_ref()
-            .map(|(_, _, best_score)| score > *best_score)
-            .unwrap_or(true);
-        if should_replace {
-            selected = Some((index, lookup_key, score));
-        }
-    }
-
-    selected.map(|(index, lookup_key, _)| (index, lookup_key))
-
 }
 
 fn explain_select_plan(
     request_id: &str,
-    table_id: &str,
-    filter_count: usize,
-    index_lookup: Option<(&serverlib::DatabaseIndex, Vec<Vec<u8>>)>,
-    runtime_indexes: &RuntimeIndexStore,
+    result: serverlib::SelectExecutionResult,
 ) -> ConnectorResponse {
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Query(QueryResult {
+            columns: connector_field_defs(result.columns),
+            rows: result.rows,
+            timings: empty_query_timings(),
+        }),
+    )
 
+}
+
+fn explain_inner_statement(statement_sql: &str) -> (&str, bool) {
+    let trimmed = statement_sql.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if lowered.starts_with("explain ") {
+        (trimmed["explain".len()..].trim(), true)
+    } else {
+        (trimmed, false)
+    }
+}
+
+fn explain_mutation_plan(request_id: &str, rows: Vec<Vec<String>>) -> ConnectorResponse {
     let columns = vec![
-        FieldDef {
+        serverlib::FieldDef {
             seqno: 1,
-            field_name: "table".to_string(),
-            field_type: FieldType::Text,
+            field_name: "attribute".to_string(),
+            field_type: serverlib::FieldType::Text,
             nullable: false,
-            indexed: FieldIndex::None,
+            indexed: serverlib::FieldIndex::None,
             default_value: None,
             metadata: None,
         },
-        FieldDef {
+        serverlib::FieldDef {
             seqno: 2,
-            field_name: "access_path".to_string(),
-            field_type: FieldType::Text,
+            field_name: "value".to_string(),
+            field_type: serverlib::FieldType::Text,
             nullable: false,
-            indexed: FieldIndex::None,
-            default_value: None,
-            metadata: None,
-        },
-        FieldDef {
-            seqno: 3,
-            field_name: "index_id".to_string(),
-            field_type: FieldType::Text,
-            nullable: false,
-            indexed: FieldIndex::None,
-            default_value: None,
-            metadata: None,
-        },
-        FieldDef {
-            seqno: 4,
-            field_name: "lookup_key".to_string(),
-            field_type: FieldType::Text,
-            nullable: false,
-            indexed: FieldIndex::None,
-            default_value: None,
-            metadata: None,
-        },
-        FieldDef {
-            seqno: 5,
-            field_name: "index_cardinality".to_string(),
-            field_type: FieldType::Text,
-            nullable: false,
-            indexed: FieldIndex::None,
-            default_value: None,
-            metadata: None,
-        },
-        FieldDef {
-            seqno: 6,
-            field_name: "lookup_hit".to_string(),
-            field_type: FieldType::Text,
-            nullable: false,
-            indexed: FieldIndex::None,
-            default_value: None,
-            metadata: None,
-        },
-        FieldDef {
-            seqno: 7,
-            field_name: "filters".to_string(),
-            field_type: FieldType::Text,
-            nullable: false,
-            indexed: FieldIndex::None,
+            indexed: serverlib::FieldIndex::None,
             default_value: None,
             metadata: None,
         },
     ];
 
-    let (access_path, index_id, lookup_key, cardinality, lookup_hit) = if let Some((index, key)) = index_lookup {
-        let state = runtime_indexes.index(&index.index_id.0);
-        let hit = state
-            .map(|s| s.contains(&key))
-            .unwrap_or(false);
-        let card = state
-            .map(|s| s.cardinality())
-            .unwrap_or(0);
+    let result_rows = rows
+        .into_iter()
+        .map(|row| row.into_iter().map(|v| v.into_bytes()).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
 
-        let key_text = key
-            .iter()
-            .map(|part| String::from_utf8_lossy(part).to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+    explain_select_plan(
+        request_id,
+        serverlib::SelectExecutionResult {
+            columns,
+            rows: result_rows,
+        },
+    )
+}
 
-        let path = if state.is_none() || card == 0 || hit {
-            "index_lookup_then_scan"
-        } else {
-            "index_lookup_empty"
+fn explain_join_mutation_plan(
+    request_id: &str,
+    operation: &str,
+    table_id: &str,
+    relations: &[SelectRelation],
+    joins: &[SelectJoin],
+    pushdown_conditions: &[Option<SelectCondition>],
+    assignment_count: usize,
+    has_where_condition: bool,
+) -> ConnectorResponse {
+    let mut rows = vec![
+        vec!["operation".to_string(), operation.to_string()],
+        vec!["table".to_string(), table_id.to_string()],
+        vec!["relation_count".to_string(), relations.len().to_string()],
+        vec!["join_count".to_string(), joins.len().to_string()],
+    ];
+
+    if operation == "update" {
+        rows.push(vec![
+            "assignment_count".to_string(),
+            assignment_count.to_string(),
+        ]);
+    }
+
+    rows.push(vec![
+        "where_present".to_string(),
+        if has_where_condition { "true" } else { "false" }.to_string(),
+    ]);
+
+    for (join_index, join) in joins.iter().enumerate() {
+        let kind = match &join.kind {
+            serverlib::SelectJoinKind::Inner => "inner",
+            serverlib::SelectJoinKind::Left => "left",
+            serverlib::SelectJoinKind::Right => "right",
+            serverlib::SelectJoinKind::Full => "full",
         };
 
-        (
-            path.to_string(),
-            index.index_id.0.clone(),
-            key_text,
-            card.to_string(),
-            if hit { "true" } else { "false" }.to_string(),
-        )
-    } else {
-        (
-            "full_scan".to_string(),
-            "".to_string(),
-            "".to_string(),
-            "0".to_string(),
-            "".to_string(),
-        )
-    };
+        let on = if let Some((left_field_name, right_field_name)) =
+            serverlib::join_condition_field_names(join)
+        {
+            format!("{} = {}", left_field_name, right_field_name)
+        } else {
+            format!("{:?}", join.on_condition)
+        };
 
-    let rows = vec![vec![
-        table_id.as_bytes().to_vec(),
-        access_path.into_bytes(),
-        index_id.into_bytes(),
-        lookup_key.into_bytes(),
-        cardinality.into_bytes(),
-        lookup_hit.into_bytes(),
-        filter_count.to_string().into_bytes(),
-    ]];
+        rows.push(vec![
+            format!("join[{}].kind", join_index),
+            kind.to_string(),
+        ]);
+        rows.push(vec![
+            format!("join[{}].relation", join_index),
+            join.relation.table_id.clone(),
+        ]);
+        rows.push(vec![format!("join[{}].on", join_index), on]);
 
-    ConnectorResponse::applied(
-        request_id.to_string(),
-        ConnectorResult::Query(QueryResult {
-            columns,
-            rows,
-            timings: empty_query_timings(),
-        }),
-    )
+        if let Some(condition) = pushdown_conditions.get(join_index + 1).and_then(|c| c.as_ref()) {
+            rows.push(vec![
+                format!("join[{}].pushdown", join_index),
+                format!("{:?}", condition),
+            ]);
+        }
+    }
 
+    explain_mutation_plan(request_id, rows)
 }
 
 fn execute_create_view(
@@ -1942,6 +2061,7 @@ fn execute_create_trigger(
     let created_at = common::epochabs!() as u64;
 
     let created = catalog.register_trigger(trigger_id, statement.sql.clone(), Vec::new());
+
     if let Err(err) = created {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -2160,14 +2280,15 @@ fn append_row_payload_record(
     kind: TransactionKind,
     payload: Vec<u8>,
     timestamp_epoch_ms: u64,
+    refid: Option<TransactionId>,
 ) -> Result<(), String> {
 
     let existing = wal.since(wal_id, None);
     let last = existing.last();
     let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
-    let refid = last.map(|record| record.id);
+    let refid = refid.or_else(|| last.map(|record| record.id));
 
-    let row_map = bincode::deserialize::<HashMap<String, Vec<u8>>>(&payload)
+    let row_map = decode_row_payload(table.schema(), &payload)
         .map_err(|err| format!("row payload decode failed: {err}"))?;
 
     let record = TransactionRecord {
@@ -2189,6 +2310,7 @@ fn append_row_payload_record(
     );
 
     Ok(())
+
 }
 
 fn append_payload_record_pair(

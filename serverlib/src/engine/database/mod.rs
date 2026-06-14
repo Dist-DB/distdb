@@ -19,6 +19,7 @@ pub mod entity_kind;
 pub mod entity_object_ref;
 pub mod entity_object_type;
 pub mod index;
+pub mod row_payload;
 pub mod runtime_index;
 pub mod relationship;
 pub mod schema_change_tx;

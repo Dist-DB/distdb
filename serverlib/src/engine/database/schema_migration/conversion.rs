@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 
 use super::super::core::DatabaseError;
+use super::super::row_payload::{decode_row_payload, encode_row_payload};
+use super::super::table_schema::TableSchema;
 use super::super::table_schema::FieldType;
 use super::types::{SchemaMutationRuleSet, TypeConversionPolicy};
 
 pub fn apply_schema_rules_to_payload(
     payload: &[u8],
     rules: &SchemaMutationRuleSet,
+    schema: &TableSchema,
 ) -> Result<Vec<u8>, DatabaseError> {
 
-    let mut row = match bincode::deserialize::<HashMap<String, Vec<u8>>>(payload) {
+    let mut row: HashMap<String, Vec<u8>> = match decode_row_payload(schema, payload) {
         Ok(row) => row,
         Err(_) => return Ok(payload.to_vec()),
     };
@@ -42,7 +45,7 @@ pub fn apply_schema_rules_to_payload(
             .or_insert_with(|| default_value.clone());
     }
 
-    bincode::serialize(&row).map_err(|_| DatabaseError::CatalogSerialize)
+    encode_row_payload(schema, &row).map_err(|_| DatabaseError::CatalogSerialize)
 
 }
 
@@ -121,33 +124,7 @@ pub fn parse_f64_bytes(value: &[u8]) -> Result<f64, ()> {
     text.parse::<f64>().map_err(|_| ())
 }
 
+
 #[cfg(test)]
-mod tests {
-    
-    use super::*;
-
-    #[test]
-    fn convert_numeric_string_to_int() {
-        let result = convert_value_to_field_type(b"42", &FieldType::Int(64), TypeConversionPolicy::Safe);
-        assert_eq!(result, Ok(b"42".to_vec()));
-    }
-
-    #[test]
-    fn convert_invalid_to_int_safe_mode_fails() {
-        let result = convert_value_to_field_type(b"not-a-number", &FieldType::Int(32), TypeConversionPolicy::Safe);
-        assert_eq!(result, Err(()));
-    }
-
-    #[test]
-    fn convert_invalid_to_int_force_mode_coerces() {
-        let result = convert_value_to_field_type(b"not-a-number", &FieldType::Int(32), TypeConversionPolicy::Force);
-        assert_eq!(result, Ok(b"0".to_vec()));
-    }
-
-    #[test]
-    fn convert_text_preserves_valid_utf8() {
-        let result = convert_value_to_field_type(b"hello", &FieldType::Text, TypeConversionPolicy::Safe);
-        assert_eq!(result, Ok(b"hello".to_vec()));
-    }
-
-}
+#[path = "conversion_test.rs"]
+mod tests;

@@ -61,10 +61,62 @@ pub struct AlterTableChangePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertRowsSource {
+    Values(Vec<Vec<Option<Vec<u8>>>>),
+    Select(SelectReadPlan),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertRowsPlan {
     pub table_id: String,
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<Option<Vec<u8>>>>,
+    pub source: InsertRowsSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAssignment {
+    pub field_name: String,
+    pub value: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateRowsPlan {
+    pub table_id: String,
+    pub relations: Vec<SelectRelation>,
+    pub joins: Vec<SelectJoin>,
+    pub pushdown_conditions: Vec<Option<SelectCondition>>,
+    pub assignments: Vec<UpdateAssignment>,
+    pub where_condition: Option<SelectCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRowsPlan {
+    pub table_id: String,
+    pub relations: Vec<SelectRelation>,
+    pub joins: Vec<SelectJoin>,
+    pub pushdown_conditions: Vec<Option<SelectCondition>>,
+    pub where_condition: Option<SelectCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectRelation {
+    pub table_id: String,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectJoinKind {
+    Inner,
+    Left,
+    Right,
+    Full,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectJoin {
+    pub kind: SelectJoinKind,
+    pub relation: SelectRelation,
+    pub on_condition: SelectCondition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +135,11 @@ pub enum SelectPredicate {
         field_name: String,
         op: SelectComparisonOp,
         value: Vec<u8>,
+    },
+    FieldComparison {
+        left_field_name: String,
+        op: SelectComparisonOp,
+        right_field_name: String,
     },
     InList {
         field_name: String,
@@ -124,6 +181,9 @@ pub enum SelectProjectionItem {
 pub struct SelectReadPlan {
     // Empty when SELECT omits FROM and contains only inbuilt projection functions.
     pub table_id: String,
+    pub relations: Vec<SelectRelation>,
+    pub joins: Vec<SelectJoin>,
+    pub pushdown_conditions: Vec<Option<SelectCondition>>,
     pub projection: Option<Vec<String>>,
     pub projection_items: Vec<SelectProjectionItem>,
     pub projection_is_wildcard: bool,
