@@ -59,7 +59,14 @@ RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BAC
 
 Note that server 2 points to server 1 using the 'servers' directive
 
-## Connecting the Conole
+Then to connect to the cluster
+
+```bash
+RUST_LOG="info,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run servers=127.0.0.1:4001
+```
+
+
+## Connecting the Console
 
 You can also provide bootstrap peer candidates directly when launching console:
 
