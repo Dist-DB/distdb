@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::identity::NodeId;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NodeDescriptor {
     pub id: NodeId,
     pub addrs: Vec<String>,

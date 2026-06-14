@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn wal_rejects_out_of_order_append() {
+    fn wal_accepts_out_of_order_append_and_keeps_sorted_order() {
         let wal = ConcurrentWalManager::new();
         let actor = UserId::from_username("integrity-user");
 
@@ -116,6 +116,11 @@ mod tests {
             },
         );
 
-        assert!(out_of_order.is_err());
+        assert!(out_of_order.is_ok());
+
+        let replay = wal.since("events", None);
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].id, TransactionId(3));
+        assert_eq!(replay[1].id, TransactionId(4));
     }
 }

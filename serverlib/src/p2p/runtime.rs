@@ -1,9 +1,10 @@
 use crate::core::cluster::NodeDescriptor;
 use crate::helpers::error::{Result, ServerLibError};
 use crate::p2p::network::ServerP2pNetwork;
-use crate::p2p::protocol::ServiceMessage;
+use crate::p2p::protocol::{AffinityJoinRequest, AffinityJoinResponse, ServiceMessage};
 use crate::p2p::transport::Transport;
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
@@ -37,6 +38,14 @@ pub struct ServerP2pRuntime<T: Transport> {
     network: ServerP2pNetwork<T>,
     idle_wait: Duration,
     running: bool,
+    pending_affinity_join_requests: VecDeque<(String, AffinityJoinRequest)>,
+    pending_affinity_join_responses: VecDeque<(String, AffinityJoinResponse)>,
+    pending_schema_catalog_requests: VecDeque<(String, super::protocol::SchemaCatalogRequest)>,
+    pending_schema_catalog_responses: VecDeque<(String, super::protocol::SchemaCatalogResponse)>,
+    pending_data_snapshot_requests: VecDeque<(String, super::protocol::DataSnapshotRequest)>,
+    pending_data_snapshot_responses: VecDeque<(String, super::protocol::DataSnapshotResponse)>,
+    pending_transactions_since_requests: VecDeque<(String, super::protocol::TransactionsSinceRequest)>,
+    pending_transactions_since_responses: VecDeque<(String, super::protocol::TransactionsSinceResponse)>,
 }
 
 impl<T: Transport> ServerP2pRuntime<T> {
@@ -45,6 +54,14 @@ impl<T: Transport> ServerP2pRuntime<T> {
             network,
             idle_wait: Duration::from_millis(50),
             running: false,
+            pending_affinity_join_requests: VecDeque::new(),
+            pending_affinity_join_responses: VecDeque::new(),
+            pending_schema_catalog_requests: VecDeque::new(),
+            pending_schema_catalog_responses: VecDeque::new(),
+            pending_data_snapshot_requests: VecDeque::new(),
+            pending_data_snapshot_responses: VecDeque::new(),
+            pending_transactions_since_requests: VecDeque::new(),
+            pending_transactions_since_responses: VecDeque::new(),
         }
     }
 
@@ -63,6 +80,70 @@ impl<T: Transport> ServerP2pRuntime<T> {
 
     pub fn network_mut(&mut self) -> &mut ServerP2pNetwork<T> {
         &mut self.network
+    }
+
+    pub fn pending_affinity_join_requests(
+        &mut self,
+    ) -> Vec<(String, AffinityJoinRequest)> {
+        self.pending_affinity_join_requests
+            .drain(..)
+            .collect()
+    }
+
+    pub fn pending_affinity_join_responses(
+        &mut self,
+    ) -> Vec<(String, AffinityJoinResponse)> {
+        self.pending_affinity_join_responses
+            .drain(..)
+            .collect()
+    }
+
+    pub fn pending_schema_catalog_requests(
+        &mut self,
+    ) -> Vec<(String, super::protocol::SchemaCatalogRequest)> {
+        self.pending_schema_catalog_requests
+            .drain(..)
+            .collect()
+    }
+
+    pub fn pending_schema_catalog_responses(
+        &mut self,
+    ) -> Vec<(String, super::protocol::SchemaCatalogResponse)> {
+        self.pending_schema_catalog_responses
+            .drain(..)
+            .collect()
+    }
+
+    pub fn pending_data_snapshot_requests(
+        &mut self,
+    ) -> Vec<(String, super::protocol::DataSnapshotRequest)> {
+        self.pending_data_snapshot_requests
+            .drain(..)
+            .collect()
+    }
+
+    pub fn pending_data_snapshot_responses(
+        &mut self,
+    ) -> Vec<(String, super::protocol::DataSnapshotResponse)> {
+        self.pending_data_snapshot_responses
+            .drain(..)
+            .collect()
+    }
+
+    pub fn pending_transactions_since_requests(
+        &mut self,
+    ) -> Vec<(String, super::protocol::TransactionsSinceRequest)> {
+        self.pending_transactions_since_requests
+            .drain(..)
+            .collect()
+    }
+
+    pub fn pending_transactions_since_responses(
+        &mut self,
+    ) -> Vec<(String, super::protocol::TransactionsSinceResponse)> {
+        self.pending_transactions_since_responses
+            .drain(..)
+            .collect()
     }
 
     pub fn run_loop(&mut self, events: &Receiver<ServerP2pEvent>) -> Result<()> {
@@ -115,13 +196,96 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 message,
             } => {
                 log::debug!("server p2p message received from_peer_id={}", from_peer_id);
-                if let ServiceMessage::NodeAnnounce(node) = message {
-                    log::info!(
-                        "server p2p node announce received peer_id={} addrs={}",
-                        node.id.0,
-                        node.addrs.join(",")
-                    );
-                    self.network.upsert_discovered_peer(node);
+                match message {
+                    ServiceMessage::NodeAnnounce(node) => {
+                        log::info!(
+                            "server p2p node announce received peer_id={} addrs={}",
+                            node.id.0,
+                            node.addrs.join(",")
+                        );
+                        self.network.upsert_discovered_peer(node);
+                    }
+                    ServiceMessage::AffinityJoinRequest(req) => {
+                        log::info!(
+                            "server p2p affinity join request received from_peer_id={} affinity_id={}",
+                            from_peer_id,
+                            req.affinity_id
+                        );
+                        self.pending_affinity_join_requests
+                            .push_back((from_peer_id.clone(), req));
+                    }
+                    ServiceMessage::AffinityJoinResponse(resp) => {
+                        log::info!(
+                            "server p2p affinity join response received from_peer_id={} request_id={} ok={}",
+                            from_peer_id,
+                            resp.request_id,
+                            resp.ok
+                        );
+                        self.pending_affinity_join_responses
+                            .push_back((from_peer_id.clone(), resp));
+                    }
+                    ServiceMessage::SchemaCatalogRequest(req) => {
+                        log::info!(
+                            "server p2p schema catalog request received from_peer_id={} database_id={}",
+                            from_peer_id,
+                            req.database_id
+                        );
+                        self.pending_schema_catalog_requests
+                            .push_back((from_peer_id.clone(), req));
+                    }
+                    ServiceMessage::SchemaCatalogResponse(resp) => {
+                        log::info!(
+                            "server p2p schema catalog response received from_peer_id={} request_id={}",
+                            from_peer_id,
+                            resp.request_id
+                        );
+                        self.pending_schema_catalog_responses
+                            .push_back((from_peer_id.clone(), resp));
+                    }
+                    ServiceMessage::DataSnapshotRequest(req) => {
+                        log::info!(
+                            "server p2p data snapshot request received from_peer_id={} database_id={}",
+                            from_peer_id,
+                            req.database_id
+                        );
+                        self.pending_data_snapshot_requests
+                            .push_back((from_peer_id.clone(), req));
+                    }
+                    ServiceMessage::DataSnapshotResponse(resp) => {
+                        log::info!(
+                            "server p2p data snapshot response received from_peer_id={} request_id={}",
+                            from_peer_id,
+                            resp.request_id
+                        );
+                        self.pending_data_snapshot_responses
+                            .push_back((from_peer_id.clone(), resp));
+                    }
+                    ServiceMessage::TransactionsSinceRequest(req) => {
+                        log::info!(
+                            "server p2p transactions since request received from_peer_id={} database_id={} from_tx={:?}",
+                            from_peer_id,
+                            req.database_id,
+                            req.from_transaction_id
+                        );
+                        self.pending_transactions_since_requests
+                            .push_back((from_peer_id.clone(), req));
+                    }
+                    ServiceMessage::TransactionsSinceResponse(resp) => {
+                        log::info!(
+                            "server p2p transactions since response received from_peer_id={} request_id={} count={}",
+                            from_peer_id,
+                            resp.request_id,
+                            resp.transactions.len()
+                        );
+                        self.pending_transactions_since_responses
+                            .push_back((from_peer_id.clone(), resp));
+                    }
+                    _ => {
+                        log::debug!(
+                            "server p2p message received but not handled: {:?}",
+                            message
+                        );
+                    }
                 }
                 Ok(ServerP2pHandleOutcome::MessageReceived { from_peer_id })
             }

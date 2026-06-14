@@ -35,3 +35,22 @@ fn bootstrap_nodes_are_available_as_discovered_peers() {
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].id.0, "node-a");
 }
+
+#[test]
+fn remote_announced_peer_is_normalized_to_non_local() {
+    let mut discovery = KademliaDiscoveryService::new(
+        NodeId("node-local".to_string()),
+        KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
+    );
+
+    discovery.upsert_peer(NodeDescriptor {
+        id: NodeId("node-remote".to_string()),
+        addrs: vec!["/ip4/127.0.0.1/tcp/4102".to_string()],
+        is_local: true,
+    });
+
+    let peers = discovery.discover_peers();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].id.0, "node-remote");
+    assert!(!peers[0].is_local);
+}

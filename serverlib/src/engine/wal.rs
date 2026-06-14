@@ -515,13 +515,42 @@ fn spawn_worker(
                             let _ = ack.send(Ok(()));
                         
                         } else {
+                            if entries.iter().any(|existing| *existing == record) {
+                                // Exact duplicate already present; treat as idempotent success.
+                                let _ = ack.send(Ok(()));
+                                continue;
+                            }
+
+                            // Insert older records into sorted position so affinity imports from
+                            // peers with divergent local id ranges are still preserved.
+                            let mut insert_pos = entries
+                                .binary_search_by_key(&record.id.0, |existing| existing.id.0)
+                                .unwrap_or_else(|idx| idx);
+                            while insert_pos < entries.len()
+                                && entries[insert_pos].id.0 <= record.id.0
+                            {
+                                insert_pos += 1;
+                            }
+
+                            entries.insert(insert_pos, record);
+
+                            if let Some(ref path) = wal_path {
+                                if let Err(e) = rewrite_wal_file(path, entries) {
+                                    log::error!(
+                                        "failed to rewrite WAL file for out-of-order insert stream={}: {}",
+                                        stream_key,
+                                        e
+                                    );
+                                    let _ = ack.send(Err(e));
+                                    continue;
+                                }
+                            }
+
                             log::warn!(
-                                "out-of-order transaction rejected for stream={}",
+                                "out-of-order transaction accepted and merged for stream={}",
                                 stream_key
                             );
-                            let _ = ack.send(Err(
-                                "out-of-order transaction id for table WAL stream",
-                            ));
+                            let _ = ack.send(Ok(()));
                         }
 
                     } else {

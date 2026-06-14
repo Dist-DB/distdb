@@ -6,33 +6,45 @@ use common::helpers::utils::md5_hash;
 use common::helpers::{aes_decrypt, aes_encrypt};
 use common::{PeerSession, SessionLog, SessionLogEventType};
 use connector::{
-    ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, FieldDef,
-    FieldIndex, FieldType, MutationResult, QueryResult, QueryTimings,
+    ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, FieldDef, FieldIndex,
+    FieldType, MutationResult, QueryResult, QueryTimings,
 };
 use serverlib::core::cluster::NodeDescriptor;
 use serverlib::core::identity::NodeId;
-use serverlib::p2p::protocol::ServiceMessage;
+use serverlib::p2p::protocol::{AffinityJoinRequest, AffinityJoinResponse, DataSnapshotResponse, TransactionsSinceResponse, SchemaCatalogResponse, ServiceMessage};
 use serverlib::p2p::transport::Transport;
-use serverlib::{KademliaDiscoveryConfig, KademliaDiscoveryService, ServerP2pEvent, ServerP2pNetwork, ServerP2pRuntime};
+use serverlib::{
+    AffinityDocument, AffinityMember, AffinityMemberStatus, AffinityProcessor,
+    AffinityStorage, DatabaseSchemaSummary, KademliaDiscoveryConfig, KademliaDiscoveryService,
+    ReplicationPhaseExecutor, ReplicationSecuritySummary, ServerP2pEvent, ServerP2pNetwork,
+    ServerP2pRuntime, TransactionRecord,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, interval};
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{collections::HashSet, net::Ipv4Addr};
+use std::{collections::HashMap, collections::HashSet, net::Ipv4Addr};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
+const SERVICE_MESSAGE_MAGIC: &[u8; 4] = b"SDSP";
 
 // we change these later (accessing the database structures...)
 
 const SERVER_TEMP_PASSWORD: &str = "password";
 const SERVER_TEMP_USER: &str = "root";
 const SERVER_TEMP_TOKEN_SALT: &[u8; 8] = b"distdbv1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AffinityStartupConfig {
+    affinity_id: String,
+    affinity_key: String,
+}
 
 #[derive(Debug, Default)]
 struct TcpServerTransport {
@@ -76,9 +88,11 @@ impl Transport for TcpServerTransport {
         }
 
         if success_count == 0 {
-            return Err(serverlib::helpers::error::ServerLibError::Network(
-                "broadcast failed to reach any peer".to_string(),
-            ));
+            log::warn!(
+                "server p2p transport broadcast could not reach any configured peer (message={:?})",
+                message
+            );
+            return Ok(());
         }
 
         Ok(())
@@ -266,6 +280,358 @@ fn parse_server_list_from_args(args: &[String]) -> Vec<String> {
     server_list
 }
 
+fn parse_affinity_startup_config(args: &[String]) -> Option<AffinityStartupConfig> {
+    let affinity_spec = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("affinity=").map(str::trim))?;
+
+    if affinity_spec.is_empty() {
+        return None;
+    }
+
+    let (affinity_id, affinity_password) = match affinity_spec.split_once(':') {
+        Some((id, pwd)) => {
+            let id_str = id.trim();
+            let pwd_str = pwd.trim();
+            if id_str.is_empty() || pwd_str.is_empty() {
+                return None;
+            }
+            (id_str.to_string(), pwd_str.to_string())
+        }
+        None => return None,
+    };
+
+    let affinity_key = stable_id(&[affinity_id.as_str(), affinity_password.as_str()]);
+
+    Some(AffinityStartupConfig {
+        affinity_id,
+        affinity_key,
+    })
+}
+
+fn build_affinity_document_snapshot(
+    config: &AffinityStartupConfig,
+    local_node: &NodeDescriptor,
+    discovered_peers: Vec<NodeDescriptor>,
+) -> AffinityDocument {
+    let mut members = discovered_peers
+        .into_iter()
+        .map(|peer| AffinityMember {
+            node_id: peer.id,
+            addrs: peer.addrs,
+            status: AffinityMemberStatus::Unknown,
+            last_seen_epoch_ms: now_millis(),
+        })
+        .collect::<Vec<_>>();
+
+    members.push(AffinityMember {
+        node_id: local_node.id.clone(),
+        addrs: local_node.addrs.clone(),
+        status: AffinityMemberStatus::Online,
+        last_seen_epoch_ms: now_millis(),
+    });
+
+    let mut dedup = std::collections::HashMap::new();
+    for member in members {
+        dedup.insert(member.node_id.0.clone(), member);
+    }
+
+    AffinityDocument {
+        affinity_id: config.affinity_id.clone(),
+        affinity_revision: 1,
+        members: dedup.into_values().collect(),
+        databases: Vec::<DatabaseSchemaSummary>::new(),
+        replication_security: ReplicationSecuritySummary {
+            policy_revision: 1,
+            key_id: Some(config.affinity_key.clone()),
+            updated_epoch_ms: now_millis(),
+        },
+    }
+}
+
+fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<DatabaseSchemaSummary> {
+    let mut summaries = app
+        .catalogs()
+        .iter()
+        .map(|(database_id, catalog)| {
+            let mut table_ids = catalog.table_ids();
+            table_ids.sort();
+
+            let schema_identifier = catalog.schema_epoch().max(1);
+            let schema_fingerprint = md5_hash(
+                format!(
+                    "{}:{}:{}",
+                    database_id,
+                    schema_identifier,
+                    table_ids.join(",")
+                )
+                .as_str(),
+            );
+
+            DatabaseSchemaSummary {
+                database_id: database_id.clone(),
+                schema_identifier,
+                schema_hash: Some(schema_fingerprint),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    summaries.sort_by(|a, b| a.database_id.cmp(&b.database_id));
+    summaries
+}
+
+#[allow(dead_code)]
+fn send_affinity_join_requests(
+    config: &AffinityStartupConfig,
+    local_node: &NodeDescriptor,
+    discovered_peers: &[NodeDescriptor],
+) -> Vec<AffinityJoinResponse> {
+    let mut responses = Vec::new();
+
+    for peer in discovered_peers {
+        let request_id = format!(
+            "{}_{}",
+            local_node.id.0,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+
+        let join_req = AffinityJoinRequest {
+            request_id,
+            affinity_id: config.affinity_id.clone(),
+            requester_node_id: local_node.id.0.clone(),
+            affinity_key: config.affinity_key.clone(),
+        };
+
+        let message = ServiceMessage::AffinityJoinRequest(join_req);
+        let mut delivered = false;
+
+        for peer_addr in &peer.addrs {
+            let Some(socket_addr) = multiaddr_to_socket_addr(peer_addr) else {
+                continue;
+            };
+
+            match send_service_request_to_addr(&socket_addr, &message) {
+                Ok(Some(ServiceMessage::AffinityJoinResponse(resp))) => {
+                    responses.push(resp);
+                    delivered = true;
+                    log::debug!(
+                        "sent affinity join request and received response peer_id={} addr={}",
+                        peer.id.0,
+                        socket_addr
+                    );
+                    break;
+                }
+                Ok(Some(other)) => {
+                    log::warn!(
+                        "unexpected message while awaiting join response from peer_id={} addr={}: {:?}",
+                        peer.id.0,
+                        socket_addr,
+                        other
+                    );
+                }
+                Ok(None) => {
+                    log::debug!(
+                        "no join response received from peer_id={} addr={}",
+                        peer.id.0,
+                        socket_addr
+                    );
+                }
+                Err(err) => {
+                    log::warn!(
+                        "failed to send affinity join request to peer_id={} addr={}: {}",
+                        peer.id.0,
+                        socket_addr,
+                        err
+                    );
+                }
+            }
+        }
+
+        if !delivered {
+            log::warn!(
+                "failed to deliver affinity join request to any address for peer_id={}",
+                peer.id.0
+            );
+        }
+    }
+
+    responses
+}
+
+#[allow(dead_code)]
+fn merge_affinity_documents_from_responses(
+    base_document: &mut AffinityDocument,
+    responses: Vec<AffinityJoinResponse>,
+) {
+    for response in responses {
+        if !response.ok {
+            log::warn!("affinity join response failed: {:?}", response.error);
+            continue;
+        }
+
+        if let Some(remote_doc) = response.document {
+            let member_count = remote_doc.members.len();
+            let database_count = remote_doc.databases.len();
+
+            for member in remote_doc.members {
+                base_document.upsert_member(member);
+            }
+
+            for database in remote_doc.databases {
+                base_document.upsert_database_schema(database);
+            }
+
+            log::debug!(
+                "merged affinity document from peer: members={} databases={}",
+                member_count,
+                database_count
+            );
+        }
+    }
+}
+
+async fn execute_affinity_join_sequence(
+    affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
+    affinity_storage: Arc<AffinityStorage>,
+    config: &AffinityStartupConfig,
+    local_node: &NodeDescriptor,
+    discovered_peers: &[NodeDescriptor],
+) {
+    if discovered_peers.is_empty() {
+        log::debug!("no discovered peers for affinity join");
+        return;
+    }
+
+    log::info!(
+        "starting affinity join sequence with {} peers",
+        discovered_peers.len()
+    );
+
+    let responses = send_affinity_join_requests(config, local_node, discovered_peers);
+
+    if !responses.is_empty() {
+        log::info!(
+            "affinity join received {} responses from peers",
+            responses.len()
+        );
+
+        let mut processor = affinity_processor.lock().await;
+        if let Some(ref mut proc) = processor.as_mut() {
+            if let Some(base_doc) = proc.document() {
+                let mut updated_doc = base_doc.clone();
+                merge_affinity_documents_from_responses(&mut updated_doc, responses);
+                proc.apply_affinity_document(updated_doc.clone());
+
+                // Mark first sync step (control plane join) as completed
+                proc.mark_sync_step_completed(0);
+
+                // Save updated document to storage
+                if let Err(err) = affinity_storage.save(&updated_doc) {
+                    log::error!("failed to save affinity document after join: {}", err);
+                } else {
+                    log::info!(
+                        "saved affinity document after join affinity_id={} revision={}",
+                        updated_doc.affinity_id, updated_doc.affinity_revision
+                    );
+                }
+
+                // Save checkpoint after marking step
+                if let Some(checkpoint) = proc.checkpoint() {
+                    if let Err(err) = affinity_storage.save_checkpoint(checkpoint) {
+                        log::error!("failed to save checkpoint after join: {}", err);
+                    } else {
+                        log::debug!("saved checkpoint after join");
+                    }
+                }
+            }
+        }
+    }
+
+    log::debug!("affinity join sequence completed");
+}
+
+fn initialize_affinity_with_persistence(
+    config: Option<&AffinityStartupConfig>,
+    local_node: &NodeDescriptor,
+    discovered_peers: Vec<NodeDescriptor>,
+    data_dir: &std::path::Path,
+) -> (Option<AffinityProcessor>, AffinityStorage) {
+    let storage = AffinityStorage::new(data_dir);
+
+    let Some(config) = config else {
+        return (None, storage);
+    };
+
+    // Try to load persisted document first
+    let document = match storage.load(&config.affinity_id) {
+        Ok(Some(doc)) => {
+            log::info!(
+                "loaded persisted affinity document affinity_id={} revision={}",
+                doc.affinity_id,
+                doc.affinity_revision
+            );
+            doc
+        }
+        Ok(None) => {
+            log::debug!("no persisted affinity document found, building from peers");
+            build_affinity_document_snapshot(config, local_node, discovered_peers)
+        }
+        Err(err) => {
+            log::warn!(
+                "failed to load persisted affinity document: {}, building from peers",
+                err
+            );
+            build_affinity_document_snapshot(config, local_node, discovered_peers)
+        }
+    };
+
+    // Create and initialize processor
+    let mut processor = AffinityProcessor::new(local_node.id.clone());
+    processor.begin_join();
+    processor.apply_affinity_document(document);
+
+    // Try to load and restore checkpoint if it exists
+    match storage.load_checkpoint(&config.affinity_id) {
+        Ok(Some(checkpoint)) => {
+            processor.restore_checkpoint(checkpoint);
+            log::info!(
+                "restored checkpoint for resumable replication affinity_id={}",
+                config.affinity_id
+            );
+        }
+        Ok(None) => {
+            log::debug!("no checkpoint found, starting fresh");
+            processor.initialize_checkpoint(serverlib::AffinitySyncPhase::ControlPlane);
+        }
+        Err(err) => {
+            log::warn!(
+                "failed to load checkpoint: {}, starting fresh",
+                err
+            );
+            processor.initialize_checkpoint(serverlib::AffinitySyncPhase::ControlPlane);
+        }
+    }
+
+    match processor.build_sync_plan() {
+        Ok(plan) => {
+            log::info!(
+                "affinity processor initialized with persistence affinity_id={} planned_steps={}",
+                config.affinity_id,
+                plan.len()
+            );
+        }
+        Err(err) => {
+            log::warn!("affinity processor initialization failed: {}", err);
+            processor.set_degraded(err.to_string());
+        }
+    }
+
+    (Some(processor), storage)
+}
+
 fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> String {
     if let Some(explicit) = args
         .iter()
@@ -391,6 +757,93 @@ fn send_service_message_to_addr(
     Ok(())
 }
 
+fn send_service_request_to_addr(
+    addr: &str,
+    message: &ServiceMessage,
+) -> serverlib::helpers::error::Result<Option<ServiceMessage>> {
+    let mut stream = std::net::TcpStream::connect(addr).map_err(|err| {
+        serverlib::helpers::error::ServerLibError::Network(format!(
+            "connect to {} failed: {}",
+            addr, err
+        ))
+    })?;
+
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|err| {
+            serverlib::helpers::error::ServerLibError::Network(format!(
+                "set write timeout for {} failed: {}",
+                addr, err
+            ))
+        })?;
+
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|err| {
+            serverlib::helpers::error::ServerLibError::Network(format!(
+                "set read timeout for {} failed: {}",
+                addr, err
+            ))
+        })?;
+
+    let payload = encode_service_message(message).ok_or_else(|| {
+        serverlib::helpers::error::ServerLibError::Network(
+            "unsupported service message for wire encoding".to_string(),
+        )
+    })?;
+
+    let len = payload.len() as u32;
+    stream
+        .write_all(&len.to_le_bytes())
+        .and_then(|_| stream.write_all(&payload))
+        .map_err(|err| {
+            serverlib::helpers::error::ServerLibError::Network(format!(
+                "write service frame to {} failed: {}",
+                addr, err
+            ))
+        })?;
+
+    // Listener sends an initial connector challenge frame to every new socket.
+    // Service-message callers skip non-service frames and consume the next frame.
+    for _ in 0..2 {
+        let mut header = [0u8; 4];
+        if let Err(err) = stream.read_exact(&mut header) {
+            let timed_out = matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            );
+            if timed_out {
+                return Ok(None);
+            }
+
+            return Err(serverlib::helpers::error::ServerLibError::Network(format!(
+                "read response header from {} failed: {}",
+                addr, err
+            )));
+        }
+
+        let payload_len = u32::from_le_bytes(header) as usize;
+        let mut response_payload = vec![0u8; payload_len];
+        stream
+            .read_exact(&mut response_payload)
+            .map_err(|err| {
+                serverlib::helpers::error::ServerLibError::Network(format!(
+                    "read response payload from {} failed: {}",
+                    addr, err
+                ))
+            })?;
+
+        if let Some(message) = decode_service_message(&response_payload) {
+            return Ok(Some(message));
+        }
+    }
+
+    Err(serverlib::helpers::error::ServerLibError::Network(format!(
+        "decode response message from {} failed",
+        addr
+    )))
+}
+
 fn node_announce_dedup_key(node: &NodeDescriptor) -> String {
     format!("{}|{}", node.id.0, node.addrs.join(","))
 }
@@ -492,53 +945,71 @@ fn is_valid_server_node(node: &NodeDescriptor) -> bool {
 }
 
 fn encode_service_message(message: &ServiceMessage) -> Option<Vec<u8>> {
-    match message {
-        ServiceMessage::NodeAnnounce(node) => {
-            let addrs = node.addrs.join(",");
-            let payload = format!(
-                "node_announce|{}|{}|{}",
-                node.id.0,
-                addrs,
-                if node.is_local { "1" } else { "0" }
-            );
-            Some(payload.into_bytes())
-        }
-        _ => None,
-    }
+    let mut payload = SERVICE_MESSAGE_MAGIC.to_vec();
+    let encoded = bincode::serialize(message).ok()?;
+    payload.extend_from_slice(&encoded);
+    Some(payload)
 }
 
 fn decode_service_message(payload: &[u8]) -> Option<ServiceMessage> {
-    let text = std::str::from_utf8(payload).ok()?;
-    let mut parts = text.splitn(4, '|');
-    let kind = parts.next()?;
-
-    if kind != "node_announce" {
+    if payload.len() < SERVICE_MESSAGE_MAGIC.len() {
         return None;
     }
 
-    let node_id = parts.next()?.trim();
-    let addrs_str = parts.next()?.trim();
-    let is_local_str = parts.next()?.trim();
-
-    if node_id.is_empty() {
+    if &payload[..SERVICE_MESSAGE_MAGIC.len()] != SERVICE_MESSAGE_MAGIC {
         return None;
     }
 
-    let addrs = if addrs_str.is_empty() {
-        Vec::new()
-    } else {
-        addrs_str
-            .split(',')
-            .map(|addr| addr.trim().to_string())
-            .filter(|addr| !addr.is_empty())
-            .collect::<Vec<_>>()
-    };
+    bincode::deserialize(&payload[SERVICE_MESSAGE_MAGIC.len()..]).ok()
+}
 
-    Some(ServiceMessage::NodeAnnounce(NodeDescriptor {
-        id: NodeId(node_id.to_string()),
-        addrs,
-        is_local: is_local_str == "1",
-    }))
+fn build_schema_definitions_for_database(app: &ServerApp, database_id: &str) -> Result<Vec<String>, String> {
+    let catalog = app
+        .catalogs()
+        .get(database_id)
+        .ok_or_else(|| format!("database '{}' not found", database_id))?;
+
+    let mut table_ids = catalog.table_ids();
+    table_ids.sort();
+
+    let mut statements = Vec::new();
+
+    for table_id in table_ids {
+        let Some(schema) = catalog.table_schema(&table_id) else {
+            continue;
+        };
+
+        let mut fields = schema.fields.clone();
+        fields.sort_by_key(|f| f.seqno);
+
+        let mut parts = fields
+            .iter()
+            .map(|field| {
+                field
+                    .to_sql_string()
+                    .replace(" BIGINT SIGNED", " BIGINT")
+                    .replace(" INT SIGNED", " INT")
+            })
+            .collect::<Vec<_>>();
+
+        let primary_keys = fields
+            .iter()
+            .filter(|field| matches!(field.indexed, common::schema::FieldIndex::PrimaryKey))
+            .map(|field| field.field_name.clone())
+            .collect::<Vec<_>>();
+
+        if !primary_keys.is_empty() {
+            parts.push(format!("PRIMARY KEY ({})", primary_keys.join(", ")));
+        }
+
+        statements.push(format!(
+            "CREATE TABLE {} ({});",
+            table_id,
+            parts.join(", ")
+        ));
+    }
+
+    Ok(statements)
 }
 
 fn initialize_server_p2p_runtime(
@@ -597,6 +1068,497 @@ fn spawn_p2p_heartbeat_task(
     })
 }
 
+fn spawn_affinity_replication_task(
+    affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
+    affinity_storage: Arc<AffinityStorage>,
+    app: Arc<Mutex<ServerApp>>,
+    p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    affinity_config: AffinityStartupConfig,
+    local_node: NodeDescriptor,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_millis(500));
+        let mut executor = ReplicationPhaseExecutor::new();
+        let mut last_affinity_refresh_at = std::time::Instant::now() - Duration::from_secs(30);
+
+        loop {
+            ticker.tick().await;
+
+            let mut processor = affinity_processor.lock().await;
+            if let Some(ref mut proc) = processor.as_mut() {
+                // Only execute replication if processor is in Syncing state
+                if let serverlib::AffinityProcessorState::Syncing(_) = proc.state() {
+                    match proc.build_sync_plan() {
+                        Ok(plan) => {
+                            let current_idx = executor.current_sync_index();
+                            if let Some(step) = plan.get(current_idx) {
+                                if matches!(step.phase, serverlib::AffinitySyncPhase::SchemaCatalog) {
+                                    if let Some(database_id) = &step.database_id {
+                                        let affinity_id = proc
+                                            .document()
+                                            .map(|doc| doc.affinity_id.clone())
+                                            .unwrap_or_default();
+
+                                        if let Err(err) = execute_live_schema_catalog_sync(
+                                            &app,
+                                            &p2p_runtime,
+                                            &affinity_id,
+                                            database_id,
+                                        )
+                                        .await
+                                        {
+                                            log::warn!(
+                                                "live schema catalog sync failed affinity_id={} database_id={}: {}",
+                                                affinity_id,
+                                                database_id,
+                                                err
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if matches!(step.phase, serverlib::AffinitySyncPhase::WalCatchup) {
+                                    if let Some(database_id) = &step.database_id {
+                                        let affinity_id = proc
+                                            .document()
+                                            .map(|doc| doc.affinity_id.clone())
+                                            .unwrap_or_default();
+
+                                        if let Err(err) = execute_live_wal_catchup_sync(
+                                            &app,
+                                            &p2p_runtime,
+                                            &affinity_id,
+                                            database_id,
+                                            None,
+                                            None,
+                                            None,
+                                        )
+                                        .await
+                                        {
+                                            log::warn!(
+                                                "live WAL catchup sync failed affinity_id={} database_id={}: {}",
+                                                affinity_id,
+                                                database_id,
+                                                err
+                                            );
+                                        }
+                                    }
+                                }
+
+                            }
+
+                            match executor.execute_next_phase(proc, &plan) {
+                                Ok(completed) => {
+                                    // Save checkpoint after each phase
+                                    if let Some(checkpoint) = proc.checkpoint() {
+                                        if let Err(err) = affinity_storage.save_checkpoint(checkpoint) {
+                                            log::error!("failed to save checkpoint after replication phase: {}", err);
+                                        }
+                                    }
+
+                                    // If all phases completed, mark processor as ready
+                                    if completed {
+                                        proc.set_ready();
+                                        log::info!("affinity replication completed, processor is ready");
+
+                                        // Save final document state
+                                        if let Some(doc) = proc.document() {
+                                            if let Err(err) = affinity_storage.save(doc) {
+                                                log::error!("failed to save final affinity document: {}", err);
+                                            }
+                                        }
+                                    } else {
+                                        log::debug!("affinity replication phase completed, continuing to next phase");
+                                    }
+                                }
+                                Err(err) => {
+                                    log::error!("affinity replication phase failed: {}", err);
+                                    proc.set_degraded(format!("replication failed: {}", err));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            log::warn!("failed to build replication sync plan: {}", err);
+                        }
+                    }
+                }
+
+                if let serverlib::AffinityProcessorState::Ready = proc.state() {
+                    if last_affinity_refresh_at.elapsed() >= Duration::from_secs(10) {
+                        last_affinity_refresh_at = std::time::Instant::now();
+
+                        let discovered_peers = {
+                            let runtime = p2p_runtime.lock().await;
+                            runtime.network().discover_peers()
+                        };
+
+                        let responses = send_affinity_join_requests(
+                            &affinity_config,
+                            &local_node,
+                            &discovered_peers,
+                        );
+
+                        if !responses.is_empty() {
+                            if let Some(base_doc) = proc.document() {
+                                let mut merged_doc = base_doc.clone();
+                                let previous_database_count = merged_doc.databases.len();
+                                merge_affinity_documents_from_responses(&mut merged_doc, responses);
+
+                                if merged_doc != *base_doc {
+                                    proc.apply_affinity_document(merged_doc.clone());
+                                    proc.set_ready();
+
+                                    if let Err(err) = affinity_storage.save(&merged_doc) {
+                                        log::error!(
+                                            "failed to save refreshed affinity document: {}",
+                                            err
+                                        );
+                                    }
+
+                                    if merged_doc.databases.len() > previous_database_count {
+                                        log::info!(
+                                            "refreshed affinity document added databases old_count={} new_count={}",
+                                            previous_database_count,
+                                            merged_doc.databases.len()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let Some(document) = proc.document() else {
+                        continue;
+                    };
+
+                    let affinity_id = document.affinity_id.clone();
+                    let database_ids = document
+                        .databases
+                        .iter()
+                        .map(|db| db.database_id.clone())
+                        .collect::<Vec<_>>();
+
+                    let peer_targets = {
+                        let runtime = p2p_runtime.lock().await;
+                        runtime
+                            .network()
+                            .discover_peers()
+                            .into_iter()
+                            .filter(|peer| !peer.is_local)
+                            .flat_map(|peer| peer.addrs)
+                            .collect::<Vec<_>>()
+                    };
+
+                    for database_id in database_ids {
+                        for target_addr in &peer_targets {
+                            match execute_live_wal_catchup_sync(
+                                &app,
+                                &p2p_runtime,
+                                &affinity_id,
+                                &database_id,
+                                None,
+                                None,
+                                Some(target_addr),
+                            )
+                            .await
+                            {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    log::warn!(
+                                        "continuous WAL catchup failed affinity_id={} database_id={} target={}: {}",
+                                        affinity_id,
+                                        database_id,
+                                        target_addr,
+                                        err
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn apply_schema_definitions_to_local_database(
+    app: &mut ServerApp,
+    database_id: &str,
+    schema_definitions: &[String],
+) -> Result<(), String> {
+    app.apply_affinity_schema_definitions(database_id, schema_definitions)
+}
+
+fn encode_wal_frame(frame: &(String, TransactionRecord)) -> Result<String, String> {
+    let bytes = bincode::serialize(frame)
+        .map_err(|err| format!("failed to serialize WAL frame: {}", err))?;
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{:02x}", b);
+    }
+    Ok(encoded)
+}
+
+fn decode_wal_frame(encoded: &str) -> Result<(String, TransactionRecord), String> {
+    if encoded.len() % 2 != 0 {
+        return Err("invalid WAL frame encoding length".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    let chars = encoded.as_bytes();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let chunk = std::str::from_utf8(&chars[i..i + 2])
+            .map_err(|err| format!("invalid WAL frame utf8: {}", err))?;
+        let value = u8::from_str_radix(chunk, 16)
+            .map_err(|err| format!("invalid WAL frame hex '{}': {}", chunk, err))?;
+        bytes.push(value);
+        i += 2;
+    }
+
+    bincode::deserialize::<(String, TransactionRecord)>(&bytes)
+        .map_err(|err| format!("failed to deserialize WAL frame: {}", err))
+}
+
+async fn execute_live_schema_catalog_sync(
+    app: &Arc<Mutex<ServerApp>>,
+    p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    affinity_id: &str,
+    database_id: &str,
+) -> Result<(), String> {
+    if affinity_id.is_empty() {
+        return Ok(());
+    }
+
+    let request_id = format!(
+        "schema-sync-{}-{}",
+        database_id,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+
+    let peer_targets = {
+        let runtime = p2p_runtime.lock().await;
+        let peers = runtime.network().discover_peers();
+
+        let mut targets = Vec::new();
+        for peer in peers {
+            if peer.is_local {
+                continue;
+            }
+
+            for addr in peer.addrs {
+                targets.push(addr);
+            }
+        }
+        targets
+    };
+
+    if peer_targets.is_empty() {
+        log::debug!(
+            "no remote peers available for schema sync affinity_id={} database_id={}",
+            affinity_id,
+            database_id
+        );
+        return Ok(());
+    }
+
+    let mut applied_any = false;
+    for target in peer_targets {
+        let Some(socket_addr) = multiaddr_to_socket_addr(&target) else {
+            continue;
+        };
+
+        let message = ServiceMessage::SchemaCatalogRequest(
+            serverlib::p2p::protocol::SchemaCatalogRequest {
+                request_id: request_id.clone(),
+                affinity_id: affinity_id.to_string(),
+                database_id: database_id.to_string(),
+            },
+        );
+
+        let Ok(Some(ServiceMessage::SchemaCatalogResponse(response))) =
+            send_service_request_to_addr(&socket_addr, &message)
+        else {
+            continue;
+        };
+
+        if response.request_id != request_id {
+            continue;
+        }
+
+        if !response.ok {
+            let err = response
+                .error
+                .unwrap_or_else(|| "unknown schema sync error".to_string());
+            log::warn!(
+                "peer rejected schema catalog request affinity_id={} database_id={}: {}",
+                affinity_id,
+                database_id,
+                err
+            );
+            continue;
+        }
+
+        if response.schema_definitions.is_empty() {
+            continue;
+        }
+
+        let mut app_guard = app.lock().await;
+        apply_schema_definitions_to_local_database(
+            &mut app_guard,
+            database_id,
+            &response.schema_definitions,
+        )?;
+        applied_any = true;
+    }
+
+    if applied_any {
+        log::info!(
+            "applied remote schema catalog affinity_id={} database_id={}",
+            affinity_id,
+            database_id
+        );
+    }
+
+    Ok(())
+}
+
+async fn execute_live_wal_catchup_sync(
+    app: &Arc<Mutex<ServerApp>>,
+    p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    affinity_id: &str,
+    database_id: &str,
+    from_transaction_id: Option<serverlib::TransactionId>,
+    from_stream_transaction_ids: Option<&HashMap<String, serverlib::TransactionId>>,
+    target_addr: Option<&str>,
+) -> Result<HashMap<String, serverlib::TransactionId>, String> {
+    if affinity_id.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let request_id = format!(
+        "wal-sync-{}-{}",
+        database_id,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+
+    let peer_targets = {
+        let runtime = p2p_runtime.lock().await;
+        let peers = runtime.network().discover_peers();
+
+        let mut targets = Vec::new();
+        for peer in peers {
+            if peer.is_local {
+                continue;
+            }
+
+            for addr in peer.addrs {
+                if target_addr.map(|target| target == addr).unwrap_or(true) {
+                    targets.push(addr);
+                }
+            }
+        }
+        targets
+    };
+
+    if peer_targets.is_empty() {
+        log::debug!(
+            "no remote peers available for WAL catchup affinity_id={} database_id={}",
+            affinity_id,
+            database_id
+        );
+        return Ok(HashMap::new());
+    }
+
+    let mut max_seen_by_stream: HashMap<String, u64> = HashMap::new();
+    let mut imported = Vec::new();
+    for target in peer_targets {
+        let Some(socket_addr) = multiaddr_to_socket_addr(&target) else {
+            continue;
+        };
+
+        let message = ServiceMessage::TransactionsSinceRequest(
+            serverlib::p2p::protocol::TransactionsSinceRequest {
+                request_id: request_id.clone(),
+                affinity_id: affinity_id.to_string(),
+                database_id: database_id.to_string(),
+                from_transaction_id,
+                from_stream_transaction_ids: from_stream_transaction_ids
+                    .map(|map| map.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                    .unwrap_or_default(),
+            },
+        );
+
+        let Ok(Some(ServiceMessage::TransactionsSinceResponse(response))) =
+            send_service_request_to_addr(&socket_addr, &message)
+        else {
+            continue;
+        };
+
+        if response.request_id != request_id {
+            continue;
+        }
+        if !response.ok {
+            continue;
+        }
+
+        if !response.transactions.is_empty() {
+            log::info!(
+                "live WAL catchup received frames affinity_id={} database_id={} from_peer={} frame_count={}",
+                affinity_id,
+                database_id,
+                socket_addr,
+                response.transactions.len()
+            );
+        }
+
+        for encoded in response.transactions {
+            match decode_wal_frame(&encoded) {
+                Ok(frame) => {
+                    max_seen_by_stream
+                        .entry(frame.0.clone())
+                        .and_modify(|current| {
+                            if frame.1.id.0 > *current {
+                                *current = frame.1.id.0;
+                            }
+                        })
+                        .or_insert(frame.1.id.0);
+                    imported.push(frame);
+                }
+                Err(err) => {
+                    log::warn!("failed decoding WAL frame during catchup: {}", err);
+                }
+            }
+        }
+    }
+
+    if imported.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    log::info!(
+        "live WAL catchup importing frames affinity_id={} database_id={} frame_count={}",
+        affinity_id,
+        database_id,
+        imported.len()
+    );
+
+    let mut app_guard = app.lock().await;
+    app_guard.import_wal_records(database_id, imported)?;
+
+    Ok(max_seen_by_stream
+        .into_iter()
+        .map(|(stream, tx)| (stream, serverlib::TransactionId(tx)))
+        .collect())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
@@ -604,6 +1566,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = std::env::args().collect::<Vec<_>>();
     let server_list = parse_server_list_from_args(&args);
+    let affinity_config = parse_affinity_startup_config(&args);
 
     let node_id = args
         .iter()
@@ -668,8 +1631,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         is_local: true,
     };
 
+    let discovered_peers_for_affinity = runtime.network().discover_peers();
+
     let p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>> = Arc::new(Mutex::new(runtime));
     let p2p_heartbeat_task = spawn_p2p_heartbeat_task(Arc::clone(&p2p_runtime), local_node.clone());
+
+    let (affinity_processor, affinity_storage) = initialize_affinity_with_persistence(
+        affinity_config.as_ref(),
+        &local_node,
+        discovered_peers_for_affinity.clone(),
+        &data_dir,
+    );
+    let affinity_processor: Arc<Mutex<Option<AffinityProcessor>>> = Arc::new(Mutex::new(affinity_processor));
+    let affinity_storage = Arc::new(affinity_storage);
 
     let config = ServerRuntimeConfig {
         node_id,
@@ -697,6 +1671,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Arc::new(Mutex::new(app));
     let app_for_listener = Arc::clone(&app);
     let p2p_runtime_for_listener = Arc::clone(&p2p_runtime);
+    let affinity_processor_for_listener = Arc::clone(&affinity_processor);
     let seen_node_announces = Arc::new(Mutex::new(HashSet::<String>::new()));
     let seen_node_announces_for_listener = Arc::clone(&seen_node_announces);
     let active_connections = Arc::new(AtomicUsize::new(0));
@@ -719,6 +1694,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     let app = Arc::clone(&app_for_listener);
                     let p2p_runtime = Arc::clone(&p2p_runtime_for_listener);
+                    let affinity_processor = Arc::clone(&affinity_processor_for_listener);
                     let seen_node_announces = Arc::clone(&seen_node_announces_for_listener);
                     let active_connections = Arc::clone(&active_connections_for_listener);
                     let local_node = local_node_for_listener.clone();
@@ -727,6 +1703,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             stream,
                             app,
                             p2p_runtime,
+                            affinity_processor,
                             seen_node_announces,
                             local_node,
                             peer_addr.to_string(),
@@ -759,6 +1736,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     });
 
+    if let Some(config) = &affinity_config {
+        execute_affinity_join_sequence(
+            Arc::clone(&affinity_processor),
+            Arc::clone(&affinity_storage),
+            config,
+            &local_node,
+            &discovered_peers_for_affinity,
+        )
+        .await;
+
+        // Spawn replication task to execute sync phases
+        let _replication_task = spawn_affinity_replication_task(
+            Arc::clone(&affinity_processor),
+            Arc::clone(&affinity_storage),
+            Arc::clone(&app),
+            Arc::clone(&p2p_runtime),
+            config.clone(),
+            local_node.clone(),
+        );
+    }
+
     log::info!("server process is running; press Ctrl+C to shutdown");
     tokio::signal::ctrl_c().await?;
     log::info!("shutdown signal received");
@@ -776,6 +1774,7 @@ async fn handle_connector_stream(
     mut stream: TcpStream,
     app: Arc<Mutex<ServerApp>>,
     p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
     seen_node_announces: Arc<Mutex<HashSet<String>>>,
     local_node: NodeDescriptor,
     peer_addr: String,
@@ -832,29 +1831,237 @@ async fn handle_connector_stream(
             return Err(Box::new(err));
         }
 
-        let request = match bincode::deserialize::<ConnectorRequest>(&payload) {
-            Ok(request) => request,
-            Err(_) => {
-                if let Some(message) = decode_service_message(&payload) {
-                    if let ServiceMessage::NodeAnnounce(node) = &message {
-                        if !is_valid_server_node(node) {
-                            log::debug!(
-                                "ignoring invalid server node announce id='{}' addrs='{}' from {}",
-                                node.id.0,
-                                node.addrs.join(","),
-                                peer_addr
+        if let Some(message) = decode_service_message(&payload) {
+            if let ServiceMessage::NodeAnnounce(node) = &message {
+                if !is_valid_server_node(node) {
+                    log::debug!(
+                        "ignoring invalid server node announce id='{}' addrs='{}' from {}",
+                        node.id.0,
+                        node.addrs.join(","),
+                        peer_addr
+                    );
+                    continue;
+                }
+            }
+
+            let message_for_fanout = message.clone();
+            let mut runtime = p2p_runtime.lock().await;
+            if let Err(err) = runtime.handle_event(ServerP2pEvent::MessageReceived {
+                from_peer_id: peer_addr.clone(),
+                message,
+            }) {
+                log::debug!("server p2p message handling failed from {}: {}", peer_addr, err);
+            }
+
+                    if let ServiceMessage::AffinityJoinRequest(join_req) = &message_for_fanout {
+                        let summaries = {
+                            let app_guard = app.lock().await;
+                            build_database_schema_summaries_from_app(&app_guard)
+                        };
+
+                        let processor_lock = affinity_processor.lock().await;
+                        let response = if let Some(processor) = processor_lock.as_ref() {
+                            if let Some(doc) = processor.document() {
+                                let mut merged_doc = doc.clone();
+                                for summary in summaries {
+                                    merged_doc.upsert_database_schema(summary);
+                                }
+
+                                AffinityJoinResponse {
+                                    request_id: join_req.request_id.clone(),
+                                    ok: true,
+                                    error: None,
+                                    document: Some(merged_doc),
+                                }
+                            } else {
+                                AffinityJoinResponse {
+                                    request_id: join_req.request_id.clone(),
+                                    ok: false,
+                                    error: Some("processor has no document yet".to_string()),
+                                    document: None,
+                                }
+                            }
+                        } else {
+                            AffinityJoinResponse {
+                                request_id: join_req.request_id.clone(),
+                                ok: false,
+                                error: Some("affinity not configured".to_string()),
+                                document: None,
+                            }
+                        };
+                        drop(processor_lock);
+
+                        let response_message = ServiceMessage::AffinityJoinResponse(response);
+                        if let Err(err) = write_service_message_to_stream(&mut stream, &response_message).await {
+                            log::warn!(
+                                "failed to send affinity join response to {}: {}",
+                                peer_addr,
+                                err
                             );
-                            continue;
                         }
+
+                        log::debug!(
+                            "sent affinity join response to {} for request_id={}",
+                            peer_addr,
+                            join_req.request_id
+                        );
+
+                        session.mark_disconnect();
+                        rollback_active_session_transaction(&app, &session.session_id).await;
+                        return Ok(());
                     }
 
-                    let message_for_fanout = message.clone();
-                    let mut runtime = p2p_runtime.lock().await;
-                    if let Err(err) = runtime.handle_event(ServerP2pEvent::MessageReceived {
-                        from_peer_id: peer_addr.clone(),
-                        message,
-                    }) {
-                        log::debug!("server p2p message handling failed from {}: {}", peer_addr, err);
+                    if let ServiceMessage::SchemaCatalogRequest(schema_req) = &message_for_fanout {
+                        log::debug!(
+                            "received schema catalog request from {} database={}",
+                            peer_addr,
+                            schema_req.database_id
+                        );
+
+                        let app_guard = app.lock().await;
+                        let (ok, error, schema_definitions) = match build_schema_definitions_for_database(
+                            &app_guard,
+                            &schema_req.database_id,
+                        ) {
+                            Ok(definitions) => (true, None, definitions),
+                            Err(err) => (false, Some(err), Vec::new()),
+                        };
+                        drop(app_guard);
+
+                        let response = SchemaCatalogResponse {
+                            request_id: schema_req.request_id.clone(),
+                            ok,
+                            error,
+                            schema_definitions,
+                        };
+
+                        let response_message = ServiceMessage::SchemaCatalogResponse(response);
+                        if let Err(err) = write_service_message_to_stream(&mut stream, &response_message).await {
+                            log::warn!(
+                                "failed to send schema catalog response to {}: {}",
+                                peer_addr,
+                                err
+                            );
+                        }
+
+                        log::debug!(
+                            "sent schema catalog response to {} for request_id={}",
+                            peer_addr,
+                            schema_req.request_id
+                        );
+
+                        session.mark_disconnect();
+                        rollback_active_session_transaction(&app, &session.session_id).await;
+                        return Ok(());
+                    }
+
+                    if let ServiceMessage::DataSnapshotRequest(snapshot_req) = &message_for_fanout {
+                        log::debug!(
+                            "received data snapshot request from {} database={} tables={:?}",
+                            peer_addr,
+                            snapshot_req.database_id,
+                            snapshot_req.table_names
+                        );
+
+                        // TODO: Query actual data snapshot from app
+                        // For now, return empty snapshot as placeholder
+                        let snapshot_data: Vec<(String, Vec<String>)> = Vec::new();
+
+                        let response = DataSnapshotResponse {
+                            request_id: snapshot_req.request_id.clone(),
+                            ok: true,
+                            error: None,
+                            snapshot_data,
+                        };
+
+                        let response_message = ServiceMessage::DataSnapshotResponse(response);
+                        if let Err(err) = write_service_message_to_stream(&mut stream, &response_message).await {
+                            log::warn!(
+                                "failed to send data snapshot response to {}: {}",
+                                peer_addr,
+                                err
+                            );
+                        }
+
+                        log::debug!(
+                            "sent data snapshot response to {} for request_id={}",
+                            peer_addr,
+                            snapshot_req.request_id
+                        );
+
+                        session.mark_disconnect();
+                        rollback_active_session_transaction(&app, &session.session_id).await;
+                        return Ok(());
+                    }
+
+                    if let ServiceMessage::TransactionsSinceRequest(txn_req) = &message_for_fanout {
+                        log::debug!(
+                            "received transactions since request from {} database={} from_tx={:?}",
+                            peer_addr,
+                            txn_req.database_id,
+                            txn_req.from_transaction_id
+                        );
+
+                        let app_guard = app.lock().await;
+                        let stream_cursors = txn_req
+                            .from_stream_transaction_ids
+                            .iter()
+                            .map(|(stream_id, tx_id)| (stream_id.clone(), *tx_id))
+                            .collect::<HashMap<_, _>>();
+                        let (ok, error, transactions) = match app_guard
+                            .export_wal_records_for_database(
+                                &txn_req.database_id,
+                                txn_req.from_transaction_id,
+                                Some(&stream_cursors),
+                            )
+                        {
+                            Ok(records) => {
+                                let encoded = records
+                                    .into_iter()
+                                    .filter_map(|frame| {
+                                        match encode_wal_frame(&frame) {
+                                            Ok(encoded) => Some(encoded),
+                                            Err(err) => {
+                                                log::warn!(
+                                                    "failed encoding WAL frame for response: {}",
+                                                    err
+                                                );
+                                                None
+                                            }
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                (true, None, encoded)
+                            }
+                            Err(err) => (false, Some(err), Vec::new()),
+                        };
+                        drop(app_guard);
+
+                        let response = TransactionsSinceResponse {
+                            request_id: txn_req.request_id.clone(),
+                            ok,
+                            error,
+                            transactions,
+                        };
+
+                        let response_message = ServiceMessage::TransactionsSinceResponse(response);
+                        if let Err(err) = write_service_message_to_stream(&mut stream, &response_message).await {
+                            log::warn!(
+                                "failed to send transactions since response to {}: {}",
+                                peer_addr,
+                                err
+                            );
+                        }
+
+                        log::debug!(
+                            "sent transactions since response to {} for request_id={}",
+                            peer_addr,
+                            txn_req.request_id
+                        );
+
+                        session.mark_disconnect();
+                        rollback_active_session_transaction(&app, &session.session_id).await;
+                        return Ok(());
                     }
 
                     if let ServiceMessage::NodeAnnounce(node) = message_for_fanout {
@@ -901,6 +2108,9 @@ async fn handle_connector_stream(
                     return Ok(());
                 }
 
+        let request = match bincode::deserialize::<ConnectorRequest>(&payload) {
+            Ok(request) => request,
+            Err(_) => {
                 rollback_active_session_transaction(&app, &session.session_id).await;
                 return Err("invalid connector or p2p frame payload".into());
             }
@@ -948,7 +2158,6 @@ async fn handle_connector_stream(
             }
             
             continue;
-
         }
 
         session.record_request(&request);
@@ -990,6 +2199,18 @@ async fn write_response_frame(
     response: ConnectorResponse,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let payload = bincode::serialize(&response)?;
+    let len = payload.len() as u32;
+    stream.write_all(&len.to_le_bytes()).await?;
+    stream.write_all(&payload).await?;
+    Ok(())
+}
+
+async fn write_service_message_to_stream(
+    stream: &mut TcpStream,
+    message: &ServiceMessage,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let payload = encode_service_message(message)
+        .ok_or("failed to encode service message")?;
     let len = payload.len() as u32;
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(&payload).await?;
@@ -1038,6 +2259,21 @@ mod tests {
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
             is_local: false,
         });
+
+        let encoded = encode_service_message(&message).expect("message should encode");
+        let decoded = decode_service_message(&encoded).expect("message should decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn schema_catalog_wire_encoding_roundtrips() {
+        let message = ServiceMessage::SchemaCatalogRequest(
+            serverlib::p2p::protocol::SchemaCatalogRequest {
+                request_id: "req-1".to_string(),
+                affinity_id: "aff-1".to_string(),
+                database_id: "main".to_string(),
+            },
+        );
 
         let encoded = encode_service_message(&message).expect("message should encode");
         let decoded = decode_service_message(&encoded).expect("message should decode");
@@ -1152,5 +2388,50 @@ mod tests {
         assert_eq!(nodes[0].addrs, vec!["/ip4/127.0.0.1/tcp/9400".to_string()]);
         assert_eq!(nodes[1].addrs, vec!["/dns/node.local/tcp/9400".to_string()]);
         assert!(nodes.iter().all(|node| !node.id.0.is_empty()));
+    }
+
+    #[test]
+    fn parse_affinity_startup_config_parses_key_colon_password() {
+        let args = vec![
+            "server".to_string(),
+            "affinity=team-a:secret".to_string(),
+        ];
+
+        let cfg = parse_affinity_startup_config(&args).expect("config should parse");
+        assert_eq!(cfg.affinity_id, "team-a");
+        assert!(!cfg.affinity_key.is_empty());
+
+        let missing_password = vec!["server".to_string(), "affinity=team-a".to_string()];
+        assert!(parse_affinity_startup_config(&missing_password).is_none());
+
+        let empty_spec = vec!["server".to_string(), "affinity=:".to_string()];
+        assert!(parse_affinity_startup_config(&empty_spec).is_none());
+    }
+
+    #[test]
+    fn build_affinity_document_snapshot_includes_local_and_discovered_nodes() {
+        let cfg = AffinityStartupConfig {
+            affinity_id: "team-a".to_string(),
+            affinity_key: "k1".to_string(),
+        };
+        let local_node = NodeDescriptor {
+            id: NodeId("sam01".to_string()),
+            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+            is_local: true,
+        };
+        let discovered = vec![NodeDescriptor {
+            id: NodeId("sam02".to_string()),
+            addrs: vec!["/ip4/127.0.0.1/tcp/4002".to_string()],
+            is_local: false,
+        }];
+
+        let doc = build_affinity_document_snapshot(&cfg, &local_node, discovered);
+        assert_eq!(doc.affinity_id, "team-a");
+        assert_eq!(doc.members.len(), 2);
+        assert!(doc
+            .members
+            .iter()
+            .any(|member| member.node_id.0 == "sam01" && member.status == AffinityMemberStatus::Online));
+        assert!(doc.members.iter().any(|member| member.node_id.0 == "sam02"));
     }
 }

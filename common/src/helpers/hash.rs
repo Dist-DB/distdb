@@ -1,15 +1,14 @@
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 pub fn stable_id(parts: &[&str]) -> String {
 
-    let mut hasher = DefaultHasher::new();
+    let mut joined = String::new();
     for part in parts {
-        part.hash(&mut hasher);
-        ":".hash(&mut hasher);
+        joined.push_str(part);
+        joined.push(':');
     }
-    
-    format!("{:016x}", hasher.finish())
+
+    let digest = md5::compute(joined.as_bytes());
+    // Keep 64-bit style identifier width for compatibility with existing callers.
+    format!("{:x}", digest)[..16].to_string()
 
 }

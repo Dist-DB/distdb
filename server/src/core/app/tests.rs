@@ -738,6 +738,223 @@ fn rejected_insert_releases_table_write_lock() {
 }
 
 #[test]
+fn affinity_schema_sync_failure_returns_database_to_ready() {
+
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-affinity-schema-sync-lock-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .transition_status(ObjectStatus::Ready)
+        .expect("load->ready should be valid");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let result = app.apply_affinity_schema_definitions(
+        "main",
+        &["this is not valid sql".to_string()],
+    );
+
+    assert!(result.is_err());
+    assert_eq!(
+        app.catalogs.get("main").map(|catalog| catalog.status()),
+        Some(ObjectStatus::Ready)
+    );
+
+}
+
+#[test]
+fn affinity_wal_import_ignores_stale_schema_revision_and_returns_database_to_ready() {
+
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-affinity-wal-sync-lock-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::Int(64),
+                nullable: false,
+                indexed: FieldIndex::Indexed,
+                default_value: None,
+                metadata: None,
+            }]),
+        )
+        .expect("users table should register");
+    catalog
+        .transition_status(ObjectStatus::Ready)
+        .expect("load->ready should be valid");
+    let wal_stream_id = catalog.database_id.0.clone();
+    app.catalogs.insert("main".to_string(), catalog);
+
+    // Stale schema revisions can arrive again during replicated catchup and
+    // should be treated as idempotent.
+    let stale_schema_payload = SchemaChangePayload {
+        table_id: "users".to_string(),
+        schema_revision: 0,
+        schema_epoch: 1,
+        schema: TableSchema::new(vec![FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(64),
+            nullable: false,
+            indexed: FieldIndex::Indexed,
+            default_value: None,
+            metadata: None,
+        }]),
+    };
+
+    let malformed = vec![(
+        wal_stream_id,
+        TransactionRecord {
+            id: TransactionId(1),
+            groupid: None,
+            refid: None,
+            timestamp_epoch_ms: 1,
+            actor: UserId::from_username("affinity-sync-test"),
+            kind: TransactionKind::SchemaChange,
+            payload: stale_schema_payload
+                .encode()
+                .expect("schema payload should encode"),
+        },
+    )];
+
+    let result = app.import_wal_records("main", malformed);
+
+    assert!(result.is_ok());
+    assert_eq!(
+        app.catalogs.get("main").map(|catalog| catalog.status()),
+        Some(ObjectStatus::Ready)
+    );
+
+}
+
+#[test]
+fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
+
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-wal-export-stream-cursors-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::Int(64),
+                nullable: false,
+                indexed: FieldIndex::Indexed,
+                default_value: None,
+                metadata: None,
+            }]),
+        )
+        .expect("users table should register");
+    catalog
+        .register_table(
+            "accounts",
+            TableSchema::new(vec![FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::Int(64),
+                nullable: false,
+                indexed: FieldIndex::Indexed,
+                default_value: None,
+                metadata: None,
+            }]),
+        )
+        .expect("accounts table should register");
+    catalog
+        .transition_status(ObjectStatus::Ready)
+        .expect("load->ready should be valid");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    app.wal
+        .append(
+            "users",
+            TransactionRecord {
+                id: TransactionId(1),
+                groupid: None,
+                refid: None,
+                timestamp_epoch_ms: 1,
+                actor: UserId::from_username("export-test"),
+                kind: TransactionKind::Ignore,
+                payload: Vec::new(),
+            },
+        )
+        .expect("users WAL append should succeed");
+
+    app.wal
+        .append(
+            "accounts",
+            TransactionRecord {
+                id: TransactionId(2),
+                groupid: None,
+                refid: None,
+                timestamp_epoch_ms: 2,
+                actor: UserId::from_username("export-test"),
+                kind: TransactionKind::Ignore,
+                payload: Vec::new(),
+            },
+        )
+        .expect("accounts WAL append should succeed");
+
+    let mut stream_cursors = std::collections::HashMap::new();
+    stream_cursors.insert("users".to_string(), TransactionId(1));
+
+    let exported = app
+        .export_wal_records_for_database(
+            "main",
+            Some(TransactionId(1000)),
+            Some(&stream_cursors),
+        )
+        .expect("WAL export should succeed");
+
+    assert!(
+        exported
+            .iter()
+            .any(|(stream_id, record)| stream_id == "accounts" && record.id == TransactionId(2)),
+        "accounts stream records should not be filtered by global cursor"
+    );
+    assert!(
+        exported
+            .iter()
+            .all(|(stream_id, record)| !(stream_id == "users" && record.id <= TransactionId(1))),
+        "users stream should respect its own cursor"
+    );
+
+}
+
+#[test]
 fn session_transaction_control_is_scoped_by_session_id() {
 
     let unique_suffix = common::epochabs!();

@@ -1,7 +1,9 @@
 
+pub mod affinity;
+pub mod affinity_storage;
+pub mod replication_executor;
 pub mod database;
 pub mod execution;
-pub mod replication;
 pub mod security;
 pub mod sql;
 pub mod wal;
@@ -14,8 +16,12 @@ pub use database::core::{
 	DatabaseEntityAspect, DatabaseEntityKind, DatabaseObjectRef, DatabaseObjectType,
 	IndexId, ObjectStatus,
 };
+pub use affinity::{
+	AffinityDocument, AffinityMember, AffinityMemberStatus, AffinityProcessor,
+	AffinityProcessorError, AffinityProcessorState, AffinitySyncPhase, AffinitySyncStep,
+	DatabaseSchemaSummary, ReplicationSecuritySummary,
+};
 
-pub use replication::{EventType, PublicationEvent, SubscriptionKey};
 pub use database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
 pub use database::transaction::{TransactionId, TransactionKind, TransactionRecord};
 pub use database::transaction::{

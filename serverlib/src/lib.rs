@@ -50,7 +50,13 @@ pub use engine::database::transaction::{
 	TransactionId, TransactionKind, TransactionRecord,
 };
 
-pub use engine::replication::{EventType, PublicationEvent, SubscriptionKey};
+pub use engine::affinity::{
+	AffinityDocument, AffinityMember, AffinityMemberStatus, AffinityProcessor,
+	AffinityProcessorError, AffinityProcessorState, AffinitySyncPhase, AffinitySyncStep,
+	CheckpointMetadata, DatabaseSchemaSummary, ReplicationSecuritySummary,
+};
+pub use engine::affinity_storage::AffinityStorage;
+pub use engine::replication_executor::ReplicationPhaseExecutor;
 pub use engine::sql::{
 	create_table_schema_from_statement, 
 	parse_mysql8_sql_requests, 

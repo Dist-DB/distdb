@@ -63,7 +63,9 @@ impl KademliaDiscoveryService {
 
     pub fn upsert_peer(&mut self, node: NodeDescriptor) {
         if node.id != self.local_node_id {
-            self.peers.insert(node.id.clone(), node);
+            let mut remote = node;
+            remote.is_local = false;
+            self.peers.insert(remote.id.clone(), remote);
         }
     }
 }

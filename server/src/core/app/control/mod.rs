@@ -1,9 +1,10 @@
 use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
-    ConcurrentWalManager, DatabaseCatalog, TransactionId, TransactionKind, TransactionRecord,
+    ConcurrentWalManager, DatabaseCatalog, DatabaseId, TransactionId, TransactionKind, TransactionRecord,
     UserId,
 };
+use serverlib::ObjectStatus;
 
 use crate::core::app::state::SessionSnapshot;
 use crate::core::app::ServerApp;
@@ -20,6 +21,136 @@ use super::helpers::{
 mod isolation;
 
 impl ServerApp {
+
+    fn resolve_catalog_key(&self, database_id: &str) -> Option<String> {
+        if self.catalogs.contains_key(database_id) {
+            return Some(database_id.to_string());
+        }
+
+        let normalized = DatabaseId::from_database_name(database_id).ok()?.0;
+        if self.catalogs.contains_key(&normalized) {
+            return Some(normalized);
+        }
+
+        None
+    }
+
+    fn ensure_affinity_catalog_exists(&mut self, database_id: &str) -> Result<String, String> {
+        if let Some(key) = self.resolve_catalog_key(database_id) {
+            return Ok(key);
+        }
+
+        // Affinity sync callers may pass an already-normalized remote database id.
+        // Persist the incoming identifier as-is to avoid re-hashing ids cross-node.
+        let key = database_id.to_string();
+
+        let mut catalog = DatabaseCatalog::new(DatabaseId(key.clone()));
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .map_err(|err| format!("failed preparing replicated catalog '{}': {}", key, err))?;
+        self.catalogs.insert(key.clone(), catalog);
+
+        Ok(key)
+    }
+
+    fn begin_affinity_sync_lock(&mut self, database_id: &str) -> Result<(), String> {
+        let database_key = self.ensure_affinity_catalog_exists(database_id)?;
+        let catalog = self
+            .catalogs
+            .get_mut(&database_key)
+            .ok_or_else(|| format!("database '{}' not found", database_key))?;
+
+        if catalog.status() == ObjectStatus::Lock {
+            return Err(format!(
+                "database '{}' is already locked by another operation",
+                database_key
+            ));
+        }
+
+        catalog
+            .transition_status(ObjectStatus::Lock)
+            .map_err(|err| format!("failed locking database '{}' for affinity sync: {}", database_key, err))
+    }
+
+    fn finish_affinity_sync_lock(&mut self, database_id: &str) -> Result<(), String> {
+        let Some(database_key) = self.resolve_catalog_key(database_id) else {
+            return Err(format!("database '{}' not found", database_id));
+        };
+
+        let catalog = self
+            .catalogs
+            .get_mut(&database_key)
+            .ok_or_else(|| format!("database '{}' not found", database_key))?;
+
+        if catalog.status() == ObjectStatus::Ready {
+            return Ok(());
+        }
+
+        catalog
+            .transition_status(ObjectStatus::Ready)
+            .map_err(|err| format!("failed returning database '{}' to ready: {}", database_key, err))
+    }
+
+    pub fn apply_affinity_schema_definitions(
+        &mut self,
+        database_id: &str,
+        schema_definitions: &[String],
+    ) -> Result<(), String> {
+        self.begin_affinity_sync_lock(database_id)?;
+
+        let apply_result = (|| {
+            for (idx, sql) in schema_definitions.iter().enumerate() {
+                let request = ConnectorRequest {
+                    request_id: format!("replication-schema-apply-{}-{}", database_id, idx),
+                    command: ConnectorCommand::Query {
+                        query: connector::DataQuery {
+                            database_id: database_id.to_string(),
+                            sql: sql.clone(),
+                        },
+                    },
+                };
+
+                let response = self.handle_connector_request_for_session(
+                    &request,
+                    "__affinity_replication_schema_sync__",
+                );
+
+                if matches!(
+                    response.status,
+                    connector::ResponseStatus::Applied | connector::ResponseStatus::Accepted
+                ) {
+                    continue;
+                }
+
+                let error_message = match response.result {
+                    ConnectorResult::Error(message) => message,
+                    _ => "schema apply rejected without error message".to_string(),
+                };
+
+                if error_message.to_ascii_lowercase().contains("already exists") {
+                    continue;
+                }
+
+                return Err(format!(
+                    "failed applying schema definition '{}' to database '{}': {}",
+                    sql, database_id, error_message
+                ));
+            }
+
+            Ok(())
+        })();
+
+        let release_result = self.finish_affinity_sync_lock(database_id);
+
+        match (apply_result, release_result) {
+            (Err(apply_err), Err(release_err)) => {
+                Err(format!("{}; cleanup failed: {}", apply_err, release_err))
+            }
+            (Err(apply_err), Ok(())) => Err(apply_err),
+            (Ok(()), Err(release_err)) => Err(release_err),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
 
     pub fn handle_connector_request(&mut self, request: &ConnectorRequest) -> ConnectorResponse {
         self.handle_connector_request_for_session(request, &request.request_id)
@@ -453,6 +584,108 @@ impl ServerApp {
         }
 
         Ok(())
+    }
+
+    pub fn export_wal_records_for_database(
+        &self,
+        database_id: &str,
+        from: Option<TransactionId>,
+        from_stream_transaction_ids: Option<&std::collections::HashMap<String, TransactionId>>,
+    ) -> Result<Vec<(String, TransactionRecord)>, String> {
+        let database_key = self
+            .resolve_catalog_key(database_id)
+            .ok_or_else(|| format!("database '{}' not found", database_id))?;
+
+        let Some(catalog) = self.catalogs.get(&database_key) else {
+            return Err(format!("database '{}' not found", database_id));
+        };
+
+        let mut stream_ids = vec![database_key];
+        stream_ids.extend(catalog.table_ids());
+
+        let mut frames = Vec::new();
+        for stream_id in stream_ids {
+            let stream_from = match from_stream_transaction_ids {
+                Some(map) => map.get(&stream_id).copied(),
+                None => from,
+            };
+            let mut records = self.wal.since(&stream_id, stream_from);
+            records.sort_by_key(|record| record.id.0);
+            for record in records {
+                frames.push((stream_id.clone(), record));
+            }
+        }
+
+        frames.sort_by(|a, b| {
+            a.1.timestamp_epoch_ms
+                .cmp(&b.1.timestamp_epoch_ms)
+                .then_with(|| a.1.id.0.cmp(&b.1.id.0))
+        });
+
+        Ok(frames)
+    }
+
+    pub fn import_wal_records(
+        &mut self,
+        database_id: &str,
+        records: Vec<(String, TransactionRecord)>,
+    ) -> Result<(), String> {
+        self.begin_affinity_sync_lock(database_id)?;
+
+        let import_result = (|| {
+            let mut appended_any = false;
+
+            for (stream_id, record) in records {
+                if self
+                    .wal
+                    .since(&stream_id, None)
+                    .iter()
+                    .any(|existing| *existing == record)
+                {
+                    continue;
+                }
+
+                match self.wal.append(&stream_id, record) {
+                    Ok(()) => {
+                        appended_any = true;
+                    }
+                    Err(err) if err.contains("out-of-order") => {
+                        // Duplicate or older record already present locally; skip.
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "failed importing WAL record stream='{}': {}",
+                            stream_id,
+                            err
+                        ));
+                    }
+                }
+            }
+
+            if !appended_any {
+                return Ok(());
+            }
+
+            // Rebuild in-memory structures from newly imported WAL records.
+            self.replay_catalog_state_from_wal()
+                .map_err(|err| format!("failed replaying imported WAL records: {}", err))?;
+            self.runtime_indexes
+                .bootstrap_from_catalogs(&self.catalogs, &self.wal);
+
+            Ok(())
+        })();
+
+        let release_result = self.finish_affinity_sync_lock(database_id);
+
+        match (import_result, release_result) {
+            (Err(import_err), Err(release_err)) => {
+                Err(format!("{}; cleanup failed: {}", import_err, release_err))
+            }
+            (Err(import_err), Ok(())) => Err(import_err),
+            (Ok(()), Err(release_err)) => Err(release_err),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
     pub fn rollback_session_transaction(&mut self, session_id: &str) -> bool {

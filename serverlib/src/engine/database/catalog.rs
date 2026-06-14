@@ -549,7 +549,7 @@ impl DatabaseCatalog {
 
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
         if payload.schema_revision <= table.schema_revision() {
-            return Err(DatabaseError::SchemaRevisionOutOfOrder);
+            return Ok(());
         }
 
         let indexes = Self::indexes_for_schema(&table_id, &payload.schema);
