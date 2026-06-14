@@ -9,9 +9,8 @@ The platform current features the following:-
 
 ### Core Capabilities
 
-SQL Support (MySQL 8.0 Compatible):
-
 ```bash
+✓ SQL Support (MySQL 8.0 Compatible)
 ✓ CREATE/ALTER/DROP TABLE
 ✓ INSERT/UPDATE/DELETE/SELECT
 ✓ Complex JOINs (INNER, LEFT, RIGHT, FULL OUTER)
