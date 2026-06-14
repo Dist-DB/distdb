@@ -57,7 +57,7 @@ impl std::fmt::Display for DatabaseError {
             Self::SchemaRevisionOutOfOrder          => write!(f, "schema revision must advance monotonically"),
             Self::SchemaChange(e)     => write!(f, "schema mutation error: {e}"),
             Self::SchemaChangeInProgress            => write!(f, "another schema change is currently in progress"),
-            Self::TableNotLocked                    => write!(f, "table must be locked before a schema change can be prepared or committed"),
+            Self::TableNotLocked                    => write!(f, "table must be locked before the requested write operation can proceed"),
             Self::DuplicateView                     => write!(f, "view already registered in database catalog"),
             Self::ViewNotFound                      => write!(f, "view not found in database catalog"),
             Self::ViewNotWritable                   => write!(f, "views are read-only; write operations are not permitted"),

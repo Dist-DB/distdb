@@ -17,6 +17,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
         orders_wal_id,
         TransactionRecord {
             id: TransactionId(1),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 1,
             actor: actor.clone(),
@@ -29,6 +30,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
         orders_wal_id,
         TransactionRecord {
             id: TransactionId(2),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 2,
             actor: actor.clone(),
@@ -41,6 +43,7 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
         inventory_wal_id,
         TransactionRecord {
             id: TransactionId(1),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 3,
             actor,
@@ -90,6 +93,7 @@ mod tests {
             "events",
             TransactionRecord {
                 id: TransactionId(4),
+                groupid: None,
                 refid: None,
                 timestamp_epoch_ms: 1,
                 actor: actor.clone(),
@@ -103,6 +107,7 @@ mod tests {
             "events",
             TransactionRecord {
                 id: TransactionId(3),
+                groupid: None,
                 refid: None,
                 timestamp_epoch_ms: 2,
                 actor,

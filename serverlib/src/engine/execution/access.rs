@@ -101,21 +101,58 @@ pub fn load_live_rows(
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     let wal_records = wal.since(table_id, None);
-    let mut live_rows: Vec<(u64, HashMap<String, Vec<u8>>)> = Vec::new();
-    let mut deleted_ids: HashSet<u64> = HashSet::new();
+    let mut live_rows = HashMap::new();
+    let mut row_order = Vec::new();
+    let mut committed_groups = HashSet::new();
+    let mut aborted_groups = HashSet::new();
 
     for record in &wal_records {
+        match record.kind {
+            TransactionKind::WriteCommit => {
+                if let Some(group_id) = record.groupid {
+                    committed_groups.insert(group_id.0);
+                }
+            }
+            TransactionKind::WriteAbort => {
+                if let Some(group_id) = record.groupid {
+                    aborted_groups.insert(group_id.0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for record in &wal_records {
+        if let Some(group_id) = record.groupid {
+            let group_id = group_id.0;
+            if aborted_groups.contains(&group_id) {
+                continue;
+            }
+
+            if !committed_groups.contains(&group_id)
+                && !matches!(record.kind, TransactionKind::WriteCommit | TransactionKind::WriteAbort)
+            {
+                continue;
+            }
+        }
 
         match record.kind {
 
-            TransactionKind::Insert => match decode_row_payload(schema, &record.payload) {
-                Ok(row_map) => live_rows.push((record.id.0, row_map)),
+            TransactionKind::Ignore => {}
+
+            TransactionKind::Insert | TransactionKind::Update => {
+                match decode_row_payload(schema, &record.payload) {
+                Ok(row_map) => {
+                    row_order.push(record.id.0);
+                    live_rows.insert(record.id.0, row_map);
+                }
                 Err(_) => continue,
+                }
             },
 
             TransactionKind::Delete => {
                 if let Some(refid) = record.refid {
-                    deleted_ids.insert(refid.0);
+                    live_rows.remove(&refid.0);
                 }
             },
 
@@ -124,9 +161,9 @@ pub fn load_live_rows(
         }
     }
 
-    live_rows
+    row_order
         .into_iter()
-        .filter(|(id, _)| !deleted_ids.contains(id))
+        .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
         .collect()
 
 }

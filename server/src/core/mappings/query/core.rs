@@ -39,6 +39,54 @@ pub(crate) fn handle_query_command(
     runtime_indexes: &mut RuntimeIndexStore,
 ) -> ConnectorResponse {
 
+    handle_query_command_internal(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        None,
+        None,
+    )
+
+}
+
+pub(crate) fn handle_query_command_in_write_group(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    write_group_id: TransactionId,
+    touched_tables: &mut HashSet<String>,
+) -> ConnectorResponse {
+
+    handle_query_command_internal(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        Some(write_group_id),
+        Some(touched_tables),
+    )
+
+}
+
+fn handle_query_command_internal(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_tables: Option<&mut HashSet<String>>,
+) -> ConnectorResponse {
+
     let request_start = Instant::now();
     let parse_start = Instant::now();
 
@@ -54,6 +102,8 @@ pub(crate) fn handle_query_command(
                 node_data_dir,
                 runtime_indexes,
                 parsed,
+                external_write_group_id,
+                touched_tables,
             );
             with_query_timings(response, make_query_timings(request_start, parse_ms))
         },
@@ -71,6 +121,8 @@ struct QueryExecutionContext<'a> {
     wal: &'a ConcurrentWalManager,
     node_data_dir: &'a Path,
     runtime_indexes: &'a mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_write_tables: Option<&'a mut HashSet<String>>,
 }
 
 type QueryOperationHandler = fn(
@@ -88,6 +140,8 @@ fn execute_parsed_query(
     node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
     parsed: Vec<SqlRequest>,
+    external_write_group_id: Option<TransactionId>,
+    touched_tables: Option<&mut HashSet<String>>,
 ) -> ConnectorResponse {
 
     if parsed.len() != 1 {
@@ -104,6 +158,8 @@ fn execute_parsed_query(
         wal,
         node_data_dir,
         runtime_indexes,
+        external_write_group_id,
+        touched_write_tables: touched_tables,
     };
 
     let handler: Option<QueryOperationHandler> = match statement.operation {
@@ -265,6 +321,8 @@ fn execute_insert(
         ctx.wal,
         ctx.node_data_dir,
         ctx.runtime_indexes,
+        ctx.external_write_group_id,
+        ctx.touched_write_tables.as_deref_mut(),
         statement,
     )
 
@@ -284,6 +342,8 @@ fn execute_update(
         ctx.wal,
         ctx.node_data_dir,
         ctx.runtime_indexes,
+        ctx.external_write_group_id,
+        ctx.touched_write_tables.as_deref_mut(),
         statement,
     )
 
@@ -303,6 +363,8 @@ fn execute_delete(
         ctx.wal,
         ctx.node_data_dir,
         ctx.runtime_indexes,
+        ctx.external_write_group_id,
+        ctx.touched_write_tables.as_deref_mut(),
         statement,
     )
 
@@ -1021,15 +1083,10 @@ fn execute_insert_impl(
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_write_tables: Option<&mut HashSet<String>>,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
-
-    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
 
     let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
 
@@ -1070,6 +1127,38 @@ fn execute_insert_impl(
 
         return explain_mutation_plan(request_id, rows);
     }
+
+    with_table_write_guard(
+        request_id,
+        catalogs,
+        &query.database_id,
+        &plan.table_id,
+        |catalog| {
+        execute_insert_locked(
+            request_id,
+            query,
+            catalog,
+            wal,
+            runtime_indexes,
+            external_write_group_id,
+            touched_write_tables,
+            &plan,
+        )
+        },
+    )
+
+}
+
+fn execute_insert_locked(
+    request_id: &str,
+    query: &DataQuery,
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_write_tables: Option<&mut HashSet<String>>,
+    plan: &serverlib::InsertRowsPlan,
+) -> ConnectorResponse {
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
         return ConnectorResponse::rejected(
@@ -1124,130 +1213,140 @@ fn execute_insert_impl(
             Err(message) => return ConnectorResponse::rejected(request_id.to_string(), message),
         };
 
-    let mut affected_rows = 0u64;
-    for row in &insert_rows {
-        if row.len() != columns.len() {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!(
-                    "insert failed: values count {} does not match columns count {}",
-                    row.len(),
-                    columns.len()
-                ),
-            );
-        }
+    with_statement_write_batch(
+        request_id,
+        wal,
+        table,
+        runtime_indexes,
+        external_write_group_id,
+        touched_write_tables,
+        |group_id, runtime_indexes| {
+        let mut affected_rows = 0u64;
 
-        let mut payload_row = HashMap::with_capacity(schema.fields.len());
-
-        for (column, value) in columns.iter().zip(row.iter()) {
-            let field = schema
-                .field(column)
-                .expect("column existence already validated");
-
-            match value {
-                Some(value_bytes) => {
-                    payload_row.insert(column.clone(), value_bytes.clone());
-                }
-
-                None => {
-                    if let Some(default) = &field.default_value {
-                        payload_row.insert(column.clone(), default.clone());
-                    } else if !field.nullable {
-                        return ConnectorResponse::rejected(
-                            request_id.to_string(),
-                            format!("insert failed: column '{}' cannot be null", column),
-                        );
-                    }
-                }
-            }
-        }
-
-        for field in &schema.fields {
-            if payload_row.contains_key(&field.field_name) {
-                continue;
-            }
-
-            if let Some(default) = &field.default_value {
-                payload_row.insert(field.field_name.clone(), default.clone());
-                continue;
-            }
-
-            if !field.nullable {
+        for row in &insert_rows {
+            if row.len() != columns.len() {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!(
-                        "insert failed: missing required column '{}'",
-                        field.field_name
+                        "insert failed: row has {} values but {} columns were specified",
+                        row.len(),
+                        columns.len()
                     ),
                 );
             }
-        }
 
-        // Primary key uniqueness check
-        if let Some(pk_index) = primary_key_index(table) {
-            let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
-                vec![pk_index.field_name.clone()]
-            } else {
-                pk_index.field_names.clone()
+            let mut payload_row = HashMap::with_capacity(schema.fields.len());
+
+            for (column, value) in columns.iter().zip(row.iter()) {
+                let field = schema
+                    .field(column)
+                    .expect("column existence already validated");
+
+                match value {
+                    Some(value_bytes) => {
+                        payload_row.insert(column.clone(), value_bytes.clone());
+                    }
+
+                    None => {
+                        if let Some(default) = &field.default_value {
+                            payload_row.insert(column.clone(), default.clone());
+                        } else if !field.nullable {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert failed: column '{}' cannot be null", column),
+                            );
+                        }
+                    }
+                }
+            }
+
+            for field in &schema.fields {
+                if payload_row.contains_key(&field.field_name) {
+                    continue;
+                }
+
+                if let Some(default) = &field.default_value {
+                    payload_row.insert(field.field_name.clone(), default.clone());
+                    continue;
+                }
+
+                if !field.nullable {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!(
+                            "insert failed: missing required column '{}'",
+                            field.field_name
+                        ),
+                    );
+                }
+            }
+
+            if let Some(pk_index) = primary_key_index(table) {
+                let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
+                    vec![pk_index.field_name.clone()]
+                } else {
+                    pk_index.field_names.clone()
+                };
+
+                let incoming_pk = pk_fields
+                    .iter()
+                    .map(|pk| payload_row.get(pk).cloned().unwrap_or_default())
+                    .collect::<Vec<_>>();
+
+                let pk_runtime = runtime_indexes.index(&pk_index.index_id.0);
+
+                if pk_runtime
+                    .map(|idx| idx.contains(&incoming_pk))
+                    .unwrap_or(false)
+                {
+                    let pk_display = pk_fields
+                        .iter()
+                        .zip(incoming_pk.iter())
+                        .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert failed: duplicate primary key ({})", pk_display),
+                    );
+                }
+            }
+
+            let encoded = match encode_row_payload(schema, &payload_row) {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert payload encode failed: {err}"),
+                    );
+                }
             };
 
-            let incoming_pk = pk_fields
-                .iter()
-                .map(|pk| payload_row.get(pk).cloned().unwrap_or_default())
-                .collect::<Vec<_>>();
-
-            let pk_runtime = runtime_indexes.index(&pk_index.index_id.0);
-
-            if pk_runtime
-                .map(|idx| idx.contains(&incoming_pk))
-                .unwrap_or(false)
-            {
-                let pk_display = pk_fields
-                    .iter()
-                    .zip(incoming_pk.iter())
-                    .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+            if let Err(err) = append_row_payload_record(
+                wal,
+                &plan.table_id,
+                table,
+                runtime_indexes,
+                TransactionKind::Insert,
+                encoded,
+                common::epochabs!() as u64,
+                None,
+                Some(group_id),
+            ) {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
-                    format!("insert failed: duplicate primary key ({})", pk_display),
+                    format!("insert WAL append failed: {err}"),
                 );
             }
+
+            affected_rows = affected_rows.saturating_add(1);
         }
 
-        let encoded = match encode_row_payload(schema, &payload_row) {
-            Ok(encoded) => encoded,
-
-            Err(err) => {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("insert payload encode failed: {err}"),
-                );
-            }
-        };
-
-        if let Err(err) = append_row_payload_record(
-            wal,
-            &plan.table_id,
-            table,
-            runtime_indexes,
-            TransactionKind::Insert,
-            encoded,
-            common::epochabs!() as u64,
-            None,
-        ) {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("insert WAL append failed: {err}"),
-            );
-        }
-
-        affected_rows = affected_rows.saturating_add(1);
-    }
-
-    ConnectorResponse::applied(
-        request_id.to_string(),
-        ConnectorResult::Mutation(MutationResult { affected_rows }),
+        ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows }),
+        )
+        },
     )
 
 }
@@ -1372,15 +1471,10 @@ fn execute_update_impl(
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_write_tables: Option<&mut HashSet<String>>,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
-
-    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
 
     let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
 
@@ -1406,6 +1500,38 @@ fn execute_update_impl(
             plan.where_condition.is_some(),
         );
     }
+
+    with_table_write_guard(
+        request_id,
+        catalogs,
+        &query.database_id,
+        &plan.table_id,
+        |catalog| {
+        execute_update_locked(
+            request_id,
+            query,
+            catalog,
+            wal,
+            runtime_indexes,
+            external_write_group_id,
+            touched_write_tables,
+            &plan,
+        )
+        },
+    )
+
+}
+
+fn execute_update_locked(
+    request_id: &str,
+    query: &DataQuery,
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_write_tables: Option<&mut HashSet<String>>,
+    plan: &serverlib::UpdateRowsPlan,
+) -> ConnectorResponse {
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
         return ConnectorResponse::rejected(
@@ -1464,6 +1590,14 @@ fn execute_update_impl(
         HashSet::new()
     };
 
+    with_statement_write_batch(
+        request_id,
+        wal,
+        table,
+        runtime_indexes,
+        external_write_group_id,
+        touched_write_tables,
+        |group_id, runtime_indexes| {
     let mut affected_rows = 0u64;
 
     for (row_id, row_map) in current_live_rows {
@@ -1552,6 +1686,7 @@ fn execute_update_impl(
             delete_payload,
             common::epochabs!() as u64,
             Some(TransactionId(row_id)),
+            Some(group_id),
         ) {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -1578,6 +1713,7 @@ fn execute_update_impl(
             insert_payload,
             common::epochabs!() as u64,
             None,
+            Some(group_id),
         ) {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -1592,6 +1728,8 @@ fn execute_update_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows }),
     )
+        },
+    )
 
 }
 
@@ -1602,15 +1740,10 @@ fn execute_delete_impl(
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_write_tables: Option<&mut HashSet<String>>,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
-
-    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
 
     let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
 
@@ -1636,6 +1769,38 @@ fn execute_delete_impl(
             plan.where_condition.is_some(),
         );
     }
+
+    with_table_write_guard(
+        request_id,
+        catalogs,
+        &query.database_id,
+        &plan.table_id,
+        |catalog| {
+        execute_delete_locked(
+            request_id,
+            query,
+            catalog,
+            wal,
+            runtime_indexes,
+            external_write_group_id,
+            touched_write_tables,
+            &plan,
+        )
+        },
+    )
+
+}
+
+fn execute_delete_locked(
+    request_id: &str,
+    query: &DataQuery,
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_write_tables: Option<&mut HashSet<String>>,
+    plan: &serverlib::DeleteRowsPlan,
+) -> ConnectorResponse {
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
         return ConnectorResponse::rejected(
@@ -1676,6 +1841,14 @@ fn execute_delete_impl(
         }
     };
 
+    with_statement_write_batch(
+        request_id,
+        wal,
+        table,
+        runtime_indexes,
+        external_write_group_id,
+        touched_write_tables,
+        |group_id, runtime_indexes| {
     let mut affected_rows = 0u64;
 
     for (row_id, row_map) in current_live_rows {
@@ -1710,6 +1883,7 @@ fn execute_delete_impl(
             delete_payload,
             common::epochabs!() as u64,
             Some(TransactionId(row_id)),
+            Some(group_id),
         ) {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -1724,6 +1898,52 @@ fn execute_delete_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows }),
     )
+        },
+    )
+
+}
+
+fn with_table_write_guard<F>(
+    request_id: &str,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    database_id: &str,
+    table_id: &str,
+    execute: F,
+) -> ConnectorResponse
+where
+    F: FnOnce(&mut DatabaseCatalog) -> ConnectorResponse,
+{
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", database_id),
+        );
+    };
+
+    if let Err(err) = catalog.begin_table_write(table_id) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("table write lock failed: {err}"),
+        );
+    }
+
+    let response = execute(catalog);
+
+    if matches!(response.status, connector::ResponseStatus::Applied) {
+        match catalog.finalize_table_write(table_id) {
+            Ok(()) => response,
+            Err(err) => {
+                let _ = catalog.abort_table_write(table_id);
+                ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("table write finalize failed: {err}"),
+                )
+            }
+        }
+    } else {
+        let _ = catalog.abort_table_write(table_id);
+        response
+    }
 
 }
 
@@ -2303,16 +2523,36 @@ fn append_payload_record(
     payload: Vec<u8>,
     timestamp_epoch_ms: u64,
 ) -> Result<(), String> {
+    append_payload_record_with_group(wal, wal_id, kind, payload, timestamp_epoch_ms, None)
+        .map(|_| ())
+}
+
+fn append_payload_record_with_group(
+    wal: &ConcurrentWalManager,
+    wal_id: &str,
+    kind: TransactionKind,
+    payload: Vec<u8>,
+    timestamp_epoch_ms: u64,
+    group_id: Option<TransactionId>,
+) -> Result<TransactionId, String> {
 
     let existing = wal.since(wal_id, None);
     let last = existing.last();
     let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
     let refid = last.map(|record| record.id);
+    let record_group_id = group_id.or_else(|| {
+        if matches!(kind, TransactionKind::WriteBegin) {
+            Some(next_id)
+        } else {
+            None
+        }
+    });
 
     wal.append(
         wal_id,
         TransactionRecord {
             id: next_id,
+            groupid: record_group_id,
             refid,
             timestamp_epoch_ms,
             actor: UserId::from_username("server"),
@@ -2320,10 +2560,12 @@ fn append_payload_record(
             payload,
         },
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    Ok(next_id)
 }
 
-fn append_row_payload_record(
+pub(super) fn append_row_payload_record(
     wal: &ConcurrentWalManager,
     wal_id: &str,
     table: &serverlib::DatabaseTable,
@@ -2332,8 +2574,24 @@ fn append_row_payload_record(
     payload: Vec<u8>,
     timestamp_epoch_ms: u64,
     refid: Option<TransactionId>,
+    group_id: Option<TransactionId>,
 ) -> Result<(), String> {
     let existing = wal.since(wal_id, None);
+
+    if let Some(expected_refid) = refid {
+        let live_row_ids = load_live_rows(wal, wal_id, table.schema())
+            .into_iter()
+            .map(|(row_id, _)| row_id)
+            .collect::<HashSet<_>>();
+
+        if !live_row_ids.contains(&expected_refid.0) {
+            return Err(format!(
+                "row mutation references stale or missing live transaction id {}",
+                expected_refid.0
+            ));
+        }
+    }
+
     let last = existing.last();
     let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
     let refid = refid.or_else(|| last.map(|record| record.id));
@@ -2343,6 +2601,7 @@ fn append_row_payload_record(
 
     let record = TransactionRecord {
         id: next_id,
+        groupid: group_id,
         refid,
         timestamp_epoch_ms,
         actor: UserId::from_username("server"),
@@ -2355,6 +2614,156 @@ fn append_row_payload_record(
     runtime_indexes.apply_table_row_mutation(derived_indexes_for_table(table), kind, &row_map);
 
     Ok(())
+}
+
+fn with_statement_write_batch<F>(
+    request_id: &str,
+    wal: &ConcurrentWalManager,
+    table: &serverlib::DatabaseTable,
+    runtime_indexes: &mut RuntimeIndexStore,
+    external_write_group_id: Option<TransactionId>,
+    touched_tables: Option<&mut HashSet<String>>,
+    execute: F,
+) -> ConnectorResponse
+where
+    F: FnOnce(TransactionId, &mut RuntimeIndexStore) -> ConnectorResponse,
+{
+    if let (Some(write_group_id), Some(touched_tables)) = (external_write_group_id, touched_tables)
+    {
+        if touched_tables.insert(table.table_id.clone()) {
+            if let Err(err) = append_payload_record_with_group(
+                wal,
+                &table.table_id,
+                TransactionKind::WriteBegin,
+                request_id.as_bytes().to_vec(),
+                common::epochabs!() as u64,
+                Some(write_group_id),
+            ) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("transaction write begin failed: {err}"),
+                );
+            }
+        }
+
+        return execute(write_group_id, runtime_indexes);
+    }
+
+    let write_group_id = match append_payload_record_with_group(
+        wal,
+        &table.table_id,
+        TransactionKind::WriteBegin,
+        request_id.as_bytes().to_vec(),
+        common::epochabs!() as u64,
+        None,
+    ) {
+        Ok(group_id) => group_id,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("statement write begin failed: {err}"),
+            )
+        }
+    };
+
+    let response = execute(write_group_id, runtime_indexes);
+
+    if matches!(response.status, connector::ResponseStatus::Applied) {
+        if let Err(err) = append_payload_record_with_group(
+            wal,
+            &table.table_id,
+            TransactionKind::WriteCommit,
+            Vec::new(),
+            common::epochabs!() as u64,
+            Some(write_group_id),
+        ) {
+            let _ = append_payload_record_with_group(
+                wal,
+                &table.table_id,
+                TransactionKind::WriteAbort,
+                Vec::new(),
+                common::epochabs!() as u64,
+                Some(write_group_id),
+            );
+            rebuild_runtime_indexes_for_table(table, wal, runtime_indexes);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("statement write commit failed: {err}"),
+            );
+        }
+
+        response
+    } else {
+        let _ = append_payload_record_with_group(
+            wal,
+            &table.table_id,
+            TransactionKind::WriteAbort,
+            Vec::new(),
+            common::epochabs!() as u64,
+            Some(write_group_id),
+        );
+        rebuild_runtime_indexes_for_table(table, wal, runtime_indexes);
+        response
+    }
+}
+
+pub(crate) fn commit_external_write_group(
+    wal: &ConcurrentWalManager,
+    table_ids: &HashSet<String>,
+    group_id: TransactionId,
+) -> Result<(), String> {
+    for table_id in table_ids {
+        append_payload_record_with_group(
+            wal,
+            table_id,
+            TransactionKind::WriteCommit,
+            Vec::new(),
+            common::epochabs!() as u64,
+            Some(group_id),
+        )?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn abort_external_write_group(
+    wal: &ConcurrentWalManager,
+    catalogs: &HashMap<String, DatabaseCatalog>,
+    runtime_indexes: &mut RuntimeIndexStore,
+    table_ids: &HashSet<String>,
+    group_id: TransactionId,
+) {
+    for table_id in table_ids {
+        let _ = append_payload_record_with_group(
+            wal,
+            table_id,
+            TransactionKind::WriteAbort,
+            Vec::new(),
+            common::epochabs!() as u64,
+            Some(group_id),
+        );
+
+        if let Some(table) = catalogs.values().find_map(|catalog| catalog.table(table_id)) {
+            rebuild_runtime_indexes_for_table(table, wal, runtime_indexes);
+        }
+    }
+}
+
+fn rebuild_runtime_indexes_for_table(
+    table: &serverlib::DatabaseTable,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+) {
+    let live_rows = load_live_rows(wal, &table.table_id, table.schema());
+
+    for index in derived_indexes_for_table(table) {
+        runtime_indexes.index_mut(&index.index_id.0).rebuild(
+            live_rows
+                .iter()
+                .map(|(_, row_map)| index_value_tuple(index, row_map))
+                .collect(),
+        );
+    }
 }
 
 fn append_payload_record_pair(

@@ -16,7 +16,10 @@ use serverlib::{
 };
 
 use crate::core::config::ServerRuntimeConfig;
-use crate::core::mappings::query::handle_query_command;
+use crate::core::mappings::query::{
+    abort_external_write_group, commit_external_write_group, handle_query_command,
+    handle_query_command_in_write_group,
+};
 use crate::core::transaction_coordinator::{QueryRoutingDecision, TransactionCoordinator};
 use crate::engine::wal_probe::{WalProbeResult, run_wal_probe};
 use crate::helpers::ServerAppError;
@@ -338,19 +341,36 @@ impl ServerApp {
         self.validate_staged_queries(request_id, staged_queries)?;
 
         let mut total_affected_rows = 0u64;
+        let write_group_id = TransactionId(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(common::epochabs!() as u64),
+        );
+        let mut touched_tables = std::collections::HashSet::new();
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
             let apply_request_id = format!("{}::apply{}", request_id, idx + 1);
-            let response = handle_query_command(
+            let response = handle_query_command_in_write_group(
                 &apply_request_id,
                 staged_query,
                 &mut self.catalogs,
                 &self.wal,
                 &self.node_data_dir,
                 &mut self.runtime_indexes,
+                write_group_id,
+                &mut touched_tables,
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
+                abort_external_write_group(
+                    &self.wal,
+                    &self.catalogs,
+                    &mut self.runtime_indexes,
+                    &touched_tables,
+                    write_group_id,
+                );
+
                 let error = match response.result {
                     ConnectorResult::Error(message) => message,
                     _ => "staged query apply failed".to_string(),
@@ -366,6 +386,17 @@ impl ServerApp {
             if let ConnectorResult::Mutation(mutation) = response.result {
                 total_affected_rows = total_affected_rows.saturating_add(mutation.affected_rows);
             }
+        }
+
+        if let Err(err) = commit_external_write_group(&self.wal, &touched_tables, write_group_id) {
+            abort_external_write_group(
+                &self.wal,
+                &self.catalogs,
+                &mut self.runtime_indexes,
+                &touched_tables,
+                write_group_id,
+            );
+            return Err(format!("transaction commit marker append failed: {err}"));
         }
 
         Ok(total_affected_rows)
@@ -481,6 +512,7 @@ impl ServerApp {
                 &wal_id,
                 TransactionRecord {
                     id: next_id,
+                    groupid: None,
                     refid,
                     timestamp_epoch_ms,
                     actor: UserId::from_username("server"),

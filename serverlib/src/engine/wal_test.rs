@@ -4,6 +4,7 @@ use super::*;
 fn make_record(id: u64, kind: TransactionKind, actor: &UserId) -> TransactionRecord {
     TransactionRecord {
         id: TransactionId(id),
+        groupid: None,
         refid: None,
         timestamp_epoch_ms: id,
         actor: actor.clone(),
@@ -45,8 +46,51 @@ fn compact_keeps_latest_schema_metadata_and_appends_truncate_marker() {
     assert_eq!(records[1].id, TransactionId(4));
     assert_eq!(records[2].kind, TransactionKind::Truncate);
     assert_eq!(records[2].id, TransactionId(6));
-    assert_eq!(records[2].refid, Some(TransactionId(5)));
+    assert_eq!(records[2].refid, None);
     assert_eq!(records[2].timestamp_epoch_ms, 99);
+}
+
+#[test]
+fn compact_clears_refids_to_removed_records() {
+    let wal = ConcurrentWalManager::new();
+    let actor = UserId::from_username("tester");
+
+    wal.append(
+        "users",
+        make_record(1, TransactionKind::SchemaChange, &actor),
+    )
+    .expect("append should succeed");
+    wal.append(
+        "users",
+        make_record(2, TransactionKind::MetadataChange, &actor),
+    )
+    .expect("append should succeed");
+    wal.append(
+        "users",
+        TransactionRecord {
+            id: TransactionId(3),
+            groupid: None,
+            refid: Some(TransactionId(1)),
+            timestamp_epoch_ms: 3,
+            actor: actor.clone(),
+            kind: TransactionKind::SchemaChange,
+            payload: vec![3],
+        },
+    )
+    .expect("append should succeed");
+
+    wal.compact_stream_to_latest_schema_and_metadata("users", actor, 100)
+        .expect("compact should succeed");
+
+    let records = wal.since("users", None);
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].id, TransactionId(2));
+    assert_eq!(records[0].refid, None);
+    assert_eq!(records[1].id, TransactionId(3));
+    assert_eq!(records[1].refid, None);
+    assert_eq!(records[2].kind, TransactionKind::Truncate);
+    assert_eq!(records[2].id, TransactionId(4));
+    assert_eq!(records[2].refid, Some(TransactionId(3)));
 }
 
 #[test]

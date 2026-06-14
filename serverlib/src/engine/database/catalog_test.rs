@@ -593,6 +593,7 @@ fn schema_replay_uses_latest_transaction_payload() {
         "users",
         crate::TransactionRecord {
             id: crate::TransactionId(1),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 1,
             actor: actor.clone(),
@@ -625,6 +626,7 @@ fn schema_replay_uses_latest_transaction_payload() {
         "users",
         crate::TransactionRecord {
             id: crate::TransactionId(2),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 2,
             actor,
@@ -681,6 +683,7 @@ fn metadata_and_sql_definition_replay_builds_view_state() {
         "main_db",
         crate::TransactionRecord {
             id: crate::TransactionId(1),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 100,
             actor: actor.clone(),
@@ -705,6 +708,7 @@ fn metadata_and_sql_definition_replay_builds_view_state() {
         "main_db",
         crate::TransactionRecord {
             id: crate::TransactionId(2),
+            groupid: None,
             refid: Some(crate::TransactionId(1)),
             timestamp_epoch_ms: 101,
             actor,
@@ -745,6 +749,7 @@ fn table_lifecycle_replay_honors_create_then_drop() {
         "main_db",
         crate::TransactionRecord {
             id: crate::TransactionId(1),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 1,
             actor: actor.clone(),
@@ -767,6 +772,7 @@ fn table_lifecycle_replay_honors_create_then_drop() {
         "main_db",
         crate::TransactionRecord {
             id: crate::TransactionId(2),
+            groupid: None,
             refid: Some(crate::TransactionId(1)),
             timestamp_epoch_ms: 2,
             actor,

@@ -380,20 +380,49 @@ fn compact_entries_to_latest_schema_and_metadata(
         })
         .cloned();
 
+    let mut retained_ids = std::collections::HashSet::new();
+    if let Some(schema) = latest_schema.clone() {
+        retained_ids.insert(schema.id.0);
+    }
+
+    if let Some(metadata) = latest_metadata.clone() {
+        retained_ids.insert(metadata.id.0);
+    }
+
+    for record in entries.iter_mut() {
+        if !retained_ids.contains(&record.id.0) {
+            record.kind = TransactionKind::Ignore;
+            record.refid = None;
+            record.payload.clear();
+        }
+    }
+
     let mut retained = Vec::new();
-    if let Some(schema) = latest_schema {
+    if let Some(mut schema) = latest_schema {
+        if schema.refid.is_some_and(|refid| !retained_ids.contains(&refid.0)) {
+            schema.refid = None;
+        }
         retained.push(schema);
     }
-    
-    if let Some(metadata) = latest_metadata {
+
+    if let Some(mut metadata) = latest_metadata {
+        if metadata.refid.is_some_and(|refid| !retained_ids.contains(&refid.0)) {
+            metadata.refid = None;
+        }
         retained.push(metadata);
     }
 
     retained.sort_by_key(|record| record.id.0);
 
+    let truncate_refid = entries
+        .last()
+        .map(|record| record.id)
+        .filter(|refid| retained_ids.contains(&refid.0));
+
     retained.push(TransactionRecord {
         id: TransactionId(last_id.0 + 1),
-        refid: Some(last_id),
+        groupid: None,
+        refid: truncate_refid,
         timestamp_epoch_ms,
         actor,
         kind: TransactionKind::Truncate,

@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use super::row_payload::decode_row_payload;
 use super::table::DatabaseTable;
 use super::transaction::TransactionLog;
-use crate::{ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin, TransactionKind};
+use crate::{
+    load_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
+    TransactionKind,
+};
 
 /// In-memory state for a single index.
 /// Each entry is a composite key tuple in the index's field order.
@@ -111,6 +114,7 @@ impl RuntimeIndexStore {
         I: IntoIterator<Item = &'a DatabaseIndex>,
     {
         match kind {
+            TransactionKind::Ignore => {}
             TransactionKind::Delete => self.remove_table_row(indexes, row_map),
             TransactionKind::Insert | TransactionKind::Update => {
                 self.record_table_row(indexes, row_map)
@@ -143,39 +147,13 @@ impl RuntimeIndexStore {
                     self.register_index(index.clone());
                 }
 
-                let records = wal.since(&table_id, None);
+                let live_rows = load_live_rows(wal, &table_id, &table.schema);
                 for index in table.indexes.values() {
-                    let mut live: Vec<(u64, Vec<Vec<u8>>)> = Vec::new();
-                    let mut deleted: HashSet<u64> = HashSet::new();
-
-                    for record in &records {
-
-                        match record.kind {
-
-                            TransactionKind::Insert => {
-                                if let Ok(row_map) = decode_row_payload(&table.schema, &record.payload) {
-                                    let key = index_value_tuple(index, &row_map);
-                                    live.push((record.id.0, key));
-                                }
-                            },
-
-                            TransactionKind::Delete => {
-                                if let Some(refid) = record.refid {
-                                    deleted.insert(refid.0);
-                                }
-                            },
-
-                            _ => {}
-
-                        }
-
-                    }
-
                     let state = self.index_mut(&index.index_id.0);
                     state.rebuild(
-                        live.into_iter()
-                            .filter(|(id, _)| !deleted.contains(id))
-                            .map(|(_, key)| key)
+                        live_rows
+                            .iter()
+                            .map(|(_, row_map)| index_value_tuple(index, row_map))
                             .collect(),
                     );
                     state.index = Some(index.clone());

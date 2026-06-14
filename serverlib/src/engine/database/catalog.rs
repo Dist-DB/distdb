@@ -399,6 +399,46 @@ impl DatabaseCatalog {
 
     }
 
+    pub fn begin_table_write(&mut self, table_id: &str) -> DatabaseResult<()> {
+        let table_id = common::normalize_identifier!(table_id);
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        table.lock()
+
+    }
+
+    pub fn finalize_table_write(&mut self, table_id: &str) -> DatabaseResult<()> {
+
+        let table_id = common::normalize_identifier!(table_id);
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+
+        if table.status() != ObjectStatus::Lock {
+            return Err(DatabaseError::TableNotLocked);
+        }
+
+        table.begin_sync()?;
+
+        if !self.table_sync_acknowledged_stub(&table_id) {
+            return Err(DatabaseError::SyncPending);
+        }
+
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        table.complete_sync()
+
+    }
+
+    pub fn abort_table_write(&mut self, table_id: &str) -> DatabaseResult<()> {
+
+        let table_id = common::normalize_identifier!(table_id);
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+
+        if table.status() != ObjectStatus::Lock {
+            return Err(DatabaseError::TableNotLocked);
+        }
+
+        table.abort()
+
+    }
+
     pub(crate) fn transition_schema_change_phase(
         &mut self,
         table_id: &str,

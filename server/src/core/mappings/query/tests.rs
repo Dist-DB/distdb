@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use connector::{ConnectorResult, DataQuery};
 use serverlib::DatabaseCatalog;
-use serverlib::{ConcurrentWalManager, RuntimeIndexStore};
+use serverlib::{
+    ConcurrentWalManager, FieldDef, FieldIndex, FieldType, RuntimeIndexStore, TableSchema,
+    TransactionId, TransactionKind,
+};
 
 use super::*;
 
@@ -140,4 +143,130 @@ fn commit_is_explicitly_recognized() {
     };
 
     assert!(message.contains("session transactions are not wired yet"));
+}
+
+#[test]
+fn append_row_payload_record_rejects_missing_refid() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::Int(32),
+                nullable: false,
+                indexed: FieldIndex::PrimaryKey,
+                default_value: None,
+                metadata: None,
+            }]),
+        )
+        .expect("table should be registered");
+
+    let table = catalog
+        .table("users")
+        .expect("users table should exist")
+        .clone();
+
+    let mut row = HashMap::new();
+    row.insert("id".to_string(), b"1".to_vec());
+
+    let payload =
+        serverlib::encode_row_payload(table.schema(), &row).expect("row payload should encode");
+
+    let err = super::core::append_row_payload_record(
+        &wal,
+        "users",
+        &table,
+        &mut runtime_indexes,
+        TransactionKind::Delete,
+        payload,
+        1,
+        Some(TransactionId(99)),
+        None,
+    )
+    .expect_err("missing refid should be rejected");
+
+    assert!(err.contains("references stale or missing live transaction id 99"));
+}
+
+#[test]
+fn append_row_payload_record_rejects_stale_refid() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::Int(32),
+                nullable: false,
+                indexed: FieldIndex::PrimaryKey,
+                default_value: None,
+                metadata: None,
+            }]),
+        )
+        .expect("table should be registered");
+
+    let table = catalog
+        .table("users")
+        .expect("users table should exist")
+        .clone();
+
+    let mut row = HashMap::new();
+    row.insert("id".to_string(), b"1".to_vec());
+
+    let payload =
+        serverlib::encode_row_payload(table.schema(), &row).expect("row payload should encode");
+
+    super::core::append_row_payload_record(
+        &wal,
+        "users",
+        &table,
+        &mut runtime_indexes,
+        TransactionKind::Insert,
+        payload.clone(),
+        1,
+        None,
+        None,
+    )
+    .expect("insert should succeed");
+
+    super::core::append_row_payload_record(
+        &wal,
+        "users",
+        &table,
+        &mut runtime_indexes,
+        TransactionKind::Delete,
+        payload.clone(),
+        2,
+        Some(TransactionId(1)),
+        None,
+    )
+    .expect("first delete should succeed");
+
+    let err = super::core::append_row_payload_record(
+        &wal,
+        "users",
+        &table,
+        &mut runtime_indexes,
+        TransactionKind::Delete,
+        payload,
+        3,
+        Some(TransactionId(1)),
+        None,
+    )
+    .expect_err("stale refid should be rejected");
+
+    assert!(err.contains("references stale or missing live transaction id 1"));
 }

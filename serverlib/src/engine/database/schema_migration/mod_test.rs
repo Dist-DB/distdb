@@ -137,6 +137,7 @@ fn disk_executor_rewrites_flushes_and_cuts_over() {
     let seed_records = vec![
         TransactionRecord {
             id: TransactionId(1),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 1,
             actor: actor.clone(),
@@ -145,6 +146,7 @@ fn disk_executor_rewrites_flushes_and_cuts_over() {
         },
         TransactionRecord {
             id: TransactionId(2),
+            groupid: None,
             refid: Some(TransactionId(1)),
             timestamp_epoch_ms: 2,
             actor: actor.clone(),
@@ -153,6 +155,7 @@ fn disk_executor_rewrites_flushes_and_cuts_over() {
         },
         TransactionRecord {
             id: TransactionId(3),
+            groupid: None,
             refid: Some(TransactionId(2)),
             timestamp_epoch_ms: 3,
             actor,
@@ -218,6 +221,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
 
     let seed_records = vec![TransactionRecord {
         id: TransactionId(1),
+        groupid: None,
         refid: None,
         timestamp_epoch_ms: 1,
         actor,
@@ -294,6 +298,7 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
 
     let seed_records = vec![TransactionRecord {
         id: TransactionId(1),
+        groupid: None,
         refid: None,
         timestamp_epoch_ms: 1,
         actor,
@@ -363,6 +368,7 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
 
     let seed_records = vec![TransactionRecord {
         id: TransactionId(1),
+        groupid: None,
         refid: None,
         timestamp_epoch_ms: 1,
         actor,

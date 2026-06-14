@@ -64,6 +64,7 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
         "users",
         TransactionRecord {
             id: TransactionId(1),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 1,
             actor: actor.clone(),
@@ -82,6 +83,7 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
         "profiles",
         TransactionRecord {
             id: TransactionId(10),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 10,
             actor: actor.clone(),
@@ -101,6 +103,7 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
         "profiles",
         TransactionRecord {
             id: TransactionId(11),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 11,
             actor,
@@ -120,6 +123,7 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
         "profiles",
         TransactionRecord {
             id: TransactionId(12),
+            groupid: None,
             refid: None,
             timestamp_epoch_ms: 12,
             actor: UserId("test-user".to_string()),

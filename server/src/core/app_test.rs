@@ -9,8 +9,9 @@ use connector::{
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
     DatabaseIndex, DatabaseIndexKind, EntityMetadata, EntityMetadataPayload, FieldDef,
-    FieldIndex, FieldType, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
-    SqlObjectKind, TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
+    FieldIndex, FieldType, ObjectStatus, SchemaChangePayload, SqlDefinitionAction,
+    SqlDefinitionPayload, SqlObjectKind, TableSchema, TransactionId, TransactionKind,
+    TransactionRecord, UserId,
 };
 
 #[derive(Debug)]
@@ -85,6 +86,7 @@ fn bootstrap_replays_latest_schema_from_wal() {
             &catalog.database_id.0,
             TransactionRecord {
                 id: TransactionId(1),
+                groupid: None,
                 refid: None,
                 timestamp_epoch_ms: 1,
                 actor: UserId::from_username("bootstrap-tester"),
@@ -170,6 +172,7 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
             &wal_id,
             TransactionRecord {
                 id: TransactionId(1),
+                groupid: None,
                 refid: None,
                 timestamp_epoch_ms: 1,
                 actor: actor.clone(),
@@ -193,6 +196,7 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
             &wal_id,
             TransactionRecord {
                 id: TransactionId(2),
+                groupid: None,
                 refid: Some(TransactionId(1)),
                 timestamp_epoch_ms: 2,
                 actor: actor.clone(),
@@ -218,6 +222,7 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
             &wal_id,
             TransactionRecord {
                 id: TransactionId(3),
+                groupid: None,
                 refid: Some(TransactionId(2)),
                 timestamp_epoch_ms: 3,
                 actor: actor.clone(),
@@ -243,6 +248,7 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
             &wal_id,
             TransactionRecord {
                 id: TransactionId(4),
+                groupid: None,
                 refid: Some(TransactionId(3)),
                 timestamp_epoch_ms: 4,
                 actor,
@@ -629,6 +635,84 @@ fn update_query_updates_live_row() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], b"1".to_vec());
     assert_eq!(result.rows[0][1], b"sam+updated@example.com".to_vec());
+
+    assert_eq!(
+        app.catalogs
+            .get("main")
+            .and_then(|catalog| catalog.table_status("users")),
+        Some(ObjectStatus::Ready)
+    );
+}
+
+#[test]
+fn rejected_insert_releases_table_write_lock() {
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-insert-abort-lock-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-create-table-lock-abort",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key, email varchar(255) not null)"
+                    .to_string(),
+            },
+        },
+    ));
+    assert_eq!(create_response.status, ResponseStatus::Applied);
+
+    let first_insert = app.handle_connector_request(&ConnectorRequest::new(
+        "req-insert-lock-abort-1",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id, email) values (1, 'sam@example.com')".to_string(),
+            },
+        },
+    ));
+    assert_eq!(first_insert.status, ResponseStatus::Applied);
+
+    let duplicate_insert = app.handle_connector_request(&ConnectorRequest::new(
+        "req-insert-lock-abort-2",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id, email) values (1, 'sam@example.com')".to_string(),
+            },
+        },
+    ));
+    assert_eq!(duplicate_insert.status, ResponseStatus::Rejected);
+
+    assert_eq!(
+        app.catalogs
+            .get("main")
+            .and_then(|catalog| catalog.table_status("users")),
+        Some(ObjectStatus::Ready)
+    );
+
+    let second_insert = app.handle_connector_request(&ConnectorRequest::new(
+        "req-insert-lock-abort-3",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id, email) values (2, 'alex@example.com')".to_string(),
+            },
+        },
+    ));
+    assert_eq!(second_insert.status, ResponseStatus::Applied);
 }
 
 #[test]
@@ -779,6 +863,369 @@ fn active_session_transaction_stages_queries_until_commit() {
         panic!("expected query result");
     };
     assert_eq!(read_result.rows.len(), 1);
+}
+
+#[test]
+fn commit_groups_staged_dml_into_one_write_batch() {
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-tx-group-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-tx-group",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    );
+
+    let create_table_response = app.handle_connector_request(&create_table);
+    assert_eq!(create_table_response.status, ResponseStatus::Applied);
+
+    let begin = ConnectorRequest::new(
+        "req-begin-tx-group",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "start transaction".to_string(),
+            },
+        },
+    );
+
+    let begin_response = app.handle_connector_request_for_session(&begin, "session-a");
+    assert_eq!(begin_response.status, ResponseStatus::Applied);
+
+    for (request_id, sql) in [
+        ("req-staged-1", "insert into users (id) values (1)"),
+        ("req-staged-2", "insert into users (id) values (2)"),
+    ] {
+        let staged_request = ConnectorRequest::new(
+            request_id,
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        );
+
+        let staged_response =
+            app.handle_connector_request_for_session(&staged_request, "session-a");
+        assert_eq!(staged_response.status, ResponseStatus::Applied);
+    }
+
+    let commit_request = ConnectorRequest::new(
+        "req-commit-group",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+
+    let commit_response =
+        app.handle_connector_request_for_session(&commit_request, "session-a");
+    assert_eq!(commit_response.status, ResponseStatus::Applied);
+
+    let records = app.wal.since("users", None);
+
+    let write_begin = records
+        .iter()
+        .filter(|record| record.kind == TransactionKind::WriteBegin)
+        .collect::<Vec<_>>();
+    assert_eq!(write_begin.len(), 1);
+
+    let write_commit = records
+        .iter()
+        .filter(|record| record.kind == TransactionKind::WriteCommit)
+        .collect::<Vec<_>>();
+    assert_eq!(write_commit.len(), 1);
+
+    let write_abort = records
+        .iter()
+        .filter(|record| record.kind == TransactionKind::WriteAbort)
+        .count();
+    assert_eq!(write_abort, 0);
+
+    let group_id = write_begin[0]
+        .groupid
+        .expect("write begin should carry the transaction group id");
+    assert_eq!(write_commit[0].groupid, Some(group_id));
+
+    let inserts = records
+        .iter()
+        .filter(|record| record.kind == TransactionKind::Insert)
+        .collect::<Vec<_>>();
+    assert_eq!(inserts.len(), 2);
+    assert!(
+        inserts
+            .iter()
+            .all(|record| record.groupid == Some(group_id))
+    );
+}
+
+#[test]
+fn failed_commit_validation_leaves_real_wal_and_indexes_clean() {
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-tx-abort-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    for (request_id, sql) in [(
+        "req-create-table-tx-abort",
+        "create table users (id bigint not null primary key)",
+    )] {
+        let response = app.handle_connector_request(&ConnectorRequest::new(
+            request_id,
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        ));
+        assert_eq!(response.status, ResponseStatus::Applied);
+    }
+
+    let begin = ConnectorRequest::new(
+        "req-begin-tx-abort",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "start transaction".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&begin, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    for (request_id, sql) in [
+        ("req-staged-abort-1", "insert into users (id) values (1)"),
+        ("req-staged-abort-2", "insert into users (id) values (1)"),
+    ] {
+        let staged_request = ConnectorRequest::new(
+            request_id,
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        );
+
+        let staged_response =
+            app.handle_connector_request_for_session(&staged_request, "session-a");
+        assert_eq!(staged_response.status, ResponseStatus::Applied);
+    }
+
+    let commit_request = ConnectorRequest::new(
+        "req-commit-abort",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+
+    let commit_response =
+        app.handle_connector_request_for_session(&commit_request, "session-a");
+    assert_eq!(commit_response.status, ResponseStatus::Rejected);
+
+    let records_after_failed_commit = app.wal.since("users", None);
+    assert!(!records_after_failed_commit.iter().any(|record| {
+        matches!(
+            record.kind,
+            TransactionKind::Insert
+                | TransactionKind::Delete
+                | TransactionKind::Update
+                | TransactionKind::WriteBegin
+                | TransactionKind::WriteCommit
+                | TransactionKind::WriteAbort
+        )
+    }));
+
+    let read_request = ConnectorRequest::new(
+        "req-select-after-abort",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select id from users where id=1".to_string(),
+            },
+        },
+    );
+
+    let read_response = app.handle_connector_request_for_session(&read_request, "session-b");
+    assert_eq!(read_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(read_result) = read_response.result else {
+        panic!("expected query result");
+    };
+    assert!(read_result.rows.is_empty());
+
+    let retry_insert = ConnectorRequest::new(
+        "req-insert-after-abort",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id) values (1)".to_string(),
+            },
+        },
+    );
+
+    let retry_insert_response = app.handle_connector_request(&retry_insert);
+    assert_eq!(retry_insert_response.status, ResponseStatus::Applied);
+}
+
+#[test]
+fn commit_shares_one_group_id_across_touched_tables() {
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-tx-multitable-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    for (request_id, sql) in [
+        (
+            "req-create-users-multitable",
+            "create table users (id bigint not null primary key)",
+        ),
+        (
+            "req-create-profiles-multitable",
+            "create table profiles (id bigint not null primary key)",
+        ),
+    ] {
+        let response = app.handle_connector_request(&ConnectorRequest::new(
+            request_id,
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        ));
+        assert_eq!(response.status, ResponseStatus::Applied);
+    }
+
+    let begin = ConnectorRequest::new(
+        "req-begin-tx-multitable",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "start transaction".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&begin, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    for (request_id, sql) in [
+        ("req-staged-users-multitable", "insert into users (id) values (1)"),
+        (
+            "req-staged-profiles-multitable",
+            "insert into profiles (id) values (10)",
+        ),
+    ] {
+        let staged_request = ConnectorRequest::new(
+            request_id,
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        );
+
+        let staged_response =
+            app.handle_connector_request_for_session(&staged_request, "session-a");
+        assert_eq!(staged_response.status, ResponseStatus::Applied);
+    }
+
+    let commit_request = ConnectorRequest::new(
+        "req-commit-multitable",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+
+    let commit_response =
+        app.handle_connector_request_for_session(&commit_request, "session-a");
+    assert_eq!(commit_response.status, ResponseStatus::Applied);
+
+    let users_records = app.wal.since("users", None);
+    let profiles_records = app.wal.since("profiles", None);
+
+    let users_group_id = users_records
+        .iter()
+        .find(|record| record.kind == TransactionKind::WriteBegin)
+        .and_then(|record| record.groupid)
+        .expect("users write begin should have a group id");
+    let profiles_group_id = profiles_records
+        .iter()
+        .find(|record| record.kind == TransactionKind::WriteBegin)
+        .and_then(|record| record.groupid)
+        .expect("profiles write begin should have a group id");
+
+    assert_eq!(users_group_id, profiles_group_id);
+    
+    assert!(users_records.iter().any(|record| {
+        record.kind == TransactionKind::WriteCommit && record.groupid == Some(users_group_id)
+    }));
+    
+    assert!(profiles_records.iter().any(|record| {
+        record.kind == TransactionKind::WriteCommit && record.groupid == Some(users_group_id)
+    }));
+    
+    assert!(users_records.iter().any(|record| {
+        record.kind == TransactionKind::Insert && record.groupid == Some(users_group_id)
+    }));
+    
+    assert!(profiles_records.iter().any(|record| {
+        record.kind == TransactionKind::Insert && record.groupid == Some(users_group_id)
+    }));
+
 }
 
 #[test]
