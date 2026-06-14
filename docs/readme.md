@@ -3,7 +3,51 @@
 
 This project is orientated to the development of a P2P distributed database
 
-## Principles
+## Current Status
+
+The platform current features the following:-
+
+### Core Capabilities
+
+SQL Support (MySQL 8.0 Compatible):
+
+✓ CREATE/ALTER/DROP TABLE
+✓ INSERT/UPDATE/DELETE/SELECT
+✓ Complex JOINs (INNER, LEFT, RIGHT, FULL OUTER)
+✓ WHERE conditions, ORDER BY, LIMIT
+✓ Indexes (Primary key, indexed fields)
+✓ SHOW TABLES/DATABASES
+
+### Transactional Behavior:
+
+✓ Explicit transactions (BEGIN/COMMIT/ROLLBACK)
+✓ Per-session staged DML during active transaction
+✓ Snapshot isolation for reads within transaction
+✓ Write-write conflict detection & rejection
+✓ Predicate conflict detection (write-skew prevention)
+✓ Grouped atomic commits to WAL
+✓ Transaction markers in WAL for recovery
+
+### Infrastructure:
+
+✓ WAL (Write-Ahead Log) for durability & recovery
+✓ Transaction log replay on startup
+✓ Catalog persistence (schema storage)
+✓ Runtime index store (in-memory query optimization)
+✓ AES encryption for client-server transport
+✓ P2P networking foundation (Kademlia DHT)
+
+## Architectural Overview
+
+This platform features a number of optimizations that provide extensive improvements over many traditional databases
+
+- Use of WAL - WAL (or Write Ahead Logging) is a true tranactional log of events that occur on the platform - Each Database Entity (a table, view, procedure, function) feature their own WAL. Each database entity features a state-machine (load->ready<->lock->sync->ready) that gates the DML
+- Internal data representation to Rust native types - No exotics
+- High-speed tombstoning of records (using refid)
+- Seamless P2P Replication topology - using Kademlia DHT
+- All opensource (Server, ServerLib and Console under GNU-GPL3 Licensing)
+
+## Guiding Principles
 
 The database platform conforms to the following principles
 

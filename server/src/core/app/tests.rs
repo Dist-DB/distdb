@@ -1,18 +1,21 @@
 use std::cell::RefCell;
 
 use super::*;
+use crate::core::config::ServerRuntimeConfig;
 use crate::core::mappings::perf::QueryTimingThresholds;
+use common::helpers::format::FileKind;
 use connector::{
-    ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest, ConnectorResult,
+    ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorResult,
     ConnectorTransport, ResponseStatus,
 };
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
-    DatabaseIndex, DatabaseIndexKind, EntityMetadata, EntityMetadataPayload, FieldDef,
+    DatabaseCatalog, DatabaseIndex, DatabaseIndexKind, EntityMetadata, EntityMetadataPayload, FieldDef,
     FieldIndex, FieldType, ObjectStatus, SchemaChangePayload, SqlDefinitionAction,
-    SqlDefinitionPayload, SqlObjectKind, TableSchema, TransactionId, TransactionKind,
+    SqlDefinitionPayload, SqlObjectKind, TableSchema, TransactionId, TransactionKind, RuntimeIndexStore,
     TransactionRecord, UserId,
 };
+use serverlib::decode_row_payload;
 
 #[derive(Debug)]
 struct InProcessServerTransport {
@@ -27,6 +30,7 @@ impl ConnectorTransport for InProcessServerTransport {
 
 #[test]
 fn bootstrap_replays_latest_schema_from_wal() {
+
     let unique_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
@@ -113,10 +117,12 @@ fn bootstrap_replays_latest_schema_from_wal() {
     .index_id
     .0;
     assert!(loaded.index(&email_index_id).is_some());
+
 }
 
 #[test]
 fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
+
     let unique_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
@@ -269,17 +275,21 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
         .expect("catalog should be loaded");
 
     assert!(loaded.trigger("trg_users_bi").is_some());
+    
     assert_eq!(
         loaded
             .entity_metadata("trg_users_bi")
             .and_then(|metadata| metadata.created_by.as_deref()),
         Some("bootstrap-object-replay")
     );
+    
     assert!(loaded.view("users_v").is_none());
+
 }
 
 #[test]
 fn select_query_returns_table_schema_columns() {
+
     let unique_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
@@ -352,10 +362,12 @@ fn select_query_returns_table_schema_columns() {
 
     assert_eq!(column_names, vec!["id", "email"]);
     assert!(result.rows.is_empty());
+
 }
 
 #[test]
 fn show_tables_query_returns_table_name_rows() {
+
     let unique_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
@@ -440,10 +452,12 @@ fn show_tables_query_returns_table_name_rows() {
         .collect::<Vec<_>>();
 
     assert_eq!(row_values, vec!["accounts", "users"]);
+
 }
 
 #[test]
 fn create_table_query_registers_table_with_schema() {
+
     let unique_suffix = common::epochabs!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -477,14 +491,17 @@ fn create_table_query_registers_table_with_schema() {
     let schema = catalog
         .table_schema("users")
         .expect("users schema should exist");
+    
     assert_eq!(schema.fields.len(), 2);
     assert_eq!(schema.fields[0].field_name, "id");
     assert_eq!(schema.fields[0].indexed, FieldIndex::PrimaryKey);
     assert_eq!(schema.fields[1].field_name, "email");
+
 }
 
 #[test]
 fn insert_query_appends_insert_record_to_table_wal() {
+
     let unique_suffix = common::epochabs!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -550,10 +567,12 @@ fn insert_query_appends_insert_record_to_table_wal() {
 
     assert_eq!(payload.get("id"), Some(&b"1".to_vec()));
     assert_eq!(payload.get("email"), Some(&b"sam@example.com".to_vec()));
+
 }
 
 #[test]
 fn update_query_updates_live_row() {
+
     let unique_suffix = common::epochabs!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -642,10 +661,12 @@ fn update_query_updates_live_row() {
             .and_then(|catalog| catalog.table_status("users")),
         Some(ObjectStatus::Ready)
     );
+
 }
 
 #[test]
 fn rejected_insert_releases_table_write_lock() {
+
     let unique_suffix = common::epochabs!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -713,10 +734,12 @@ fn rejected_insert_releases_table_write_lock() {
         },
     ));
     assert_eq!(second_insert.status, ResponseStatus::Applied);
+
 }
 
 #[test]
 fn session_transaction_control_is_scoped_by_session_id() {
+
     let unique_suffix = common::epochabs!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -767,11 +790,14 @@ fn session_transaction_control_is_scoped_by_session_id() {
 
     let commit_same_response =
         app.handle_connector_request_for_session(&commit_same_session, "session-a");
+    
     assert_eq!(commit_same_response.status, ResponseStatus::Applied);
+
 }
 
 #[test]
 fn active_session_transaction_stages_queries_until_commit() {
+
     let unique_suffix = common::epochabs!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -827,6 +853,25 @@ fn active_session_transaction_stages_queries_until_commit() {
         app.handle_connector_request_for_session(&staged_query, "session-a");
     assert_eq!(staged_response.status, ResponseStatus::Applied);
 
+    let read_before_commit = ConnectorRequest::new(
+        "req-select-before-commit",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select id from users where id=1".to_string(),
+            },
+        },
+    );
+
+    let read_before_commit_response =
+        app.handle_connector_request_for_session(&read_before_commit, "session-b");
+    assert_eq!(read_before_commit_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(read_before_commit_result) = read_before_commit_response.result else {
+        panic!("expected query result");
+    };
+    assert!(read_before_commit_result.rows.is_empty());
+
     let commit_request = ConnectorRequest::new(
         "req-commit",
         ConnectorCommand::Query {
@@ -863,10 +908,524 @@ fn active_session_transaction_stages_queries_until_commit() {
         panic!("expected query result");
     };
     assert_eq!(read_result.rows.len(), 1);
+    
+}
+
+#[test]
+fn explicit_transaction_rejects_non_dml_schema_statements() {
+
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-tx-isolation-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let begin = ConnectorRequest::new(
+        "req-begin-isolation",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "begin".to_string(),
+            },
+        },
+    );
+
+    let begin_response = app.handle_connector_request_for_session(&begin, "session-a");
+    assert_eq!(begin_response.status, ResponseStatus::Applied);
+
+    let create_table_in_tx = ConnectorRequest::new(
+        "req-create-table-in-tx",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    );
+
+    let create_table_response =
+        app.handle_connector_request_for_session(&create_table_in_tx, "session-a");
+    assert_eq!(create_table_response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = create_table_response.result else {
+        panic!("expected error result");
+    };
+
+    assert!(
+        message.contains("only single-statement insert/update/delete queries are allowed inside explicit transactions")
+    );
+
+}
+
+#[test]
+fn snapshot_isolation_rejects_concurrent_write_write_conflicts() {
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-snapshot-conflict-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-snapshot-conflict",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key, email varchar(255) not null)".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&create_table).status, ResponseStatus::Applied);
+
+    let seed_row = ConnectorRequest::new(
+        "req-seed-snapshot-conflict",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id, email) values (1, 'seed@example.com')".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&seed_row).status, ResponseStatus::Applied);
+
+    for session_id in ["session-a", "session-b"] {
+        let begin = ConnectorRequest::new(
+            &format!("req-begin-snapshot-conflict-{session_id}"),
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "begin".to_string(),
+                },
+            },
+        );
+        assert_eq!(
+            app.handle_connector_request_for_session(&begin, session_id)
+                .status,
+            ResponseStatus::Applied
+        );
+    }
+
+    let stage_a = ConnectorRequest::new(
+        "req-stage-update-snapshot-conflict-a",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "update users set email='from-a@example.com' where id=1".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&stage_a, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let stage_b = ConnectorRequest::new(
+        "req-stage-update-snapshot-conflict-b",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "update users set email='from-b@example.com' where id=1".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&stage_b, "session-b")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let commit_a = ConnectorRequest::new(
+        "req-commit-snapshot-conflict-a",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&commit_a, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let commit_b = ConnectorRequest::new(
+        "req-commit-snapshot-conflict-b",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+
+    let commit_b_response = app.handle_connector_request_for_session(&commit_b, "session-b");
+    assert_eq!(commit_b_response.status, ResponseStatus::Rejected);
+
+}
+
+#[test]
+fn snapshot_isolation_keeps_repeatable_reads_within_transaction() {
+
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-snapshot-repeatable-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-snapshot-repeatable",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key, email varchar(255) not null)".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&create_table).status, ResponseStatus::Applied);
+
+    let seed_row = ConnectorRequest::new(
+        "req-seed-snapshot-repeatable",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id, email) values (1, 'seed@example.com')".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&seed_row).status, ResponseStatus::Applied);
+
+    let begin = ConnectorRequest::new(
+        "req-begin-snapshot-repeatable",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "begin".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&begin, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let tx_read = ConnectorRequest::new(
+        "req-read-snapshot-repeatable-tx",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select email from users where id=1".to_string(),
+            },
+        },
+    );
+
+    let concurrent_update = ConnectorRequest::new(
+        "req-concurrent-update-snapshot-repeatable",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "update users set email='updated@example.com' where id=1".to_string(),
+            },
+        },
+    );
+
+    let first_read = app.handle_connector_request_for_session(&tx_read, "session-a");
+    assert_eq!(first_read.status, ResponseStatus::Applied);
+
+    let concurrent_update_response = app.handle_connector_request(&concurrent_update);
+    assert_eq!(concurrent_update_response.status, ResponseStatus::Applied);
+
+    let second_read = app.handle_connector_request_for_session(&tx_read, "session-a");
+    assert_eq!(second_read.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(first_rows) = first_read.result else {
+        panic!("expected first query result");
+    };
+    let ConnectorResult::Query(second_rows) = second_read.result else {
+        panic!("expected second query result");
+    };
+
+    assert_eq!(first_rows.rows, second_rows.rows);
+    
+}
+
+#[test]
+fn snapshot_isolation_transactional_reads_see_own_staged_writes() {
+
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-snapshot-own-writes-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-snapshot-own-writes",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key, email varchar(255) not null)".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&create_table).status, ResponseStatus::Applied);
+
+    let begin = ConnectorRequest::new(
+        "req-begin-snapshot-own-writes",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "begin".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&begin, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let stage_insert = ConnectorRequest::new(
+        "req-stage-insert-snapshot-own-writes",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id, email) values (7, 'tx@example.com')".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&stage_insert, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let tx_read = ConnectorRequest::new(
+        "req-read-snapshot-own-writes",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select email from users where id=7".to_string(),
+            },
+        },
+    );
+
+    let tx_read_response = app.handle_connector_request_for_session(&tx_read, "session-a");
+    assert_eq!(tx_read_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(tx_read_result) = tx_read_response.result else {
+        panic!("expected query result");
+    };
+    assert_eq!(tx_read_result.rows.len(), 1);
+    assert_eq!(tx_read_result.rows[0][0], b"tx@example.com".to_vec());
+
+    let outside_read = ConnectorRequest::new(
+        "req-outside-read-snapshot-own-writes",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select email from users where id=7".to_string(),
+            },
+        },
+    );
+
+    let outside_read_response =
+        app.handle_connector_request_for_session(&outside_read, "session-b");
+    assert_eq!(outside_read_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(outside_read_result) = outside_read_response.result else {
+        panic!("expected query result");
+    };
+    assert!(outside_read_result.rows.is_empty());
+
+}
+
+#[test]
+fn serializable_rejects_write_skew_across_disjoint_rows() {
+
+    let unique_suffix = common::epochabs!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-serializable-write-skew-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-serializable-write-skew",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table oncall (id bigint not null primary key, on_call bigint not null)".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&create_table).status, ResponseStatus::Applied);
+
+    for (request_id, sql) in [
+        (
+            "req-seed-serializable-write-skew-1",
+            "insert into oncall (id, on_call) values (1, 1)",
+        ),
+        (
+            "req-seed-serializable-write-skew-2",
+            "insert into oncall (id, on_call) values (2, 1)",
+        ),
+    ] {
+        let seed = ConnectorRequest::new(
+            request_id,
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        );
+        assert_eq!(app.handle_connector_request(&seed).status, ResponseStatus::Applied);
+    }
+
+    for session_id in ["session-a", "session-b"] {
+        let begin = ConnectorRequest::new(
+            &format!("req-begin-serializable-write-skew-{session_id}"),
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "begin".to_string(),
+                },
+            },
+        );
+        assert_eq!(
+            app.handle_connector_request_for_session(&begin, session_id)
+                .status,
+            ResponseStatus::Applied
+        );
+    }
+
+    let tx_read = ConnectorRequest::new(
+        "req-read-serializable-write-skew",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select id from oncall where on_call=1".to_string(),
+            },
+        },
+    );
+
+    let tx_read_a = app.handle_connector_request_for_session(&tx_read, "session-a");
+    let tx_read_b = app.handle_connector_request_for_session(&tx_read, "session-b");
+    assert_eq!(tx_read_a.status, ResponseStatus::Applied);
+    assert_eq!(tx_read_b.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(rows_a) = tx_read_a.result else {
+        panic!("expected query result");
+    };
+    let ConnectorResult::Query(rows_b) = tx_read_b.result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows_a.rows.len(), 2);
+    assert_eq!(rows_b.rows.len(), 2);
+
+    let stage_a = ConnectorRequest::new(
+        "req-stage-serializable-write-skew-a",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "update oncall set on_call=0 where id=1".to_string(),
+            },
+        },
+    );
+    let stage_b = ConnectorRequest::new(
+        "req-stage-serializable-write-skew-b",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "update oncall set on_call=0 where id=2".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&stage_a, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&stage_b, "session-b")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let commit_a = ConnectorRequest::new(
+        "req-commit-serializable-write-skew-a",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&commit_a, "session-a")
+            .status,
+        ResponseStatus::Applied
+    );
+
+    let commit_b = ConnectorRequest::new(
+        "req-commit-serializable-write-skew-b",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+    
+    let commit_b_response = app.handle_connector_request_for_session(&commit_b, "session-b");
+    assert_eq!(commit_b_response.status, ResponseStatus::Rejected);
+
 }
 
 #[test]
 fn commit_groups_staged_dml_into_one_write_batch() {
+
     let unique_suffix = common::epochabs!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -971,11 +1530,13 @@ fn commit_groups_staged_dml_into_one_write_batch() {
         .filter(|record| record.kind == TransactionKind::Insert)
         .collect::<Vec<_>>();
     assert_eq!(inserts.len(), 2);
+    
     assert!(
         inserts
             .iter()
             .all(|record| record.groupid == Some(group_id))
     );
+
 }
 
 #[test]

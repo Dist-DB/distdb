@@ -59,3 +59,30 @@ disconnect;
 There is also a 'help' feature that will provide other commands. The service WILL BE 100% compatible with the MySQL8.0.x SQL dialect (in time).
 
 The console will present information relating to the connectivity between client and server.
+
+## Current Isolation Contract
+
+The current explicit transaction behavior is equivalent to a read-committed style contract for staged DML:
+
+- `insert`, `update`, and `delete` statements are staged per session while a transaction is active.
+- Staged writes are not visible to other sessions before `commit`.
+- On `commit`, staged writes are applied as a single grouped publish.
+- On `rollback`, staged writes are discarded.
+
+Within an explicit transaction:
+
+- `select` statements execute against the transaction snapshot plus that session's staged writes.
+- schema and other non-DML statement types are still rejected.
+
+## Next Isolation Milestone
+
+The next target is fuller snapshot isolation behavior:
+
+- Reads inside one transaction are repeatable against its snapshot.
+- A transaction sees its own staged writes.
+- Concurrent write-write conflicts on the same logical row are rejected at commit for the later committer.
+
+Write-write conflict behavior and repeatable-read behavior are both covered by active server tests.
+
+Write-skew prevention for predicate-based invariants is now covered by an active server test.
+Range/phantom conflict handling is the next serializable gap to close.

@@ -1,102 +1,25 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-
-use common::helpers::format::FileKind;
-use common::helpers::{create_dir, list_files};
-use connector::{
-    ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, DataMutation,
-    MutationResult, SchemaCommand,
-};
-#[cfg(test)]
-use serverlib::decode_row_payload;
+use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
-    ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, TransactionId, TransactionKind,
-    TransactionRecord, UserId,
+    ConcurrentWalManager, DatabaseCatalog, TransactionId, TransactionKind, TransactionRecord,
+    UserId,
 };
 
-use crate::core::config::ServerRuntimeConfig;
+use crate::core::app::state::SessionSnapshot;
+use crate::core::app::ServerApp;
 use crate::core::mappings::query::{
     abort_external_write_group, commit_external_write_group, handle_query_command,
     handle_query_command_in_write_group,
 };
-use crate::core::transaction_coordinator::{QueryRoutingDecision, TransactionCoordinator};
-use crate::engine::wal_probe::{WalProbeResult, run_wal_probe};
-use crate::helpers::ServerAppError;
+use crate::core::transaction_coordinator::QueryRoutingDecision;
+use super::helpers::{
+    CommandKind, SessionTxMarkerType, command_info, is_staged_dml_query,
+    is_transactional_read_query,
+};
 
-#[derive(Debug)]
-pub struct ServerApp {
-    config: ServerRuntimeConfig,
-    node_data_dir: PathBuf,
-    wal: ConcurrentWalManager,
-    catalogs: HashMap<String, DatabaseCatalog>,
-    runtime_indexes: RuntimeIndexStore,
-    transaction_coordinator: TransactionCoordinator,
-}
+mod isolation;
 
 impl ServerApp {
-    pub fn new(config: ServerRuntimeConfig) -> Result<Self, ServerAppError> {
-        let node_config = config.to_node_config();
-        node_config
-            .validate()
-            .map_err(|msg| ServerAppError::InvalidConfig(msg.to_string()))?;
-
-        let node_data_dir = config.data_dir.join(&config.node_id);
-
-        create_dir(&node_data_dir).map_err(|e| {
-            ServerAppError::InvalidConfig(format!(
-                "cannot create node data directory '{}': {}",
-                node_data_dir.display(),
-                e
-            ))
-        })?;
-
-        log::info!("node data directory: {}", node_data_dir.display());
-
-        let wal = ConcurrentWalManager::with_data_dir(node_data_dir.clone());
-        log::info!("server app created for node_id={}", config.node_id);
-
-        Ok(Self {
-            config,
-            node_data_dir,
-            wal,
-            catalogs: HashMap::new(),
-            runtime_indexes: RuntimeIndexStore::new(),
-            transaction_coordinator: TransactionCoordinator::new(),
-        })
-    }
-
-    pub fn bootstrap(&mut self) -> Result<(), ServerAppError> {
-        self.load_catalogs_from_disk()?;
-        self.replay_catalog_state_from_wal()?;
-        self.runtime_indexes
-            .bootstrap_from_catalogs(&self.catalogs, &self.wal);
-        log::info!(
-            "server bootstrap complete for node_id={} data_dir={}",
-            self.config.node_id,
-            self.node_data_dir.display()
-        );
-        Ok(())
-    }
-
-    pub fn node_data_dir(&self) -> &PathBuf {
-        &self.node_data_dir
-    }
-
-    pub fn node_id(&self) -> &str {
-        &self.config.node_id
-    }
-
-    pub fn catalogs(&self) -> &HashMap<String, DatabaseCatalog> {
-        &self.catalogs
-    }
-
-    pub fn run_wal_smoke_test(&self) -> Result<WalProbeResult, ServerAppError> {
-        // Keep startup probe isolated so repeated process boots do not mutate
-        // persisted WAL streams and trigger out-of-order validation errors.
-        let probe_wal = ConcurrentWalManager::new();
-        run_wal_probe(&probe_wal).map_err(|msg| ServerAppError::Runtime(msg.to_string()))
-    }
 
     pub fn handle_connector_request(&mut self, request: &ConnectorRequest) -> ConnectorResponse {
         self.handle_connector_request_for_session(request, &request.request_id)
@@ -116,7 +39,6 @@ impl ServerApp {
         );
 
         let response = match command_info.kind {
-
             CommandKind::CreateDatabase => {
                 let ConnectorCommand::CreateDatabase { database_name } = &request.command else {
                     unreachable!("command info kind must align with command variant")
@@ -137,7 +59,7 @@ impl ServerApp {
                         format!("create database failed: {err}"),
                     ),
                 }
-            },
+            }
 
             CommandKind::Query => {
                 let ConnectorCommand::Query { query } = &request.command else {
@@ -149,30 +71,39 @@ impl ServerApp {
                 {
                     response
                 } else {
-                    match self.transaction_coordinator.route_query(
-                        session_id,
-                        query.clone(),
-                        is_staged_dml_query(query),
-                    ) {
-                        Ok(QueryRoutingDecision::ExecuteImmediately) => handle_query_command(
-                            &request.request_id,
-                            query,
-                            &mut self.catalogs,
-                            &self.wal,
-                            &self.node_data_dir,
-                            &mut self.runtime_indexes,
-                        ),
-                        Ok(QueryRoutingDecision::Staged) => ConnectorResponse::applied(
-                            request.request_id.clone(),
-                            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
-                        ),
-                        Ok(QueryRoutingDecision::Rejected(message)) => {
-                            ConnectorResponse::rejected(request.request_id.clone(), message)
+                    let transaction_active = self
+                        .transaction_coordinator
+                        .is_active(session_id)
+                        .unwrap_or(false);
+
+                    if transaction_active && is_transactional_read_query(query) {
+                        self.execute_transactional_read(&request.request_id, session_id, query)
+                    } else {
+                        match self.transaction_coordinator.route_query(
+                            session_id,
+                            query.clone(),
+                            is_staged_dml_query(query),
+                        ) {
+                            Ok(QueryRoutingDecision::ExecuteImmediately) => handle_query_command(
+                                &request.request_id,
+                                query,
+                                &mut self.catalogs,
+                                &self.wal,
+                                &self.node_data_dir,
+                                &mut self.runtime_indexes,
+                            ),
+                            Ok(QueryRoutingDecision::Staged) => ConnectorResponse::applied(
+                                request.request_id.clone(),
+                                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+                            ),
+                            Ok(QueryRoutingDecision::Rejected(message)) => {
+                                ConnectorResponse::rejected(request.request_id.clone(), message)
+                            }
+                            Err(err) => ConnectorResponse::rejected(request.request_id.clone(), err),
                         }
-                        Err(err) => ConnectorResponse::rejected(request.request_id.clone(), err),
                     }
                 }
-            },
+            }
 
             CommandKind::Schema => ConnectorResponse::rejected(
                 request.request_id.clone(),
@@ -183,11 +114,9 @@ impl ServerApp {
                 request.request_id.clone(),
                 "mutation command execution is not wired yet",
             ),
-
         };
 
         match &response.result {
-
             ConnectorResult::Error(message) => {
                 log::warn!(
                     "connector request completed request_id={} path={} status={:?} error={}",
@@ -196,7 +125,7 @@ impl ServerApp {
                     response.status,
                     message
                 );
-            },
+            }
 
             _ => {
                 log::info!(
@@ -206,11 +135,10 @@ impl ServerApp {
                     response.status
                 );
             }
-
         }
 
         response
-        
+
     }
 
     fn handle_transaction_control_query(
@@ -219,6 +147,7 @@ impl ServerApp {
         session_id: &str,
         query: &connector::DataQuery,
     ) -> Option<ConnectorResponse> {
+
         let normalized = query
             .sql
             .trim()
@@ -230,6 +159,30 @@ impl ServerApp {
             if let Err(err) = self.transaction_coordinator.begin(session_id) {
                 return Some(ConnectorResponse::rejected(request_id.to_string(), err));
             }
+
+            self.tx_begin_epoch_ms_by_session
+                .insert(session_id.to_string(), common::epochabs!() as u64);
+
+            let snapshot_wal = ConcurrentWalManager::new();
+            if let Err(err) = self.seed_sandbox_wal(&snapshot_wal) {
+                let _ = self.transaction_coordinator.rollback(session_id);
+                self.tx_begin_epoch_ms_by_session.remove(session_id);
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("failed to capture transaction snapshot: {}", err),
+                ));
+            }
+
+            self.tx_snapshot_by_session.insert(
+                session_id.to_string(),
+                SessionSnapshot {
+                    catalogs: self.catalogs.clone(),
+                    runtime_indexes: self.runtime_indexes.clone(),
+                    wal: snapshot_wal,
+                },
+            );
+            self.tx_read_observations_by_session
+                .insert(session_id.to_string(), Vec::new());
 
             if let Err(err) = self.append_session_tx_marker(
                 session_id,
@@ -255,9 +208,18 @@ impl ServerApp {
             };
 
             let staged_count = staged_queries.len();
+            let snapshot_epoch_ms = self
+                .tx_begin_epoch_ms_by_session
+                .get(session_id)
+                .copied()
+                .unwrap_or(0);
 
-            let total_affected_rows = match self.commit_staged_queries(request_id, &staged_queries)
-            {
+            let total_affected_rows = match self.commit_staged_queries(
+                request_id,
+                session_id,
+                &staged_queries,
+                snapshot_epoch_ms,
+            ) {
                 Ok(total) => total,
                 Err(err) => {
                     if let Err(restore_err) = self
@@ -282,6 +244,10 @@ impl ServerApp {
                     return Some(ConnectorResponse::rejected(request_id.to_string(), err));
                 }
             };
+
+            self.tx_begin_epoch_ms_by_session.remove(session_id);
+            self.tx_snapshot_by_session.remove(session_id);
+            self.tx_read_observations_by_session.remove(session_id);
 
             if let Err(err) = self.append_session_tx_marker(
                 session_id,
@@ -315,6 +281,10 @@ impl ServerApp {
                 ));
             }
 
+            self.tx_begin_epoch_ms_by_session.remove(session_id);
+            self.tx_snapshot_by_session.remove(session_id);
+            self.tx_read_observations_by_session.remove(session_id);
+
             if let Err(err) = self.append_session_tx_marker(
                 session_id,
                 request_id,
@@ -331,13 +301,31 @@ impl ServerApp {
         }
 
         None
+
     }
 
     fn commit_staged_queries(
         &mut self,
         request_id: &str,
+        session_id: &str,
         staged_queries: &[connector::DataQuery],
+        snapshot_epoch_ms: u64,
     ) -> Result<u64, String> {
+
+        if snapshot_epoch_ms > 0 {
+            if let Some(conflict) =
+                self.detect_write_write_conflict(snapshot_epoch_ms, staged_queries)
+            {
+                return Err(conflict);
+            }
+
+            if let Some(conflict) =
+                self.detect_predicate_read_conflicts(session_id, snapshot_epoch_ms)
+            {
+                return Err(conflict);
+            }
+        }
+
         self.validate_staged_queries(request_id, staged_queries)?;
 
         let mut total_affected_rows = 0u64;
@@ -400,6 +388,7 @@ impl ServerApp {
         }
 
         Ok(total_affected_rows)
+
     }
 
     fn validate_staged_queries(
@@ -407,6 +396,7 @@ impl ServerApp {
         request_id: &str,
         staged_queries: &[connector::DataQuery],
     ) -> Result<(), String> {
+
         let mut sandbox_catalogs = self.catalogs.clone();
         let mut sandbox_indexes = self.runtime_indexes.clone();
         let sandbox_wal = ConcurrentWalManager::new();
@@ -439,6 +429,7 @@ impl ServerApp {
         }
 
         Ok(())
+
     }
 
     fn seed_sandbox_wal(&self, sandbox_wal: &ConcurrentWalManager) -> Result<(), String> {
@@ -465,12 +456,17 @@ impl ServerApp {
     }
 
     pub fn rollback_session_transaction(&mut self, session_id: &str) -> bool {
+
         let rolled_back = self
             .transaction_coordinator
             .rollback(session_id)
             .unwrap_or(false);
 
         if rolled_back {
+            self.tx_begin_epoch_ms_by_session.remove(session_id);
+            self.tx_snapshot_by_session.remove(session_id);
+            self.tx_read_observations_by_session.remove(session_id);
+
             if let Err(err) = self.append_session_tx_marker(
                 session_id,
                 "__disconnect__",
@@ -482,6 +478,7 @@ impl ServerApp {
         }
 
         rolled_back
+
     }
 
     fn append_session_tx_marker(
@@ -491,6 +488,7 @@ impl ServerApp {
         marker_type: SessionTxMarkerType,
         staged_count: usize,
     ) -> Result<(), String> {
+
         let wal_id = format!("__session_tx__:{}", session_id);
         let records = self.wal.since(&wal_id, None);
         let next_id = TransactionId(records.last().map(|record| record.id.0 + 1).unwrap_or(1));
@@ -521,195 +519,7 @@ impl ServerApp {
                 },
             )
             .map_err(|err| format!("failed to append session tx marker: {}", err))
+    
     }
 
-    pub fn shutdown(&self) -> Result<(), ServerAppError> {
-        log::info!("server shutting down for node_id={}", self.config.node_id);
-        self.wal
-            .shutdown_all()
-            .map_err(|msg| ServerAppError::Runtime(msg.to_string()))
-    }
-
-    fn load_catalogs_from_disk(&mut self) -> Result<(), ServerAppError> {
-        self.catalogs.clear();
-
-        let files = list_files(&self.node_data_dir)
-            .map_err(|e| ServerAppError::Runtime(format!("failed to list data directory: {e}")))?;
-
-        for file in files {
-            let ext = file
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("");
-
-            if ext != FileKind::Catalog.extension() {
-                continue;
-            }
-
-            let stem = file
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| ServerAppError::Runtime("invalid catalog file name".to_string()))?;
-
-            let catalog = match DatabaseCatalog::load_from_path(&file) {
-                Ok(catalog) => catalog,
-                Err(_) => {
-                    log::warn!(
-                        "catalog '{}' could not be deserialized; loading empty catalog from file stem",
-                        file.display()
-                    );
-                    DatabaseCatalog::from_file_stem(stem)
-                }
-            };
-
-            let table_ids = catalog.table_ids();
-            log::info!(
-                "loaded catalog '{}' for database='{}' with {} table identifier(s)",
-                file.display(),
-                catalog.database_id.0,
-                table_ids.len()
-            );
-
-            self.catalogs.insert(catalog.database_id.0.clone(), catalog);
-        }
-
-        Ok(())
-    }
-
-    fn replay_catalog_state_from_wal(&mut self) -> Result<(), ServerAppError> {
-        for catalog in self.catalogs.values_mut() {
-            let wal_id = catalog.database_id.0.clone();
-            let applied = catalog
-                .replay_entity_construction_from_log(&wal_id, &self.wal)
-                .map_err(|msg| ServerAppError::Runtime(msg.to_string()))?;
-
-            if applied > 0 {
-                log::info!(
-                    "replayed {} catalog transaction(s) for database='{}'",
-                    applied,
-                    catalog.database_id.0
-                );
-            }
-        }
-
-        Ok(())
-    }
 }
-
-#[derive(Debug, Clone, Copy)]
-enum SessionTxMarkerType {
-    Begin,
-    Commit,
-    Rollback,
-    DisconnectRollback,
-    CommitFailed,
-}
-
-impl SessionTxMarkerType {
-    fn as_str(self) -> &'static str {
-        match self {
-            SessionTxMarkerType::Begin => "begin",
-            SessionTxMarkerType::Commit => "commit",
-            SessionTxMarkerType::Rollback => "rollback",
-            SessionTxMarkerType::DisconnectRollback => "disconnect_rollback",
-            SessionTxMarkerType::CommitFailed => "commit_failed",
-        }
-    }
-}
-
-fn is_staged_dml_query(query: &connector::DataQuery) -> bool {
-    let Ok(parsed) = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) else {
-        return false;
-    };
-
-    if parsed.len() != 1 {
-        return false;
-    }
-
-    matches!(
-        parsed[0].operation,
-        serverlib::SqlOperation::Insert
-            | serverlib::SqlOperation::Update
-            | serverlib::SqlOperation::Delete
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommandKind {
-    CreateDatabase,
-    Query,
-    Schema,
-    Mutation,
-}
-
-#[derive(Debug, Clone)]
-struct CommandInfo {
-    kind: CommandKind,
-    path: String,
-}
-
-fn command_info(command: &ConnectorCommand) -> CommandInfo {
-    match command {
-        ConnectorCommand::CreateDatabase { database_name } => CommandInfo {
-            kind: CommandKind::CreateDatabase,
-            path: format!("create_database:{database_name}"),
-        },
-
-        ConnectorCommand::Query { query } => CommandInfo {
-            kind: CommandKind::Query,
-            path: format!("query:{}", query.database_id),
-        },
-
-        ConnectorCommand::Schema {
-            database_id,
-            command,
-        } => {
-            let path = match command {
-                SchemaCommand::CreateTable { table_id, .. } => {
-                    format!("schema:create_table:{database_id}:{table_id}")
-                }
-                SchemaCommand::AlterTable { change } => {
-                    format!("schema:alter_table:{database_id}:{}", change.table_id)
-                }
-                SchemaCommand::DropTable { table_id } => {
-                    format!("schema:drop_table:{database_id}:{table_id}")
-                }
-            };
-
-            CommandInfo {
-                kind: CommandKind::Schema,
-                path,
-            }
-        }
-
-        ConnectorCommand::Mutation {
-            database_id,
-            mutation,
-        } => {
-            let path = match mutation {
-                DataMutation::Insert { table_id, .. } => {
-                    format!("mutation:insert:{database_id}:{table_id}")
-                }
-                DataMutation::Update { table_id, .. } => {
-                    format!("mutation:update:{database_id}:{table_id}")
-                }
-                DataMutation::Delete { table_id, .. } => {
-                    format!("mutation:delete:{database_id}:{table_id}")
-                }
-            };
-
-            CommandInfo {
-                kind: CommandKind::Mutation,
-                path,
-            }
-        }
-    }
-}
-
-fn describe_command_path(command: &ConnectorCommand) -> String {
-    command_info(command).path
-}
-
-#[cfg(test)]
-#[path = "app_test.rs"]
-mod tests;

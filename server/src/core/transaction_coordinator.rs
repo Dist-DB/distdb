@@ -42,6 +42,11 @@ enum CoordinatorCommand {
         reply: Sender<Result<(), &'static str>>,
     },
 
+    GetStaged {
+        session_id: String,
+        reply: Sender<Result<Vec<DataQuery>, &'static str>>,
+    },
+
     TakeForCommit {
         session_id: String,
         reply: Sender<Result<Vec<DataQuery>, &'static str>>,
@@ -126,6 +131,19 @@ impl TransactionCoordinator {
             .send(CoordinatorCommand::Stage {
                 session_id: session_id.to_string(),
                 query,
+                reply: reply_tx,
+            })
+            .map_err(|_| "transaction coordinator unavailable")?;
+        reply_rx
+            .recv()
+            .map_err(|_| "transaction coordinator unavailable")?
+    }
+
+    pub fn staged_queries(&self, session_id: &str) -> Result<Vec<DataQuery>, &'static str> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender
+            .send(CoordinatorCommand::GetStaged {
+                session_id: session_id.to_string(),
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
@@ -235,6 +253,15 @@ fn run_coordinator_loop(receiver: Receiver<CoordinatorCommand>) {
 
                 staged.push(query);
                 let _ = reply.send(Ok(()));
+            },
+
+            CoordinatorCommand::GetStaged { session_id, reply } => {
+                let Some(staged) = staged_by_session.get(&session_id) else {
+                    let _ = reply.send(Err("no active transaction for this session"));
+                    continue;
+                };
+
+                let _ = reply.send(Ok(staged.clone()));
             },
 
             CoordinatorCommand::TakeForCommit { session_id, reply } => {
