@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use common::helpers::{create_dir, list_files};
 use common::helpers::format::FileKind;
+use common::helpers::{create_dir, list_files};
 use connector::{
-    ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult,
-    DataMutation, MutationResult, SchemaCommand,
+    ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, DataMutation,
+    MutationResult, SchemaCommand,
 };
-use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore};
 #[cfg(test)]
 use serverlib::decode_row_payload;
+use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore};
 
 use crate::core::config::ServerRuntimeConfig;
 use crate::core::mappings::query::handle_query_command;
@@ -26,9 +26,7 @@ pub struct ServerApp {
 }
 
 impl ServerApp {
-
     pub fn new(config: ServerRuntimeConfig) -> Result<Self, ServerAppError> {
-
         let node_config = config.to_node_config();
         node_config
             .validate()
@@ -36,14 +34,19 @@ impl ServerApp {
 
         let node_data_dir = config.data_dir.join(&config.node_id);
 
-        create_dir(&node_data_dir)
-            .map_err(|e| ServerAppError::InvalidConfig(format!("cannot create node data directory '{}': {}", node_data_dir.display(), e)))?;
+        create_dir(&node_data_dir).map_err(|e| {
+            ServerAppError::InvalidConfig(format!(
+                "cannot create node data directory '{}': {}",
+                node_data_dir.display(),
+                e
+            ))
+        })?;
 
         log::info!("node data directory: {}", node_data_dir.display());
 
         let wal = ConcurrentWalManager::with_data_dir(node_data_dir.clone());
         log::info!("server app created for node_id={}", config.node_id);
-        
+
         Ok(Self {
             config,
             node_data_dir,
@@ -51,14 +54,18 @@ impl ServerApp {
             catalogs: HashMap::new(),
             runtime_indexes: RuntimeIndexStore::new(),
         })
-
     }
 
     pub fn bootstrap(&mut self) -> Result<(), ServerAppError> {
         self.load_catalogs_from_disk()?;
         self.replay_catalog_state_from_wal()?;
-        self.runtime_indexes.bootstrap_from_catalogs(&self.catalogs, &self.wal);
-        log::info!("server bootstrap complete for node_id={} data_dir={}", self.config.node_id, self.node_data_dir.display());
+        self.runtime_indexes
+            .bootstrap_from_catalogs(&self.catalogs, &self.wal);
+        log::info!(
+            "server bootstrap complete for node_id={} data_dir={}",
+            self.config.node_id,
+            self.node_data_dir.display()
+        );
         Ok(())
     }
 
@@ -91,31 +98,27 @@ impl ServerApp {
         );
 
         let response = match command_info.kind {
-
             CommandKind::CreateDatabase => {
                 let ConnectorCommand::CreateDatabase { database_name } = &request.command else {
                     unreachable!("command info kind must align with command variant")
                 };
 
                 match DatabaseCatalog::create_new_database(database_name, &self.node_data_dir) {
-
                     Ok(catalog) => {
-                        self.catalogs
-                            .insert(catalog.database_id.0.clone(), catalog);
+                        self.catalogs.insert(catalog.database_id.0.clone(), catalog);
 
                         ConnectorResponse::applied(
                             request.request_id.clone(),
                             ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
                         )
-                    },
+                    }
 
                     Err(err) => ConnectorResponse::rejected(
                         request.request_id.clone(),
                         format!("create database failed: {err}"),
                     ),
-
                 }
-            },
+            }
 
             CommandKind::Query => {
                 let ConnectorCommand::Query { query } = &request.command else {
@@ -130,7 +133,7 @@ impl ServerApp {
                     &self.node_data_dir,
                     &mut self.runtime_indexes,
                 )
-            },
+            }
 
             CommandKind::Schema => ConnectorResponse::rejected(
                 request.request_id.clone(),
@@ -141,21 +144,18 @@ impl ServerApp {
                 request.request_id.clone(),
                 "mutation command execution is not wired yet",
             ),
-
         };
 
         match &response.result {
-            
             ConnectorResult::Error(message) => {
                 log::warn!(
-                    "connector request completed request_id={} path={} status={:?} error={}"
-                    ,
+                    "connector request completed request_id={} path={} status={:?} error={}",
                     request.request_id,
                     command_path,
                     response.status,
                     message
                 );
-            },
+            }
 
             _ => {
                 log::info!(
@@ -165,7 +165,6 @@ impl ServerApp {
                     response.status
                 );
             }
-
         }
 
         response
@@ -179,14 +178,12 @@ impl ServerApp {
     }
 
     fn load_catalogs_from_disk(&mut self) -> Result<(), ServerAppError> {
-
         self.catalogs.clear();
 
         let files = list_files(&self.node_data_dir)
             .map_err(|e| ServerAppError::Runtime(format!("failed to list data directory: {e}")))?;
 
         for file in files {
-
             let ext = file
                 .extension()
                 .and_then(|value| value.to_str())
@@ -220,17 +217,13 @@ impl ServerApp {
                 table_ids.len()
             );
 
-            self.catalogs
-                .insert(catalog.database_id.0.clone(), catalog);
-
+            self.catalogs.insert(catalog.database_id.0.clone(), catalog);
         }
 
         Ok(())
-
     }
 
     fn replay_catalog_state_from_wal(&mut self) -> Result<(), ServerAppError> {
-
         for catalog in self.catalogs.values_mut() {
             let wal_id = catalog.database_id.0.clone();
             let applied = catalog
@@ -247,9 +240,7 @@ impl ServerApp {
         }
 
         Ok(())
-
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,9 +258,7 @@ struct CommandInfo {
 }
 
 fn command_info(command: &ConnectorCommand) -> CommandInfo {
-
     match command {
-
         ConnectorCommand::CreateDatabase { database_name } => CommandInfo {
             kind: CommandKind::CreateDatabase,
             path: format!("create_database:{database_name}"),
@@ -284,14 +273,13 @@ fn command_info(command: &ConnectorCommand) -> CommandInfo {
             database_id,
             command,
         } => {
-
             let path = match command {
                 SchemaCommand::CreateTable { table_id, .. } => {
                     format!("schema:create_table:{database_id}:{table_id}")
-                },
+                }
                 SchemaCommand::AlterTable { change } => {
                     format!("schema:alter_table:{database_id}:{}", change.table_id)
-                },
+                }
                 SchemaCommand::DropTable { table_id } => {
                     format!("schema:drop_table:{database_id}:{table_id}")
                 }
@@ -301,21 +289,19 @@ fn command_info(command: &ConnectorCommand) -> CommandInfo {
                 kind: CommandKind::Schema,
                 path,
             }
-
-        },
+        }
 
         ConnectorCommand::Mutation {
             database_id,
             mutation,
         } => {
-
             let path = match mutation {
                 DataMutation::Insert { table_id, .. } => {
                     format!("mutation:insert:{database_id}:{table_id}")
-                },
+                }
                 DataMutation::Update { table_id, .. } => {
                     format!("mutation:update:{database_id}:{table_id}")
-                },
+                }
                 DataMutation::Delete { table_id, .. } => {
                     format!("mutation:delete:{database_id}:{table_id}")
                 }
@@ -325,16 +311,12 @@ fn command_info(command: &ConnectorCommand) -> CommandInfo {
                 kind: CommandKind::Mutation,
                 path,
             }
-            
-        },
-
+        }
     }
-
 }
 
 fn describe_command_path(command: &ConnectorCommand) -> String {
     command_info(command).path
-
 }
 
 #[cfg(test)]
@@ -344,16 +326,15 @@ mod tests {
     use super::*;
     use crate::core::mappings::perf::QueryTimingThresholds;
     use connector::{
-        ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest,
-        ConnectorResult, ConnectorTransport, ResponseStatus,
-    };
-    use serverlib::{
-        DatabaseIndex, DatabaseIndexKind,
-        EntityMetadata, EntityMetadataPayload, FieldDef, FieldIndex, FieldType,
-        SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind,
-        TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
+        ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest, ConnectorResult,
+        ConnectorTransport, ResponseStatus,
     };
     use serverlib::engine::database::transaction::TransactionLog;
+    use serverlib::{
+        DatabaseIndex, DatabaseIndexKind, EntityMetadata, EntityMetadataPayload, FieldDef,
+        FieldIndex, FieldType, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
+        SqlObjectKind, TableSchema, TransactionId, TransactionKind, TransactionRecord, UserId,
+    };
 
     #[derive(Debug)]
     struct InProcessServerTransport {
@@ -368,7 +349,6 @@ mod tests {
 
     #[test]
     fn bootstrap_replays_latest_schema_from_wal() {
-        
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
@@ -397,7 +377,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
-                metadata: None,
+                    metadata: None,
                 }]),
             )
             .expect("base table should register");
@@ -413,7 +393,7 @@ mod tests {
             nullable: false,
             indexed: FieldIndex::Indexed,
             default_value: None,
-        metadata: None,
+            metadata: None,
         }]);
 
         let payload = SchemaChangePayload {
@@ -454,12 +434,10 @@ mod tests {
         .index_id
         .0;
         assert!(loaded.index(&email_index_id).is_some());
-        
     }
 
     #[test]
     fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
-        
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
@@ -488,7 +466,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
-                metadata: None,
+                    metadata: None,
                 }]),
             )
             .expect("base table should register");
@@ -619,7 +597,6 @@ mod tests {
 
     #[test]
     fn select_query_returns_table_schema_columns() {
-
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
@@ -634,8 +611,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         catalog
             .register_table(
@@ -648,7 +625,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::None,
                         default_value: None,
-                    metadata: None,
+                        metadata: None,
                     },
                     FieldDef {
                         seqno: 2,
@@ -657,7 +634,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::Indexed,
                         default_value: None,
-                    metadata: None,
+                        metadata: None,
                     },
                 ]),
             )
@@ -692,12 +669,10 @@ mod tests {
 
         assert_eq!(column_names, vec!["id", "email"]);
         assert!(result.rows.is_empty());
-
     }
 
     #[test]
     fn show_tables_query_returns_table_name_rows() {
-        
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
@@ -712,8 +687,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         catalog
             .register_table(
@@ -725,7 +700,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
-                metadata: None,
+                    metadata: None,
                 }]),
             )
             .expect("users table should register");
@@ -740,7 +715,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
-                metadata: None,
+                    metadata: None,
                 }]),
             )
             .expect("accounts table should register");
@@ -771,7 +746,7 @@ mod tests {
             .iter()
             .map(|field| field.field_name.as_str())
             .collect::<Vec<_>>();
-        
+
         assert_eq!(column_names, vec!["table_name"]);
         assert_eq!(result.rows.len(), 2);
 
@@ -782,12 +757,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(row_values, vec!["accounts", "users"]);
-
     }
 
     #[test]
     fn create_table_query_registers_table_with_schema() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -799,8 +772,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
         app.catalogs.insert("main".to_string(), catalog);
 
         let request = ConnectorRequest::new(
@@ -825,12 +798,10 @@ mod tests {
         assert_eq!(schema.fields[0].field_name, "id");
         assert_eq!(schema.fields[0].indexed, FieldIndex::PrimaryKey);
         assert_eq!(schema.fields[1].field_name, "email");
-
     }
 
     #[test]
     fn insert_query_appends_insert_record_to_table_wal() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -842,8 +813,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -896,12 +867,10 @@ mod tests {
 
         assert_eq!(payload.get("id"), Some(&b"1".to_vec()));
         assert_eq!(payload.get("email"), Some(&b"sam@example.com".to_vec()));
-
     }
 
     #[test]
     fn update_query_updates_live_row() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -913,8 +882,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -983,12 +952,10 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], b"1".to_vec());
         assert_eq!(result.rows[0][1], b"sam+updated@example.com".to_vec());
-
     }
 
     #[test]
     fn delete_query_removes_live_row() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1000,8 +967,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1068,12 +1035,10 @@ mod tests {
         };
 
         assert!(result.rows.is_empty());
-
     }
 
     #[test]
     fn update_query_with_join_updates_matching_target_row() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1085,8 +1050,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1184,12 +1149,10 @@ mod tests {
                 "sam+updated@example.com".to_string(),
             ]
         );
-
     }
 
     #[test]
     fn delete_query_with_left_outer_join_removes_unmatched_target_row() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1201,8 +1164,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1285,12 +1248,10 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], b"1".to_vec());
-
     }
 
     #[test]
     fn select_inner_join_returns_matching_rows() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1302,8 +1263,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1365,12 +1326,10 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], b"sam@example.com".to_vec());
         assert_eq!(result.rows[0][1], b"Sam".to_vec());
-
     }
 
     #[test]
     fn select_inner_join_preserves_one_to_many_matches() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1382,8 +1341,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1461,12 +1420,10 @@ mod tests {
         for row in &result.rows {
             assert_eq!(row[0], b"sam@example.com".to_vec());
         }
-
     }
 
     #[test]
     fn select_left_join_returns_unmatched_left_rows_with_nulls() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1478,8 +1435,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1564,12 +1521,10 @@ mod tests {
                 ("sam@example.com".to_string(), "Sam".to_string()),
             ]
         );
-
     }
 
     #[test]
     fn select_left_join_where_right_field_is_null_filters_after_tuple_formation() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1581,8 +1536,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1647,12 +1602,10 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], b"alex@example.com".to_vec());
-
     }
 
     #[test]
     fn select_left_outer_join_null_extends_unmatched_rows() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1664,8 +1617,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1744,12 +1697,10 @@ mod tests {
                 ("sam@example.com".to_string(), "Sam".to_string()),
             ]
         );
-
     }
 
     #[test]
     fn select_right_outer_join_null_extends_unmatched_rows() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1761,8 +1712,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1841,12 +1792,10 @@ mod tests {
                 ("sam@example.com".to_string(), "Sam".to_string()),
             ]
         );
-
     }
 
     #[test]
     fn select_full_outer_join_null_extends_both_sides() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1858,8 +1807,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -1943,12 +1892,10 @@ mod tests {
                 ("sam@example.com".to_string(), "Sam".to_string()),
             ]
         );
-
     }
 
     #[test]
     fn explain_select_with_multiple_joins_returns_join_steps() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -1960,8 +1907,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -2030,7 +1977,6 @@ mod tests {
 
     #[test]
     fn explain_insert_update_delete_return_plan_details() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2042,8 +1988,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -2065,10 +2011,12 @@ mod tests {
             panic!("expected query result");
         };
 
-        assert!(insert_result
-            .rows
-            .iter()
-            .any(|row| row == &vec![b"operation".to_vec(), b"insert".to_vec()]));
+        assert!(
+            insert_result
+                .rows
+                .iter()
+                .any(|row| row == &vec![b"operation".to_vec(), b"insert".to_vec()])
+        );
 
         let explain_update = ConnectorRequest::new(
             "req-explain-update-1",
@@ -2088,18 +2036,24 @@ mod tests {
             panic!("expected query result");
         };
 
-        assert!(update_result
-            .rows
-            .iter()
-            .any(|row| row == &vec![b"join_count".to_vec(), b"2".to_vec()]));
-        assert!(update_result
-            .rows
-            .iter()
-            .any(|row| row == &vec![b"join[0].kind".to_vec(), b"inner".to_vec()]));
-        assert!(update_result
-            .rows
-            .iter()
-            .any(|row| row == &vec![b"join[1].kind".to_vec(), b"left".to_vec()]));
+        assert!(
+            update_result
+                .rows
+                .iter()
+                .any(|row| row == &vec![b"join_count".to_vec(), b"2".to_vec()])
+        );
+        assert!(
+            update_result
+                .rows
+                .iter()
+                .any(|row| row == &vec![b"join[0].kind".to_vec(), b"inner".to_vec()])
+        );
+        assert!(
+            update_result
+                .rows
+                .iter()
+                .any(|row| row == &vec![b"join[1].kind".to_vec(), b"left".to_vec()])
+        );
 
         let explain_delete = ConnectorRequest::new(
             "req-explain-delete-1",
@@ -2119,19 +2073,22 @@ mod tests {
             panic!("expected query result");
         };
 
-        assert!(delete_result
-            .rows
-            .iter()
-            .any(|row| row == &vec![b"operation".to_vec(), b"delete".to_vec()]));
-        assert!(delete_result
-            .rows
-            .iter()
-            .any(|row| row == &vec![b"join_count".to_vec(), b"2".to_vec()]));
+        assert!(
+            delete_result
+                .rows
+                .iter()
+                .any(|row| row == &vec![b"operation".to_vec(), b"delete".to_vec()])
+        );
+        assert!(
+            delete_result
+                .rows
+                .iter()
+                .any(|row| row == &vec![b"join_count".to_vec(), b"2".to_vec()])
+        );
     }
 
     #[test]
     fn insert_select_copies_rows_into_target_table() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2143,8 +2100,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -2213,7 +2170,6 @@ mod tests {
 
     #[test]
     fn insert_select_with_join_materializes_joined_source_rows() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2225,8 +2181,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         app.catalogs.insert("main".to_string(), catalog);
 
@@ -2297,7 +2253,6 @@ mod tests {
 
     #[test]
     fn select_alias_where_pk_falls_back_to_scan_when_runtime_index_is_empty() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2309,8 +2264,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
         app.catalogs.insert("main".to_string(), catalog);
 
         let create_request = ConnectorRequest::new(
@@ -2379,8 +2334,10 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(String::from_utf8_lossy(&result.rows[0][0]), "1");
-        assert_eq!(String::from_utf8_lossy(&result.rows[0][1]), "sam@example.com");
-
+        assert_eq!(
+            String::from_utf8_lossy(&result.rows[0][1]),
+            "sam@example.com"
+        );
     }
 
     #[test]
@@ -2396,8 +2353,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
         app.catalogs.insert("main".to_string(), catalog);
 
         let create_request = ConnectorRequest::new(
@@ -2436,8 +2393,11 @@ mod tests {
             .iter()
             .map(|field| field.field_name.as_str())
             .collect::<Vec<_>>();
-        
-        assert_eq!(column_names, vec!["field", "type", "null", "key", "default"]);
+
+        assert_eq!(
+            column_names,
+            vec!["field", "type", "null", "key", "default"]
+        );
         assert_eq!(result.rows.len(), 2);
 
         let first_row = result
@@ -2451,9 +2411,8 @@ mod tests {
             .rows
             .get(1)
             .expect("describe should return second row");
-        
-        assert_eq!(String::from_utf8_lossy(&second_row[0]), "email");
 
+        assert_eq!(String::from_utf8_lossy(&second_row[0]), "email");
     }
 
     #[test]
@@ -2469,8 +2428,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
         catalog
             .register_table("users", TableSchema::new(Vec::new()))
             .expect("users table should register");
@@ -2482,9 +2441,7 @@ mod tests {
             .join(FileKind::Data.file_name(&normalized_table_id));
         let hashed_table_stream_file = app
             .node_data_dir
-            .join(FileKind::Data.file_name(common::helpers::stable_id(&[
-                &normalized_table_id,
-            ])));
+            .join(FileKind::Data.file_name(common::helpers::stable_id(&[&normalized_table_id])));
 
         std::fs::write(&legacy_table_stream_file, b"legacy stream")
             .expect("legacy table stream file should be created");
@@ -2512,7 +2469,6 @@ mod tests {
 
     #[test]
     fn alter_table_query_updates_schema() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2524,8 +2480,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
         app.catalogs.insert("main".to_string(), catalog);
 
         let create_request = ConnectorRequest::new(
@@ -2564,12 +2520,10 @@ mod tests {
         assert!(schema.field("status").is_some());
         assert!(schema.field("login_email").is_some());
         assert!(schema.field("email").is_none());
-
     }
 
     #[test]
     fn create_database_query_creates_catalog() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2594,12 +2548,10 @@ mod tests {
         let response = app.handle_connector_request(&request);
         assert_eq!(response.status, ResponseStatus::Applied);
         assert!(!app.catalogs().is_empty());
-
     }
 
     #[test]
     fn drop_database_query_removes_catalog() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2637,7 +2589,6 @@ mod tests {
         assert_eq!(response.status, ResponseStatus::Applied);
         assert!(app.catalogs().get("analytics").is_none());
         assert!(!catalog_file.exists());
-
     }
 
     #[test]
@@ -2653,8 +2604,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         catalog
             .register_table(
@@ -2666,7 +2617,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
-                metadata: None,
+                    metadata: None,
                 }]),
             )
             .expect("users table should register");
@@ -2688,8 +2639,9 @@ mod tests {
             ConnectorCommand::Query {
                 query: connector::DataQuery {
                     database_id: "main".to_string(),
-                    sql: "create trigger trg_users_bi before insert on users for each row begin end"
-                        .to_string(),
+                    sql:
+                        "create trigger trg_users_bi before insert on users for each row begin end"
+                            .to_string(),
                 },
             },
         );
@@ -2715,9 +2667,9 @@ mod tests {
         let view_snapshot = app
             .node_data_dir
             .join(FileKind::Entity.file_name(common::helpers::stable_id(&["users_v"])));
-        let trigger_snapshot = app.node_data_dir.join(FileKind::Entity.file_name(
-            common::helpers::stable_id(&["trg_users_bi"]),
-        ));
+        let trigger_snapshot = app
+            .node_data_dir
+            .join(FileKind::Entity.file_name(common::helpers::stable_id(&["trg_users_bi"])));
         let procedure_snapshot = app
             .node_data_dir
             .join(FileKind::Entity.file_name(common::helpers::stable_id(&["p_sync"])));
@@ -2725,9 +2677,9 @@ mod tests {
         let view_wal = app
             .node_data_dir
             .join(FileKind::Data.file_name(common::helpers::stable_id(&["users_v"])));
-        let trigger_wal = app.node_data_dir.join(FileKind::Data.file_name(
-            common::helpers::stable_id(&["trg_users_bi"]),
-        ));
+        let trigger_wal = app
+            .node_data_dir
+            .join(FileKind::Data.file_name(common::helpers::stable_id(&["trg_users_bi"])));
         let procedure_wal = app
             .node_data_dir
             .join(FileKind::Data.file_name(common::helpers::stable_id(&["p_sync"])));
@@ -2796,7 +2748,6 @@ mod tests {
 
     #[test]
     fn connector_client_path_can_query_show_tables_without_simulation() {
-        
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2808,8 +2759,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         catalog
             .register_table(
@@ -2821,7 +2772,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
-                metadata: None,
+                    metadata: None,
                 }]),
             )
             .expect("users table should register");
@@ -2836,7 +2787,7 @@ mod tests {
                     nullable: false,
                     indexed: FieldIndex::None,
                     default_value: None,
-                metadata: None,
+                    metadata: None,
                 }]),
             )
             .expect("accounts table should register");
@@ -2876,12 +2827,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(row_values, vec!["accounts", "users"]);
-
     }
 
     #[test]
     fn connector_client_path_can_query_select_without_simulation() {
-
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2893,8 +2842,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         catalog
             .register_table(
@@ -2907,7 +2856,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::None,
                         default_value: None,
-                    metadata: None,
+                        metadata: None,
                     },
                     FieldDef {
                         seqno: 2,
@@ -2916,7 +2865,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::Indexed,
                         default_value: None,
-                    metadata: None,
+                        metadata: None,
                     },
                 ]),
             )
@@ -2959,12 +2908,10 @@ mod tests {
 
         assert_eq!(column_names, vec!["id", "email"]);
         assert!(result.rows.is_empty());
-        
     }
 
     #[test]
     fn query_path_stress_respects_timing_thresholds() {
-        
         let unique_suffix = common::epochabs!();
 
         let temp_root = std::env::temp_dir().join(format!(
@@ -2976,8 +2923,8 @@ mod tests {
         let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
         let mut app = ServerApp::new(config).expect("server app should initialize");
 
-        let mut catalog = DatabaseCatalog::create_empty_from_name("main")
-            .expect("catalog should be created");
+        let mut catalog =
+            DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
         catalog
             .register_table(
@@ -2990,7 +2937,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::None,
                         default_value: None,
-                    metadata: None,
+                        metadata: None,
                     },
                     FieldDef {
                         seqno: 2,
@@ -2999,7 +2946,7 @@ mod tests {
                         nullable: false,
                         indexed: FieldIndex::Indexed,
                         default_value: None,
-                    metadata: None,
+                        metadata: None,
                     },
                 ]),
             )
@@ -3072,5 +3019,4 @@ mod tests {
         let idx = rank.saturating_sub(1).min(sorted_values.len() - 1);
         sorted_values[idx]
     }
-    
 }

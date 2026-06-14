@@ -8,38 +8,46 @@ pub struct WalProbeResult {
 }
 
 pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'static str> {
-    
     let orders_wal_id = "orders";
     let inventory_wal_id = "inventory";
 
     let actor = UserId::from_username("probe-user");
 
-    wal.append(orders_wal_id, TransactionRecord {
-        id: TransactionId(1),
-        refid: None,
-        timestamp_epoch_ms: 1,
-        actor: actor.clone(),
-        kind: TransactionKind::Insert,
-        payload: vec![1, 2, 3],
-    })?;
+    wal.append(
+        orders_wal_id,
+        TransactionRecord {
+            id: TransactionId(1),
+            refid: None,
+            timestamp_epoch_ms: 1,
+            actor: actor.clone(),
+            kind: TransactionKind::Insert,
+            payload: vec![1, 2, 3],
+        },
+    )?;
 
-    wal.append(orders_wal_id, TransactionRecord {
-        id: TransactionId(2),
-        refid: None,
-        timestamp_epoch_ms: 2,
-        actor: actor.clone(),
-        kind: TransactionKind::Update,
-        payload: vec![4, 5, 6],
-    })?;
+    wal.append(
+        orders_wal_id,
+        TransactionRecord {
+            id: TransactionId(2),
+            refid: None,
+            timestamp_epoch_ms: 2,
+            actor: actor.clone(),
+            kind: TransactionKind::Update,
+            payload: vec![4, 5, 6],
+        },
+    )?;
 
-    wal.append(inventory_wal_id, TransactionRecord {
-        id: TransactionId(1),
-        refid: None,        
-        timestamp_epoch_ms: 3,
-        actor,
-        kind: TransactionKind::Insert,
-        payload: vec![7],
-    })?;
+    wal.append(
+        inventory_wal_id,
+        TransactionRecord {
+            id: TransactionId(1),
+            refid: None,
+            timestamp_epoch_ms: 3,
+            actor,
+            kind: TransactionKind::Insert,
+            payload: vec![7],
+        },
+    )?;
 
     let replay = wal.since(orders_wal_id, Some(TransactionId(1)));
 
@@ -47,7 +55,6 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
         active_workers: wal.active_worker_count(),
         records_in_primary_table: replay.len(),
     })
-    
 }
 
 #[cfg(test)]
@@ -79,24 +86,30 @@ mod tests {
         let wal = ConcurrentWalManager::new();
         let actor = UserId::from_username("integrity-user");
 
-        wal.append("events", TransactionRecord {
-            id: TransactionId(4),
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: vec![],
-        })
+        wal.append(
+            "events",
+            TransactionRecord {
+                id: TransactionId(4),
+                refid: None,
+                timestamp_epoch_ms: 1,
+                actor: actor.clone(),
+                kind: TransactionKind::Insert,
+                payload: vec![],
+            },
+        )
         .expect("first append should succeed");
 
-        let out_of_order = wal.append("events", TransactionRecord {
-            id: TransactionId(3),
-            refid: None,
-            timestamp_epoch_ms: 2,
-            actor,
-            kind: TransactionKind::Update,
-            payload: vec![],
-        });
+        let out_of_order = wal.append(
+            "events",
+            TransactionRecord {
+                id: TransactionId(3),
+                refid: None,
+                timestamp_epoch_ms: 2,
+                actor,
+                kind: TransactionKind::Update,
+                payload: vec![],
+            },
+        );
 
         assert!(out_of_order.is_err());
     }

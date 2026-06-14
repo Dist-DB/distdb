@@ -1,0 +1,90 @@
+use std::collections::HashMap;
+
+use connector::ConnectorResult;
+use serverlib::DatabaseCatalog;
+
+use super::*;
+
+fn query_result_rows(response: connector::ConnectorResponse) -> Vec<Vec<String>> {
+    let ConnectorResult::Query(result) = response.result else {
+        panic!("expected query response")
+    };
+
+    result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8(cell).expect("cell should be utf8"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+}
+
+#[test]
+fn explain_inner_statement_detects_prefix_case_insensitive() {
+    let (inner, is_explain) = explain_inner_statement("  ExPlAiN   select 1  ");
+    assert!(is_explain);
+    assert_eq!(inner, "select 1");
+
+    let (inner, is_explain) = explain_inner_statement("select 1");
+    assert!(!is_explain);
+    assert_eq!(inner, "select 1");
+}
+
+#[test]
+fn explain_mutation_plan_returns_attribute_value_rows() {
+    let response = explain_mutation_plan(
+        "req-1",
+        vec![
+            vec!["operation".to_string(), "insert".to_string()],
+            vec!["table".to_string(), "users".to_string()],
+        ],
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0], vec!["operation".to_string(), "insert".to_string()]);
+    assert_eq!(rows[1], vec!["table".to_string(), "users".to_string()]);
+}
+
+#[test]
+fn explain_join_mutation_plan_includes_join_surface_details() {
+    let plan = serverlib::parse_update_rows_from_statement(
+        "update users u inner join profiles p on u.id = p.user_id set u.email = 'a@b.com' where p.user_id = 1",
+    )
+    .expect("update plan should parse");
+
+    let response = explain_join_mutation_plan(
+        "req-join",
+        "update",
+        &plan.table_id,
+        &plan.relations,
+        &plan.joins,
+        &plan.pushdown_conditions,
+        plan.assignments.len(),
+        plan.where_condition.is_some(),
+    );
+
+    let rows = query_result_rows(response);
+    assert!(rows.contains(&vec!["join_count".to_string(), "1".to_string()]));
+    assert!(rows.contains(&vec!["assignment_count".to_string(), "1".to_string()]));
+    assert!(rows.contains(&vec![
+        "join[0].relation".to_string(),
+        "profiles".to_string()
+    ]));
+}
+
+#[test]
+fn resolve_catalog_supports_user_database_name_lookup() {
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("OrdersDb").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id.clone(), catalog);
+
+    assert!(resolve_catalog(&catalogs, &db_id).is_some());
+    assert!(resolve_catalog(&catalogs, "OrdersDb").is_some());
+    assert!(resolve_catalog_mut(&mut catalogs, "OrdersDb").is_some());
+}

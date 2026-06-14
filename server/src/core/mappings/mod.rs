@@ -1,3 +1,2 @@
-
-pub mod query;
 pub mod perf;
+pub mod query;
