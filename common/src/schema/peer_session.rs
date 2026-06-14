@@ -18,7 +18,7 @@ pub struct PeerSession {
     pub service_type: PeerServiceType,
     pub current_database: Option<String>,
     pub auth_token: Option<String>,
-    pub shared_authorization: Option<String>,
+    pub session_id: Option<String>,
     pub user_id: Option<String>,
 }
 
@@ -38,8 +38,8 @@ impl PeerSession {
         self
     }
 
-    pub fn with_shared_authorization(mut self, token: impl Into<String>) -> Self {
-        self.shared_authorization = Some(token.into());
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 
@@ -56,7 +56,7 @@ impl PeerSession {
     pub fn clear_connection_state(&mut self) {
         self.current_database = None;
         self.auth_token = None;
-        self.shared_authorization = None;
+        self.session_id = None;
         self.user_id = None;
     }
 
@@ -91,7 +91,7 @@ mod tests {
             .with_service_type(PeerServiceType::DataNode)
             .with_database("main")
             .with_auth_token("token")
-            .with_shared_authorization("shared")
+            .with_session_id("sid-1")
             .with_user_id("root");
 
         session.clear_connection_state();
@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(session.service_type, PeerServiceType::DataNode);
         assert_eq!(session.current_database, None);
         assert_eq!(session.auth_token, None);
-        assert_eq!(session.shared_authorization, None);
+        assert_eq!(session.session_id, None);
         assert_eq!(session.user_id, None);
     }
 

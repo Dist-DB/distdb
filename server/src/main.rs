@@ -26,7 +26,7 @@ const SERVER_TEMP_TOKEN_SALT: &[u8; 8] = b"distdbv1";
 struct ServerConnectionSession {
     peer_addr: String,
     challenge_id: String,
-    shared_authorization_token: String,
+    session_id: String,
     session: PeerSession,
     log: SessionLog,
     authenticated: bool,
@@ -34,11 +34,17 @@ struct ServerConnectionSession {
 }
 
 impl ServerConnectionSession {
+    
     fn new(peer_addr: String, connection_id: usize) -> Self {
+
         let challenge_id = format!("challenge-{}-{connection_id}", now_millis());
-        let shared_authorization_token =
-            md5_hash(format!("{}:{}:{}", SERVER_TEMP_USER, peer_addr, challenge_id).as_str());
-        let session = PeerSession::new().with_user_id(SERVER_TEMP_USER);
+        
+        let session_id = md5_hash(format!("{}:{}:{}", SERVER_TEMP_USER, peer_addr, challenge_id).as_str());
+        
+        let session = PeerSession::new()
+            .with_user_id(SERVER_TEMP_USER)
+            .with_session_id(session_id.clone());
+
         let expected_md5_token = md5_hash(SERVER_TEMP_PASSWORD);
         let security_secret = security_context_secret(SERVER_TEMP_USER, "bootstrap");
         let encrypted_password_md5_token = aes_encrypt(
@@ -46,6 +52,7 @@ impl ServerConnectionSession {
             &security_secret,
             SERVER_TEMP_TOKEN_SALT,
         );
+        
         let mut log = SessionLog::new();
 
         log.add_entry(
@@ -66,42 +73,46 @@ impl ServerConnectionSession {
         Self {
             peer_addr,
             challenge_id,
-            shared_authorization_token,
+            session_id,
             session,
             log,
             authenticated: false,
             encrypted_password_md5_token,
         }
+
     }
 
     fn challenge_message(&self) -> String {
         format!(
-            "password challenge required challenge_id={} shared_authorization={} peer={}",
-            self.challenge_id, self.shared_authorization_token, self.peer_addr
+            "password challenge required challenge_id={} session_id={} peer={}",
+            self.challenge_id, self.session_id, self.peer_addr
         )
     }
 
     fn record_request(&mut self, request: &ConnectorRequest) {
+
         let event_type = match &request.command {
+
             ConnectorCommand::Query { query } => {
                 self.session.current_database = Some(query.database_id.clone());
                 SessionLogEventType::QueryExecute
-            }
+            },
 
             ConnectorCommand::Schema { database_id, .. } => {
                 self.session.current_database = Some(database_id.clone());
                 SessionLogEventType::SchemaChange
-            }
+            },
 
             ConnectorCommand::Mutation { database_id, .. } => {
                 self.session.current_database = Some(database_id.clone());
                 SessionLogEventType::Other
-            }
+            },
 
             ConnectorCommand::CreateDatabase { database_name } => {
                 self.session.current_database = Some(database_name.clone());
                 SessionLogEventType::Other
-            }
+            },
+
         };
 
         self.log.add_entry(
@@ -113,18 +124,23 @@ impl ServerConnectionSession {
             ),
             true,
         );
+
     }
 
     fn mark_disconnect(&mut self) {
+
         self.session.clear_connection_state();
+        
         self.log.add_entry(
             SessionLogEventType::Disconnect,
             "connector peer disconnected",
             true,
         );
+
     }
 
     fn authenticate_if_valid_token(&mut self, candidate_password_md5_token: &str) -> bool {
+
         let security_secret = security_context_secret(SERVER_TEMP_USER, "bootstrap");
         let expected_password_md5_token =
             aes_decrypt(&self.encrypted_password_md5_token, &security_secret);
@@ -155,7 +171,9 @@ impl ServerConnectionSession {
 
             false
         }
+
     }
+
 }
 
 fn security_context_secret(user_id: &str, database_id: &str) -> String {
@@ -164,6 +182,7 @@ fn security_context_secret(user_id: &str, database_id: &str) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let data_dir = std::env::args()
@@ -209,8 +228,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_connections_for_listener = Arc::clone(&active_connections);
 
     tokio::spawn(async move {
+
         loop {
+
             match listener.accept().await {
+
                 Ok((stream, peer_addr)) => {
                     let connection_id =
                         active_connections_for_listener.fetch_add(1, Ordering::SeqCst) + 1;
@@ -243,13 +265,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             remaining
                         );
                     });
-                }
+                },
 
                 Err(err) => {
                     log::warn!("listener accept failed: {}", err);
                 }
+
             }
+            
         }
+
     });
 
     log::info!("server process is running; press Ctrl+C to shutdown");
@@ -257,7 +282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("shutdown signal received");
 
     app.lock().await.shutdown()?;
+    
     Ok(())
+
 }
 
 async fn handle_connector_stream(
@@ -266,32 +293,62 @@ async fn handle_connector_stream(
     peer_addr: String,
     connection_id: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
     let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
 
-    write_response_frame(
+    async fn rollback_active_session_transaction(app: &Arc<Mutex<ServerApp>>, session_id: &str) {
+        let mut app = app.lock().await;
+        if app.rollback_session_transaction(session_id) {
+            log::info!(
+                "rolled back active transaction due to disconnect session_id={}",
+                session_id
+            );
+        }
+    }
+
+    if let Err(err) = write_response_frame(
         &mut stream,
         ConnectorResponse::rejected(
             SERVER_PASSWORD_CHALLENGE_REQUEST_ID,
             session.challenge_message(),
         ),
     )
-    .await?;
+    .await
+    {
+        rollback_active_session_transaction(&app, &session.session_id).await;
+        return Err(err);
+    }
 
     loop {
+
         let mut len_buf = [0u8; 4];
+
         if let Err(err) = stream.read_exact(&mut len_buf).await {
             if err.kind() == std::io::ErrorKind::UnexpectedEof {
                 session.mark_disconnect();
+                rollback_active_session_transaction(&app, &session.session_id).await;
                 return Ok(());
             }
+            rollback_active_session_transaction(&app, &session.session_id).await;
             return Err(Box::new(err));
         }
 
         let frame_len = u32::from_le_bytes(len_buf) as usize;
         let mut payload = vec![0u8; frame_len];
-        stream.read_exact(&mut payload).await?;
 
-        let request = bincode::deserialize::<ConnectorRequest>(&payload)?;
+        if let Err(err) = stream.read_exact(&mut payload).await {
+            rollback_active_session_transaction(&app, &session.session_id).await;
+            return Err(Box::new(err));
+        }
+
+        let request = match bincode::deserialize::<ConnectorRequest>(&payload) {
+            Ok(request) => request,
+            Err(err) => {
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                return Err(Box::new(err));
+            }
+        };
+
         log::debug!(
             "server handling connector request_id={} from {}",
             request.request_id,
@@ -299,6 +356,7 @@ async fn handle_connector_stream(
         );
 
         if !session.authenticated {
+
             let auth_outcome = match &request.command {
                 ConnectorCommand::Query { query } => extract_auth_token(&query.sql)
                     .map(|token| session.authenticate_if_valid_token(token)),
@@ -317,19 +375,29 @@ async fn handle_connector_stream(
                 ),
             };
 
-            write_response_frame(&mut stream, response).await?;
+            if let Err(err) = write_response_frame(&mut stream, response).await {
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                return Err(err);
+            }
+            
             continue;
+
         }
 
         session.record_request(&request);
 
         let response = {
             let mut app = app.lock().await;
-            app.handle_connector_request(&request)
+            app.handle_connector_request_for_session(&request, &session.session_id)
         };
 
-        write_response_frame(&mut stream, response).await?;
+        if let Err(err) = write_response_frame(&mut stream, response).await {
+            rollback_active_session_transaction(&app, &session.session_id).await;
+            return Err(err);
+        }
+
     }
+
 }
 
 fn now_millis() -> u64 {

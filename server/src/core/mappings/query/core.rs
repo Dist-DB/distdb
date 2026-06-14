@@ -38,10 +38,12 @@ pub(crate) fn handle_query_command(
     node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
 ) -> ConnectorResponse {
+
     let request_start = Instant::now();
     let parse_start = Instant::now();
 
     match serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) {
+
         Ok(parsed) => {
             let parse_ms = parse_start.elapsed().as_millis() as u64;
             let response = execute_parsed_query(
@@ -54,12 +56,14 @@ pub(crate) fn handle_query_command(
                 parsed,
             );
             with_query_timings(response, make_query_timings(request_start, parse_ms))
-        }
+        },
 
         Err(err) => {
             ConnectorResponse::rejected(request_id.to_string(), format!("sql parse failed: {err}"))
         }
+
     }
+
 }
 
 struct QueryExecutionContext<'a> {
@@ -75,7 +79,6 @@ type QueryOperationHandler = fn(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse;
-
 
 fn execute_parsed_query(
     request_id: &str,
@@ -119,6 +122,7 @@ fn execute_parsed_query(
         SqlOperation::CreateTrigger => Some(execute_create_trigger),
         SqlOperation::CreateStoredProcedure => Some(execute_create_stored_procedure),
         SqlOperation::AlterTable => Some(execute_alter_table),
+        SqlOperation::AlterOther => Some(execute_alter_other),
         _ => None,
     };
 
@@ -135,12 +139,53 @@ fn execute_parsed_query(
 
 }
 
+fn execute_alter_other(
+    _ctx: &mut QueryExecutionContext<'_>,
+    request_id: &str,
+    _query: &DataQuery,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let lowered = statement.sql.trim().to_ascii_lowercase();
+
+    if lowered.starts_with("begin") || lowered.starts_with("start transaction") {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "transaction control recognized but session transactions are not wired yet; current mode is autocommit per statement",
+        );
+    }
+
+    if lowered.starts_with("commit") {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "commit recognized but session transactions are not wired yet; current mode is autocommit per statement",
+        );
+    }
+
+    if lowered.starts_with("rollback") {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "rollback recognized but session transactions are not wired yet; current mode is autocommit per statement",
+        );
+    }
+
+    ConnectorResponse::rejected(
+        request_id.to_string(),
+        format!(
+            "query operation '{:?}' execution is not wired yet",
+            statement.operation
+        ),
+    )
+
+}
+
 fn execute_alter_table(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_alter_table_impl(
         request_id,
         query,
@@ -149,6 +194,7 @@ fn execute_alter_table(
         ctx.node_data_dir,
         statement,
     )
+
 }
 
 fn execute_create_database(
@@ -157,6 +203,7 @@ fn execute_create_database(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_create_database_impl(
         request_id,
         query,
@@ -165,6 +212,7 @@ fn execute_create_database(
         ctx.node_data_dir,
         statement,
     )
+
 }
 
 fn execute_create_table(
@@ -173,6 +221,7 @@ fn execute_create_table(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_create_table_impl(
         request_id,
         query,
@@ -181,6 +230,7 @@ fn execute_create_table(
         ctx.node_data_dir,
         statement,
     )
+
 }
 
 fn execute_drop_directive(
@@ -189,6 +239,7 @@ fn execute_drop_directive(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_drop_directive_impl(
         request_id,
         query,
@@ -197,6 +248,7 @@ fn execute_drop_directive(
         ctx.node_data_dir,
         statement,
     )
+
 }
 
 fn execute_insert(
@@ -205,6 +257,7 @@ fn execute_insert(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_insert_impl(
         request_id,
         query,
@@ -214,6 +267,7 @@ fn execute_insert(
         ctx.runtime_indexes,
         statement,
     )
+
 }
 
 fn execute_update(
@@ -222,6 +276,7 @@ fn execute_update(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+    
     execute_update_impl(
         request_id,
         query,
@@ -231,6 +286,7 @@ fn execute_update(
         ctx.runtime_indexes,
         statement,
     )
+
 }
 
 fn execute_delete(
@@ -239,6 +295,7 @@ fn execute_delete(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_delete_impl(
         request_id,
         query,
@@ -248,6 +305,7 @@ fn execute_delete(
         ctx.runtime_indexes,
         statement,
     )
+
 }
 
 fn execute_select(
@@ -256,6 +314,7 @@ fn execute_select(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_select_impl(
         request_id,
         query,
@@ -265,6 +324,7 @@ fn execute_select(
         ctx.runtime_indexes,
         statement,
     )
+
 }
 
 fn execute_create_view(
@@ -273,6 +333,7 @@ fn execute_create_view(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_create_view_impl(
         request_id,
         query,
@@ -281,6 +342,7 @@ fn execute_create_view(
         ctx.node_data_dir,
         statement,
     )
+
 }
 
 fn execute_create_trigger(
@@ -289,6 +351,7 @@ fn execute_create_trigger(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_create_trigger_impl(
         request_id,
         query,
@@ -297,6 +360,7 @@ fn execute_create_trigger(
         ctx.node_data_dir,
         statement,
     )
+
 }
 
 fn execute_create_stored_procedure(
@@ -305,6 +369,7 @@ fn execute_create_stored_procedure(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     execute_create_stored_procedure_impl(
         request_id,
         query,
@@ -313,6 +378,7 @@ fn execute_create_stored_procedure(
         ctx.node_data_dir,
         statement,
     )
+
 }
 
 fn execute_alter_table_impl(
@@ -323,6 +389,7 @@ fn execute_alter_table_impl(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -490,6 +557,7 @@ fn execute_alter_table_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+
 }
 
 fn execute_create_database_impl(
@@ -500,6 +568,7 @@ fn execute_create_database_impl(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(database_name) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -521,6 +590,7 @@ fn execute_create_database_impl(
             format!("create database failed: {err}"),
         ),
     }
+
 }
 
 fn execute_create_table_impl(
@@ -531,6 +601,7 @@ fn execute_create_table_impl(
     _node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -677,6 +748,7 @@ fn execute_create_table_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+
 }
 
 fn execute_drop_directive_impl(
@@ -687,6 +759,7 @@ fn execute_drop_directive_impl(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     match statement.operation {
         SqlOperation::DropDatabase => {
             execute_drop_database(request_id, catalogs, node_data_dir, statement)
@@ -702,11 +775,13 @@ fn execute_drop_directive_impl(
             ),
         ),
     }
+
 }
 
 fn drop_entity_operation_metadata(
     operation: SqlOperation,
 ) -> Option<(DatabaseObjectType, &'static str, Option<SqlObjectKind>)> {
+
     match operation {
         SqlOperation::DropTable => Some((DatabaseObjectType::Table, "table", None)),
         SqlOperation::DropView => {
@@ -724,6 +799,7 @@ fn drop_entity_operation_metadata(
         )),
         _ => None,
     }
+
 }
 
 fn execute_drop_database(
@@ -732,6 +808,7 @@ fn execute_drop_database(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(database_name) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -776,6 +853,7 @@ fn execute_drop_database(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+
 }
 
 fn execute_drop_entity_object(
@@ -786,6 +864,7 @@ fn execute_drop_entity_object(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(object_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -932,6 +1011,7 @@ fn execute_drop_entity_object(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+
 }
 
 fn execute_insert_impl(
@@ -943,6 +1023,7 @@ fn execute_insert_impl(
     runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -1168,6 +1249,7 @@ fn execute_insert_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows }),
     )
+
 }
 
 fn materialize_insert_source_rows(
@@ -1176,7 +1258,9 @@ fn materialize_insert_source_rows(
     runtime_indexes: &RuntimeIndexStore,
     source: &serverlib::InsertRowsSource,
 ) -> Result<Vec<Vec<Option<Vec<u8>>>>, String> {
+
     match source {
+
         serverlib::InsertRowsSource::Values(rows) => Ok(rows.clone()),
 
         serverlib::InsertRowsSource::Select(read_plan) => {
@@ -1276,7 +1360,9 @@ fn materialize_insert_source_rows(
 
             Ok(rows)
         }
+
     }
+
 }
 
 fn execute_update_impl(
@@ -1288,6 +1374,7 @@ fn execute_update_impl(
     runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -1505,6 +1592,7 @@ fn execute_update_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows }),
     )
+
 }
 
 fn execute_delete_impl(
@@ -1516,6 +1604,7 @@ fn execute_delete_impl(
     runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -1635,6 +1724,7 @@ fn execute_delete_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows }),
     )
+
 }
 
 fn load_mutation_rows(
@@ -1648,6 +1738,7 @@ fn load_mutation_rows(
     joins: &[serverlib::SelectJoin],
     where_condition: Option<&SelectCondition>,
 ) -> Result<Vec<(u64, HashMap<String, Vec<u8>>)>, String> {
+
     if joins.is_empty() {
         return Ok(load_live_rows(wal, table_id, schema));
     }
@@ -1686,6 +1777,7 @@ fn execute_select_impl(
     runtime_indexes: &RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let statement_sql_lower = statement.sql.to_ascii_lowercase();
 
     if statement_sql_lower.starts_with("show databases") {
@@ -1906,6 +1998,7 @@ fn execute_joined_select(
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &serverlib::SelectReadPlan,
 ) -> ConnectorResponse {
+
     if read_plan.is_explain {
         return explain_select_plan(
             request_id,
@@ -1960,6 +2053,7 @@ fn execute_create_view_impl(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(view_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -2034,6 +2128,7 @@ fn execute_create_trigger_impl(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(trigger_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -2120,6 +2215,7 @@ fn execute_create_stored_procedure_impl(
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
     let Some(procedure_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -2197,6 +2293,7 @@ fn execute_create_stored_procedure_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+
 }
 
 fn append_payload_record(
@@ -2206,6 +2303,7 @@ fn append_payload_record(
     payload: Vec<u8>,
     timestamp_epoch_ms: u64,
 ) -> Result<(), String> {
+
     let existing = wal.since(wal_id, None);
     let last = existing.last();
     let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
@@ -2320,6 +2418,7 @@ fn apply_entity_metadata_with_wal(
         &format!("{operation_label} metadata WAL append failed"),
         &format!("{operation_label} entity metadata WAL append failed"),
     )
+
 }
 
 fn append_sql_definition_upsert_with_wal(
@@ -2333,6 +2432,7 @@ fn append_sql_definition_upsert_with_wal(
     created_at: u64,
     operation_label: &str,
 ) -> Result<(), String> {
+
     let payload = SqlDefinitionPayload {
         object_id: object_id.to_string(),
         object_kind,
@@ -2356,9 +2456,11 @@ fn append_sql_definition_upsert_with_wal(
         &format!("{operation_label} sql definition WAL append failed"),
         &format!("{operation_label} entity sql WAL append failed"),
     )
+
 }
 
 fn remove_table_stream_files(node_data_dir: &Path, table_id: &str) -> Result<(), String> {
+
     let normalized_table_id = common::normalize_identifier!(table_id);
 
     // Keep compatibility with any legacy plain-name stream files while also
@@ -2378,6 +2480,7 @@ fn remove_table_stream_files(node_data_dir: &Path, table_id: &str) -> Result<(),
     }
 
     Ok(())
+
 }
 
 fn persist_entity_snapshot(
@@ -2385,6 +2488,7 @@ fn persist_entity_snapshot(
     entity_id: &str,
     node_data_dir: &Path,
 ) -> Result<(), String> {
+
     let normalized_entity_id = common::normalize_identifier!(entity_id);
     let entity = catalog
         .entity(&normalized_entity_id)
@@ -2402,9 +2506,11 @@ fn persist_entity_snapshot(
         &file,
     )
     .map_err(|err| err.to_string())
+
 }
 
 fn remove_entity_snapshot_file(node_data_dir: &Path, entity_id: &str) -> Result<(), String> {
+    
     let path = entity_snapshot_path(node_data_dir, entity_id);
 
     if let Err(err) = fs::remove_file(&path) {
@@ -2414,6 +2520,7 @@ fn remove_entity_snapshot_file(node_data_dir: &Path, entity_id: &str) -> Result<
     }
 
     Ok(())
+    
 }
 
 fn entity_snapshot_path(node_data_dir: &Path, entity_id: &str) -> PathBuf {

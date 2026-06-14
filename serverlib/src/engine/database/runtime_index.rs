@@ -7,7 +7,7 @@ use crate::{ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexO
 
 /// In-memory state for a single index.
 /// Each entry is a composite key tuple in the index's field order.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
     entries: HashSet<Vec<Vec<u8>>>,
@@ -42,7 +42,7 @@ impl RuntimeIndexState {
 }
 
 /// Runtime indexes for all tables across all databases.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexStore {
     indexes: HashMap<String, RuntimeIndexState>,
 }

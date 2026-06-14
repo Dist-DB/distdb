@@ -13,6 +13,7 @@ pub enum ConsoleCommand {
     Help,
     Exit,
     ShowP2p,
+    ShowLog,
     ShowPeers,
     ConnectPeer { user: String, peer_id: String },
     Disconnect,
@@ -20,10 +21,17 @@ pub enum ConsoleCommand {
     Sql(String),
 }
 
+struct ConsoleLogEntry {
+    seqno: u64,
+    message: String,
+}
+
 pub struct ConsoleSession {
     pub runtime: ConnectorP2pRuntime,
     pub current_database: Option<String>,
     request_seq: u64,
+    log_seq: u64,
+    log_entries: Vec<ConsoleLogEntry>,
 }
 
 impl ConsoleSession {
@@ -46,6 +54,8 @@ impl ConsoleSession {
             runtime,
             current_database: None,
             request_seq: 0,
+            log_seq: 0,
+            log_entries: Vec::new(),
         })
 
     }
@@ -61,16 +71,24 @@ impl ConsoleSession {
 
             ConsoleCommand::Help => {
                 print_help();
+                self.push_log("help displayed".to_string());
                 Ok(true)
             },
 
             ConsoleCommand::Exit => {
                 self.runtime.transport().disconnect_active_peer();
+                self.push_log("session exit requested".to_string());
                 Ok(false)
             },
 
             ConsoleCommand::ShowP2p => {
                 self.print_p2p_status();
+                self.push_log("p2p status displayed".to_string());
+                Ok(true)
+            },
+
+            ConsoleCommand::ShowLog => {
+                self.print_log();
                 Ok(true)
             },
 
@@ -94,6 +112,7 @@ impl ConsoleSession {
                         );
                     }
                 }
+                self.push_log("peer list displayed".to_string());
                 Ok(true)
             },
 
@@ -104,17 +123,19 @@ impl ConsoleSession {
                     "notification: connection to {} is successful (session {}@{})",
                     peer_id, user, peer_id
                 );
-                match self.runtime.transport().session_shared_authorization() {
-                    Ok(Some(token)) => println!("shared_authorization={}", token),
-                    Ok(None) => println!("shared_authorization=<none>"),
-                    Err(_) => println!("shared_authorization=<unavailable>"),
+                match self.runtime.transport().session_id() {
+                    Ok(Some(token)) => println!("session_id={}", token),
+                    Ok(None) => println!("session_id=<none>"),
+                    Err(_) => println!("session_id=<unavailable>"),
                 }
+                self.push_log(format!("connected peer={} as user={}", peer_id, user));
                 Ok(true)
             },
 
             ConsoleCommand::Disconnect => {
                 self.runtime.transport().disconnect_active_peer();
                 println!("disconnected active peer session");
+                self.push_log("active peer disconnected".to_string());
                 Ok(true)
             },
 
@@ -139,6 +160,7 @@ impl ConsoleSession {
                     "database switched to {}",
                     self.current_database.as_deref().unwrap_or("<none>")
                 );
+                self.push_log(format!("database switched to {}", self.current_database.as_deref().unwrap_or("<none>")));
                 
                 Ok(true)
             },
@@ -196,6 +218,13 @@ impl ConsoleSession {
 
         print_response(&response);
 
+        self.push_log(format!(
+            "sql request_id={} db={} outcome={}",
+            request_id,
+            request.query_database_id(),
+            summarize_response(&response)
+        ));
+
         Ok(true)
 
     }
@@ -238,14 +267,59 @@ impl ConsoleSession {
             Err(_) => println!("  auth_token=<unavailable>"),
         }
 
-        match transport.session_shared_authorization() {
-            Ok(Some(_)) => println!("  shared_authorization=<set>"),
-            Ok(None) => println!("  shared_authorization=<none>"),
-            Err(_) => println!("  shared_authorization=<unavailable>"),
+        match transport.session_id() {
+            Ok(Some(_)) => println!("  session_id=<set>"),
+            Ok(None) => println!("  session_id=<none>"),
+            Err(_) => println!("  session_id=<unavailable>"),
         }
 
     }
 
+    fn push_log(&mut self, message: String) {
+        self.log_seq += 1;
+        self.log_entries.push(ConsoleLogEntry {
+            seqno: self.log_seq,
+            message,
+        });
+    }
+
+    fn print_log(&self) {
+        if self.log_entries.is_empty() {
+            println!("no console log entries");
+            return;
+        }
+
+        for entry in &self.log_entries {
+            println!("[{}] {}", entry.seqno, entry.message);
+        }
+    }
+
+}
+
+trait ConsoleRequestExt {
+    fn query_database_id(&self) -> &str;
+}
+
+impl ConsoleRequestExt for ConnectorRequest {
+    fn query_database_id(&self) -> &str {
+        match &self.command {
+            ConnectorCommand::Query { query } => &query.database_id,
+            _ => "<n/a>",
+        }
+    }
+}
+
+fn summarize_response(response: &ConnectorResponse) -> String {
+    match &response.result {
+        ConnectorResult::Query(result) => format!("query rows={}", result.rows.len()),
+        ConnectorResult::Mutation(result) => {
+            format!("mutation affected_rows={}", result.affected_rows)
+        }
+        ConnectorResult::Schema(result) => {
+            format!("schema table={} revision={}", result.table_id, result.schema_revision)
+        }
+        ConnectorResult::Error(message) => format!("error {}", message),
+    }
 }
 
 pub fn extract_password_token_input(sql: &str) -> Option<&str> {
@@ -343,6 +417,10 @@ pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, Stri
 
     if lowered == "show p2p" {
         return Ok(Some(ConsoleCommand::ShowP2p));
+    }
+
+    if lowered == "show log" {
+        return Ok(Some(ConsoleCommand::ShowLog));
     }
 
     if lowered == "show peers" {
@@ -492,6 +570,7 @@ pub fn print_help() {
     println!("  exit | quit | \\q          leave console");
     println!("  use <database>;           switch active database");
     println!("  show p2p;                 display connector/server p2p stack status");
+    println!("  show log;                 display in-console command/response log");
     println!("  show peers;               list discovered p2p peers (* = active)");
     println!("  connect <user@peer-id>;   switch session to a discovered peer");
     println!("  disconnect;               close the active peer session connection");
@@ -527,7 +606,7 @@ fn is_console_command_fragment(line: &str) -> bool {
 
     matches!(
         lowered.as_str(),
-        "help" | ".help" | "exit" | "quit" | "\\q" | "show p2p" | "show peers" | "disconnect"
+        "help" | ".help" | "exit" | "quit" | "\\q" | "show p2p" | "show log" | "show peers" | "disconnect"
     ) || lowered.starts_with("use ")
         || lowered.starts_with("connect ")
 
@@ -550,6 +629,7 @@ mod tests {
         assert!(matches!(parse_console_command("exit;"), Ok(Some(ConsoleCommand::Exit))));
         assert!(matches!(parse_console_command("disconnect;"), Ok(Some(ConsoleCommand::Disconnect))));
         assert!(matches!(parse_console_command("show p2p;"), Ok(Some(ConsoleCommand::ShowP2p))));
+        assert!(matches!(parse_console_command("show log;"), Ok(Some(ConsoleCommand::ShowLog))));
     }
 
     #[test]

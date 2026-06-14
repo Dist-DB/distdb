@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use connector::ConnectorResult;
+use connector::{ConnectorResult, DataQuery};
 use serverlib::DatabaseCatalog;
+use serverlib::{ConcurrentWalManager, RuntimeIndexStore};
 
 use super::*;
 
@@ -87,4 +88,56 @@ fn resolve_catalog_supports_user_database_name_lookup() {
     assert!(resolve_catalog(&catalogs, &db_id).is_some());
     assert!(resolve_catalog(&catalogs, "OrdersDb").is_some());
     assert!(resolve_catalog_mut(&mut catalogs, "OrdersDb").is_some());
+}
+
+#[test]
+fn begin_transaction_is_explicitly_recognized() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "begin".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-begin",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        std::path::Path::new("."),
+        &mut runtime_indexes,
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(message.contains("session transactions are not wired yet"));
+}
+
+#[test]
+fn commit_is_explicitly_recognized() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "commit".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-commit",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        std::path::Path::new("."),
+        &mut runtime_indexes,
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(message.contains("session transactions are not wired yet"));
 }

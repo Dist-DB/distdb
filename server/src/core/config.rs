@@ -14,6 +14,7 @@ pub struct ServerRuntimeConfig {
 }
 
 impl ServerRuntimeConfig {
+
     pub fn default_local() -> Self {
         Self::default_local_with_data_dir(PathBuf::from("./data"))
     }
@@ -47,10 +48,12 @@ impl ServerRuntimeConfig {
             listen_addrs: self.listen_addrs.clone(),
         }
     }
+
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -63,4 +66,5 @@ mod tests {
             vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")]
         );
     }
+    
 }

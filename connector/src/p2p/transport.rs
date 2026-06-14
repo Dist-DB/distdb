@@ -196,7 +196,7 @@ impl ConnectorP2pTransport {
         Ok(live.session.auth_token.clone())
     }
 
-    pub fn session_shared_authorization(&self) -> Result<Option<String>, ConnectorError> {
+    pub fn session_id(&self) -> Result<Option<String>, ConnectorError> {
         let connection = self
             .live_connection
             .lock()
@@ -204,11 +204,11 @@ impl ConnectorP2pTransport {
 
         let Some(live) = connection.as_ref() else {
             return Err(ConnectorError::Transport(
-                "no active peer connection for shared authorization retrieval".to_string(),
+                "no active peer connection for session id retrieval".to_string(),
             ));
         };
 
-        Ok(live.session.shared_authorization.clone())
+        Ok(live.session.session_id.clone())
     }
 
     fn clear_live_connection(&self, reason: &str) {
@@ -225,7 +225,9 @@ impl ConnectorP2pTransport {
 }
 
 impl ConnectorTransport for ConnectorP2pTransport {
+
     fn request(&self, request: &ConnectorRequest) -> Result<ConnectorResponse, ConnectorError> {
+
         if self.peers.is_empty() && self.config.bootstrap_peers.is_empty() {
             log::warn!("connector transport request failed: no peers or bootstrap peers configured");
             return Err(ConnectorError::Transport(
@@ -292,7 +294,9 @@ impl ConnectorTransport for ConnectorP2pTransport {
                     )
                 }
             })
+    
     }
+
 }
 
 fn send_request_over_tcp(
@@ -300,6 +304,7 @@ fn send_request_over_tcp(
     peer: &ConnectorPeer,
     request: &ConnectorRequest,
 ) -> Result<ConnectorResponse, ConnectorError> {
+
     ensure_live_connection(transport, peer)?;
 
     let mut connection = transport
@@ -321,12 +326,14 @@ fn send_request_over_tcp(
     }
 
     response
+
 }
 
 fn ensure_live_connection(
     transport: &ConnectorP2pTransport,
     peer: &ConnectorPeer,
 ) -> Result<(), ConnectorError> {
+
     let mut connection = transport
         .live_connection
         .lock()
@@ -374,28 +381,30 @@ fn ensure_live_connection(
         socket_addr
     );
 
-    let server_shared_authorization = match &challenge.result {
-        ConnectorResult::Error(message) => extract_shared_authorization(message),
+    let server_session_id = match &challenge.result {
+        ConnectorResult::Error(message) => extract_session_id(message),
         _ => None,
     };
     let shared_session_token = generate_shared_session_token(
         &peer.peer_id,
-        server_shared_authorization.as_deref(),
+        server_session_id.as_deref(),
     );
 
     *connection = Some(LiveConnection {
         peer_id: peer.peer_id.clone(),
         stream,
-        session: PeerSession::new().with_shared_authorization(shared_session_token),
+        session: PeerSession::new().with_session_id(shared_session_token),
     });
 
     Ok(())
+
 }
 
 fn send_request_frame(
     stream: &mut TcpStream,
     request: &ConnectorRequest,
 ) -> Result<ConnectorResponse, ConnectorError> {
+
     let payload = bincode::serialize(request).map_err(|e| {
         ConnectorError::Transport(format!("failed to serialize request payload: {e}"))
     })?;
@@ -407,9 +416,11 @@ fn send_request_frame(
         .map_err(|e| ConnectorError::Transport(format!("failed to write request: {e}")))?;
 
     read_response_frame(stream)
+
 }
 
 fn read_response_frame(stream: &mut TcpStream) -> Result<ConnectorResponse, ConnectorError> {
+
     let mut response_len_buf = [0u8; 4];
     stream
         .read_exact(&mut response_len_buf)
@@ -417,46 +428,68 @@ fn read_response_frame(stream: &mut TcpStream) -> Result<ConnectorResponse, Conn
 
     let response_len = u32::from_le_bytes(response_len_buf) as usize;
     let mut response_buf = vec![0u8; response_len];
+
     stream
         .read_exact(&mut response_buf)
         .map_err(|e| ConnectorError::Transport(format!("failed to read response payload: {e}")))?;
 
     bincode::deserialize::<ConnectorResponse>(&response_buf)
         .map_err(|e| ConnectorError::Transport(format!("failed to decode response payload: {e}")))
+
 }
 
 fn normalize_peer_addr(raw: &str) -> String {
+
     let trimmed = raw.trim();
     if trimmed.contains(':') {
         return trimmed.to_string();
     }
+    
     format!("{}:{}", trimmed, DEFAULT_SERVER_PORT)
+
 }
 
-fn extract_shared_authorization(message: &str) -> Option<String> {
+fn extract_session_id(message: &str) -> Option<String> {
+
     for part in message.split_whitespace() {
+
+        if let Some(value) = part.strip_prefix("session_id=") {
+            let token = value.trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+
+        // Backward compatibility for servers that still emit the old label.
         if let Some(value) = part.strip_prefix("shared_authorization=") {
             let token = value.trim();
             if !token.is_empty() {
                 return Some(token.to_string());
             }
         }
+    
     }
+    
     None
+
 }
 
 fn generate_shared_session_token(peer_id: &str, server_token: Option<&str>) -> String {
+
     let entropy = format!(
         "{}:{}:{}",
         peer_id,
         epochabs(),
         server_token.unwrap_or("server-token-unavailable")
     );
+    
     md5(entropy.as_bytes())
+
 }
 
 #[cfg(test)]
 mod tests {
+    
     use super::*;
     use crate::core::{
         ConnectorCommand, ConnectorRequest, ConnectorResult, MutationResult,
@@ -544,4 +577,5 @@ mod tests {
 
         assert_eq!(transport.active_peer_id(), Some("peer-2"));
     }
+    
 }
