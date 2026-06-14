@@ -11,15 +11,18 @@ The platform current features the following:-
 
 SQL Support (MySQL 8.0 Compatible):
 
+```bash
 ✓ CREATE/ALTER/DROP TABLE
 ✓ INSERT/UPDATE/DELETE/SELECT
 ✓ Complex JOINs (INNER, LEFT, RIGHT, FULL OUTER)
 ✓ WHERE conditions, ORDER BY, LIMIT
 ✓ Indexes (Primary key, indexed fields)
 ✓ SHOW TABLES/DATABASES
+```
 
 ### Transactional Behavior:
 
+```bash
 ✓ Explicit transactions (BEGIN/COMMIT/ROLLBACK)
 ✓ Per-session staged DML during active transaction
 ✓ Snapshot isolation for reads within transaction
@@ -27,15 +30,18 @@ SQL Support (MySQL 8.0 Compatible):
 ✓ Predicate conflict detection (write-skew prevention)
 ✓ Grouped atomic commits to WAL
 ✓ Transaction markers in WAL for recovery
+```
 
 ### Infrastructure:
 
+```bash
 ✓ WAL (Write-Ahead Log) for durability & recovery
 ✓ Transaction log replay on startup
 ✓ Catalog persistence (schema storage)
 ✓ Runtime index store (in-memory query optimization)
 ✓ AES encryption for client-server transport
 ✓ P2P networking foundation (Kademlia DHT)
+```
 
 ## Architectural Overview
 
