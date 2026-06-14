@@ -68,7 +68,6 @@ The database platform conforms to the following principles
 - Security is defined on a node & database instance
 - A standard set of SQL directives are supported by the service
 - p2p clients may receive notifications on data changes pub/sub on a table/database level
-
 - Changes to data are replicated to connected instances of a datanode sharing the same database
 - Servers are interconnected using the pub/sub notification pump
 - Subscriptions are managed using unique identifers using a hash!{databaseid:tableid}
@@ -81,10 +80,8 @@ The database platform conforms to the following principles
 - Security structures are maintained in the transactional log
 - When a schema change is noted, the data entries should conform to the schema format there after
 - All transactions are recorded with timestamp (epochabs), userid, transaction-type and then data
-
 - user-identifiers are hash!{username.lowercase}
 - password-keys are hash!{databaseid:username.lowercase:password}
-
 - tables comprise of fields {seqno:fieldname:fieldtype:size:nullability:indexed:default}
 - fieldtypes may be int, uint, float, string[fixedsize], text, enum, spatial (long,lat,elevation), blob
 - fieldsizes for int, uint and float are 8,16,32,64
