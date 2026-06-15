@@ -3877,23 +3877,29 @@ fn create_and_drop_sql_backed_objects_are_wired() {
     let view_wal = app
         .node_data_dir
         .join(FileKind::Data.file_name(
-            catalog
-                .entity_wal_stream_id("users_v")
-                .expect("view WAL stream should exist"),
+            common::helpers::stable_id(&[
+                &catalog
+                    .entity_wal_stream_id("users_v")
+                    .expect("view WAL stream should exist"),
+            ]),
         ));
     let trigger_wal = app
         .node_data_dir
         .join(FileKind::Data.file_name(
-            catalog
-                .entity_wal_stream_id("trg_users_bi")
-                .expect("trigger WAL stream should exist"),
+            common::helpers::stable_id(&[
+                &catalog
+                    .entity_wal_stream_id("trg_users_bi")
+                    .expect("trigger WAL stream should exist"),
+            ]),
         ));
     let procedure_wal = app
         .node_data_dir
         .join(FileKind::Data.file_name(
-            catalog
-                .entity_wal_stream_id("p_sync")
-                .expect("procedure WAL stream should exist"),
+            common::helpers::stable_id(&[
+                &catalog
+                    .entity_wal_stream_id("p_sync")
+                    .expect("procedure WAL stream should exist"),
+            ]),
         ));
 
     assert!(view_snapshot.exists());
