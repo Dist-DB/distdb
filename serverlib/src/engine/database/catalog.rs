@@ -28,6 +28,8 @@ use super::transaction::{
 };
 use super::view::DatabaseView;
 
+
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseCatalog {
     pub database_id: DatabaseId,

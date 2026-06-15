@@ -309,14 +309,16 @@ mod tests {
 
     #[test]
     fn checkpoint_save_and_load_roundtrip() {
+
         use crate::engine::affinity::AffinitySyncPhase;
         use std::fs;
-        use std::path::Path;
 
         // Create a temporary directory for the test
         let temp_dir = std::env::temp_dir()
             .join(format!("checkpoint_test_{}", std::process::id()));
+
         let _ = fs::remove_dir_all(&temp_dir);
+        
         fs::create_dir_all(&temp_dir).expect("create temp dir");
 
         let storage = AffinityStorage::new(&temp_dir);

@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use super::row_payload::decode_row_payload;
 use super::table::DatabaseTable;
-use super::transaction::TransactionLog;
 use crate::{
     load_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
     TransactionKind,
