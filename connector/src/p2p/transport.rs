@@ -86,6 +86,7 @@ impl ConnectorP2pTransport {
 
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
         let peer_id = peer.peer_id.clone();
+        let is_discovered = peer.is_discovered;
         log::debug!(
             "connector transport upsert peer peer_id={} addrs={}",
             peer_id,
@@ -121,13 +122,13 @@ impl ConnectorP2pTransport {
         self.peers.insert(
             peer_id.clone(),
             ConnectorPeer {
-                is_discovered: true,
+                is_discovered,
                 ..peer
             },
         );
 
         // First discovered peer becomes the sticky session peer.
-        if self.active_peer_id.is_none() || active_was_stale {
+        if is_discovered && (self.active_peer_id.is_none() || active_was_stale) {
             self.active_peer_id = Some(peer_id);
         }
     }
@@ -138,6 +139,10 @@ impl ConnectorP2pTransport {
             .filter(|peer| peer.is_discovered)
             .cloned()
             .collect()
+    }
+
+    pub fn known_peers(&self) -> Vec<ConnectorPeer> {
+        self.peers.values().cloned().collect()
     }
 
     pub fn active_peer_id(&self) -> Option<&str> {
@@ -189,14 +194,25 @@ impl ConnectorP2pTransport {
             .unwrap_or(false)
     }
 
-    pub fn connect_active_peer(&self) -> Result<(), ConnectorError> {
-        let Some(peer) = self.active_peer() else {
+    pub fn connect_active_peer(&mut self) -> Result<(), ConnectorError> {
+        if self.active_peer_id.is_none() {
+            if let Some(addr) = self.config.bootstrap_peers.first().cloned() {
+                self.peers.entry(addr.clone()).or_insert(ConnectorPeer {
+                    peer_id: addr.clone(),
+                    addrs: vec![addr.clone()],
+                    is_discovered: false,
+                });
+                self.active_peer_id = Some(addr);
+            }
+        }
+
+        let Some(peer) = self.active_peer().cloned() else {
             return Err(ConnectorError::Transport(
                 "no connected peer selected for session routing".to_string(),
             ));
         };
 
-        ensure_live_connection(self, peer)
+        ensure_live_connection(self, &peer)
     }
 
     pub fn disconnect_active_peer(&self) {

@@ -98,7 +98,9 @@ impl ConnectorP2pRuntime {
     }
 
     pub fn handle_event(&mut self, event: ConnectorP2pEvent) -> Result<ConnectorP2pHandleOutcome, ConnectorError> {
+        
         match event {
+
             ConnectorP2pEvent::PeerDiscovered(peer) => {
                 let peer_id = peer.peer_id.clone();
                 log::info!(
@@ -108,7 +110,8 @@ impl ConnectorP2pRuntime {
                 );
                 self.transport.upsert_peer(peer);
                 Ok(ConnectorP2pHandleOutcome::PeerDiscovered { peer_id })
-            }
+            },
+
             ConnectorP2pEvent::ResponseReceived(response) => {
                 log::debug!(
                     "connector p2p response received request_id={} status={:?}",
@@ -117,7 +120,8 @@ impl ConnectorP2pRuntime {
                 );
                 self.transport.queue_response(response.clone());
                 Ok(ConnectorP2pHandleOutcome::ResponseReceived(response))
-            }
+            },
+            
             ConnectorP2pEvent::ErrorReceived {
                 request_id,
                 message,
@@ -127,14 +131,18 @@ impl ConnectorP2pRuntime {
                     .unwrap_or_default();
                 log::error!("connector p2p error: {}{}", prefix, message);
                 Err(ConnectorError::Transport(format!("{prefix}{message}")))
-            }
+            },
+
             ConnectorP2pEvent::Shutdown => {
                 log::info!("connector p2p runtime shutdown received");
                 self.running = false;
                 Ok(ConnectorP2pHandleOutcome::Shutdown)
             }
+
         }
+
     }
+
 }
 
 #[cfg(test)]

@@ -58,6 +58,13 @@ impl<T: Transport> ServerP2pNetwork<T> {
             .into_iter()
             .find(|peer| peer.id.0 == peer_id)
             .map(|peer| peer.addrs)
+            .or_else(|| {
+                self.discovery
+                    .bootstrap_nodes()
+                    .iter()
+                    .find(|peer| peer.id.0 == peer_id)
+                    .map(|peer| peer.addrs.clone())
+            })
             .unwrap_or_default();
 
         if resolved_addrs.is_empty() {

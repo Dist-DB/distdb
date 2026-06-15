@@ -36,21 +36,18 @@ impl KademliaDiscoveryConfig {
 pub struct KademliaDiscoveryService {
     local_node_id: NodeId,
     config: KademliaDiscoveryConfig,
+    bootstrap_nodes: Vec<NodeDescriptor>,
     peers: HashMap<NodeId, NodeDescriptor>,
 }
 
 impl KademliaDiscoveryService {
     
     pub fn new(local_node_id: NodeId, config: KademliaDiscoveryConfig) -> Self {
-        let mut peers = HashMap::new();
-        for node in &config.bootstrap_nodes {
-            peers.insert(node.id.clone(), node.clone());
-        }
-
         Self {
             local_node_id,
+            bootstrap_nodes: config.bootstrap_nodes.clone(),
             config,
-            peers,
+            peers: HashMap::new(),
         }
     }
 
@@ -68,6 +65,10 @@ impl KademliaDiscoveryService {
             remote.is_local = false;
             self.peers.insert(remote.id.clone(), remote);
         }
+    }
+
+    pub fn bootstrap_nodes(&self) -> &[NodeDescriptor] {
+        &self.bootstrap_nodes
     }
 
 }

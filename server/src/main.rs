@@ -417,6 +417,7 @@ fn send_affinity_join_requests(
             request_id,
             affinity_id: config.affinity_id.clone(),
             requester_node_id: local_node.id.0.clone(),
+            requester_addrs: local_node.addrs.clone(),
             affinity_key: config.affinity_key.clone(),
         };
 
@@ -2054,6 +2055,21 @@ async fn handle_connector_stream(
 
             if let ServiceMessage::AffinityJoinRequest(join_req) = &message_for_fanout {
 
+                let requester_addrs = join_req
+                    .requester_addrs
+                    .iter()
+                    .filter(|addr| multiaddr_to_socket_addr(addr).is_some())
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                if !requester_addrs.is_empty() {
+                    runtime.network_mut().upsert_discovered_peer(NodeDescriptor {
+                        id: NodeId(join_req.requester_node_id.clone()),
+                        addrs: requester_addrs,
+                        is_local: false,
+                    });
+                }
+
                 let summaries = {
                     let app_guard = app.lock().await;
                     build_database_schema_summaries_from_app(&app_guard)
@@ -2289,6 +2305,23 @@ async fn handle_connector_stream(
                 };
 
                 if should_fanout {
+
+                    for announce_addr in &node.addrs {
+                        let Some(target_addr) = multiaddr_to_socket_addr(announce_addr) else {
+                            continue;
+                        };
+
+                        if let Err(err) = send_service_message_to_addr(
+                            &target_addr,
+                            &ServiceMessage::NodeAnnounce(local_node.clone()),
+                        ) {
+                            log::debug!(
+                                "server p2p direct announce reply to {} failed: {}",
+                                target_addr,
+                                err
+                            );
+                        }
+                    }
 
                     let mut target_addrs = HashSet::new();
                     for peer in runtime.network().discover_peers() {

@@ -51,6 +51,8 @@ pub struct AffinityJoinRequest {
     pub request_id: String,
     pub affinity_id: String,
     pub requester_node_id: String,
+    #[serde(default)]
+    pub requester_addrs: Vec<String>,
     pub affinity_key: String,
 }
 

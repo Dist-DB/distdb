@@ -26,14 +26,15 @@ fn local_node_is_not_added_to_discovered_peers() {
 }
 
 #[test]
-fn bootstrap_nodes_are_available_as_discovered_peers() {
+fn bootstrap_nodes_are_retained_for_routing_only() {
     let config = KademliaDiscoveryConfig::new("/distdb/kad/1.0.0")
         .with_bootstrap_nodes(vec![node("node-a", "/ip4/10.0.0.1/tcp/4001")]);
     let discovery = KademliaDiscoveryService::new(NodeId("node-local".to_string()), config);
 
     let peers = discovery.discover_peers();
-    assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].id.0, "node-a");
+    assert!(peers.is_empty());
+    assert_eq!(discovery.bootstrap_nodes().len(), 1);
+    assert_eq!(discovery.bootstrap_nodes()[0].id.0, "node-a");
 }
 
 #[test]

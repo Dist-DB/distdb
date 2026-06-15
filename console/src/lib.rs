@@ -1,6 +1,6 @@
 
 use connector::{
-    ConnectorClient, ConnectorCommand, ConnectorP2pConfig, ConnectorP2pEvent,
+    ConnectorClient, ConnectorCommand, ConnectorP2pConfig,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
     ConnectorResponse, ConnectorResult, DataQuery, ResponseStatus,
 };
@@ -51,15 +51,7 @@ impl ConsoleSession {
                 .with_bootstrap_peers(bootstrap_peers.clone()),
         );
 
-        let mut runtime = ConnectorP2pRuntime::new(transport);
-
-        for (idx, server_address) in bootstrap_peers.into_iter().enumerate() {
-            runtime.handle_event(ConnectorP2pEvent::PeerDiscovered(ConnectorPeer {
-                peer_id: format!("server-node-{:02}", idx + 1),
-                addrs: vec![server_address],
-                is_discovered: false,
-            }))?;
-        }
+        let runtime = ConnectorP2pRuntime::new(transport);
 
         Ok(Self {
             runtime,
@@ -130,7 +122,7 @@ impl ConsoleSession {
 
             ConsoleCommand::ConnectPeer { user, peer_id } => {
                 self.runtime.transport_mut().select_peer(&peer_id)?;
-                self.runtime.transport().connect_active_peer()?;
+                self.runtime.transport_mut().connect_active_peer()?;
                 println!(
                     "notification: connection to {} is successful (session {}@{})",
                     peer_id, user, peer_id
@@ -242,66 +234,117 @@ impl ConsoleSession {
     }
 
     fn refresh_discovered_peers_from_server(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.runtime.transport().has_live_connection() {
-            if let Err(err) = self.runtime.transport().connect_active_peer() {
-                log::debug!("server peer refresh skipped: unable to connect active peer: {}", err);
-                return Ok(());
-            }
+        let mut known_peers = self.runtime.transport().known_peers();
+        if known_peers.is_empty() {
+            known_peers = self
+                .runtime
+                .transport()
+                .bootstrap_peers()
+                .iter()
+                .map(|addr| ConnectorPeer {
+                    peer_id: addr.clone(),
+                    addrs: vec![addr.clone()],
+                    is_discovered: false,
+                })
+                .collect();
         }
 
+        let original_active_peer = self.runtime.transport().active_peer_id().map(ToOwned::to_owned);
         let database_id = self
             .current_database
             .clone()
             .unwrap_or_else(|| AUTH_FALLBACK_DATABASE.to_string());
 
-        let request = ConnectorRequest::new(
-            self.next_request_id(),
-            ConnectorCommand::Query {
-                query: DataQuery {
-                    database_id,
-                    sql: SERVER_PEER_DISCOVERY_SQL.to_string(),
+        for peer in known_peers {
+            if !self
+                .runtime
+                .transport()
+                .known_peers()
+                .iter()
+                .any(|known| known.peer_id == peer.peer_id)
+            {
+                self.runtime.transport_mut().upsert_peer(ConnectorPeer {
+                    peer_id: peer.peer_id.clone(),
+                    addrs: peer.addrs.clone(),
+                    is_discovered: false,
+                });
+            }
+
+            if let Err(err) = self.runtime.transport_mut().select_peer(&peer.peer_id) {
+                log::debug!(
+                    "server peer refresh skipped for peer_id={}: {}",
+                    peer.peer_id,
+                    err
+                );
+                continue;
+            }
+
+            if let Err(err) = self.runtime.transport_mut().connect_active_peer() {
+                log::debug!(
+                    "server peer refresh skipped for peer_id={}: {}",
+                    peer.peer_id,
+                    err
+                );
+                continue;
+            }
+
+            let request = ConnectorRequest::new(
+                self.next_request_id(),
+                ConnectorCommand::Query {
+                    query: DataQuery {
+                        database_id: database_id.clone(),
+                        sql: SERVER_PEER_DISCOVERY_SQL.to_string(),
+                    },
                 },
-            },
-        );
+            );
 
-        let client = ConnectorClient::new(self.runtime.transport().clone());
-        let response = match client.execute(&request) {
-            Ok(response) => response,
-            Err(err) => {
-                log::debug!("server peer refresh request failed: {}", err);
-                return Ok(());
-            }
-        };
+            let client = ConnectorClient::new(self.runtime.transport().clone());
+            let response = match client.execute(&request) {
+                Ok(response) => response,
+                Err(err) => {
+                    log::debug!(
+                        "server peer refresh request failed for peer_id={}: {}",
+                        peer.peer_id,
+                        err
+                    );
+                    continue;
+                }
+            };
 
-        let ConnectorResult::Query(result) = response.result else {
-            return Ok(());
-        };
-
-        for row in result.rows {
-            if row.len() < 2 {
+            let ConnectorResult::Query(result) = response.result else {
                 continue;
+            };
+
+            for row in result.rows {
+                if row.len() < 2 {
+                    continue;
+                }
+
+                let peer_id = String::from_utf8_lossy(&row[0]).trim().to_string();
+                if peer_id.is_empty() {
+                    continue;
+                }
+
+                let addrs = String::from_utf8_lossy(&row[1])
+                    .split(',')
+                    .map(|addr| addr.trim().to_string())
+                    .filter(|addr| !addr.is_empty())
+                    .collect::<Vec<_>>();
+
+                if addrs.is_empty() {
+                    continue;
+                }
+
+                self.runtime.transport_mut().upsert_peer(ConnectorPeer {
+                    peer_id,
+                    addrs,
+                    is_discovered: true,
+                });
             }
+        }
 
-            let peer_id = String::from_utf8_lossy(&row[0]).trim().to_string();
-            if peer_id.is_empty() {
-                continue;
-            }
-
-            let addrs = String::from_utf8_lossy(&row[1])
-                .split(',')
-                .map(|addr| addr.trim().to_string())
-                .filter(|addr| !addr.is_empty())
-                .collect::<Vec<_>>();
-
-            if addrs.is_empty() {
-                continue;
-            }
-
-            self.runtime.transport_mut().upsert_peer(ConnectorPeer {
-                peer_id,
-                addrs,
-                is_discovered: true,
-            });
+        if let Some(active_peer_id) = original_active_peer {
+            let _ = self.runtime.transport_mut().select_peer(&active_peer_id);
         }
 
         Ok(())
