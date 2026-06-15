@@ -237,6 +237,7 @@ mod tests {
             }],
             databases: vec![DatabaseSchemaSummary {
                 database_id: "db1".to_string(),
+                database_name: "db1".to_string(),
                 schema_identifier: 1,
                 schema_hash: Some("hash1".to_string()),
             }],

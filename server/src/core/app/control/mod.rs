@@ -45,6 +45,7 @@ impl ServerApp {
         let key = database_id.to_string();
 
         let mut catalog = DatabaseCatalog::new(DatabaseId(key.clone()));
+        catalog.set_database_name(&key);
         catalog
             .transition_status(ObjectStatus::Ready)
             .map_err(|err| format!("failed preparing replicated catalog '{}': {}", key, err))?;

@@ -733,6 +733,13 @@ fn execute_create_table_impl(
 
     let normalized_table_id = common::normalize_identifier!(table_id);
     if catalog.table(&normalized_table_id).is_some() {
+        if request_id.starts_with("replication-schema-apply-") {
+            return ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            );
+        }
+
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -2122,7 +2129,13 @@ fn execute_select_impl(
     if statement_sql_lower.starts_with("show databases") {
         
         let result = serverlib::show_databases_result(
-            catalogs.values().map(|catalog| catalog.database_name().to_string()),
+            catalogs.values().map(|catalog| {
+                if catalog.database_name().is_empty() {
+                    catalog.database_id.0.clone()
+                } else {
+                    catalog.database_name().to_string()
+                }
+            }),
         );
 
         return ConnectorResponse::applied(

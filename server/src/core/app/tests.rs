@@ -3750,6 +3750,7 @@ fn create_database_query_creates_catalog() {
 
 #[test]
 fn drop_database_query_removes_catalog() {
+    
     let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -3784,9 +3785,11 @@ fn drop_database_query_removes_catalog() {
     );
 
     let response = app.handle_connector_request(&request);
+
     assert_eq!(response.status, ResponseStatus::Applied);
     assert!(app.catalogs().get("analytics").is_none());
     assert!(!catalog_file.exists());
+
 }
 
 #[test]

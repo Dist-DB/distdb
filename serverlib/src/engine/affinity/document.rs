@@ -18,6 +18,8 @@ pub struct AffinityMember {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseSchemaSummary {
     pub database_id: String,
+    #[serde(default)]
+    pub database_name: String,
     pub schema_identifier: u64,
     pub schema_hash: Option<String>,
 }

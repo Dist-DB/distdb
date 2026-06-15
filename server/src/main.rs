@@ -384,6 +384,7 @@ fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<DatabaseSche
 
             DatabaseSchemaSummary {
                 database_id: database_id.clone(),
+                database_name: catalog.database_name().to_string(),
                 schema_identifier,
                 schema_hash: Some(schema_fingerprint),
             }
@@ -1227,6 +1228,12 @@ fn spawn_affinity_replication_task(
                                                     .find(|db| db.database_id == *database_id)
                                                     .and_then(|db| db.schema_hash.clone())
                                             }),
+                                            proc.document().and_then(|doc| {
+                                                doc.databases
+                                                    .iter()
+                                                    .find(|db| db.database_id == *database_id)
+                                                    .map(|db| db.database_name.clone())
+                                            }),
                                         )
                                         .await
                                         {
@@ -1495,6 +1502,7 @@ async fn execute_live_schema_catalog_sync(
     database_id: &str,
     expected_schema_identifier: u64,
     expected_schema_hash: Option<String>,
+    expected_database_name: Option<String>,
 ) -> Result<(), String> {
     if affinity_id.is_empty() {
         return Ok(());
@@ -1508,6 +1516,13 @@ async fn execute_live_schema_catalog_sync(
             .map(|d| d.as_millis())
             .unwrap_or(0)
     );
+
+    if let Some(database_name) = expected_database_name.as_deref() {
+        if !database_name.is_empty() && database_name != database_id {
+            let mut app_guard = app.lock().await;
+            let _ = app_guard.set_affinity_catalog_database_name(database_id, database_name);
+        }
+    }
 
     let peer_targets = {
         let runtime = p2p_runtime.lock().await;
@@ -1588,7 +1603,7 @@ async fn execute_live_schema_catalog_sync(
             database_id,
             &response.schema_definitions,
         )?;
-        if !response.database_name.is_empty() {
+        if !response.database_name.is_empty() && response.database_name != database_id {
             let _ = app_guard.set_affinity_catalog_database_name(database_id, &response.database_name);
         }
         applied_any = true;

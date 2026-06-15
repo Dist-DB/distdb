@@ -42,11 +42,13 @@ mod tests {
             databases: vec![
                 DatabaseSchemaSummary {
                     database_id: "orders".to_string(),
+                    database_name: "orders".to_string(),
                     schema_identifier: 200,
                     schema_hash: Some("abc".to_string()),
                 },
                 DatabaseSchemaSummary {
                     database_id: "billing".to_string(),
+                    database_name: "billing".to_string(),
                     schema_identifier: 100,
                     schema_hash: Some("def".to_string()),
                 },
