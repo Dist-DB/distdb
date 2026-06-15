@@ -175,6 +175,7 @@ mod tests {
         tx.send(ConnectorP2pEvent::PeerDiscovered(ConnectorPeer {
             peer_id: "peer-1".to_string(),
             addrs: vec!["/ip4/10.0.0.1/tcp/4001".to_string()],
+            is_discovered: true,
         }))
         .expect("event send should succeed");
 
@@ -219,6 +220,7 @@ mod tests {
                 ConnectorP2pEvent::PeerDiscovered(ConnectorPeer {
                     peer_id: "peer-2".to_string(),
                     addrs: vec!["/ip4/10.0.0.2/tcp/4001".to_string()],
+                    is_discovered: true,
                 }),
                 ConnectorP2pEvent::Shutdown,
             ],

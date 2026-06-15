@@ -42,6 +42,7 @@ impl ConnectorP2pConfig {
 pub struct ConnectorPeer {
     pub peer_id: String,
     pub addrs: Vec<String>,
+    pub is_discovered: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +118,13 @@ impl ConnectorP2pTransport {
             self.peers.remove(&stale_peer_id);
         }
 
-        self.peers.insert(peer_id.clone(), peer);
+        self.peers.insert(
+            peer_id.clone(),
+            ConnectorPeer {
+                is_discovered: true,
+                ..peer
+            },
+        );
 
         // First discovered peer becomes the sticky session peer.
         if self.active_peer_id.is_none() || active_was_stale {
@@ -126,7 +133,11 @@ impl ConnectorP2pTransport {
     }
 
     pub fn discovered_peers(&self) -> Vec<ConnectorPeer> {
-        self.peers.values().cloned().collect()
+        self.peers
+            .values()
+            .filter(|peer| peer.is_discovered)
+            .cloned()
+            .collect()
     }
 
     pub fn active_peer_id(&self) -> Option<&str> {
@@ -570,6 +581,7 @@ mod tests {
         transport.upsert_peer(ConnectorPeer {
             peer_id: "peer-1".to_string(),
             addrs: vec!["/ip4/10.0.0.1/tcp/4001".to_string()],
+            is_discovered: true,
         });
 
         transport.queue_response(ConnectorResponse {
@@ -597,6 +609,7 @@ mod tests {
         transport.upsert_peer(ConnectorPeer {
             peer_id: "peer-1".to_string(),
             addrs: vec!["/ip4/10.0.0.1/tcp/4001".to_string()],
+            is_discovered: true,
         });
 
         assert_eq!(transport.active_peer_id(), Some("peer-1"));
@@ -609,10 +622,12 @@ mod tests {
         transport.upsert_peer(ConnectorPeer {
             peer_id: "peer-1".to_string(),
             addrs: vec!["/ip4/10.0.0.1/tcp/4001".to_string()],
+            is_discovered: true,
         });
         transport.upsert_peer(ConnectorPeer {
             peer_id: "peer-2".to_string(),
             addrs: vec!["/ip4/10.0.0.2/tcp/4001".to_string()],
+            is_discovered: true,
         });
 
         transport
@@ -629,11 +644,13 @@ mod tests {
         transport.upsert_peer(ConnectorPeer {
             peer_id: "server-node-01".to_string(),
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+            is_discovered: true,
         });
 
         transport.upsert_peer(ConnectorPeer {
             peer_id: "sam01".to_string(),
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+            is_discovered: true,
         });
 
         let peers = transport.discovered_peers();

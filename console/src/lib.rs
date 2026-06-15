@@ -57,6 +57,7 @@ impl ConsoleSession {
             runtime.handle_event(ConnectorP2pEvent::PeerDiscovered(ConnectorPeer {
                 peer_id: format!("server-node-{:02}", idx + 1),
                 addrs: vec![server_address],
+                is_discovered: false,
             }))?;
         }
 
@@ -296,7 +297,11 @@ impl ConsoleSession {
                 continue;
             }
 
-            self.runtime.transport_mut().upsert_peer(ConnectorPeer { peer_id, addrs });
+            self.runtime.transport_mut().upsert_peer(ConnectorPeer {
+                peer_id,
+                addrs,
+                is_discovered: true,
+            });
         }
 
         Ok(())
