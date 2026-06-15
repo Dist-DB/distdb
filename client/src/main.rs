@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.handle_event(ConnectorP2pEvent::PeerDiscovered(ConnectorPeer {
         peer_id: "server-node-01".to_string(),
         addrs: vec!["/ip4/10.0.0.42/tcp/4001".to_string()],
+        is_discovered: true,
     }))?;
 
     let create_database = ConnectorRequest::new(
