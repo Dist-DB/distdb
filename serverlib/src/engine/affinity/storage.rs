@@ -9,6 +9,7 @@ pub struct AffinityStorage {
 }
 
 impl AffinityStorage {
+
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
         Self {
             data_dir: data_dir.as_ref().to_path_buf(),
@@ -25,6 +26,7 @@ impl AffinityStorage {
 
     /// Load affinity document from disk if it exists
     pub fn load(&self, affinity_id: &str) -> Result<Option<AffinityDocument>> {
+
         let path = self.affinity_document_path(affinity_id);
 
         if !path.exists() {
@@ -57,10 +59,12 @@ impl AffinityStorage {
         );
 
         Ok(Some(document))
+
     }
 
     /// Save affinity document to disk
     pub fn save(&self, document: &AffinityDocument) -> Result<()> {
+
         let path = self.affinity_document_path(&document.affinity_id);
 
         let contents = bincode::serialize(document).map_err(|err| {
@@ -86,10 +90,12 @@ impl AffinityStorage {
         );
 
         Ok(())
+
     }
 
     /// Delete affinity document from disk
     pub fn delete(&self, affinity_id: &str) -> Result<()> {
+
         let path = self.affinity_document_path(affinity_id);
 
         if !path.exists() {
@@ -110,10 +116,12 @@ impl AffinityStorage {
         );
 
         Ok(())
+
     }
 
     /// Load checkpoint metadata from disk if it exists
     pub fn load_checkpoint(&self, affinity_id: &str) -> Result<Option<CheckpointMetadata>> {
+
         let path = self.checkpoint_path(affinity_id);
 
         if !path.exists() {
@@ -147,10 +155,12 @@ impl AffinityStorage {
         );
 
         Ok(Some(checkpoint))
+
     }
 
     /// Save checkpoint metadata to disk
     pub fn save_checkpoint(&self, checkpoint: &CheckpointMetadata) -> Result<()> {
+
         let path = self.checkpoint_path(&checkpoint.affinity_id);
 
         let contents = bincode::serialize(checkpoint).map_err(|err| {
@@ -176,10 +186,12 @@ impl AffinityStorage {
         );
 
         Ok(())
+
     }
 
     /// Delete checkpoint metadata from disk
     pub fn delete_checkpoint(&self, affinity_id: &str) -> Result<()> {
+
         let path = self.checkpoint_path(affinity_id);
 
         if !path.exists() {
@@ -200,7 +212,9 @@ impl AffinityStorage {
         );
 
         Ok(())
+
     }
+    
 }
 
 #[cfg(test)]

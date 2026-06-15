@@ -8,6 +8,7 @@ pub struct ReplicationPhaseExecutor {
 }
 
 impl ReplicationPhaseExecutor {
+
     pub fn new() -> Self {
         Self {
             current_sync_index: 0,
@@ -32,24 +33,30 @@ impl ReplicationPhaseExecutor {
         let step = &sync_plan[self.current_sync_index];
 
         match step.phase {
+            
             AffinitySyncPhase::ControlPlane => {
                 self.execute_control_plane_phase(processor, step)?;
-            }
+            },
+            
             AffinitySyncPhase::SchemaCatalog => {
                 self.execute_schema_catalog_phase(processor, step)?;
-            }
+            },
+            
             AffinitySyncPhase::DataSnapshot => {
                 self.execute_data_snapshot_phase(processor, step)?;
-            }
+            },
+            
             AffinitySyncPhase::WalCatchup => {
                 self.execute_wal_catchup_phase(processor, step)?;
-            }
+            },
+
         }
 
         processor.mark_sync_step_completed(self.current_sync_index);
         self.current_sync_index += 1;
 
         Ok(self.current_sync_index >= sync_plan.len())
+
     }
 
     /// Control Plane: Initialize membership and document agreement
@@ -59,6 +66,7 @@ impl ReplicationPhaseExecutor {
         processor: &AffinityProcessor,
         _step: &crate::engine::affinity::AffinitySyncStep,
     ) -> Result<()> {
+
         log::info!(
             "executing control plane replication phase local_node={:?}",
             processor.local_node_id()
@@ -74,6 +82,7 @@ impl ReplicationPhaseExecutor {
 
         log::debug!("control plane phase completed - affinity document is established");
         Ok(())
+
     }
 
     /// Schema Catalog: Sync schema metadata for each database in the affinity
@@ -82,6 +91,7 @@ impl ReplicationPhaseExecutor {
         processor: &AffinityProcessor,
         step: &crate::engine::affinity::AffinitySyncStep,
     ) -> Result<()> {
+
         let Some(database_id) = &step.database_id else {
             return Err(ServerLibError::InvalidState(
                 "schema catalog phase requires database_id".to_string(),
@@ -110,6 +120,7 @@ impl ReplicationPhaseExecutor {
         );
 
         Ok(())
+
     }
 
     /// Data Snapshot: Replicate initial data snapshot from peers
@@ -118,6 +129,7 @@ impl ReplicationPhaseExecutor {
         processor: &AffinityProcessor,
         step: &crate::engine::affinity::AffinitySyncStep,
     ) -> Result<()> {
+
         let Some(database_id) = &step.database_id else {
             return Err(ServerLibError::InvalidState(
                 "data snapshot phase requires database_id".to_string(),
@@ -155,6 +167,7 @@ impl ReplicationPhaseExecutor {
         );
 
         Ok(())
+
     }
 
     /// WAL Catchup: Apply transaction log to reach consistency with peers
@@ -163,6 +176,7 @@ impl ReplicationPhaseExecutor {
         processor: &AffinityProcessor,
         step: &crate::engine::affinity::AffinitySyncStep,
     ) -> Result<()> {
+
         let Some(database_id) = &step.database_id else {
             return Err(ServerLibError::InvalidState(
                 "wal catchup phase requires database_id".to_string(),
@@ -201,7 +215,9 @@ impl ReplicationPhaseExecutor {
         );
 
         Ok(())
+
     }
+    
 }
 
 #[cfg(test)]

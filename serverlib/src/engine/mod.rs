@@ -1,6 +1,5 @@
 
 pub mod affinity;
-pub mod affinity_storage;
 pub mod replication_executor;
 pub mod database;
 pub mod execution;
@@ -16,6 +15,7 @@ pub use database::core::{
 	DatabaseEntityAspect, DatabaseEntityKind, DatabaseObjectRef, DatabaseObjectType,
 	IndexId, ObjectStatus,
 };
+
 pub use affinity::{
 	AffinityDocument, AffinityMember, AffinityMemberStatus, AffinityProcessor,
 	AffinityProcessorError, AffinityProcessorState, AffinitySyncPhase, AffinitySyncStep,
