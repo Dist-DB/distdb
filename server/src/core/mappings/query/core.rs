@@ -17,6 +17,7 @@ use serverlib::{
     TableLifecycleAction, TableLifecyclePayload, TableSchema, TransactionId, TransactionKind,
     TransactionRecord, UserId,
 };
+
 use serverlib::{
     RuntimeIndexStore, collect_indexable_equality_filters, count_condition_predicates,
     decode_row_payload, encode_row_payload, index_value_tuple, load_live_rows,
@@ -28,7 +29,10 @@ use super::explain::{
     connector_field_defs, explain_inner_statement, explain_join_mutation_plan,
     explain_mutation_plan, explain_select_plan,
 };
+
 use super::timings::{empty_query_timings, make_query_timings, with_query_timings};
+
+
 
 pub(crate) fn handle_query_command(
     request_id: &str,
@@ -183,7 +187,9 @@ fn execute_parsed_query(
     };
 
     match handler {
+
         Some(handler) => handler(&mut ctx, request_id, query, statement),
+        
         None => ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -191,6 +197,7 @@ fn execute_parsed_query(
                 statement.operation
             ),
         ),
+
     }
 
 }
@@ -493,7 +500,9 @@ fn execute_alter_table_impl(
     let mut type_changes = Vec::new();
 
     for operation in plan.operations {
+
         let apply_result = match operation {
+
             AlterTableChangeOp::AddField(mut field) => {
                 let next_seqno = tx
                     .pending_schema()
@@ -506,12 +515,12 @@ fn execute_alter_table_impl(
                 field.seqno = next_seqno;
                 additions.push((field.field_name.clone(), field.field_type.clone()));
                 tx.add_field(field)
-            }
+            },
 
             AlterTableChangeOp::DropField(name) => {
                 removals.push(name.clone());
                 tx.remove_field(&name)
-            }
+            },
 
             AlterTableChangeOp::RenameField { from, to } => {
                 let existing = tx.pending_schema().field(&from).cloned();
@@ -529,7 +538,7 @@ fn execute_alter_table_impl(
                         serverlib::SchemaError::FieldNotFound,
                     )),
                 }
-            }
+            },
 
             AlterTableChangeOp::ModifyField {
                 field_name,
@@ -540,7 +549,8 @@ fn execute_alter_table_impl(
                     target_type: new_type.clone(),
                 });
                 Ok(())
-            }
+            },
+
         };
 
         if let Err(err) = apply_result {
@@ -550,6 +560,7 @@ fn execute_alter_table_impl(
                 format!("alter table failed: {err}"),
             );
         }
+
     }
 
     let wal_id = catalog.database_id.0.clone();
@@ -557,6 +568,7 @@ fn execute_alter_table_impl(
     let created_at = common::epoch_nanos!();
 
     if let Err(err) = tx.commit::<serverlib::DatabaseError, _>(catalog, |payload| {
+        
         let encoded = payload
             .encode()
             .map_err(|_| serverlib::DatabaseError::CatalogSerialize)?;
@@ -580,6 +592,7 @@ fn execute_alter_table_impl(
         .map_err(|_| serverlib::DatabaseError::CatalogWrite)?;
 
         Ok(())
+
     }) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -589,6 +602,7 @@ fn execute_alter_table_impl(
 
     // If there are type changes or field modifications, run the migration executor
     if !type_changes.is_empty() {
+
         let mutation_rule_set = serverlib::SchemaMutationRuleSet {
             renames,
             removals,
@@ -602,6 +616,7 @@ fn execute_alter_table_impl(
 
         let executor =
             serverlib::DiskToMemorySchemaMigrationExecutor::new(node_data_dir.to_path_buf());
+        
         executor
             .set_rules_for_table(&table_id, mutation_rule_set)
             .ok();
@@ -613,6 +628,7 @@ fn execute_alter_table_impl(
                 format!("alter table schema migration failed: {err}"),
             );
         }
+
     }
 
     ConnectorResponse::applied(
@@ -639,18 +655,20 @@ fn execute_create_database_impl(
     };
 
     match DatabaseCatalog::create_new_database(database_name, node_data_dir) {
+
         Ok(catalog) => {
             catalogs.insert(catalog.database_id.0.clone(), catalog);
             ConnectorResponse::applied(
                 request_id.to_string(),
                 ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
             )
-        }
+        },
 
         Err(err) => ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create database failed: {err}"),
         ),
+
     }
 
 }
@@ -823,12 +841,15 @@ fn execute_drop_directive_impl(
 ) -> ConnectorResponse {
 
     match statement.operation {
+
         SqlOperation::DropDatabase => {
             execute_drop_database(request_id, catalogs, node_data_dir, statement)
-        }
+        },
+
         _ if drop_entity_operation_metadata(statement.operation).is_some() => {
             execute_drop_entity_object(request_id, query, catalogs, wal, node_data_dir, statement)
-        }
+        },
+
         _ => ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -836,6 +857,7 @@ fn execute_drop_directive_impl(
                 statement.operation
             ),
         ),
+
     }
 
 }
@@ -845,21 +867,27 @@ fn drop_entity_operation_metadata(
 ) -> Option<(DatabaseObjectType, &'static str, Option<SqlObjectKind>)> {
 
     match operation {
+        
         SqlOperation::DropTable => Some((DatabaseObjectType::Table, "table", None)),
+        
         SqlOperation::DropView => {
             Some((DatabaseObjectType::View, "view", Some(SqlObjectKind::View)))
-        }
+        },
+        
         SqlOperation::DropTrigger => Some((
             DatabaseObjectType::Trigger,
             "trigger",
             Some(SqlObjectKind::Trigger),
         )),
+
         SqlOperation::DropStoredProcedure => Some((
             DatabaseObjectType::StoredProcedure,
             "stored procedure",
             Some(SqlObjectKind::StoredProcedure),
         )),
+
         _ => None,
+
     }
 
 }
@@ -945,6 +973,7 @@ fn execute_drop_entity_object(
     };
 
     let normalized_object_id = common::normalize_identifier!(object_id);
+
     let Some((object_type, kind_label, sql_object_kind)) =
         drop_entity_operation_metadata(statement.operation)
     else {
@@ -984,6 +1013,7 @@ fn execute_drop_entity_object(
 
     // Only remove a dedicated entity stream. SQL-backed objects currently
     // share the database stream and must not delete it.
+
     if let Some(stream_id) = entity_wal_stream_id {
         if stream_id != wal_id {
             if let Err(err) = wal.delete_stream(&stream_id) {
@@ -998,6 +1028,7 @@ fn execute_drop_entity_object(
     let timestamp = common::epoch_nanos!();
 
     if object_type == DatabaseObjectType::Table {
+
         let lifecycle_payload = TableLifecyclePayload {
             table_id: normalized_object_id.clone(),
             action: TableLifecycleAction::Drop,
@@ -1034,7 +1065,9 @@ fn execute_drop_entity_object(
                 format!("drop table cleanup failed: {err}"),
             );
         }
+
     } else {
+
         let sql_payload = SqlDefinitionPayload {
             object_id: normalized_object_id,
             object_kind: sql_object_kind
@@ -1067,6 +1100,7 @@ fn execute_drop_entity_object(
                 format!("drop sql definition WAL append failed: {err}"),
             );
         }
+
     }
 
     ConnectorResponse::applied(
@@ -1101,6 +1135,7 @@ fn execute_insert_impl(
     };
 
     if is_explain {
+
         let mut rows = vec![
             vec!["operation".to_string(), "insert".to_string()],
             vec!["table".to_string(), plan.table_id.clone()],
@@ -1108,10 +1143,12 @@ fn execute_insert_impl(
         ];
 
         match &plan.source {
+
             serverlib::InsertRowsSource::Values(values) => {
                 rows.push(vec!["source".to_string(), "values".to_string()]);
                 rows.push(vec!["row_count".to_string(), values.len().to_string()]);
-            }
+            },
+
             serverlib::InsertRowsSource::Select(select_plan) => {
                 rows.push(vec!["source".to_string(), "select".to_string()]);
                 rows.push(vec![
@@ -1123,9 +1160,11 @@ fn execute_insert_impl(
                     select_plan.joins.len().to_string(),
                 ]);
             }
+
         }
 
         return explain_mutation_plan(request_id, rows);
+
     }
 
     with_table_write_guard(
@@ -1207,7 +1246,7 @@ fn execute_insert_locked(
                 format!("insert failed: unknown column '{}'", column),
             );
         }
-        
+
     }
 
     let insert_rows =
@@ -1224,139 +1263,151 @@ fn execute_insert_locked(
         external_write_group_id,
         touched_write_tables,
         |group_id, runtime_indexes| {
-        let mut affected_rows = 0u64;
 
-        for row in &insert_rows {
+            let mut affected_rows = 0u64;
 
-            if row.len() != columns.len() {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!(
-                        "insert failed: row has {} values but {} columns were specified",
-                        row.len(),
-                        columns.len()
-                    ),
-                );
-            }
+            for row in &insert_rows {
 
-            let mut payload_row = HashMap::with_capacity(schema.fields.len());
+                if row.len() != columns.len() {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!(
+                            "insert failed: row has {} values but {} columns were specified",
+                            row.len(),
+                            columns.len()
+                        ),
+                    );
+                }
 
-            for (column, value) in columns.iter().zip(row.iter()) {
-                
-                let field = schema
-                    .field(column)
-                    .expect("column existence already validated");
+                let mut payload_row = HashMap::with_capacity(schema.fields.len());
 
-                match value {
+                for (column, value) in columns.iter().zip(row.iter()) {
+                    
+                    let field = schema
+                        .field(column)
+                        .expect("column existence already validated");
 
-                    Some(value_bytes) => {
-                        payload_row.insert(column.clone(), value_bytes.clone());
-                    },
+                    match value {
 
-                    None => {
+                        Some(value_bytes) => {
+                            payload_row.insert(column.clone(), value_bytes.clone());
+                        },
 
-                        if let Some(default) = &field.default_value {
-                            payload_row.insert(column.clone(), default.clone());
-                        } else if !field.nullable {
-                            return ConnectorResponse::rejected(
-                                request_id.to_string(),
-                                format!("insert failed: column '{}' cannot be null", column),
-                            );
+                        None => {
+
+                            if let Some(default) = &field.default_value {
+                                payload_row.insert(column.clone(), default.clone());
+                            } else if !field.nullable {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!("insert failed: column '{}' cannot be null", column),
+                                );
+                            }
+
                         }
 
                     }
 
                 }
 
-            }
+                for field in &schema.fields {
 
-            for field in &schema.fields {
-                if payload_row.contains_key(&field.field_name) {
-                    continue;
+                    if payload_row.contains_key(&field.field_name) {
+                        continue;
+                    }
+
+                    if let Some(default) = &field.default_value {
+                        payload_row.insert(field.field_name.clone(), default.clone());
+                        continue;
+                    }
+
+                    if !field.nullable {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!(
+                                "insert failed: missing required column '{}'",
+                                field.field_name
+                            ),
+                        );
+                    }
+
                 }
 
-                if let Some(default) = &field.default_value {
-                    payload_row.insert(field.field_name.clone(), default.clone());
-                    continue;
+                if let Some(pk_index) = primary_key_index(table) {
+
+                    let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
+                        vec![pk_index.field_name.clone()]
+                    } else {
+                        pk_index.field_names.clone()
+                    };
+
+                    let incoming_pk = pk_fields
+                        .iter()
+                        .map(|pk| payload_row.get(pk).cloned().unwrap_or_default())
+                        .collect::<Vec<_>>();
+
+                    let pk_runtime = runtime_indexes.index(&pk_index.index_id.0);
+
+                    if pk_runtime
+                        .map(|idx| idx.contains(&incoming_pk))
+                        .unwrap_or(false)
+                    {
+                        
+                        let pk_display = pk_fields
+                            .iter()
+                            .zip(incoming_pk.iter())
+                            .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("insert failed: duplicate primary key ({})", pk_display),
+                        );
+
+                    }
+
                 }
 
-                if !field.nullable {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!(
-                            "insert failed: missing required column '{}'",
-                            field.field_name
-                        ),
-                    );
-                }
-            }
+                let encoded = match encode_row_payload(schema, &payload_row) {
+                    
+                    Ok(encoded) => encoded,
+                    
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("insert payload encode failed: {err}"),
+                        );
+                    }
 
-            if let Some(pk_index) = primary_key_index(table) {
-
-                let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
-                    vec![pk_index.field_name.clone()]
-                } else {
-                    pk_index.field_names.clone()
                 };
 
-                let incoming_pk = pk_fields
-                    .iter()
-                    .map(|pk| payload_row.get(pk).cloned().unwrap_or_default())
-                    .collect::<Vec<_>>();
-
-                let pk_runtime = runtime_indexes.index(&pk_index.index_id.0);
-
-                if pk_runtime
-                    .map(|idx| idx.contains(&incoming_pk))
-                    .unwrap_or(false)
-                {
-                    let pk_display = pk_fields
-                        .iter()
-                        .zip(incoming_pk.iter())
-                        .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                if let Err(err) = append_row_payload_record(
+                    wal,
+                    &plan.table_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    encoded,
+                    common::epoch_nanos!(),
+                    None,
+                    Some(group_id),
+                ) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
-                        format!("insert failed: duplicate primary key ({})", pk_display),
+                        format!("insert WAL append failed: {err}"),
                     );
                 }
+
+                affected_rows = affected_rows.saturating_add(1);
+
             }
 
-            let encoded = match encode_row_payload(schema, &payload_row) {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("insert payload encode failed: {err}"),
-                    );
-                }
-            };
-
-            if let Err(err) = append_row_payload_record(
-                wal,
-                &plan.table_id,
-                table,
-                runtime_indexes,
-                TransactionKind::Insert,
-                encoded,
-                common::epoch_nanos!(),
-                None,
-                Some(group_id),
-            ) {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("insert WAL append failed: {err}"),
-                );
-            }
-
-            affected_rows = affected_rows.saturating_add(1);
-        }
-
-        ConnectorResponse::applied(
-            request_id.to_string(),
-            ConnectorResult::Mutation(MutationResult { affected_rows }),
-        )
+            ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows }),
+            )
+            
         },
     )
 
@@ -1374,7 +1425,9 @@ fn materialize_insert_source_rows(
         serverlib::InsertRowsSource::Values(rows) => Ok(rows.clone()),
 
         serverlib::InsertRowsSource::Select(read_plan) => {
+
             let select_result = if !read_plan.joins.is_empty() {
+
                 serverlib::execute_joined_select_plan(
                     catalog,
                     wal,
@@ -1400,11 +1453,15 @@ fn materialize_insert_source_rows(
                         )
                     },
                 )
+
             } else if read_plan.table_id.is_empty() {
+                
                 serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
                     evaluate_inbuilt_sql_function(function)
                 })
+
             } else {
+                
                 let table_id = read_plan.table_id.as_str();
 
                 let schema = catalog.table_schema(table_id).ok_or_else(|| {
@@ -1416,6 +1473,7 @@ fn materialize_insert_source_rows(
                 })?;
 
                 let mut index_filter_map = HashMap::new();
+
                 let allow_index_short_circuit = read_plan
                     .where_condition
                     .as_ref()
@@ -1445,6 +1503,7 @@ fn materialize_insert_source_rows(
                         )
                     },
                 )
+
             }
             .map_err(|message| format!("insert select failed: {message}"))?;
 
@@ -1469,6 +1528,7 @@ fn materialize_insert_source_rows(
                     .collect::<Vec<_>>();
 
             Ok(rows)
+
         }
 
     }
@@ -1652,6 +1712,7 @@ fn execute_update_locked(
                 }
 
                 if let Some(pk_index) = primary_key_index(table) {
+
                     let old_pk = index_value_tuple(pk_index, &row_map);
                     let new_pk = index_value_tuple(pk_index, &updated_row);
 
@@ -1678,6 +1739,7 @@ fn execute_update_locked(
 
                     pk_keys.remove(&old_pk);
                     pk_keys.insert(new_pk);
+
                 }
 
                 let delete_payload = match encode_row_payload(schema, &row_map) {
@@ -1868,6 +1930,7 @@ fn execute_delete_locked(
             let mut affected_rows = 0u64;
 
             for (row_id, row_map) in current_live_rows {
+
                 if !mutation_uses_joins
                     && !serverlib::row_matches_select_condition(
                         &row_map,
@@ -1948,8 +2011,11 @@ where
     let response = execute(catalog);
 
     if matches!(response.status, connector::ResponseStatus::Applied) {
+
         match catalog.finalize_table_write(table_id) {
+
             Ok(()) => response,
+
             Err(err) => {
                 let _ = catalog.abort_table_write(table_id);
                 ConnectorResponse::rejected(
@@ -1957,7 +2023,9 @@ where
                     format!("table write finalize failed: {err}"),
                 )
             }
+        
         }
+
     } else {
         let _ = catalog.abort_table_write(table_id);
         response
@@ -2020,6 +2088,7 @@ fn execute_select_impl(
     let statement_sql_lower = statement.sql.to_ascii_lowercase();
 
     if statement_sql_lower.starts_with("show databases") {
+        
         let result = serverlib::show_databases_result(catalogs.keys().cloned());
 
         return ConnectorResponse::applied(
@@ -2030,9 +2099,11 @@ fn execute_select_impl(
                 timings: empty_query_timings(),
             }),
         );
+
     }
 
     if statement_sql_lower.starts_with("show tables") {
+
         let target_db = statement
             .object_name
             .as_deref()
@@ -2055,6 +2126,7 @@ fn execute_select_impl(
                 timings: empty_query_timings(),
             }),
         );
+
     }
 
     let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
@@ -2068,6 +2140,7 @@ fn execute_select_impl(
         || statement_sql_lower.starts_with("desc ")
         || statement_sql_lower.starts_with("show columns")
     {
+
         let Some(object_name) = statement.object_name.as_deref() else {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -2096,16 +2169,20 @@ fn execute_select_impl(
                 timings: empty_query_timings(),
             }),
         );
+
     }
 
     let read_plan = match serverlib::parse_select_read_plan_from_statement(&statement.sql) {
+
         Ok(plan) => plan,
+        
         Err(err) => {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("select parse failed: {err}"),
             );
         }
+
     };
 
     if !read_plan.joins.is_empty() {
@@ -2285,6 +2362,7 @@ fn execute_joined_select(
             timings: empty_query_timings(),
         }),
     )
+
 }
 
 fn execute_create_view_impl(
@@ -2355,7 +2433,8 @@ fn execute_create_view_impl(
                 request_id.to_string(),
                 ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
             )
-        }
+        
+        },
 
         Err(err) => ConnectorResponse::rejected(
             request_id.to_string(),
@@ -2641,6 +2720,7 @@ pub(super) fn append_row_payload_record(
     runtime_indexes.apply_table_row_mutation(derived_indexes_for_table(table), kind, &row_map);
 
     Ok(())
+
 }
 
 fn with_statement_write_batch<F>(
@@ -2655,6 +2735,7 @@ fn with_statement_write_batch<F>(
 where
     F: FnOnce(TransactionId, &mut RuntimeIndexStore) -> ConnectorResponse,
 {
+
     if let (Some(write_group_id), Some(touched_tables)) = (external_write_group_id, touched_tables)
     {
         if touched_tables.insert(table.table_id.clone()) {
@@ -2696,6 +2777,7 @@ where
     let response = execute(write_group_id, runtime_indexes);
 
     if matches!(response.status, connector::ResponseStatus::Applied) {
+
         if let Err(err) = append_payload_record_with_group(
             wal,
             &table.table_id,
@@ -2720,7 +2802,9 @@ where
         }
 
         response
+
     } else {
+        
         let _ = append_payload_record_with_group(
             wal,
             &table.table_id,
@@ -2729,9 +2813,12 @@ where
             common::epoch_nanos!(),
             Some(write_group_id),
         );
+
         rebuild_runtime_indexes_for_table(table, wal, runtime_indexes);
         response
+    
     }
+
 }
 
 pub(crate) fn commit_external_write_group(
@@ -2761,6 +2848,7 @@ pub(crate) fn abort_external_write_group(
     group_id: TransactionId,
 ) {
     for table_id in table_ids {
+
         let _ = append_payload_record_with_group(
             wal,
             table_id,
@@ -2773,6 +2861,7 @@ pub(crate) fn abort_external_write_group(
         if let Some(table) = catalogs.values().find_map(|catalog| catalog.table(table_id)) {
             rebuild_runtime_indexes_for_table(table, wal, runtime_indexes);
         }
+
     }
 }
 
@@ -2784,12 +2873,14 @@ fn rebuild_runtime_indexes_for_table(
     let live_rows = load_live_rows(wal, &table.table_id, table.schema());
 
     for index in derived_indexes_for_table(table) {
+
         runtime_indexes.index_mut(&index.index_id.0).rebuild(
             live_rows
                 .iter()
                 .map(|(_, row_map)| index_value_tuple(index, row_map))
                 .collect(),
         );
+
     }
 }
 
@@ -2934,6 +3025,7 @@ fn persist_entity_snapshot(
         .map_err(|_| "failed to serialize entity snapshot".to_string())?;
 
     let mut file = Vec::with_capacity(HEADER_SIZE + payload.len());
+
     file.extend_from_slice(&make_header(FileKind::Entity));
     file.extend_from_slice(&payload);
 
