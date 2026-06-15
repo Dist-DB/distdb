@@ -7,6 +7,8 @@ use super::table_schema::TableSchema;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseStoredProcedure {
+    #[serde(default)]
+    pub entity_id: String,
     pub procedure_id: String,
     pub sql: String,
     pub dependencies: Vec<String>,
@@ -17,6 +19,7 @@ impl DatabaseStoredProcedure {
 
     pub fn new(procedure_id: String, sql: String, dependencies: Vec<String>) -> Self {
         Self {
+            entity_id: common::helpers::utils::unique_id(),
             procedure_id,
             sql,
             dependencies,
@@ -28,12 +31,16 @@ impl DatabaseStoredProcedure {
 
 impl DatabaseEntityAspect for DatabaseStoredProcedure {
 
+    fn name(&self) -> &str {
+        &self.procedure_id
+    }
+
     fn kind(&self) -> DatabaseEntityKind {
         DatabaseEntityKind::StoredProcedure
     }
 
     fn storage_key(&self) -> String {
-        common::normalize_identifier!(&self.procedure_id)
+        self.entity_id.clone()
     }
 
     fn status(&self) -> ObjectStatus {

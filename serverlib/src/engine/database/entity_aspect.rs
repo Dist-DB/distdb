@@ -5,6 +5,7 @@ use super::entity_metadata::EntityMetadata;
 use super::table_schema::TableSchema;
 
 pub trait DatabaseEntityAspect {
+    fn name(&self) -> &str;
     fn kind(&self) -> DatabaseEntityKind;
     fn storage_key(&self) -> String;
     fn status(&self) -> ObjectStatus;

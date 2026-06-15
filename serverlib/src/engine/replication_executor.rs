@@ -19,12 +19,18 @@ impl ReplicationPhaseExecutor {
         self.current_sync_index
     }
 
+    /// Reset the executor so a new sync plan can be walked from the beginning.
+    pub fn reset(&mut self) {
+        self.current_sync_index = 0;
+    }
+
     /// Execute the next replication phase based on processor state
     pub fn execute_next_phase(
         &mut self,
         processor: &mut AffinityProcessor,
         sync_plan: &[crate::engine::affinity::AffinitySyncStep],
     ) -> Result<bool> {
+        
         if self.current_sync_index >= sync_plan.len() {
             log::info!("all replication phases completed");
             return Ok(true);

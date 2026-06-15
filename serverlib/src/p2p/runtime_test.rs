@@ -135,12 +135,17 @@ fn runtime_queues_schema_catalog_messages() {
         request_id: "req-schema-1".to_string(),
         affinity_id: "aff-1".to_string(),
         database_id: "db1".to_string(),
+        expected_schema_identifier: 1,
+        expected_schema_hash: Some("hash".to_string()),
     };
     let response = SchemaCatalogResponse {
         request_id: "req-schema-1".to_string(),
         ok: true,
         error: None,
+        schema_identifier: 1,
+        schema_hash: Some("hash".to_string()),
         schema_definitions: vec!["CREATE TABLE users (id INT);".to_string()],
+        database_name: String::new(),
     };
 
     runtime

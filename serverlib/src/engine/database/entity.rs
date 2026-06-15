@@ -21,6 +21,16 @@ pub enum DatabaseEntity {
 
 impl DatabaseEntityAspect for DatabaseEntity {
 
+    fn name(&self) -> &str {
+        match self {
+            Self::Table(t) => t.name(),
+            Self::View(v) => v.name(),
+            Self::Relationship(r) => r.name(),
+            Self::Trigger(t) => t.name(),
+            Self::StoredProcedure(p) => p.name(),
+        }
+    }
+
     fn kind(&self) -> DatabaseEntityKind {
         match self {
             Self::Table(_)           => DatabaseEntityKind::Table,
@@ -62,13 +72,8 @@ impl DatabaseEntityAspect for DatabaseEntity {
     }
 
     fn wal_stream_id(&self, database_wal_id: &str) -> String {
-        match self {
-            Self::Table(t)        => t.wal_stream_id(database_wal_id),
-            Self::View(v)         => v.wal_stream_id(database_wal_id),
-            Self::Relationship(r) => r.wal_stream_id(database_wal_id),
-            Self::Trigger(t)      => t.wal_stream_id(database_wal_id),
-            Self::StoredProcedure(p) => p.wal_stream_id(database_wal_id),
-        }
+        let _ = database_wal_id;
+        self.storage_key()
     }
 
     fn schema_revision(&self) -> Option<u64> {

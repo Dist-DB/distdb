@@ -10,6 +10,8 @@ use super::entity_metadata::EntityMetadata;
 /// need to re-execute the view SQL.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseView {
+    #[serde(default)]
+    pub entity_id: String,
     pub view_id: String,
     pub sql: String,
     pub schema: TableSchema,
@@ -21,6 +23,7 @@ impl DatabaseView {
     
     pub fn new(view_id: String, sql: String, schema: TableSchema) -> Self {
         Self {
+            entity_id: common::helpers::utils::unique_id(),
             view_id,
             sql,
             schema,
@@ -33,12 +36,16 @@ impl DatabaseView {
 
 impl DatabaseEntityAspect for DatabaseView {
 
+    fn name(&self) -> &str {
+        &self.view_id
+    }
+
     fn kind(&self) -> DatabaseEntityKind {
         DatabaseEntityKind::View
     }
 
     fn storage_key(&self) -> String {
-        common::normalize_identifier!(&self.view_id)
+        self.entity_id.clone()
     }
 
     fn status(&self) -> ObjectStatus {

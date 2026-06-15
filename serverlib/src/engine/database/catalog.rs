@@ -31,6 +31,8 @@ use super::view::DatabaseView;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseCatalog {
     pub database_id: DatabaseId,
+    #[serde(default)]
+    database_name: String,
     status: ObjectStatus,
     #[serde(default)]
     schema_epoch: u64,
@@ -40,10 +42,36 @@ pub struct DatabaseCatalog {
 }
 
 impl DatabaseCatalog {
+
+    fn resolve_entity_key(&self, entity_id: &str) -> Option<String> {
+
+        if self.entities.contains_key(entity_id) {
+            return Some(entity_id.to_string());
+        }
+
+        if let Some((key, _)) = self.entities.iter().find(|(_, entity)| match entity {
+            DatabaseEntity::Relationship(relationship) => {
+                let left = &relationship.left_table_id;
+                let right = &relationship.right_table_id;
+                let name = &relationship.relation_name;
+                entity_id == format!("rel:{left}:{right}:{name}")
+            }
+            _ => false,
+        }) {
+            return Some(key.clone());
+        }
+
+        self.entities
+            .iter()
+            .find(|(_, entity)| entity.name() == entity_id)
+            .map(|(key, _)| key.clone())
+
+    }
     
     pub fn new(database_id: DatabaseId) -> Self {
         Self {
             database_id,
+            database_name: String::new(),
             status: ObjectStatus::Load,
             schema_epoch: 0,
             active_schema_change: None,
@@ -53,7 +81,9 @@ impl DatabaseCatalog {
 
     pub fn create_empty_from_name(name: &str) -> DatabaseResult<Self> {
         let database_id = DatabaseId::from_database_name(name)?;
-        Ok(Self::new(database_id))
+        let mut catalog = Self::new(database_id);
+        catalog.database_name = common::normalize_identifier!(name);
+        Ok(catalog)
     }
 
     pub fn create_new_database(name: &str, directory: impl AsRef<Path>) -> DatabaseResult<Self> {
@@ -85,16 +115,15 @@ impl DatabaseCatalog {
             .validate()
             .map_err(DatabaseError::SchemaChange)?;
 
-        if self.entities.contains_key(&table_id) {
+        if self.resolve_entity_key(&table_id).is_some() {
             return Err(DatabaseError::DuplicateEntity);
         }
 
         let indexes = Self::indexes_for_schema(&table_id, &schema);
+        let table = DatabaseTable::new(table_id, schema, indexes);
+        let storage_key = table.storage_key();
 
-        self.entities.insert(
-            table_id.clone(),
-            DatabaseEntity::Table(DatabaseTable::new(table_id, schema, indexes)),
-        );
+        self.entities.insert(storage_key, DatabaseEntity::Table(table));
 
         Ok(())
         
@@ -130,45 +159,55 @@ impl DatabaseCatalog {
         object_id: &str,
     ) -> DatabaseResult<()> {
 
-        let normalized = common::normalize_identifier!(object_id);
+        let Some(resolved_key) = self.resolve_entity_key(object_id) else {
+            return Err(match object_type {
+                DatabaseObjectType::Table => DatabaseError::TableNotFound,
+                DatabaseObjectType::View => DatabaseError::ViewNotFound,
+                DatabaseObjectType::Trigger => DatabaseError::TriggerNotFound,
+                DatabaseObjectType::StoredProcedure => DatabaseError::StoredProcedureNotFound,
+                DatabaseObjectType::Relationship | DatabaseObjectType::Index => {
+                    DatabaseError::EntityNotFound
+                }
+            });
+        };
 
         let removed = match object_type {
             
-            DatabaseObjectType::Table => match self.entities.get(&normalized) {
+            DatabaseObjectType::Table => match self.entities.get(&resolved_key) {
                 Some(DatabaseEntity::Table(_)) => {
-                    self.entities.remove(&normalized);
+                    self.entities.remove(&resolved_key);
                     Ok(())
                 }
                 _ => Err(DatabaseError::TableNotFound),
             },
             
-            DatabaseObjectType::View => match self.entities.get(&normalized) {
+            DatabaseObjectType::View => match self.entities.get(&resolved_key) {
                 Some(DatabaseEntity::View(_)) => {
-                    self.entities.remove(&normalized);
+                    self.entities.remove(&resolved_key);
                     Ok(())
                 }
                 _ => Err(DatabaseError::ViewNotFound),
             },
             
-            DatabaseObjectType::Trigger => match self.entities.get(&normalized) {
+            DatabaseObjectType::Trigger => match self.entities.get(&resolved_key) {
                 Some(DatabaseEntity::Trigger(_)) => {
-                    self.entities.remove(&normalized);
+                    self.entities.remove(&resolved_key);
                     Ok(())
                 }
                 _ => Err(DatabaseError::TriggerNotFound),
             },
             
-            DatabaseObjectType::StoredProcedure => match self.entities.get(&normalized) {
+            DatabaseObjectType::StoredProcedure => match self.entities.get(&resolved_key) {
                 Some(DatabaseEntity::StoredProcedure(_)) => {
-                    self.entities.remove(&normalized);
+                    self.entities.remove(&resolved_key);
                     Ok(())
                 }
                 _ => Err(DatabaseError::StoredProcedureNotFound),
             },
             
-            DatabaseObjectType::Relationship => match self.entities.get(&normalized) {
+            DatabaseObjectType::Relationship => match self.entities.get(&resolved_key) {
                 Some(DatabaseEntity::Relationship(_)) => {
-                    self.entities.remove(&normalized);
+                    self.entities.remove(&resolved_key);
                     Ok(())
                 }
                 _ => Err(DatabaseError::EntityNotFound),
@@ -192,10 +231,7 @@ impl DatabaseCatalog {
 
     pub fn register_relationship(&mut self, relationship: DatabaseRelationship) -> DatabaseResult<()> {
 
-        let left = common::normalize_identifier!(&relationship.left_table_id);
-        let right = common::normalize_identifier!(&relationship.right_table_id);
-        let name = common::normalize_identifier!(&relationship.relation_name);
-        let entity_id = format!("rel:{left}:{right}:{name}");
+        let entity_id = relationship.storage_key();
 
         if self.entities.contains_key(&entity_id) {
             return Err(DatabaseError::DuplicateEntity);
@@ -226,31 +262,31 @@ impl DatabaseCatalog {
 
     pub fn object(&self, object_type: DatabaseObjectType, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
 
-        let normalized = common::normalize_identifier!(object_id);
+        let entity_key = self.resolve_entity_key(object_id);
         
         match object_type {
 
-            DatabaseObjectType::Table => match self.entities.get(&normalized) {
+            DatabaseObjectType::Table => match entity_key.as_deref().and_then(|key| self.entities.get(key)) {
                 Some(DatabaseEntity::Table(table)) => Some(DatabaseObjectRef::Table(table)),
                 _ => None,
             },
             
-            DatabaseObjectType::View => match self.entities.get(&normalized) {
+            DatabaseObjectType::View => match entity_key.as_deref().and_then(|key| self.entities.get(key)) {
                 Some(DatabaseEntity::View(view)) => Some(DatabaseObjectRef::View(view)),
                 _ => None,
             },
             
-            DatabaseObjectType::Relationship => self.entities.get(&normalized).and_then(|entity| match entity {
+            DatabaseObjectType::Relationship => entity_key.as_deref().and_then(|key| self.entities.get(key)).and_then(|entity| match entity {
                 DatabaseEntity::Relationship(relationship) => Some(DatabaseObjectRef::Relationship(relationship)),
                 _ => None,
             }),
             
-            DatabaseObjectType::Trigger => match self.entities.get(&normalized) {
+            DatabaseObjectType::Trigger => match entity_key.as_deref().and_then(|key| self.entities.get(key)) {
                 Some(DatabaseEntity::Trigger(trigger)) => Some(DatabaseObjectRef::Trigger(trigger)),
                 _ => None,
             },
 
-            DatabaseObjectType::StoredProcedure => match self.entities.get(&normalized) {
+            DatabaseObjectType::StoredProcedure => match entity_key.as_deref().and_then(|key| self.entities.get(key)) {
                 Some(DatabaseEntity::StoredProcedure(procedure)) => {
                     Some(DatabaseObjectRef::StoredProcedure(procedure))
                 }
@@ -261,7 +297,7 @@ impl DatabaseCatalog {
                 self.entities.values().find_map(|entity| match entity {
                     DatabaseEntity::Table(table) => table
                         .indexes
-                        .get(&normalized)
+                        .get(object_id)
                         .map(DatabaseObjectRef::Index),
                     _ => None,
                 })
@@ -275,9 +311,9 @@ impl DatabaseCatalog {
     /// object type. Entity ids are checked first, then table indexes.
     pub fn object_by_id(&self, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
 
-        let normalized = common::normalize_identifier!(object_id);
+        let entity_key = self.resolve_entity_key(object_id);
 
-        if let Some(entity) = self.entities.get(&normalized) {
+        if let Some(entity) = entity_key.as_deref().and_then(|key| self.entities.get(key)) {
             return match entity {
                 DatabaseEntity::Table(table) => Some(DatabaseObjectRef::Table(table)),
                 DatabaseEntity::View(view) => Some(DatabaseObjectRef::View(view)),
@@ -292,15 +328,15 @@ impl DatabaseCatalog {
         }
 
         self.entities.values().find_map(|entity| match entity {
-            DatabaseEntity::Table(table) => table.indexes.get(&normalized).map(DatabaseObjectRef::Index),
+            DatabaseEntity::Table(table) => table.indexes.get(object_id).map(DatabaseObjectRef::Index),
             _ => None,
         })
 
     }
 
     pub fn entity(&self, entity_id: &str) -> Option<&DatabaseEntity> {
-        let normalized = common::normalize_identifier!(entity_id);
-        self.entities.get(&normalized)
+        self.resolve_entity_key(entity_id)
+            .and_then(|key| self.entities.get(&key))
     }
 
     pub fn entity_kind(&self, entity_id: &str) -> Option<DatabaseEntityKind> {
@@ -313,6 +349,10 @@ impl DatabaseCatalog {
 
     pub fn entity_metadata(&self, entity_id: &str) -> Option<&super::entity_metadata::EntityMetadata> {
         self.entity(entity_id).map(DatabaseEntityAspect::metadata)
+    }
+
+    pub fn entity_name(&self, entity_id: &str) -> Option<&str> {
+        self.entity(entity_id).map(DatabaseEntityAspect::name)
     }
 
     pub fn entity_wal_stream_id(&self, entity_id: &str) -> Option<String> {
@@ -592,9 +632,12 @@ impl DatabaseCatalog {
     pub fn apply_entity_metadata(&mut self, payload: EntityMetadataPayload) -> DatabaseResult<()> {
 
         let entity_id = common::normalize_identifier!(payload.entity_id);
+        let resolved_key = self
+            .resolve_entity_key(&entity_id)
+            .ok_or(DatabaseError::EntityNotFound)?;
         let entity = self
             .entities
-            .get_mut(&entity_id)
+            .get_mut(&resolved_key)
             .ok_or(DatabaseError::EntityNotFound)?;
 
         match entity {
@@ -872,8 +915,8 @@ impl DatabaseCatalog {
     pub fn table_ids(&self) -> Vec<String> {
         self.entities
             .iter()
-            .filter_map(|(entity_id, entity)| match entity {
-                DatabaseEntity::Table(_) => Some(entity_id.clone()),
+            .filter_map(|(_, entity)| match entity {
+                DatabaseEntity::Table(table) => Some(table.table_id.clone()),
                 _ => None,
             })
             .collect()
@@ -892,14 +935,14 @@ impl DatabaseCatalog {
 
         let view_id = common::normalize_identifier!(view_id.into());
 
-        if self.entities.contains_key(&view_id) {
+        if self.resolve_entity_key(&view_id).is_some() {
             return Err(DatabaseError::DuplicateEntity);
         }
 
-        self.entities.insert(
-            view_id.clone(),
-            DatabaseEntity::View(DatabaseView::new(view_id, sql.into(), schema)),
-        );
+        let view = DatabaseView::new(view_id.clone(), sql.into(), schema);
+        let storage_key = view.storage_key();
+
+        self.entities.insert(storage_key, DatabaseEntity::View(view));
 
         self.bump_schema_epoch();
 
@@ -933,18 +976,14 @@ impl DatabaseCatalog {
 
         let trigger_id = common::normalize_identifier!(trigger_id.into());
 
-        if self.entities.contains_key(&trigger_id) {
+        if self.resolve_entity_key(&trigger_id).is_some() {
             return Err(DatabaseError::DuplicateEntity);
         }
 
-        self.entities.insert(
-            trigger_id.clone(),
-            DatabaseEntity::Trigger(DatabaseTrigger::new(
-                trigger_id,
-                sql.into(),
-                dependencies,
-            )),
-        );
+        let trigger = DatabaseTrigger::new(trigger_id.clone(), sql.into(), dependencies);
+        let storage_key = trigger.storage_key();
+
+        self.entities.insert(storage_key, DatabaseEntity::Trigger(trigger));
 
         self.bump_schema_epoch();
 
@@ -965,8 +1004,8 @@ impl DatabaseCatalog {
     pub fn trigger_ids(&self) -> Vec<String> {
         self.entities
             .iter()
-            .filter_map(|(entity_id, entity)| match entity {
-                DatabaseEntity::Trigger(_) => Some(entity_id.clone()),
+            .filter_map(|(_, entity)| match entity {
+                DatabaseEntity::Trigger(trigger) => Some(trigger.name().to_string()),
                 _ => None,
             })
             .collect()
@@ -981,18 +1020,14 @@ impl DatabaseCatalog {
 
         let procedure_id = common::normalize_identifier!(procedure_id.into());
 
-        if self.entities.contains_key(&procedure_id) {
+        if self.resolve_entity_key(&procedure_id).is_some() {
             return Err(DatabaseError::DuplicateEntity);
         }
 
-        self.entities.insert(
-            procedure_id.clone(),
-            DatabaseEntity::StoredProcedure(DatabaseStoredProcedure::new(
-                procedure_id,
-                sql.into(),
-                dependencies,
-            )),
-        );
+        let procedure = DatabaseStoredProcedure::new(procedure_id.clone(), sql.into(), dependencies);
+        let storage_key = procedure.storage_key();
+
+        self.entities.insert(storage_key, DatabaseEntity::StoredProcedure(procedure));
 
         self.bump_schema_epoch();
 
@@ -1014,8 +1049,10 @@ impl DatabaseCatalog {
     pub fn stored_procedure_ids(&self) -> Vec<String> {
         self.entities
             .iter()
-            .filter_map(|(entity_id, entity)| match entity {
-                DatabaseEntity::StoredProcedure(_) => Some(entity_id.clone()),
+            .filter_map(|(_, entity)| match entity {
+                DatabaseEntity::StoredProcedure(procedure) => {
+                    Some(procedure.name().to_string())
+                }
                 _ => None,
             })
             .collect()
@@ -1024,8 +1061,8 @@ impl DatabaseCatalog {
     pub fn view_ids(&self) -> Vec<String> {
         self.entities
             .iter()
-            .filter_map(|(entity_id, entity)| match entity {
-                DatabaseEntity::View(_) => Some(entity_id.clone()),
+            .filter_map(|(_, entity)| match entity {
+                DatabaseEntity::View(view) => Some(view.name().to_string()),
                 _ => None,
             })
             .collect()
@@ -1039,32 +1076,30 @@ impl DatabaseCatalog {
     /// routing layer to reject write operations against view sources before
     /// any execution begins.
     pub fn is_writable(&self, object_id: &str) -> bool {
-        let normalized = common::normalize_identifier!(object_id);
-        matches!(
-            self.entities.get(&normalized),
-            Some(DatabaseEntity::Table(_))
-        )
+        self.resolve_entity_key(object_id)
+            .and_then(|key| self.entities.get(&key))
+            .is_some_and(|entity| matches!(entity, DatabaseEntity::Table(_)))
     }
 
     fn table_mut(&mut self, table_id: &str) -> Option<&mut DatabaseTable> {
-        let normalized = common::normalize_identifier!(table_id);
-        match self.entities.get_mut(&normalized) {
+        let key = self.resolve_entity_key(table_id)?;
+        match self.entities.get_mut(&key) {
             Some(DatabaseEntity::Table(table)) => Some(table),
             _ => None,
         }
     }
 
     fn view_mut(&mut self, view_id: &str) -> Option<&mut DatabaseView> {
-        let normalized = common::normalize_identifier!(view_id);
-        match self.entities.get_mut(&normalized) {
+        let key = self.resolve_entity_key(view_id)?;
+        match self.entities.get_mut(&key) {
             Some(DatabaseEntity::View(view)) => Some(view),
             _ => None,
         }
     }
 
     fn trigger_mut(&mut self, trigger_id: &str) -> Option<&mut DatabaseTrigger> {
-        let normalized = common::normalize_identifier!(trigger_id);
-        match self.entities.get_mut(&normalized) {
+        let key = self.resolve_entity_key(trigger_id)?;
+        match self.entities.get_mut(&key) {
             Some(DatabaseEntity::Trigger(trigger)) => Some(trigger),
             _ => None,
         }
@@ -1075,9 +1110,9 @@ impl DatabaseCatalog {
         procedure_id: &str,
     ) -> Option<&mut DatabaseStoredProcedure> {
         
-        let normalized = common::normalize_identifier!(procedure_id);
-        
-        match self.entities.get_mut(&normalized) {
+        let key = self.resolve_entity_key(procedure_id)?;
+
+        match self.entities.get_mut(&key) {
             Some(DatabaseEntity::StoredProcedure(procedure)) => Some(procedure),
             _ => None,
         }
@@ -1098,6 +1133,10 @@ impl DatabaseCatalog {
         let mut catalog = bincode::deserialize::<Self>(&bytes[common::helpers::format::HEADER_SIZE..])
             .map_err(|_| DatabaseError::CatalogDeserialize)?;
 
+        if catalog.database_name.is_empty() {
+            catalog.database_name = catalog.database_id.0.clone();
+        }
+
         catalog.normalize_loaded_entities()?;
         
         Ok(catalog)
@@ -1107,6 +1146,14 @@ impl DatabaseCatalog {
     pub fn save_in_directory(&self, directory: impl AsRef<Path>) -> DatabaseResult<()> {
         let path = directory.as_ref().join(self.file_name());
         self.save_to_path(path)
+    }
+
+    pub fn database_name(&self) -> &str {
+        &self.database_name
+    }
+
+    pub fn set_database_name(&mut self, name: &str) {
+        self.database_name = name.to_string();
     }
 
     fn save_to_path(&self, path: impl AsRef<Path>) -> DatabaseResult<()> {
@@ -1200,7 +1247,21 @@ impl DatabaseCatalog {
 
         let mut normalized_entities = HashMap::with_capacity(self.entities.len());
         
-        for (_, mut entity) in std::mem::take(&mut self.entities) {
+        for (_legacy_key, mut entity) in std::mem::take(&mut self.entities) {
+
+            if entity.storage_key().is_empty() {
+                match &mut entity {
+                    DatabaseEntity::Table(table) => table.entity_id = common::helpers::utils::unique_id(),
+                    DatabaseEntity::View(view) => view.entity_id = common::helpers::utils::unique_id(),
+                    DatabaseEntity::Relationship(relationship) => {
+                        relationship.entity_id = common::helpers::utils::unique_id()
+                    }
+                    DatabaseEntity::Trigger(trigger) => trigger.entity_id = common::helpers::utils::unique_id(),
+                    DatabaseEntity::StoredProcedure(procedure) => {
+                        procedure.entity_id = common::helpers::utils::unique_id()
+                    }
+                }
+            }
 
             entity.normalize_in_place();
 

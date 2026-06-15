@@ -11,7 +11,10 @@ use connector::{
 };
 use serverlib::core::cluster::NodeDescriptor;
 use serverlib::core::identity::NodeId;
-use serverlib::p2p::protocol::{AffinityJoinRequest, AffinityJoinResponse, DataSnapshotResponse, TransactionsSinceResponse, SchemaCatalogResponse, ServiceMessage};
+use serverlib::p2p::protocol::{
+    AffinityJoinRequest, AffinityJoinResponse, AffinityReplicationAction, DataSnapshotResponse,
+    SchemaCatalogResponse, ServiceMessage, TransactionsSinceResponse,
+};
 use serverlib::p2p::transport::Transport;
 use serverlib::{
     AffinityDocument, AffinityMember, AffinityMemberStatus, AffinityProcessor,
@@ -363,7 +366,8 @@ fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<DatabaseSche
     let mut summaries = app
         .catalogs()
         .iter()
-        .map(|(database_id, catalog)| {
+        .map(|(_, catalog)| {
+            let database_id = catalog.database_id.0.clone();
             let mut table_ids = catalog.table_ids();
             table_ids.sort();
 
@@ -423,6 +427,13 @@ fn send_affinity_join_requests(
             let Some(socket_addr) = multiaddr_to_socket_addr(peer_addr) else {
                 continue;
             };
+
+            log::debug!(
+                "sending affinity replication action={} to={} affinity_id={}",
+                AffinityReplicationAction::JoinRequest.as_str(),
+                socket_addr,
+                config.affinity_id
+            );
 
             match send_service_request_to_addr(&socket_addr, &message) {
                 Ok(Some(ServiceMessage::AffinityJoinResponse(resp))) => {
@@ -974,10 +985,91 @@ fn decode_service_message(payload: &[u8]) -> Option<ServiceMessage> {
     bincode::deserialize(&payload[SERVICE_MESSAGE_MAGIC.len()..]).ok()
 }
 
-fn build_schema_definitions_for_database(app: &ServerApp, database_id: &str) -> Result<Vec<String>, String> {
-    let catalog = app
-        .catalogs()
-        .get(database_id)
+fn resolve_schema_catalog<'a>(
+    app: &'a ServerApp,
+    database_id: &str,
+) -> Option<&'a serverlib::DatabaseCatalog> {
+
+    if let Some(catalog) = app.catalogs().get(database_id) {
+        return Some(catalog);
+    }
+
+    if let Ok(normalized_id) = serverlib::DatabaseId::from_database_name(database_id) {
+        if let Some(catalog) = app.catalogs().get(&normalized_id.0) {
+            return Some(catalog);
+        }
+    }
+
+    app.catalogs()
+        .values()
+        .find(|catalog| catalog.database_id.0 == database_id)
+        
+}
+
+fn load_schema_catalog_from_disk(
+    app: &ServerApp,
+    database_id: &str,
+) -> Option<serverlib::DatabaseCatalog> {
+    
+    let mut candidate_ids = vec![database_id.to_string()];
+
+    if let Ok(normalized_id) = serverlib::DatabaseId::from_database_name(database_id) {
+        if !candidate_ids.contains(&normalized_id.0) {
+            candidate_ids.push(normalized_id.0);
+        }
+    }
+
+    for candidate_id in candidate_ids {
+        let catalog_path = app.node_data_dir().join(
+            common::helpers::format::FileKind::Catalog.file_name(&candidate_id),
+        );
+
+        if !catalog_path.exists() {
+            continue;
+        }
+
+        match serverlib::DatabaseCatalog::load_from_path(&catalog_path) {
+            Ok(catalog) => return Some(catalog),
+            Err(err) => {
+                log::warn!(
+                    "failed loading schema catalog from disk database_id={} path={} err={}",
+                    database_id,
+                    catalog_path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    None
+}
+
+fn schema_catalog_signature(catalog: &serverlib::DatabaseCatalog) -> (u64, Option<String>) {
+    let mut table_ids = catalog.table_ids();
+    table_ids.sort();
+
+    let schema_identifier = catalog.schema_epoch().max(1);
+    let schema_hash = md5_hash(
+        format!(
+            "{}:{}:{}",
+            catalog.database_id.0,
+            schema_identifier,
+            table_ids.join(",")
+        )
+        .as_str(),
+    );
+
+    (schema_identifier, Some(schema_hash))
+}
+
+fn build_schema_definitions_for_database(
+    app: &ServerApp,
+    database_id: &str,
+) -> Result<Vec<String>, String> {
+
+    let catalog = resolve_schema_catalog(app, database_id)
+        .cloned()
+        .or_else(|| load_schema_catalog_from_disk(app, database_id))
         .ok_or_else(|| format!("database '{}' not found", database_id))?;
 
     let mut table_ids = catalog.table_ids();
@@ -1087,19 +1179,31 @@ fn spawn_affinity_replication_task(
     affinity_config: AffinityStartupConfig,
     local_node: NodeDescriptor,
 ) -> JoinHandle<()> {
+    
     tokio::spawn(async move {
+
         let mut ticker = interval(Duration::from_millis(500));
         let mut executor = ReplicationPhaseExecutor::new();
         let mut last_affinity_refresh_at = std::time::Instant::now() - Duration::from_secs(30);
+        // Per-database stream cursors: database_id -> (stream_id -> last seen TransactionId).
+        // Persisted across ticks so WAL catchup never replays from the beginning.
+        let mut wal_cursors: HashMap<String, HashMap<String, serverlib::TransactionId>> = HashMap::new();
+        // Per-database last sync timestamp — throttles continuous WAL catchup so we don't
+        // hammer peers every 500 ms tick, especially when the database is empty.
+        let mut last_wal_sync_at: HashMap<String, std::time::Instant> = HashMap::new();
 
         loop {
+
             ticker.tick().await;
 
             let mut processor = affinity_processor.lock().await;
+
             if let Some(ref mut proc) = processor.as_mut() {
                 // Only execute replication if processor is in Syncing state
                 if let serverlib::AffinityProcessorState::Syncing(_) = proc.state() {
+
                     match proc.build_sync_plan() {
+
                         Ok(plan) => {
                             let current_idx = executor.current_sync_index();
                             if let Some(step) = plan.get(current_idx) {
@@ -1115,6 +1219,13 @@ fn spawn_affinity_replication_task(
                                             &p2p_runtime,
                                             &affinity_id,
                                             database_id,
+                                            step.schema_identifier.unwrap_or(0),
+                                            proc.document().and_then(|doc| {
+                                                doc.databases
+                                                    .iter()
+                                                    .find(|db| db.database_id == *database_id)
+                                                    .and_then(|db| db.schema_hash.clone())
+                                            }),
                                         )
                                         .await
                                         {
@@ -1135,23 +1246,31 @@ fn spawn_affinity_replication_task(
                                             .map(|doc| doc.affinity_id.clone())
                                             .unwrap_or_default();
 
-                                        if let Err(err) = execute_live_wal_catchup_sync(
+                                        let db_cursors = wal_cursors.get(database_id).cloned();
+                                        match execute_live_wal_catchup_sync(
                                             &app,
                                             &p2p_runtime,
                                             &affinity_id,
                                             database_id,
                                             None,
-                                            None,
+                                            db_cursors.as_ref(),
                                             None,
                                         )
                                         .await
                                         {
-                                            log::warn!(
-                                                "live WAL catchup sync failed affinity_id={} database_id={}: {}",
-                                                affinity_id,
-                                                database_id,
-                                                err
-                                            );
+                                            Ok(updated) => {
+                                                if !updated.is_empty() {
+                                                    wal_cursors.insert(database_id.clone(), updated);
+                                                }
+                                            }
+                                            Err(err) => {
+                                                log::warn!(
+                                                    "live WAL catchup sync failed affinity_id={} database_id={}: {}",
+                                                    affinity_id,
+                                                    database_id,
+                                                    err
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -1217,7 +1336,6 @@ fn spawn_affinity_replication_task(
 
                                 if merged_doc != *base_doc {
                                     proc.apply_affinity_document(merged_doc.clone());
-                                    proc.set_ready();
 
                                     if let Err(err) = affinity_storage.save(&merged_doc) {
                                         log::error!(
@@ -1232,6 +1350,14 @@ fn spawn_affinity_replication_task(
                                             previous_database_count,
                                             merged_doc.databases.len()
                                         );
+                                            // New databases need schema + WAL catchup — re-enter
+                                            // Syncing so the executor runs those phases.
+                                            // apply_affinity_document already set state to Syncing.
+                                            executor.reset();
+                                        } else {
+                                            // Doc changed (e.g. member status) but no new databases;
+                                            // stay Ready.
+                                            proc.set_ready();
                                     }
                                 }
                             }
@@ -1261,6 +1387,17 @@ fn spawn_affinity_replication_task(
                     };
 
                     for database_id in database_ids {
+                        let should_sync = last_wal_sync_at
+                            .get(&database_id)
+                            .map(|last| last.elapsed() >= Duration::from_secs(5))
+                            .unwrap_or(true);
+
+                        if !should_sync {
+                            continue;
+                        }
+                        last_wal_sync_at.insert(database_id.clone(), std::time::Instant::now());
+
+                        let db_cursors = wal_cursors.get(&database_id).cloned();
                         for target_addr in &peer_targets {
                             match execute_live_wal_catchup_sync(
                                 &app,
@@ -1268,12 +1405,16 @@ fn spawn_affinity_replication_task(
                                 &affinity_id,
                                 &database_id,
                                 None,
-                                None,
+                                db_cursors.as_ref(),
                                 Some(target_addr),
                             )
                             .await
                             {
-                                Ok(_) => {}
+                                Ok(updated) => {
+                                    if !updated.is_empty() {
+                                        wal_cursors.insert(database_id.clone(), updated);
+                                    }
+                                }
                                 Err(err) => {
                                     log::warn!(
                                         "continuous WAL catchup failed affinity_id={} database_id={} target={}: {}",
@@ -1337,6 +1478,8 @@ async fn execute_live_schema_catalog_sync(
     p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_id: &str,
     database_id: &str,
+    expected_schema_identifier: u64,
+    expected_schema_hash: Option<String>,
 ) -> Result<(), String> {
     if affinity_id.is_empty() {
         return Ok(());
@@ -1388,7 +1531,17 @@ async fn execute_live_schema_catalog_sync(
                 request_id: request_id.clone(),
                 affinity_id: affinity_id.to_string(),
                 database_id: database_id.to_string(),
+                expected_schema_identifier,
+                expected_schema_hash: expected_schema_hash.clone(),
             },
+        );
+
+        log::debug!(
+            "sending affinity replication action={} to={} affinity_id={} database_id={}",
+            AffinityReplicationAction::SchemaCatalogRequest.as_str(),
+            socket_addr,
+            affinity_id,
+            database_id
         );
 
         let Ok(Some(ServiceMessage::SchemaCatalogResponse(response))) =
@@ -1414,16 +1567,15 @@ async fn execute_live_schema_catalog_sync(
             continue;
         }
 
-        if response.schema_definitions.is_empty() {
-            continue;
-        }
-
         let mut app_guard = app.lock().await;
         apply_schema_definitions_to_local_database(
             &mut app_guard,
             database_id,
             &response.schema_definitions,
         )?;
+        if !response.database_name.is_empty() {
+            let _ = app_guard.set_affinity_catalog_database_name(database_id, &response.database_name);
+        }
         applied_any = true;
     }
 
@@ -1505,6 +1657,15 @@ async fn execute_live_wal_catchup_sync(
                     .map(|map| map.iter().map(|(k, v)| (k.clone(), *v)).collect())
                     .unwrap_or_default(),
             },
+        );
+
+        log::debug!(
+            "sending affinity replication action={} to={} affinity_id={} database_id={} from_tx={:?}",
+            AffinityReplicationAction::TransactionsSinceRequest.as_str(),
+            socket_addr,
+            affinity_id,
+            database_id,
+            from_transaction_id
         );
 
         let Ok(Some(ServiceMessage::TransactionsSinceResponse(response))) =
@@ -1937,13 +2098,22 @@ async fn handle_connector_stream(
                             Ok(definitions) => (true, None, definitions),
                             Err(err) => (false, Some(err), Vec::new()),
                         };
+                        let (schema_identifier, schema_hash) = resolve_schema_catalog(&app_guard, &schema_req.database_id)
+                            .map(schema_catalog_signature)
+                            .unwrap_or((0, None));
+                        let database_name = resolve_schema_catalog(&app_guard, &schema_req.database_id)
+                            .map(|cat| cat.database_name().to_string())
+                            .unwrap_or_default();
                         drop(app_guard);
 
                         let response = SchemaCatalogResponse {
                             request_id: schema_req.request_id.clone(),
                             ok,
                             error,
+                            schema_identifier,
+                            schema_hash,
                             schema_definitions,
+                            database_name,
                         };
 
                         let response_message = ServiceMessage::SchemaCatalogResponse(response);
@@ -2283,6 +2453,8 @@ mod tests {
                 request_id: "req-1".to_string(),
                 affinity_id: "aff-1".to_string(),
                 database_id: "main".to_string(),
+                expected_schema_identifier: 1,
+                expected_schema_hash: Some("hash".to_string()),
             },
         );
 

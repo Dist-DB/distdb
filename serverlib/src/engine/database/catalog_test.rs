@@ -11,6 +11,7 @@ fn create_empty_catalog_from_name_sets_obscured_id() {
     assert!(catalog.table_ids().is_empty());
     assert!(!catalog.database_id.0.is_empty());
     assert_ne!(catalog.database_id.0, "maindb");
+    assert_eq!(catalog.database_name(), "maindb");
 }
 
 #[test]
@@ -1045,22 +1046,31 @@ fn entity_aspects_expose_status_and_wal_stream() {
         ))
         .expect("relationship register should succeed");
 
+    let users_entity = catalog.entity("users").expect("users entity should exist");
+    let users_view_entity = catalog.entity("users_view").expect("users_view entity should exist");
+    let relationship_entity = catalog
+        .entity("rel:users:accounts:owns")
+        .expect("relationship entity should exist");
+    assert!(!users_entity.storage_key().is_empty());
+    assert!(!users_view_entity.storage_key().is_empty());
+    assert!(!relationship_entity.storage_key().is_empty());
+
     assert_eq!(catalog.entity_status("users"), Some(ObjectStatus::Load));
     assert_eq!(
         catalog.entity_wal_stream_id("users"),
-        Some("users".to_string())
+        Some(users_entity.storage_key())
     );
     assert_eq!(catalog.entity_schema_revision("users"), Some(0));
 
     assert_eq!(
         catalog.entity_wal_stream_id("users_view"),
-        Some("users_view".to_string())
+        Some(users_view_entity.storage_key())
     );
     assert_eq!(catalog.entity_schema_revision("users_view"), None);
 
     assert_eq!(
         catalog.entity_wal_stream_id("rel:users:accounts:owns"),
-        Some("rel:users:accounts:owns".to_string())
+        Some(relationship_entity.storage_key())
     );
 }
 
@@ -1083,18 +1093,29 @@ fn normalize_loaded_entities_rekeys_and_rebuilds_indexes() {
         .register_table("Users", schema)
         .expect("table register should succeed");
 
-    let entity = catalog
+    let legacy_key = catalog
+        .entity("users")
+        .expect("expected normalized table entry")
+        .storage_key();
+    let mut entity = catalog
         .entities
-        .remove("users")
+        .remove(&legacy_key)
         .expect("expected normalized table entry");
+
+    match &mut entity {
+        DatabaseEntity::Table(table) => table.entity_id.clear(),
+        _ => unreachable!("expected table entity"),
+    }
+
     catalog.entities.insert("Users".to_string(), entity);
 
     catalog
         .normalize_loaded_entities()
         .expect("normalization should succeed");
 
-    assert!(catalog.entities.contains_key("users"));
+    assert!(!catalog.entities.contains_key("users"));
     assert!(!catalog.entities.contains_key("Users"));
+    assert_eq!(catalog.table("users").expect("table should exist").table_id, "users");
     let user_id_index_id = DatabaseIndex::from_table_fields(
         "users",
         DatabaseIndexKind::Indexed,

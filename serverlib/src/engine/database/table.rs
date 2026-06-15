@@ -9,6 +9,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseTable {
+    #[serde(default)]
+    pub entity_id: String,
     pub table_id: String,
     pub status: ObjectStatus,
     pub schema_revision: u64,
@@ -25,6 +27,7 @@ impl DatabaseTable {
         indexes: HashMap<String, super::index::DatabaseIndex>,
     ) -> Self {
         Self {
+            entity_id: common::helpers::utils::unique_id(),
             table_id,
             status: ObjectStatus::Load,
             schema_revision: 0,
@@ -97,12 +100,16 @@ impl DatabaseTable {
 
 impl DatabaseEntityAspect for DatabaseTable {
 
+    fn name(&self) -> &str {
+        &self.table_id
+    }
+
     fn kind(&self) -> DatabaseEntityKind {
         DatabaseEntityKind::Table
     }
 
     fn storage_key(&self) -> String {
-        common::normalize_identifier!(&self.table_id)
+        self.entity_id.clone()
     }
 
     fn status(&self) -> ObjectStatus {

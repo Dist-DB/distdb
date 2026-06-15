@@ -8,6 +8,8 @@ use super::table_schema::TableSchema;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseTrigger {
+    #[serde(default)]
+    pub entity_id: String,
     pub trigger_id: String,
     pub sql: String,
     pub dependencies: Vec<String>,
@@ -18,6 +20,7 @@ impl DatabaseTrigger {
 
     pub fn new(trigger_id: String, sql: String, dependencies: Vec<String>) -> Self {
         Self {
+            entity_id: common::helpers::utils::unique_id(),
             trigger_id,
             sql,
             dependencies,
@@ -29,12 +32,16 @@ impl DatabaseTrigger {
 
 impl DatabaseEntityAspect for DatabaseTrigger {
 
+    fn name(&self) -> &str {
+        &self.trigger_id
+    }
+
     fn kind(&self) -> DatabaseEntityKind {
         DatabaseEntityKind::Trigger
     }
 
     fn storage_key(&self) -> String {
-        common::normalize_identifier!(&self.trigger_id)
+        self.entity_id.clone()
     }
 
     fn status(&self) -> ObjectStatus {

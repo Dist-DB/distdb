@@ -35,7 +35,7 @@ impl ServerApp {
         None
     }
 
-    fn ensure_affinity_catalog_exists(&mut self, database_id: &str) -> Result<String, String> {
+    pub fn ensure_affinity_catalog_exists(&mut self, database_id: &str) -> Result<String, String> {
         if let Some(key) = self.resolve_catalog_key(database_id) {
             return Ok(key);
         }
@@ -48,9 +48,28 @@ impl ServerApp {
         catalog
             .transition_status(ObjectStatus::Ready)
             .map_err(|err| format!("failed preparing replicated catalog '{}': {}", key, err))?;
+        catalog
+            .save_in_directory(&self.node_data_dir)
+            .map_err(|err| format!("failed persisting replicated catalog '{}' to disk: {:?}", key, err))?;
         self.catalogs.insert(key.clone(), catalog);
 
         Ok(key)
+    }
+
+    pub fn set_affinity_catalog_database_name(&mut self, database_id: &str, name: &str) -> Result<(), String> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        let Some(key) = self.resolve_catalog_key(database_id) else {
+            return Ok(());
+        };
+        let Some(catalog) = self.catalogs.get_mut(&key) else {
+            return Ok(());
+        };
+        catalog.set_database_name(name);
+        catalog
+            .save_in_directory(&self.node_data_dir)
+            .map_err(|err| format!("failed persisting catalog name update for '{}': {:?}", key, err))
     }
 
     fn begin_affinity_sync_lock(&mut self, database_id: &str) -> Result<(), String> {
@@ -140,15 +159,32 @@ impl ServerApp {
             Ok(())
         })();
 
+        let save_result = if apply_result.is_ok() {
+            if let Some(key) = self.resolve_catalog_key(database_id) {
+                if let Some(catalog) = self.catalogs.get(&key) {
+                    catalog
+                        .save_in_directory(&self.node_data_dir)
+                        .map_err(|err| format!("failed persisting catalog '{}' after schema sync: {:?}", key, err))
+                } else {
+                    Ok(())
+                }
+            } else {
+                Ok(())
+            }
+        } else {
+            Ok(())
+        };
+
         let release_result = self.finish_affinity_sync_lock(database_id);
 
-        match (apply_result, release_result) {
-            (Err(apply_err), Err(release_err)) => {
+        match (apply_result, save_result, release_result) {
+            (Err(apply_err), _, Err(release_err)) => {
                 Err(format!("{}; cleanup failed: {}", apply_err, release_err))
             }
-            (Err(apply_err), Ok(())) => Err(apply_err),
-            (Ok(()), Err(release_err)) => Err(release_err),
-            (Ok(()), Ok(())) => Ok(()),
+            (Err(apply_err), _, Ok(())) => Err(apply_err),
+            (Ok(()), Err(save_err), _) => Err(save_err),
+            (Ok(()), Ok(()), Err(release_err)) => Err(release_err),
+            (Ok(()), Ok(()), Ok(())) => Ok(()),
         }
     }
 

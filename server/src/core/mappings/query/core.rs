@@ -98,6 +98,18 @@ fn handle_query_command_internal(
 
         Ok(parsed) => {
             let parse_ms = parse_start.elapsed().as_millis() as u64;
+
+            if let Some(statement) = parsed.first() {
+                log::debug!(
+                    "query directive parsed request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
+                    request_id,
+                    query.database_id,
+                    statement.directive,
+                    statement.operation,
+                    statement.object_name
+                );
+            }
+
             let response = execute_parsed_query(
                 request_id,
                 query,
@@ -166,6 +178,15 @@ fn execute_parsed_query(
         touched_write_tables: touched_tables,
     };
 
+    log::debug!(
+        "query directive dispatch request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
+        request_id,
+        query.database_id,
+        statement.directive,
+        statement.operation,
+        statement.object_name
+    );
+
     let handler: Option<QueryOperationHandler> = match statement.operation {
         SqlOperation::Insert => Some(execute_insert),
         SqlOperation::Update => Some(execute_update),
@@ -190,13 +211,24 @@ fn execute_parsed_query(
 
         Some(handler) => handler(&mut ctx, request_id, query, statement),
         
-        None => ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!(
-                "query operation '{:?}' execution is not wired yet",
-                statement.operation
-            ),
-        ),
+        None => {
+            log::debug!(
+                "query directive missing handler request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
+                request_id,
+                query.database_id,
+                statement.directive,
+                statement.operation,
+                statement.object_name
+            );
+
+            ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!(
+                    "query operation '{:?}' execution is not wired yet",
+                    statement.operation
+                ),
+            )
+        },
 
     }
 
@@ -2089,7 +2121,9 @@ fn execute_select_impl(
 
     if statement_sql_lower.starts_with("show databases") {
         
-        let result = serverlib::show_databases_result(catalogs.keys().cloned());
+        let result = serverlib::show_databases_result(
+            catalogs.values().map(|catalog| catalog.database_name().to_string()),
+        );
 
         return ConnectorResponse::applied(
             request_id.to_string(),
@@ -2389,12 +2423,18 @@ fn execute_create_view_impl(
     };
 
     let wal_id = catalog.database_id.0.clone();
-    let entity_wal_id = common::normalize_identifier!(view_id);
     let created_at = common::epoch_nanos!();
 
     match catalog.register_view(view_id, statement.sql.clone(), TableSchema::new(Vec::new())) {
 
         Ok(()) => {
+
+            let Some(entity_wal_id) = catalog.entity_wal_stream_id(view_id) else {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    "create view WAL stream lookup failed".to_string(),
+                );
+            };
 
             if let Err(err) = apply_entity_metadata_with_wal(
                 catalog,
@@ -2469,7 +2509,6 @@ fn execute_create_trigger_impl(
     };
 
     let wal_id = catalog.database_id.0.clone();
-    let entity_wal_id = common::normalize_identifier!(trigger_id);
     let created_at = common::epoch_nanos!();
 
     let created = catalog.register_trigger(trigger_id, statement.sql.clone(), Vec::new());
@@ -2480,6 +2519,13 @@ fn execute_create_trigger_impl(
             format!("create trigger failed: {err}"),
         );
     }
+
+    let Some(entity_wal_id) = catalog.entity_wal_stream_id(trigger_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "create trigger WAL stream lookup failed".to_string(),
+        );
+    };
 
     if let Err(err) = catalog.set_sql_definition(
         trigger_id,
@@ -2556,7 +2602,6 @@ fn execute_create_stored_procedure_impl(
     };
 
     let wal_id = catalog.database_id.0.clone();
-    let entity_wal_id = common::normalize_identifier!(procedure_id);
     let created_at = common::epoch_nanos!();
 
     let created =
@@ -2568,6 +2613,13 @@ fn execute_create_stored_procedure_impl(
             format!("create procedure failed: {err}"),
         );
     }
+
+    let Some(entity_wal_id) = catalog.entity_wal_stream_id(procedure_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "create procedure WAL stream lookup failed".to_string(),
+        );
+    };
 
     if let Err(err) = catalog.set_sql_definition(
         procedure_id,
