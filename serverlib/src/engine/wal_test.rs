@@ -127,7 +127,7 @@ fn delete_stream_removes_in_memory_and_disk_state() {
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-wal-delete-stream-{}-{}",
         std::process::id(),
-        common::epochabs!()
+        common::epoch_nanos!()
     ));
 
     std::fs::create_dir_all(&temp_root).expect("temp wal dir should be created");

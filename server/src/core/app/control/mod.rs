@@ -292,7 +292,7 @@ impl ServerApp {
             }
 
             self.tx_begin_epoch_ms_by_session
-                .insert(session_id.to_string(), common::epochabs!() as u64);
+                .insert(session_id.to_string(), common::epoch_nanos!() as u64);
 
             let snapshot_wal = ConcurrentWalManager::new();
             if let Err(err) = self.seed_sandbox_wal(&snapshot_wal) {
@@ -464,7 +464,7 @@ impl ServerApp {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos() as u64)
-                .unwrap_or(common::epochabs!() as u64),
+                .unwrap_or(common::epoch_nanos!() as u64),
         );
         let mut touched_tables = std::collections::HashSet::new();
 
@@ -726,7 +726,7 @@ impl ServerApp {
         let records = self.wal.since(&wal_id, None);
         let next_id = TransactionId(records.last().map(|record| record.id.0 + 1).unwrap_or(1));
         let refid = records.last().map(|record| record.id);
-        let timestamp_epoch_ms = common::epochabs!() as u64;
+        let timestamp_epoch_ms = common::epoch_nanos!();
 
         let encoded = format!(
             "session_id={} request_id={} marker={} staged_count={} ts={}",

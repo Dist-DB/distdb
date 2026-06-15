@@ -8,9 +8,17 @@ macro_rules! epoch {
 
 
 #[macro_export]
-macro_rules! epochabs {
+macro_rules! epoch_ms {
     () => {
-        $crate::helpers::utils::epochabs()
+        $crate::helpers::utils::epoch_ms()
+    };
+}
+
+
+#[macro_export]
+macro_rules! epoch_nanos {
+    () => {
+        $crate::helpers::utils::epoch_nanos()
     };
 }
 

@@ -9,15 +9,18 @@ pub fn is_inbuilt_function(function_name: &str) -> bool {
 }
 
 pub fn evaluate_inbuilt_sql_function(function: &Function) -> Result<Option<Vec<u8>>, String> {
+
     let function_name = function.name.to_string();
     let Some(command) = resolve_command(&function_name) else {
         return Err(format!("unsupported inbuilt function '{}'", function_name));
     };
 
     command.evaluate(function)
+
 }
 
 pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<Vec<u8>>, String> {
+
     match expression {
         Expr::Nested(inner) => evaluate_argument_expression(inner),
 
@@ -27,9 +30,11 @@ pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<V
 
         _ => Err("inbuilt command arguments currently support only literals and inbuilt nested calls".to_string()),
     }
+
 }
 
 pub(super) fn function_argument_expr(argument: &FunctionArg) -> Result<&Expr, String> {
+
     match argument {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr),
         FunctionArg::Named { arg, .. } => match arg {
@@ -38,9 +43,11 @@ pub(super) fn function_argument_expr(argument: &FunctionArg) -> Result<&Expr, St
         },
         _ => Err("unsupported inbuilt command argument".to_string()),
     }
+
 }
 
 pub(super) fn function_args(function: &Function) -> Result<&[FunctionArg], String> {
+
     match &function.args {
         FunctionArguments::None => Ok(&[]),
         FunctionArguments::List(list) => Ok(&list.args),
@@ -48,9 +55,11 @@ pub(super) fn function_args(function: &Function) -> Result<&[FunctionArg], Strin
             Err("subquery function arguments are not supported for inbuilt commands".to_string())
         }
     }
+
 }
 
 fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerCommand> {
+
     static UNIX_TIMESTAMP: UnixTimestampCommand = UnixTimestampCommand;
     static CONCAT: ConcatCommand = ConcatCommand;
 
@@ -61,14 +70,17 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         "concat" => Some(&CONCAT),
         _ => None,
     }
+
 }
 
 fn normalize_name(function_name: &str) -> String {
+
     function_name
         .chars()
         .filter(|ch| *ch != '`' && *ch != '"')
         .collect::<String>()
         .to_ascii_lowercase()
+        
 }
 
 fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {

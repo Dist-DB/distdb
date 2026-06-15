@@ -54,7 +54,7 @@ impl ActiveSchemaChange {
             phase: SchemaChangePhase::Locked,
             rows_total: None,
             rows_rewritten: 0,
-            checkpoint_epoch_ms: common::epochabs!() as u64,
+            checkpoint_epoch_ms: common::epoch_nanos!(),
             resume_token: None,
         }
     }
@@ -72,7 +72,7 @@ impl ActiveSchemaChange {
         if resume_token.is_some() {
             self.resume_token = resume_token;
         }
-        self.checkpoint_epoch_ms = common::epochabs!() as u64;
+        self.checkpoint_epoch_ms = common::epoch_nanos!();
     }
 }
 

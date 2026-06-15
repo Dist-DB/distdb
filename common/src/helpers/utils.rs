@@ -38,7 +38,15 @@ pub fn epoch() -> u64 {
 }
 
 
-pub fn epochabs() -> u128 {
+pub fn epoch_ms() -> u64 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(_n) => _n.as_millis().try_into().unwrap(),
+        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }        
+}
+
+
+pub fn epoch_nanos() -> u64 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(_n) => _n.as_nanos().try_into().unwrap(),
         Err(_) => panic!("SystemTime before UNIX EPOCH!"),

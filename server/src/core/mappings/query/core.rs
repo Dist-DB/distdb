@@ -554,7 +554,7 @@ fn execute_alter_table_impl(
 
     let wal_id = catalog.database_id.0.clone();
     let entity_wal_id = table_id.clone();
-    let created_at = common::epochabs!() as u64;
+    let created_at = common::epoch_nanos!();
 
     if let Err(err) = tx.commit::<serverlib::DatabaseError, _>(catalog, |payload| {
         let encoded = payload
@@ -692,7 +692,7 @@ fn execute_create_table_impl(
         );
     }
 
-    let created_at = common::epochabs!() as u64;
+    let created_at = common::epoch_nanos!();
     if let Err(err) = catalog.create_table(normalized_table_id.clone(), schema.clone()) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -995,7 +995,7 @@ fn execute_drop_entity_object(
         }
     }
 
-    let timestamp = common::epochabs!() as u64;
+    let timestamp = common::epoch_nanos!();
 
     if object_type == DatabaseObjectType::Table {
         let lifecycle_payload = TableLifecyclePayload {
@@ -1329,7 +1329,7 @@ fn execute_insert_locked(
                 runtime_indexes,
                 TransactionKind::Insert,
                 encoded,
-                common::epochabs!() as u64,
+                common::epoch_nanos!(),
                 None,
                 Some(group_id),
             ) {
@@ -1684,7 +1684,7 @@ fn execute_update_locked(
             runtime_indexes,
             TransactionKind::Delete,
             delete_payload,
-            common::epochabs!() as u64,
+            common::epoch_nanos!(),
             Some(TransactionId(row_id)),
             Some(group_id),
         ) {
@@ -1711,7 +1711,7 @@ fn execute_update_locked(
             runtime_indexes,
             TransactionKind::Insert,
             insert_payload,
-            common::epochabs!() as u64,
+            common::epoch_nanos!(),
             None,
             Some(group_id),
         ) {
@@ -1881,7 +1881,7 @@ fn execute_delete_locked(
             runtime_indexes,
             TransactionKind::Delete,
             delete_payload,
-            common::epochabs!() as u64,
+            common::epoch_nanos!(),
             Some(TransactionId(row_id)),
             Some(group_id),
         ) {
@@ -2290,7 +2290,7 @@ fn execute_create_view_impl(
 
     let wal_id = catalog.database_id.0.clone();
     let entity_wal_id = common::normalize_identifier!(view_id);
-    let created_at = common::epochabs!() as u64;
+    let created_at = common::epoch_nanos!();
 
     match catalog.register_view(view_id, statement.sql.clone(), TableSchema::new(Vec::new())) {
         Ok(()) => {
@@ -2365,7 +2365,7 @@ fn execute_create_trigger_impl(
 
     let wal_id = catalog.database_id.0.clone();
     let entity_wal_id = common::normalize_identifier!(trigger_id);
-    let created_at = common::epochabs!() as u64;
+    let created_at = common::epoch_nanos!();
 
     let created = catalog.register_trigger(trigger_id, statement.sql.clone(), Vec::new());
 
@@ -2452,7 +2452,7 @@ fn execute_create_stored_procedure_impl(
 
     let wal_id = catalog.database_id.0.clone();
     let entity_wal_id = common::normalize_identifier!(procedure_id);
-    let created_at = common::epochabs!() as u64;
+    let created_at = common::epoch_nanos!();
 
     let created =
         catalog.register_stored_procedure(procedure_id, statement.sql.clone(), Vec::new());
@@ -2636,7 +2636,7 @@ where
                 &table.table_id,
                 TransactionKind::WriteBegin,
                 request_id.as_bytes().to_vec(),
-                common::epochabs!() as u64,
+                common::epoch_nanos!(),
                 Some(write_group_id),
             ) {
                 return ConnectorResponse::rejected(
@@ -2654,7 +2654,7 @@ where
         &table.table_id,
         TransactionKind::WriteBegin,
         request_id.as_bytes().to_vec(),
-        common::epochabs!() as u64,
+        common::epoch_nanos!(),
         None,
     ) {
         Ok(group_id) => group_id,
@@ -2674,7 +2674,7 @@ where
             &table.table_id,
             TransactionKind::WriteCommit,
             Vec::new(),
-            common::epochabs!() as u64,
+            common::epoch_nanos!(),
             Some(write_group_id),
         ) {
             let _ = append_payload_record_with_group(
@@ -2682,7 +2682,7 @@ where
                 &table.table_id,
                 TransactionKind::WriteAbort,
                 Vec::new(),
-                common::epochabs!() as u64,
+                common::epoch_nanos!(),
                 Some(write_group_id),
             );
             rebuild_runtime_indexes_for_table(table, wal, runtime_indexes);
@@ -2699,7 +2699,7 @@ where
             &table.table_id,
             TransactionKind::WriteAbort,
             Vec::new(),
-            common::epochabs!() as u64,
+            common::epoch_nanos!(),
             Some(write_group_id),
         );
         rebuild_runtime_indexes_for_table(table, wal, runtime_indexes);
@@ -2718,7 +2718,7 @@ pub(crate) fn commit_external_write_group(
             table_id,
             TransactionKind::WriteCommit,
             Vec::new(),
-            common::epochabs!() as u64,
+            common::epoch_nanos!(),
             Some(group_id),
         )?;
     }
@@ -2739,7 +2739,7 @@ pub(crate) fn abort_external_write_group(
             table_id,
             TransactionKind::WriteAbort,
             Vec::new(),
-            common::epochabs!() as u64,
+            common::epoch_nanos!(),
             Some(group_id),
         );
 

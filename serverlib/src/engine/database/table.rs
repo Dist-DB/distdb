@@ -83,11 +83,14 @@ impl DatabaseTable {
     }
 
     fn transition(&mut self, next: ObjectStatus) -> DatabaseResult<()> {
+
         if !self.status.can_transition_to(next) {
             return Err(DatabaseError::InvalidStatusTransition);
         }
+
         self.status = next;
         Ok(())
+        
     }
 
 }

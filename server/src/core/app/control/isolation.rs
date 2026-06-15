@@ -146,7 +146,7 @@ impl ServerApp {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos() as u64)
-                .unwrap_or(common::epochabs!() as u64),
+                .unwrap_or(common::epoch_nanos!() as u64),
         );
         let mut touched_tables = HashSet::new();
 

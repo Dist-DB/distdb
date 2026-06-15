@@ -3,8 +3,11 @@ use sqlparser::ast::{Expr, SetExpr, Statement, Value};
 use crate::engine::database::inbuilt::evaluate_inbuilt_sql_function;
 
 use super::{
-    parse_mysql_statements, parse_select_read_plan_from_statement, InsertRowsPlan,
-    InsertRowsSource, SqlParseError,
+    parse_mysql_statements, 
+    parse_select_read_plan_from_statement, 
+    InsertRowsPlan,
+    InsertRowsSource, 
+    SqlParseError,
 };
 
 pub fn parse_insert_rows_from_statement(
@@ -35,7 +38,9 @@ pub fn parse_insert_rows_from_statement(
     };
 
     let source = match source.body.as_ref() {
+
         SetExpr::Values(values) => {
+
             if values.rows.is_empty() {
                 return Err(SqlParseError::UnsupportedStatement(
                     "INSERT VALUES must contain at least one row".to_string(),
@@ -60,18 +65,20 @@ pub fn parse_insert_rows_from_statement(
             }
 
             InsertRowsSource::Values(rows)
-        }
+
+        },
 
         SetExpr::Select(_) => {
             let select_plan = parse_select_read_plan_from_statement(&source.to_string())?;
             InsertRowsSource::Select(select_plan)
-        }
+        },
 
         _ => {
             return Err(SqlParseError::UnsupportedStatement(
                 "only INSERT ... VALUES or INSERT ... SELECT is currently supported".to_string(),
             ));
         }
+
     };
 
     Ok(InsertRowsPlan {
@@ -83,15 +90,21 @@ pub fn parse_insert_rows_from_statement(
 }
 
 fn parse_insert_literal(expr: &Expr) -> Result<Option<Vec<u8>>, SqlParseError> {
+    
     match expr {
+        
         Expr::Value(value) => parse_insert_value(value),
+        
         Expr::Function(function) => evaluate_inbuilt_sql_function(function).map_err(|err| {
             SqlParseError::UnsupportedStatement(format!("INSERT inbuilt function failed: {err}"))
         }),
+        
         _ => Err(SqlParseError::UnsupportedStatement(format!(
             "INSERT literal '{expr}' is not supported"
         ))),
+
     }
+
 }
 
 fn parse_insert_value(value: &Value) -> Result<Option<Vec<u8>>, SqlParseError> {

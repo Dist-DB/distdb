@@ -8,8 +8,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
-use common::{DEFAULT_SERVER_PORT, PeerSession};
-use common::helpers::utils::{epochabs, md5};
+use common::{DEFAULT_SERVER_PORT, PeerSession, epoch_nanos};
+use common::helpers::utils::{md5};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 
@@ -523,7 +523,7 @@ fn generate_shared_session_token(peer_id: &str, server_token: Option<&str>) -> S
     let entropy = format!(
         "{}:{}:{}",
         peer_id,
-        epochabs(),
+        epoch_nanos!(),
         server_token.unwrap_or("server-token-unavailable")
     );
     

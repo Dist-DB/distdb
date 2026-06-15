@@ -1,4 +1,5 @@
 use super::AffinitySyncPhase;
+use common::{epoch_ms};
 
 /// Tracks replication progress for an affinity, enabling resumable sync after crashes
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18,7 +19,7 @@ impl CheckpointMetadata {
             revision: 1,
             current_phase,
             completed_step_indices: Vec::new(),
-            last_update_epoch_ms: now_epoch_ms(),
+            last_update_epoch_ms: epoch_ms!(),
         }
     }
 
@@ -26,7 +27,7 @@ impl CheckpointMetadata {
         if !self.completed_step_indices.contains(&step_index) {
             self.completed_step_indices.push(step_index);
             self.completed_step_indices.sort();
-            self.last_update_epoch_ms = now_epoch_ms();
+            self.last_update_epoch_ms = epoch_ms!();
         }
     }
 
@@ -44,12 +45,6 @@ impl CheckpointMetadata {
         }
         ((self.completed_step_indices.len() as u64 * 100) / total_steps as u64).min(100)
     }
-    
+
 }
 
-fn now_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}

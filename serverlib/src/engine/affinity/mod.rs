@@ -1,5 +1,6 @@
 
 pub mod storage;
+
 mod checkpoint;
 mod document;
 mod processor;
@@ -58,7 +59,7 @@ mod tests {
             },
 
         }
-        
+
     }
 
     #[test]

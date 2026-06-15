@@ -64,6 +64,7 @@ impl AffinityProcessor {
         databases.sort_by_key(|db| std::cmp::Reverse(db.schema_identifier));
 
         for database in databases {
+
             plan.push(AffinitySyncStep {
                 phase: AffinitySyncPhase::SchemaCatalog,
                 database_id: Some(database.database_id.clone()),
@@ -81,6 +82,7 @@ impl AffinityProcessor {
                 database_id: Some(database.database_id),
                 schema_identifier: Some(database.schema_identifier),
             });
+            
         }
 
         Ok(plan)
@@ -99,14 +101,17 @@ impl AffinityProcessor {
         &self,
         reachable_partner_count: usize,
     ) -> Result<(), AffinityProcessorError> {
+
         if reachable_partner_count == 0 {
             return Err(AffinityProcessorError::SchemaValidationPartnerRequired);
         }
         Ok(())
+
     }
 
     /// Initialize checkpoint for tracking replication progress
     pub fn initialize_checkpoint(&mut self, phase: AffinitySyncPhase) {
+        
         if let Some(doc) = &self.document {
             let checkpoint = CheckpointMetadata::new(doc.affinity_id.clone(), phase);
             self.checkpoint = Some(checkpoint);
@@ -116,10 +121,12 @@ impl AffinityProcessor {
                 phase
             );
         }
+
     }
 
     /// Load existing checkpoint, useful for resuming interrupted replication
     pub fn restore_checkpoint(&mut self, checkpoint: CheckpointMetadata) {
+
         log::info!(
             "restoring checkpoint affinity_id={} phase={:?} completed_steps={}",
             checkpoint.affinity_id,
@@ -128,6 +135,7 @@ impl AffinityProcessor {
         );
 
         self.checkpoint = Some(checkpoint);
+
     }
 
     /// Get current checkpoint
@@ -137,6 +145,7 @@ impl AffinityProcessor {
 
     /// Mark a sync step as completed
     pub fn mark_sync_step_completed(&mut self, step_index: usize) {
+
         if let Some(ref mut checkpoint) = self.checkpoint {
             checkpoint.mark_step_completed(step_index);
             log::debug!(
@@ -146,13 +155,16 @@ impl AffinityProcessor {
                 checkpoint.progress_percentage(10)
             );
         }
+
     }
 
     /// Get next incomplete sync step, useful for resuming
     pub fn next_incomplete_sync_step(&self, total_steps: usize) -> Option<usize> {
+
         self.checkpoint
             .as_ref()
             .and_then(|cp| cp.next_incomplete_step(total_steps))
+            
     }
-    
+
 }

@@ -74,10 +74,12 @@ impl ConcurrentWalManager {
     }
 
     pub fn active_worker_count(&self) -> usize {
+
         self.workers
             .lock()
             .map(|workers| workers.len())
             .unwrap_or(0)
+
     }
 
     pub fn shutdown_all(&self) -> Result<(), &'static str> {
@@ -216,6 +218,7 @@ impl TransactionLog for ConcurrentWalManager {
         };
 
         if let Some(data_dir) = &self.data_dir {
+
             let needs_hydration = match self.storage.lock() {
                 Ok(store) => !store.contains_key(&stream_key),
                 Err(_) => return Vec::new(),
@@ -230,6 +233,7 @@ impl TransactionLog for ConcurrentWalManager {
                     }
                 }
             }
+
         }
 
         let store = match self.storage.lock() {
@@ -490,8 +494,11 @@ fn spawn_worker(
                             .unwrap_or(true);
 
                         if is_ordered {
+
                             if let Some(ref path) = wal_path {
+
                                 match frame_record(&record) {
+
                                     Ok(frame) => {
                                         if let Err(e) = append_bytes(path, &frame) {
                                             log::error!(
@@ -504,17 +511,22 @@ fn spawn_worker(
                                             ));
                                             continue;
                                         }
-                                    }
+                                    },
+
                                     Err(e) => {
                                         let _ = ack.send(Err(e));
                                         continue;
                                     }
+
                                 }
+
                             }
+
                             entries.push(record);
                             let _ = ack.send(Ok(()));
                         
                         } else {
+                            
                             if entries.iter().any(|existing| *existing == record) {
                                 // Exact duplicate already present; treat as idempotent success.
                                 let _ = ack.send(Ok(()));

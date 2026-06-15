@@ -125,7 +125,7 @@ fn disk_executor_rewrites_flushes_and_cuts_over() {
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-schema-migration-{}-{}",
         std::process::id(),
-        common::epochabs!()
+        common::epoch_nanos!()
     ));
 
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
@@ -206,7 +206,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-schema-rules-{}-{}",
         std::process::id(),
-        common::epochabs!()
+        common::epoch_nanos!()
     ));
 
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
@@ -285,7 +285,7 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-schema-type-safe-{}-{}",
         std::process::id(),
-        common::epochabs!()
+        common::epoch_nanos!()
     ));
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
 
@@ -355,7 +355,7 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-schema-type-force-{}-{}",
         std::process::id(),
-        common::epochabs!()
+        common::epoch_nanos!()
     ));
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
 

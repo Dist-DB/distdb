@@ -458,7 +458,7 @@ fn show_tables_query_returns_table_name_rows() {
 #[test]
 fn create_table_query_registers_table_with_schema() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-create-table-query-{}-{}",
@@ -502,7 +502,7 @@ fn create_table_query_registers_table_with_schema() {
 #[test]
 fn insert_query_appends_insert_record_to_table_wal() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-insert-query-{}-{}",
@@ -573,7 +573,7 @@ fn insert_query_appends_insert_record_to_table_wal() {
 #[test]
 fn update_query_updates_live_row() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-update-query-{}-{}",
@@ -667,7 +667,7 @@ fn update_query_updates_live_row() {
 #[test]
 fn rejected_insert_releases_table_write_lock() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-insert-abort-lock-{}-{}",
@@ -740,7 +740,7 @@ fn rejected_insert_releases_table_write_lock() {
 #[test]
 fn affinity_schema_sync_failure_returns_database_to_ready() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-affinity-schema-sync-lock-{}-{}",
@@ -774,7 +774,7 @@ fn affinity_schema_sync_failure_returns_database_to_ready() {
 #[test]
 fn affinity_wal_import_ignores_stale_schema_revision_and_returns_database_to_ready() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-affinity-wal-sync-lock-{}-{}",
@@ -852,7 +852,7 @@ fn affinity_wal_import_ignores_stale_schema_revision_and_returns_database_to_rea
 #[test]
 fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-wal-export-stream-cursors-{}-{}",
@@ -957,7 +957,7 @@ fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
 #[test]
 fn session_transaction_control_is_scoped_by_session_id() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-tx-{}-{}",
@@ -1015,7 +1015,7 @@ fn session_transaction_control_is_scoped_by_session_id() {
 #[test]
 fn active_session_transaction_stages_queries_until_commit() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-tx-block-{}-{}",
@@ -1131,7 +1131,7 @@ fn active_session_transaction_stages_queries_until_commit() {
 #[test]
 fn explicit_transaction_rejects_non_dml_schema_statements() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-tx-isolation-{}-{}",
@@ -1181,7 +1181,7 @@ fn explicit_transaction_rejects_non_dml_schema_statements() {
 
 #[test]
 fn snapshot_isolation_rejects_concurrent_write_write_conflicts() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-snapshot-conflict-{}-{}",
@@ -1298,7 +1298,7 @@ fn snapshot_isolation_rejects_concurrent_write_write_conflicts() {
 #[test]
 fn snapshot_isolation_keeps_repeatable_reads_within_transaction() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-snapshot-repeatable-{}-{}",
@@ -1393,7 +1393,7 @@ fn snapshot_isolation_keeps_repeatable_reads_within_transaction() {
 #[test]
 fn snapshot_isolation_transactional_reads_see_own_staged_writes() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-snapshot-own-writes-{}-{}",
@@ -1492,7 +1492,7 @@ fn snapshot_isolation_transactional_reads_see_own_staged_writes() {
 #[test]
 fn serializable_rejects_write_skew_across_disjoint_rows() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-serializable-write-skew-{}-{}",
@@ -1643,7 +1643,7 @@ fn serializable_rejects_write_skew_across_disjoint_rows() {
 #[test]
 fn commit_groups_staged_dml_into_one_write_batch() {
 
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-tx-group-{}-{}",
@@ -1758,7 +1758,7 @@ fn commit_groups_staged_dml_into_one_write_batch() {
 
 #[test]
 fn failed_commit_validation_leaves_real_wal_and_indexes_clean() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-tx-abort-{}-{}",
@@ -1884,7 +1884,7 @@ fn failed_commit_validation_leaves_real_wal_and_indexes_clean() {
 
 #[test]
 fn commit_shares_one_group_id_across_touched_tables() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-tx-multitable-{}-{}",
@@ -2008,7 +2008,7 @@ fn commit_shares_one_group_id_across_touched_tables() {
 
 #[test]
 fn rollback_discards_staged_queries_for_session() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-tx-rollback-{}-{}",
@@ -2097,7 +2097,7 @@ fn rollback_discards_staged_queries_for_session() {
 
 #[test]
 fn disconnect_rollback_clears_active_session_transaction() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-session-disconnect-rollback-{}-{}",
@@ -2152,7 +2152,7 @@ fn disconnect_rollback_clears_active_session_transaction() {
 
 #[test]
 fn delete_query_removes_live_row() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-delete-query-{}-{}",
@@ -2235,7 +2235,7 @@ fn delete_query_removes_live_row() {
 
 #[test]
 fn update_query_with_join_updates_matching_target_row() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-update-join-{}-{}",
@@ -2349,7 +2349,7 @@ fn update_query_with_join_updates_matching_target_row() {
 
 #[test]
 fn delete_query_with_left_outer_join_removes_unmatched_target_row() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-delete-left-join-{}-{}",
@@ -2448,7 +2448,7 @@ fn delete_query_with_left_outer_join_removes_unmatched_target_row() {
 
 #[test]
 fn select_inner_join_returns_matching_rows() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-join-{}-{}",
@@ -2526,7 +2526,7 @@ fn select_inner_join_returns_matching_rows() {
 
 #[test]
 fn select_inner_join_preserves_one_to_many_matches() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-join-many-{}-{}",
@@ -2620,7 +2620,7 @@ fn select_inner_join_preserves_one_to_many_matches() {
 
 #[test]
 fn select_left_join_returns_unmatched_left_rows_with_nulls() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-left-join-{}-{}",
@@ -2722,7 +2722,7 @@ fn select_left_join_returns_unmatched_left_rows_with_nulls() {
 #[test]
 fn select_left_join_where_right_field_is_null_filters_after_tuple_formation() {
     
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-left-join-where-null-{}-{}",
@@ -2804,7 +2804,7 @@ fn select_left_join_where_right_field_is_null_filters_after_tuple_formation() {
 
 #[test]
 fn select_left_outer_join_null_extends_unmatched_rows() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-left-outer-join-{}-{}",
@@ -2899,7 +2899,7 @@ fn select_left_outer_join_null_extends_unmatched_rows() {
 
 #[test]
 fn select_right_outer_join_null_extends_unmatched_rows() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-right-outer-join-{}-{}",
@@ -2994,7 +2994,7 @@ fn select_right_outer_join_null_extends_unmatched_rows() {
 
 #[test]
 fn select_full_outer_join_null_extends_both_sides() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-full-outer-join-{}-{}",
@@ -3094,7 +3094,7 @@ fn select_full_outer_join_null_extends_both_sides() {
 
 #[test]
 fn explain_select_with_multiple_joins_returns_join_steps() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-explain-multi-join-{}-{}",
@@ -3175,7 +3175,7 @@ fn explain_select_with_multiple_joins_returns_join_steps() {
 
 #[test]
 fn explain_insert_update_delete_return_plan_details() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-explain-mutations-{}-{}",
@@ -3287,7 +3287,7 @@ fn explain_insert_update_delete_return_plan_details() {
 
 #[test]
 fn insert_select_copies_rows_into_target_table() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-insert-select-{}-{}",
@@ -3368,7 +3368,7 @@ fn insert_select_copies_rows_into_target_table() {
 
 #[test]
 fn insert_select_with_join_materializes_joined_source_rows() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-insert-select-join-{}-{}",
@@ -3451,7 +3451,7 @@ fn insert_select_with_join_materializes_joined_source_rows() {
 
 #[test]
 fn select_alias_where_pk_falls_back_to_scan_when_runtime_index_is_empty() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-select-empty-index-fallback-{}-{}",
@@ -3540,7 +3540,7 @@ fn select_alias_where_pk_falls_back_to_scan_when_runtime_index_is_empty() {
 
 #[test]
 fn describe_table_query_returns_schema_rows() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-describe-table-query-{}-{}",
@@ -3615,7 +3615,7 @@ fn describe_table_query_returns_schema_rows() {
 
 #[test]
 fn drop_table_query_removes_table() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-drop-table-query-{}-{}",
@@ -3667,7 +3667,7 @@ fn drop_table_query_removes_table() {
 
 #[test]
 fn alter_table_query_updates_schema() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-alter-table-query-{}-{}",
@@ -3722,7 +3722,7 @@ fn alter_table_query_updates_schema() {
 
 #[test]
 fn create_database_query_creates_catalog() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-create-db-query-{}-{}",
@@ -3750,7 +3750,7 @@ fn create_database_query_creates_catalog() {
 
 #[test]
 fn drop_database_query_removes_catalog() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-drop-db-query-{}-{}",
@@ -3791,7 +3791,7 @@ fn drop_database_query_removes_catalog() {
 
 #[test]
 fn create_and_drop_sql_backed_objects_are_wired() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-sql-backed-objects-{}-{}",
@@ -3946,7 +3946,7 @@ fn create_and_drop_sql_backed_objects_are_wired() {
 
 #[test]
 fn connector_client_path_can_query_show_tables_without_simulation() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-client-path-{}-{}",
@@ -4029,7 +4029,7 @@ fn connector_client_path_can_query_show_tables_without_simulation() {
 
 #[test]
 fn connector_client_path_can_query_select_without_simulation() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-client-select-path-{}-{}",
@@ -4110,7 +4110,7 @@ fn connector_client_path_can_query_select_without_simulation() {
 
 #[test]
 fn query_path_stress_respects_timing_thresholds() {
-    let unique_suffix = common::epochabs!();
+    let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-server-query-stress-{}-{}",
