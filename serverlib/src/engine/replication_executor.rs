@@ -222,37 +222,50 @@ impl ReplicationPhaseExecutor {
 
 #[cfg(test)]
 mod tests {
+    
     use super::*;
     use crate::core::identity::NodeId;
-    use crate::engine::affinity::{AffinitySyncStep, DatabaseSchemaSummary, ReplicationSecuritySummary, AffinityDocument, AffinityMember, AffinityMemberStatus};
+    use crate::engine::affinity::{AffinitySyncStep, 
+        DatabaseSchemaSummary, 
+        ReplicationSecuritySummary, 
+        AffinityDocument, 
+        AffinityMember, 
+        AffinityMemberStatus};
 
     fn create_test_processor() -> AffinityProcessor {
+
         let mut processor = AffinityProcessor::new(NodeId("test-node".to_string()));
         
         let doc = AffinityDocument {
+
             affinity_id: "test-affinity".to_string(),
             affinity_revision: 1,
+            
             members: vec![AffinityMember {
                 node_id: NodeId("peer1".to_string()),
                 addrs: vec!["/ip4/127.0.0.1/tcp/4002".to_string()],
                 status: AffinityMemberStatus::Online,
                 last_seen_epoch_ms: 1234567890,
             }],
+
             databases: vec![DatabaseSchemaSummary {
                 database_id: "db1".to_string(),
                 schema_identifier: 1,
                 schema_hash: Some("hash1".to_string()),
             }],
+
             replication_security: ReplicationSecuritySummary {
                 policy_revision: 1,
                 key_id: Some("key1".to_string()),
                 updated_epoch_ms: 1234567890,
             },
+
         };
         
         processor.apply_affinity_document(doc);
         processor.initialize_checkpoint(AffinitySyncPhase::ControlPlane);
         processor
+
     }
 
     #[test]

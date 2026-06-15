@@ -86,16 +86,21 @@ pub(super) fn command_info(command: &ConnectorCommand) -> CommandInfo {
             database_id,
             command,
         } => {
+            
             let path = match command {
+
                 SchemaCommand::CreateTable { table_id, .. } => {
                     format!("schema:create_table:{database_id}:{table_id}")
-                }
+                },
+
                 SchemaCommand::AlterTable { change } => {
                     format!("schema:alter_table:{database_id}:{}", change.table_id)
-                }
+                },
+
                 SchemaCommand::DropTable { table_id } => {
                     format!("schema:drop_table:{database_id}:{table_id}")
                 }
+
             };
 
             CommandInfo {
@@ -108,16 +113,21 @@ pub(super) fn command_info(command: &ConnectorCommand) -> CommandInfo {
             database_id,
             mutation,
         } => {
+
             let path = match mutation {
+
                 DataMutation::Insert { table_id, .. } => {
                     format!("mutation:insert:{database_id}:{table_id}")
-                }
+                },
+
                 DataMutation::Update { table_id, .. } => {
                     format!("mutation:update:{database_id}:{table_id}")
-                }
+                },
+
                 DataMutation::Delete { table_id, .. } => {
                     format!("mutation:delete:{database_id}:{table_id}")
                 }
+
             };
 
             CommandInfo {

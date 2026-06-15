@@ -11,6 +11,7 @@ pub struct ServerP2pNetwork<T: Transport> {
 }
 
 impl<T: Transport> ServerP2pNetwork<T> {
+
     pub fn new(discovery: KademliaDiscoveryService, transport: T) -> Self {
         Self {
             discovery,
@@ -43,6 +44,7 @@ impl<T: Transport> ServerP2pNetwork<T> {
     }
 
     pub fn send_message(&mut self, peer_id: &str, message: ServiceMessage) -> Result<()> {
+
         log::debug!("server p2p send message to peer_id={} message={:?}", peer_id, message);
 
         // Backward compatibility path: allow direct address sends where caller
@@ -92,6 +94,7 @@ impl<T: Transport> ServerP2pNetwork<T> {
     pub fn discovery(&self) -> &KademliaDiscoveryService {
         &self.discovery
     }
+    
 }
 
 

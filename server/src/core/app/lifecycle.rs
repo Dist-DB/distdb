@@ -24,6 +24,7 @@ impl ServerApp {
             .map_err(|e| ServerAppError::Runtime(format!("failed to list data directory: {e}")))?;
 
         for file in files {
+
             let ext = file
                 .extension()
                 .and_then(|value| value.to_str())
@@ -58,6 +59,7 @@ impl ServerApp {
             );
 
             self.catalogs.insert(catalog.database_id.0.clone(), catalog);
+            
         }
 
         Ok(())

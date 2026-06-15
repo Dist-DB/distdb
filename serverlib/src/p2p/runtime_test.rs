@@ -10,6 +10,7 @@ use crate::p2p::protocol::{
 struct StubTransport;
 
 impl Transport for StubTransport {
+
     fn send(&mut self, _peer_id: &str, _message: ServiceMessage) -> Result<()> {
         Ok(())
     }
@@ -17,6 +18,7 @@ impl Transport for StubTransport {
     fn broadcast(&mut self, _message: ServiceMessage) -> Result<()> {
         Ok(())
     }
+
 }
 
 #[derive(Debug)]
@@ -25,6 +27,7 @@ struct StubSwarmSource {
 }
 
 impl ServerSwarmEventSource for StubSwarmSource {
+
     fn next_event(&mut self, _idle_wait: Duration) -> Option<ServerP2pEvent> {
         if self.events.is_empty() {
             None
@@ -32,26 +35,32 @@ impl ServerSwarmEventSource for StubSwarmSource {
             Some(self.events.remove(0))
         }
     }
+
 }
 
 fn node(id: &str, addr: &str) -> NodeDescriptor {
+
     NodeDescriptor {
         id: NodeId(id.to_string()),
         addrs: vec![addr.to_string()],
         is_local: false,
     }
+
 }
 
 #[test]
 fn runtime_processes_discovery_and_announce_events() {
+
     let discovery = KademliaDiscoveryService::new(
         NodeId("local".to_string()),
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
     );
+
     let network = ServerP2pNetwork::new(discovery, StubTransport);
     let mut runtime = ServerP2pRuntime::new(network);
 
     let (tx, rx) = std::sync::mpsc::channel();
+    
     tx.send(ServerP2pEvent::PeerDiscovered(node(
         "n1",
         "/ip4/10.0.0.1/tcp/4001",
@@ -69,10 +78,12 @@ fn runtime_processes_discovery_and_announce_events() {
 
     let peers = runtime.network().discover_peers();
     assert_eq!(peers.len(), 2);
+
 }
 
 #[test]
 fn runtime_can_run_from_swarm_source() {
+    
     let discovery = KademliaDiscoveryService::new(
         NodeId("local".to_string()),
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),

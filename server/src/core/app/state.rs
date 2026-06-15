@@ -41,6 +41,7 @@ impl ServerApp {
     pub fn new(config: ServerRuntimeConfig) -> Result<Self, ServerAppError> {
 
         let node_config = config.to_node_config();
+        
         node_config
             .validate()
             .map_err(|msg| ServerAppError::InvalidConfig(msg.to_string()))?;

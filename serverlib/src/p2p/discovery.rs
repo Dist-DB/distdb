@@ -40,6 +40,7 @@ pub struct KademliaDiscoveryService {
 }
 
 impl KademliaDiscoveryService {
+    
     pub fn new(local_node_id: NodeId, config: KademliaDiscoveryConfig) -> Self {
         let mut peers = HashMap::new();
         for node in &config.bootstrap_nodes {
@@ -68,6 +69,7 @@ impl KademliaDiscoveryService {
             self.peers.insert(remote.id.clone(), remote);
         }
     }
+
 }
 
 impl DiscoveryService for KademliaDiscoveryService {

@@ -125,9 +125,13 @@ fn parse_update_literal(expr: &Expr) -> Result<Option<Vec<u8>>, SqlParseError> {
 fn parse_update_value(value: &Value) -> Result<Option<Vec<u8>>, SqlParseError> {
 
     match value {
+
         Value::Null => Ok(None),
+        
         Value::Boolean(v) => Ok(Some(v.to_string().into_bytes())),
+        
         Value::Number(v, _) => Ok(Some(v.to_string().into_bytes())),
+        
         Value::SingleQuotedString(v)
         | Value::DoubleQuotedString(v)
         | Value::TripleSingleQuotedString(v)
@@ -144,10 +148,13 @@ fn parse_update_value(value: &Value) -> Result<Option<Vec<u8>>, SqlParseError> {
         | Value::TripleDoubleQuotedRawStringLiteral(v)
         | Value::NationalStringLiteral(v)
         | Value::HexStringLiteral(v) => Ok(Some(v.as_bytes().to_vec())),
+        
         Value::DollarQuotedString(v) => Ok(Some(v.value.as_bytes().to_vec())),
+        
         Value::Placeholder(v) => Err(SqlParseError::UnsupportedStatement(format!(
             "UPDATE placeholder '{v}' is not supported"
         ))),
+
     }
     
 }

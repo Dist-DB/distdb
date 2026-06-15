@@ -116,7 +116,11 @@ impl ServerConnectionSession {
 
         let challenge_id = format!("challenge-{}-{connection_id}", now_millis());
         
-        let session_id = md5_hash(format!("{}:{}:{}", SERVER_TEMP_USER, peer_addr, challenge_id).as_str());
+        let session_id = md5_hash(format!("{}:{}:{}", 
+            SERVER_TEMP_USER, 
+            peer_addr, 
+            challenge_id).as_str()
+        );
         
         let session = PeerSession::new()
             .with_user_id(SERVER_TEMP_USER)
@@ -258,6 +262,7 @@ fn security_context_secret(user_id: &str, database_id: &str) -> String {
 }
 
 fn parse_server_list_from_args(args: &[String]) -> Vec<String> {
+
     let server_entries = args
         .iter()
         .find_map(|arg| arg.strip_prefix("servers=").map(ToOwned::to_owned))
@@ -281,6 +286,7 @@ fn parse_server_list_from_args(args: &[String]) -> Vec<String> {
 }
 
 fn parse_affinity_startup_config(args: &[String]) -> Option<AffinityStartupConfig> {
+
     let affinity_spec = args
         .iter()
         .find_map(|arg| arg.strip_prefix("affinity=").map(str::trim))?;
@@ -307,6 +313,7 @@ fn parse_affinity_startup_config(args: &[String]) -> Option<AffinityStartupConfi
         affinity_id,
         affinity_key,
     })
+
 }
 
 fn build_affinity_document_snapshot(
@@ -314,6 +321,7 @@ fn build_affinity_document_snapshot(
     local_node: &NodeDescriptor,
     discovered_peers: Vec<NodeDescriptor>,
 ) -> AffinityDocument {
+
     let mut members = discovered_peers
         .into_iter()
         .map(|peer| AffinityMember {
@@ -347,9 +355,11 @@ fn build_affinity_document_snapshot(
             updated_epoch_ms: now_millis(),
         },
     }
+
 }
 
 fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<DatabaseSchemaSummary> {
+
     let mut summaries = app
         .catalogs()
         .iter()
@@ -378,6 +388,7 @@ fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<DatabaseSche
 
     summaries.sort_by(|a, b| a.database_id.cmp(&b.database_id));
     summaries
+
 }
 
 #[allow(dead_code)]

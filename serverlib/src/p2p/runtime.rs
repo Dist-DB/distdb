@@ -33,6 +33,14 @@ pub trait ServerSwarmEventSource {
     fn next_event(&mut self, idle_wait: Duration) -> Option<ServerP2pEvent>;
 }
 
+macro_rules! drain_pending_queue {
+    ($name:ident, $field:ident, $ty:ty) => {
+        pub fn $name(&mut self) -> Vec<(String, $ty)> {
+            self.$field.drain(..).collect()
+        }
+    };
+}
+
 #[derive(Debug)]
 pub struct ServerP2pRuntime<T: Transport> {
     network: ServerP2pNetwork<T>,
@@ -82,71 +90,56 @@ impl<T: Transport> ServerP2pRuntime<T> {
         &mut self.network
     }
 
-    pub fn pending_affinity_join_requests(
-        &mut self,
-    ) -> Vec<(String, AffinityJoinRequest)> {
-        self.pending_affinity_join_requests
-            .drain(..)
-            .collect()
-    }
+    drain_pending_queue!(
+        pending_affinity_join_requests,
+        pending_affinity_join_requests,
+        AffinityJoinRequest
+    );
 
-    pub fn pending_affinity_join_responses(
-        &mut self,
-    ) -> Vec<(String, AffinityJoinResponse)> {
-        self.pending_affinity_join_responses
-            .drain(..)
-            .collect()
-    }
+    drain_pending_queue!(
+        pending_affinity_join_responses,
+        pending_affinity_join_responses,
+        AffinityJoinResponse
+    );
+    
+    drain_pending_queue!(
+        pending_schema_catalog_requests,
+        pending_schema_catalog_requests,
+        super::protocol::SchemaCatalogRequest
+    );
+    
+    drain_pending_queue!(
+        pending_schema_catalog_responses,
+        pending_schema_catalog_responses,
+        super::protocol::SchemaCatalogResponse
+    );
+    
+    drain_pending_queue!(
+        pending_data_snapshot_requests,
+        pending_data_snapshot_requests,
+        super::protocol::DataSnapshotRequest
+    );
+    
+    drain_pending_queue!(
+        pending_data_snapshot_responses,
+        pending_data_snapshot_responses,
+        super::protocol::DataSnapshotResponse
+    );
+    
+    drain_pending_queue!(
+        pending_transactions_since_requests,
+        pending_transactions_since_requests,
+        super::protocol::TransactionsSinceRequest
+    );
 
-    pub fn pending_schema_catalog_requests(
-        &mut self,
-    ) -> Vec<(String, super::protocol::SchemaCatalogRequest)> {
-        self.pending_schema_catalog_requests
-            .drain(..)
-            .collect()
-    }
-
-    pub fn pending_schema_catalog_responses(
-        &mut self,
-    ) -> Vec<(String, super::protocol::SchemaCatalogResponse)> {
-        self.pending_schema_catalog_responses
-            .drain(..)
-            .collect()
-    }
-
-    pub fn pending_data_snapshot_requests(
-        &mut self,
-    ) -> Vec<(String, super::protocol::DataSnapshotRequest)> {
-        self.pending_data_snapshot_requests
-            .drain(..)
-            .collect()
-    }
-
-    pub fn pending_data_snapshot_responses(
-        &mut self,
-    ) -> Vec<(String, super::protocol::DataSnapshotResponse)> {
-        self.pending_data_snapshot_responses
-            .drain(..)
-            .collect()
-    }
-
-    pub fn pending_transactions_since_requests(
-        &mut self,
-    ) -> Vec<(String, super::protocol::TransactionsSinceRequest)> {
-        self.pending_transactions_since_requests
-            .drain(..)
-            .collect()
-    }
-
-    pub fn pending_transactions_since_responses(
-        &mut self,
-    ) -> Vec<(String, super::protocol::TransactionsSinceResponse)> {
-        self.pending_transactions_since_responses
-            .drain(..)
-            .collect()
-    }
-
+    drain_pending_queue!(
+        pending_transactions_since_responses,
+        pending_transactions_since_responses,
+        super::protocol::TransactionsSinceResponse
+    );
+    
     pub fn run_loop(&mut self, events: &Receiver<ServerP2pEvent>) -> Result<()> {
+
         self.running = true;
 
         while self.running {
@@ -160,10 +153,13 @@ impl<T: Transport> ServerP2pRuntime<T> {
         }
 
         self.running = false;
+        
         Ok(())
+
     }
 
     pub fn run_swarm_loop<S: ServerSwarmEventSource>(&mut self, source: &mut S) -> Result<()> {
+
         self.running = true;
 
         while self.running {
@@ -176,11 +172,15 @@ impl<T: Transport> ServerP2pRuntime<T> {
         }
 
         self.running = false;
+        
         Ok(())
+
     }
 
     pub fn handle_event(&mut self, event: ServerP2pEvent) -> Result<ServerP2pHandleOutcome> {
+
         match event {
+
             ServerP2pEvent::PeerDiscovered(node) => {
                 let peer_id = node.id.0.clone();
                 log::info!(
@@ -190,13 +190,17 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 );
                 self.network.upsert_discovered_peer(node);
                 Ok(ServerP2pHandleOutcome::PeerDiscovered { peer_id })
-            }
+            },
+
             ServerP2pEvent::MessageReceived {
                 from_peer_id,
                 message,
             } => {
+                
                 log::debug!("server p2p message received from_peer_id={}", from_peer_id);
+
                 match message {
+
                     ServiceMessage::NodeAnnounce(node) => {
                         log::info!(
                             "server p2p node announce received peer_id={} addrs={}",
@@ -204,7 +208,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             node.addrs.join(",")
                         );
                         self.network.upsert_discovered_peer(node);
-                    }
+                    },
+                    
                     ServiceMessage::AffinityJoinRequest(req) => {
                         log::info!(
                             "server p2p affinity join request received from_peer_id={} affinity_id={}",
@@ -213,7 +218,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_affinity_join_requests
                             .push_back((from_peer_id.clone(), req));
-                    }
+                    },
+                    
                     ServiceMessage::AffinityJoinResponse(resp) => {
                         log::info!(
                             "server p2p affinity join response received from_peer_id={} request_id={} ok={}",
@@ -223,7 +229,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_affinity_join_responses
                             .push_back((from_peer_id.clone(), resp));
-                    }
+                    },
+                    
                     ServiceMessage::SchemaCatalogRequest(req) => {
                         log::info!(
                             "server p2p schema catalog request received from_peer_id={} database_id={}",
@@ -232,7 +239,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_schema_catalog_requests
                             .push_back((from_peer_id.clone(), req));
-                    }
+                    },
+
                     ServiceMessage::SchemaCatalogResponse(resp) => {
                         log::info!(
                             "server p2p schema catalog response received from_peer_id={} request_id={}",
@@ -241,7 +249,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_schema_catalog_responses
                             .push_back((from_peer_id.clone(), resp));
-                    }
+                    },
+
                     ServiceMessage::DataSnapshotRequest(req) => {
                         log::info!(
                             "server p2p data snapshot request received from_peer_id={} database_id={}",
@@ -250,7 +259,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_data_snapshot_requests
                             .push_back((from_peer_id.clone(), req));
-                    }
+                    },
+
                     ServiceMessage::DataSnapshotResponse(resp) => {
                         log::info!(
                             "server p2p data snapshot response received from_peer_id={} request_id={}",
@@ -259,7 +269,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_data_snapshot_responses
                             .push_back((from_peer_id.clone(), resp));
-                    }
+                    },
+
                     ServiceMessage::TransactionsSinceRequest(req) => {
                         log::info!(
                             "server p2p transactions since request received from_peer_id={} database_id={} from_tx={:?}",
@@ -269,7 +280,8 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_transactions_since_requests
                             .push_back((from_peer_id.clone(), req));
-                    }
+                    },
+
                     ServiceMessage::TransactionsSinceResponse(resp) => {
                         log::info!(
                             "server p2p transactions since response received from_peer_id={} request_id={} count={}",
@@ -279,20 +291,26 @@ impl<T: Transport> ServerP2pRuntime<T> {
                         );
                         self.pending_transactions_since_responses
                             .push_back((from_peer_id.clone(), resp));
-                    }
+                    },
+
                     _ => {
                         log::debug!(
                             "server p2p message received but not handled: {:?}",
                             message
                         );
                     }
+
                 }
+
                 Ok(ServerP2pHandleOutcome::MessageReceived { from_peer_id })
-            }
+
+            },
+
             ServerP2pEvent::ErrorReceived {
                 from_peer_id,
                 message,
             } => {
+
                 let source = from_peer_id
                     .map(|peer| format!("peer={peer}"))
                     .unwrap_or_else(|| "peer=unknown".to_string());
@@ -300,14 +318,18 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 Err(ServerLibError::Network(format!(
                     "p2p event error from {source}: {message}"
                 )))
-            }
+            },
+
             ServerP2pEvent::Shutdown => {
                 log::info!("server p2p runtime shutdown received");
                 self.running = false;
                 Ok(ServerP2pHandleOutcome::Shutdown)
             }
+
         }
+
     }
+
 }
 
 

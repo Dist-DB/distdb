@@ -17,10 +17,12 @@ pub(super) fn resolve_catalog_mut<'a>(
     catalogs: &'a mut HashMap<String, DatabaseCatalog>,
     database_id: &str,
 ) -> Option<&'a mut DatabaseCatalog> {
+
     if catalogs.contains_key(database_id) {
         return catalogs.get_mut(database_id);
     }
 
     let normalized = DatabaseId::from_database_name(database_id).ok()?.0;
     catalogs.get_mut(&normalized)
+    
 }

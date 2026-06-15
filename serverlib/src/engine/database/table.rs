@@ -136,18 +136,18 @@ impl DatabaseEntityAspect for DatabaseTable {
 
             index.table_id = normalized_table_id.clone();
 
-                if index.field_names.is_empty() && !index.field_name.is_empty() {
-                    index.field_names = vec![index.field_name.clone()];
-                }
+            if index.field_names.is_empty() && !index.field_name.is_empty() {
+                index.field_names = vec![index.field_name.clone()];
+            }
 
-                index.field_names = index
-                    .field_names
-                    .into_iter()
-                    .map(|field_name| common::normalize_identifier!(field_name))
-                    .collect::<Vec<_>>();
+            index.field_names = index
+                .field_names
+                .into_iter()
+                .map(|field_name| common::normalize_identifier!(field_name))
+                .collect::<Vec<_>>();
 
-                index.field_name = index.field_names.first().cloned().unwrap_or_default();
-                index.refresh_index_id();
+            index.field_name = index.field_names.first().cloned().unwrap_or_default();
+            index.refresh_index_id();
 
             normalized_indexes.insert(index.index_id.0.clone(), index);
             

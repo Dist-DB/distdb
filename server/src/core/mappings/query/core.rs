@@ -1191,7 +1191,9 @@ fn execute_insert_locked(
     };
 
     let mut seen = HashSet::with_capacity(columns.len());
+
     for column in &columns {
+
         if !seen.insert(column.clone()) {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -1205,6 +1207,7 @@ fn execute_insert_locked(
                 format!("insert failed: unknown column '{}'", column),
             );
         }
+        
     }
 
     let insert_rows =
@@ -1224,6 +1227,7 @@ fn execute_insert_locked(
         let mut affected_rows = 0u64;
 
         for row in &insert_rows {
+
             if row.len() != columns.len() {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
@@ -1238,16 +1242,19 @@ fn execute_insert_locked(
             let mut payload_row = HashMap::with_capacity(schema.fields.len());
 
             for (column, value) in columns.iter().zip(row.iter()) {
+                
                 let field = schema
                     .field(column)
                     .expect("column existence already validated");
 
                 match value {
+
                     Some(value_bytes) => {
                         payload_row.insert(column.clone(), value_bytes.clone());
-                    }
+                    },
 
                     None => {
+
                         if let Some(default) = &field.default_value {
                             payload_row.insert(column.clone(), default.clone());
                         } else if !field.nullable {
@@ -1256,8 +1263,11 @@ fn execute_insert_locked(
                                 format!("insert failed: column '{}' cannot be null", column),
                             );
                         }
+
                     }
+
                 }
+
             }
 
             for field in &schema.fields {
@@ -1282,6 +1292,7 @@ fn execute_insert_locked(
             }
 
             if let Some(pk_index) = primary_key_index(table) {
+
                 let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
                     vec![pk_index.field_name.clone()]
                 } else {
@@ -1598,136 +1609,140 @@ fn execute_update_locked(
         external_write_group_id,
         touched_write_tables,
         |group_id, runtime_indexes| {
-    let mut affected_rows = 0u64;
 
-    for (row_id, row_map) in current_live_rows {
-        if !mutation_uses_joins
-            && !serverlib::row_matches_select_condition(
-                &row_map,
-                plan.where_condition.as_ref(),
-                catalog,
-                wal,
-                runtime_indexes,
+            let mut affected_rows = 0u64;
+
+            for (row_id, row_map) in current_live_rows {
+
+                if !mutation_uses_joins
+                    && !serverlib::row_matches_select_condition(
+                        &row_map,
+                        plan.where_condition.as_ref(),
+                        catalog,
+                        wal,
+                        runtime_indexes,
+                    )
+                {
+                    continue;
+                }
+
+                let mut updated_row = row_map.clone();
+
+                for assignment in &plan.assignments {
+                    match &assignment.value {
+                        Some(value) => {
+                            updated_row.insert(assignment.field_name.clone(), value.clone());
+                        }
+                        None => {
+                            updated_row.remove(&assignment.field_name);
+                        }
+                    }
+                }
+
+                for field in &schema.fields {
+                    if !updated_row.contains_key(&field.field_name) && !field.nullable {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!(
+                                "update failed: column '{}' cannot be null",
+                                field.field_name
+                            ),
+                        );
+                    }
+                }
+
+                if let Some(pk_index) = primary_key_index(table) {
+                    let old_pk = index_value_tuple(pk_index, &row_map);
+                    let new_pk = index_value_tuple(pk_index, &updated_row);
+
+                    if old_pk != new_pk && pk_keys.contains(&new_pk) {
+                        let pk_fields =
+                            if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
+                                vec![pk_index.field_name.clone()]
+                            } else {
+                                pk_index.field_names.clone()
+                            };
+
+                        let pk_display = pk_fields
+                            .iter()
+                            .zip(new_pk.iter())
+                            .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("update failed: duplicate primary key ({})", pk_display),
+                        );
+                    }
+
+                    pk_keys.remove(&old_pk);
+                    pk_keys.insert(new_pk);
+                }
+
+                let delete_payload = match encode_row_payload(schema, &row_map) {
+                    Ok(encoded) => encoded,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("update delete payload encode failed: {err}"),
+                        );
+                    }
+                };
+
+                if let Err(err) = append_row_payload_record(
+                    wal,
+                    &plan.table_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Delete,
+                    delete_payload,
+                    common::epoch_nanos!(),
+                    Some(TransactionId(row_id)),
+                    Some(group_id),
+                ) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("update delete WAL append failed: {err}"),
+                    );
+                }
+
+                let insert_payload = match encode_row_payload(schema, &updated_row) {
+                    Ok(encoded) => encoded,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("update insert payload encode failed: {err}"),
+                        );
+                    }
+                };
+
+                if let Err(err) = append_row_payload_record(
+                    wal,
+                    &plan.table_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    insert_payload,
+                    common::epoch_nanos!(),
+                    None,
+                    Some(group_id),
+                ) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("update insert WAL append failed: {err}"),
+                    );
+                }
+
+                affected_rows = affected_rows.saturating_add(1);
+
+            }
+
+            ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows }),
             )
-        {
-            continue;
-        }
 
-        let mut updated_row = row_map.clone();
-
-        for assignment in &plan.assignments {
-            match &assignment.value {
-                Some(value) => {
-                    updated_row.insert(assignment.field_name.clone(), value.clone());
-                }
-                None => {
-                    updated_row.remove(&assignment.field_name);
-                }
-            }
-        }
-
-        for field in &schema.fields {
-            if !updated_row.contains_key(&field.field_name) && !field.nullable {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!(
-                        "update failed: column '{}' cannot be null",
-                        field.field_name
-                    ),
-                );
-            }
-        }
-
-        if let Some(pk_index) = primary_key_index(table) {
-            let old_pk = index_value_tuple(pk_index, &row_map);
-            let new_pk = index_value_tuple(pk_index, &updated_row);
-
-            if old_pk != new_pk && pk_keys.contains(&new_pk) {
-                let pk_fields =
-                    if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
-                        vec![pk_index.field_name.clone()]
-                    } else {
-                        pk_index.field_names.clone()
-                    };
-
-                let pk_display = pk_fields
-                    .iter()
-                    .zip(new_pk.iter())
-                    .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("update failed: duplicate primary key ({})", pk_display),
-                );
-            }
-
-            pk_keys.remove(&old_pk);
-            pk_keys.insert(new_pk);
-        }
-
-        let delete_payload = match encode_row_payload(schema, &row_map) {
-            Ok(encoded) => encoded,
-            Err(err) => {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("update delete payload encode failed: {err}"),
-                );
-            }
-        };
-
-        if let Err(err) = append_row_payload_record(
-            wal,
-            &plan.table_id,
-            table,
-            runtime_indexes,
-            TransactionKind::Delete,
-            delete_payload,
-            common::epoch_nanos!(),
-            Some(TransactionId(row_id)),
-            Some(group_id),
-        ) {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("update delete WAL append failed: {err}"),
-            );
-        }
-
-        let insert_payload = match encode_row_payload(schema, &updated_row) {
-            Ok(encoded) => encoded,
-            Err(err) => {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("update insert payload encode failed: {err}"),
-                );
-            }
-        };
-
-        if let Err(err) = append_row_payload_record(
-            wal,
-            &plan.table_id,
-            table,
-            runtime_indexes,
-            TransactionKind::Insert,
-            insert_payload,
-            common::epoch_nanos!(),
-            None,
-            Some(group_id),
-        ) {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("update insert WAL append failed: {err}"),
-            );
-        }
-
-        affected_rows = affected_rows.saturating_add(1);
-    }
-
-    ConnectorResponse::applied(
-        request_id.to_string(),
-        ConnectorResult::Mutation(MutationResult { affected_rows }),
-    )
         },
     )
 
@@ -1849,55 +1864,58 @@ fn execute_delete_locked(
         external_write_group_id,
         touched_write_tables,
         |group_id, runtime_indexes| {
-    let mut affected_rows = 0u64;
 
-    for (row_id, row_map) in current_live_rows {
-        if !mutation_uses_joins
-            && !serverlib::row_matches_select_condition(
-                &row_map,
-                plan.where_condition.as_ref(),
-                catalog,
-                wal,
-                runtime_indexes,
-            )
-        {
-            continue;
-        }
+            let mut affected_rows = 0u64;
 
-        let delete_payload = match encode_row_payload(schema, &row_map) {
-            Ok(encoded) => encoded,
-            Err(err) => {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("delete payload encode failed: {err}"),
-                );
+            for (row_id, row_map) in current_live_rows {
+                if !mutation_uses_joins
+                    && !serverlib::row_matches_select_condition(
+                        &row_map,
+                        plan.where_condition.as_ref(),
+                        catalog,
+                        wal,
+                        runtime_indexes,
+                    )
+                {
+                    continue;
+                }
+
+                let delete_payload = match encode_row_payload(schema, &row_map) {
+                    Ok(encoded) => encoded,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("delete payload encode failed: {err}"),
+                        );
+                    }
+                };
+
+                if let Err(err) = append_row_payload_record(
+                    wal,
+                    &plan.table_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Delete,
+                    delete_payload,
+                    common::epoch_nanos!(),
+                    Some(TransactionId(row_id)),
+                    Some(group_id),
+                ) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("delete WAL append failed: {err}"),
+                    );
+                }
+
+                affected_rows = affected_rows.saturating_add(1);
+            
             }
-        };
 
-        if let Err(err) = append_row_payload_record(
-            wal,
-            &plan.table_id,
-            table,
-            runtime_indexes,
-            TransactionKind::Delete,
-            delete_payload,
-            common::epoch_nanos!(),
-            Some(TransactionId(row_id)),
-            Some(group_id),
-        ) {
-            return ConnectorResponse::rejected(
+            ConnectorResponse::applied(
                 request_id.to_string(),
-                format!("delete WAL append failed: {err}"),
-            );
-        }
+                ConnectorResult::Mutation(MutationResult { affected_rows }),
+            )
 
-        affected_rows = affected_rows.saturating_add(1);
-    }
-
-    ConnectorResponse::applied(
-        request_id.to_string(),
-        ConnectorResult::Mutation(MutationResult { affected_rows }),
-    )
         },
     )
 
@@ -1986,6 +2004,7 @@ fn load_mutation_rows(
             .map(|row| (row.row_id, row.row_map))
             .collect()
     })
+
 }
 
 fn execute_select_impl(
@@ -2096,6 +2115,7 @@ fn execute_select_impl(
     let table_id = read_plan.table_id.as_str();
 
     if table_id.is_empty() {
+
         if read_plan.is_explain {
             return explain_select_plan(
                 request_id,
@@ -2130,6 +2150,7 @@ fn execute_select_impl(
                 timings: empty_query_timings(),
             }),
         );
+
     }
 
     let Some(schema) = catalog.table_schema(table_id) else {
@@ -2208,6 +2229,7 @@ fn execute_select_impl(
             timings: empty_query_timings(),
         }),
     )
+
 }
 
 fn execute_joined_select(
@@ -2293,7 +2315,9 @@ fn execute_create_view_impl(
     let created_at = common::epoch_nanos!();
 
     match catalog.register_view(view_id, statement.sql.clone(), TableSchema::new(Vec::new())) {
+
         Ok(()) => {
+
             if let Err(err) = apply_entity_metadata_with_wal(
                 catalog,
                 wal,
@@ -2337,7 +2361,9 @@ fn execute_create_view_impl(
             request_id.to_string(),
             format!("create view failed: {err}"),
         ),
+
     }
+
 }
 
 fn execute_create_trigger_impl(
@@ -2563,6 +2589,7 @@ fn append_payload_record_with_group(
     .map_err(|e| e.to_string())?;
 
     Ok(next_id)
+
 }
 
 pub(super) fn append_row_payload_record(

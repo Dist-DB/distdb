@@ -57,6 +57,7 @@ impl ConcurrentWalManager {
     /// This mode never persists records to `.dtbl` files and is suitable
     /// for tests, ephemeral nodes, or high-speed pipelines where durability
     /// is handled elsewhere.
+
     pub fn in_memory() -> Self {
         Self::new()
     }
