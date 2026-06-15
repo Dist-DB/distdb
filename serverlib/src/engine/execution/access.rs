@@ -40,6 +40,7 @@ impl RelationAccessPlan {
         &'a self,
         table: &'a DatabaseTable,
     ) -> Option<(&'a DatabaseIndex, Vec<Vec<u8>>)> {
+
         let RelationAccessStrategy::RuntimeIndexLookup {
             index_id,
             lookup_key,
@@ -51,6 +52,7 @@ impl RelationAccessPlan {
             .values()
             .find(|index| index.index_id.0 == *index_id)
             .map(|index| (index, lookup_key.clone()))
+    
     }
 
     pub fn equality_probe_source(&self) -> Option<EqualityProbeSource> {

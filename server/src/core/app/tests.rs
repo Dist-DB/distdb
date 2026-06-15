@@ -3722,6 +3722,7 @@ fn alter_table_query_updates_schema() {
 
 #[test]
 fn create_database_query_creates_catalog() {
+
     let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -3746,11 +3747,12 @@ fn create_database_query_creates_catalog() {
     let response = app.handle_connector_request(&request);
     assert_eq!(response.status, ResponseStatus::Applied);
     assert!(!app.catalogs().is_empty());
+
 }
 
 #[test]
 fn drop_database_query_removes_catalog() {
-    
+
     let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -3760,10 +3762,12 @@ fn drop_database_query_removes_catalog() {
     ));
 
     let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+
     let mut app = ServerApp::new(config).expect("server app should initialize");
 
     let catalog = DatabaseCatalog::create_empty_from_name("analytics")
         .expect("catalog should be created");
+
     catalog
         .save_in_directory(&app.node_data_dir)
         .expect("catalog should be persisted");
@@ -3794,6 +3798,7 @@ fn drop_database_query_removes_catalog() {
 
 #[test]
 fn create_and_drop_sql_backed_objects_are_wired() {
+
     let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -3870,9 +3875,11 @@ fn create_and_drop_sql_backed_objects_are_wired() {
     let view_snapshot = app
         .node_data_dir
         .join(FileKind::Entity.file_name(common::helpers::stable_id(&["users_v"])));
+    
     let trigger_snapshot = app
         .node_data_dir
         .join(FileKind::Entity.file_name(common::helpers::stable_id(&["trg_users_bi"])));
+    
     let procedure_snapshot = app
         .node_data_dir
         .join(FileKind::Entity.file_name(common::helpers::stable_id(&["p_sync"])));
@@ -3886,6 +3893,7 @@ fn create_and_drop_sql_backed_objects_are_wired() {
                     .expect("view WAL stream should exist"),
             ]),
         ));
+
     let trigger_wal = app
         .node_data_dir
         .join(FileKind::Data.file_name(
@@ -3895,6 +3903,7 @@ fn create_and_drop_sql_backed_objects_are_wired() {
                     .expect("trigger WAL stream should exist"),
             ]),
         ));
+        
     let procedure_wal = app
         .node_data_dir
         .join(FileKind::Data.file_name(
