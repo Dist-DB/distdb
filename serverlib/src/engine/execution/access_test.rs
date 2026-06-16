@@ -398,17 +398,17 @@ fn runtime_index_bootstrap_uses_latest_live_row_keys() {
     assert!(runtime_indexes
         .index(&pk_index.index_id.0)
         .expect("pk runtime index should exist")
-        .contains(&vec![b"1".to_vec()]));
+        .contains(&[b"1".to_vec()]));
     
     assert!(runtime_indexes
         .index(&email_index.index_id.0)
         .expect("email runtime index should exist")
-        .contains(&vec![b"sam+updated@example.com".to_vec()]));
+        .contains(&[b"sam+updated@example.com".to_vec()]));
     
     assert!(!runtime_indexes
         .index(&email_index.index_id.0)
         .expect("email runtime index should exist")
-        .contains(&vec![b"sam@example.com".to_vec()]));
+        .contains(&[b"sam@example.com".to_vec()]));
 
 }
 

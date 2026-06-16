@@ -21,11 +21,10 @@ pub fn write_text(path: impl AsRef<Path>, content: &str) -> io::Result<()> {
 pub fn write_bytes(path: impl AsRef<Path>, content: &[u8]) -> io::Result<()> {
     let path = path.as_ref();
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
-    }
 
     fs::write(path, content)
 }
@@ -34,11 +33,10 @@ pub fn append_bytes(path: impl AsRef<Path>, content: &[u8]) -> io::Result<()> {
     use std::io::Write;
     let path = path.as_ref();
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
-    }
 
     let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(content)

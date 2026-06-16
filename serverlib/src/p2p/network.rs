@@ -21,7 +21,7 @@ impl<T: Transport> ServerP2pNetwork<T> {
 
     pub fn discover_peers(&self) -> Vec<NodeDescriptor> {
         let peers = self.discovery.discover_peers();
-        // log::debug!("server p2p discover peers count={}", peers.len());
+        log::debug!("server p2p discover peers count={}", peers.len());
         peers
     }
 

@@ -116,6 +116,7 @@ fn joined_row_tuple_missing_relation_helpers_preserve_available_rows() {
     assert_eq!(tuple.first_relation_row().map(|row| row.row_id), Some(1));
     assert_eq!(tuple.value("u.id"), Some(&b"1".to_vec()));
 }
+
 #[test]
 fn join_condition_field_names_extracts_eq_operands() {
     let join = SelectJoin {

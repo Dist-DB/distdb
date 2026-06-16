@@ -405,6 +405,7 @@ fn pushdown_filter_text(condition: Option<&Option<SelectCondition>>) -> String {
     }
 }
 
+#[expect(clippy::too_many_arguments, reason="Necessary for the complex logic of executing SELECT plans across multiple relations, conditions, and projection types")]
 pub fn execute_relation_select_plan<E, R>(
     wal: &ConcurrentWalManager,
     table: &DatabaseTable,

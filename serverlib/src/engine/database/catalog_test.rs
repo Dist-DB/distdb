@@ -557,7 +557,7 @@ fn active_schema_change_state_is_persisted_in_catalog_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn catalog_path_for_test(catalog: &DatabaseCatalog, directory: &PathBuf) -> PathBuf {
+fn catalog_path_for_test(catalog: &DatabaseCatalog, directory: &Path) -> PathBuf {
     directory.join(catalog.file_name())
 }
 

@@ -1,17 +1,13 @@
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum PeerServiceType {
     /// Interactive client (console, application driver, etc.)
+    #[default]
     Client,
     /// Peer data node in the cluster
     DataNode,
 }
 
-impl Default for PeerServiceType {
-    fn default() -> Self {
-        Self::Client
-    }
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PeerSession {

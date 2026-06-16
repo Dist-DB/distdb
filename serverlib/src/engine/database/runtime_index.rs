@@ -62,6 +62,7 @@ impl RuntimeIndexStore {
         self.indexes.get(&Self::key(index_id))
     }
 
+    #[expect(clippy::should_implement_trait, reason="Index access by string ID, not by reference")]
     pub fn index_mut(&mut self, index_id: &str) -> &mut RuntimeIndexState {
         self.indexes.entry(Self::key(index_id)).or_default()
     }

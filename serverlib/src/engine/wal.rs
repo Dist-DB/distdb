@@ -52,11 +52,13 @@ impl Default for ConcurrentWalManager {
 
 impl ConcurrentWalManager {
 
-    /// Build a memory-resident WAL manager.
-    ///
-    /// This mode never persists records to `.dtbl` files and is suitable
-    /// for tests, ephemeral nodes, or high-speed pipelines where durability
-    /// is handled elsewhere.
+    /* Build a memory-resident WAL manager.
+    /
+    / This mode never persists records to `.dtbl` files and is suitable
+    / for tests, ephemeral nodes, or high-speed pipelines where durability
+    / is handled elsewhere.
+    / 
+    */ 
 
     pub fn in_memory() -> Self {
         Self::new()
@@ -148,11 +150,10 @@ impl ConcurrentWalManager {
 
         if let Some(data_dir) = &self.data_dir {
             let wal_path = data_dir.join(FileKind::Data.file_name(&stream_key));
-            if let Err(err) = fs::remove_file(wal_path) {
-                if err.kind() != ErrorKind::NotFound {
+            if let Err(err) = fs::remove_file(wal_path)
+                && err.kind() != ErrorKind::NotFound {
                     return Err("failed to delete WAL file");
                 }
-            }
         }
 
         Ok(())
@@ -528,7 +529,7 @@ fn spawn_worker(
                         
                         } else {
                             
-                            if entries.iter().any(|existing| *existing == record) {
+                            if entries.contains(&record) {
                                 // Exact duplicate already present; treat as idempotent success.
                                 let _ = ack.send(Ok(()));
                                 continue;
@@ -547,8 +548,8 @@ fn spawn_worker(
 
                             entries.insert(insert_pos, record);
 
-                            if let Some(ref path) = wal_path {
-                                if let Err(e) = rewrite_wal_file(path, entries) {
+                            if let Some(ref path) = wal_path
+                                && let Err(e) = rewrite_wal_file(path, entries) {
                                     log::error!(
                                         "failed to rewrite WAL file for out-of-order insert stream={}: {}",
                                         stream_key,
@@ -557,7 +558,6 @@ fn spawn_worker(
                                     let _ = ack.send(Err(e));
                                     continue;
                                 }
-                            }
 
                             log::warn!(
                                 "out-of-order transaction accepted and merged for stream={}",
@@ -590,8 +590,8 @@ fn spawn_worker(
                             timestamp_epoch_ms,
                         );
 
-                        if let Some(ref path) = wal_path {
-                            if let Err(e) = rewrite_wal_file(path, entries) {
+                        if let Some(ref path) = wal_path
+                            && let Err(e) = rewrite_wal_file(path, entries) {
                                 log::error!(
                                     "failed to rewrite compacted WAL for stream={}: {}",
                                     stream_key,
@@ -600,7 +600,6 @@ fn spawn_worker(
                                 let _ = ack.send(Err(e));
                                 continue;
                             }
-                        }
 
                         let _ = ack.send(Ok(()));
                     } else {

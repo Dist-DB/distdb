@@ -32,7 +32,7 @@ pub fn normalize_identifier(value: impl AsRef<str>) -> String {
 
 pub fn epoch() -> u64 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(_n) => _n.as_secs().try_into().unwrap(),
+        Ok(_n) => _n.as_secs(),
         Err(_) => panic!("SystemTime before UNIX EPOCH!"),
     }
 }

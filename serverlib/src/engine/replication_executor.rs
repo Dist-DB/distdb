@@ -7,6 +7,14 @@ pub struct ReplicationPhaseExecutor {
     current_sync_index: usize,
 }
 
+
+impl Default for ReplicationPhaseExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
 impl ReplicationPhaseExecutor {
 
     pub fn new() -> Self {

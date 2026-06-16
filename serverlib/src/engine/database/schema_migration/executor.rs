@@ -117,11 +117,10 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
             .into_iter()
             .filter(|record| record.kind != TransactionKind::Delete)
         {
-            if matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
-                if let Some(ref rule_set) = rules {
+            if matches!(record.kind, TransactionKind::Insert | TransactionKind::Update)
+                && let Some(ref rule_set) = rules {
                     record.payload = apply_schema_rules_to_payload(&record.payload, rule_set, schema)?;
                 }
-            }
             rewritten.push(record);
         }
 

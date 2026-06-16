@@ -3,15 +3,16 @@ use super::field_def::FieldDef;
 pub use super::index_id::IndexId;
 use super::field_types::FieldIndex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum DatabaseIndexKind {
 	PrimaryKey,
+	#[default]
 	Indexed,
-
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum DatabaseIndexOrigin {
+	#[default]
 	Derived,
 	Relationship,
 	Temporary,
@@ -30,14 +31,6 @@ impl DatabaseIndexOrigin {
 
 }
 
-impl Default for DatabaseIndexOrigin {
-
-	fn default() -> Self {
-		Self::Derived
-	}
-
-}
-
 impl DatabaseIndexKind {
 
 	pub fn prefix(self) -> &'static str {
@@ -45,14 +38,6 @@ impl DatabaseIndexKind {
 			Self::PrimaryKey => "pri",
 			Self::Indexed => "ind",
 		}
-	}
-
-}
-
-impl Default for DatabaseIndexKind {
-
-	fn default() -> Self {
-		Self::Indexed
 	}
 
 }

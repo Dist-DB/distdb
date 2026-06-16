@@ -176,8 +176,8 @@ pub fn plan_relation_access(
     index_filter_map: HashMap<String, Vec<u8>>,
 ) -> RelationAccessPlan {
 
-    if allow_index_short_circuit {
-        if let Some((index, lookup_key)) = choose_index_lookup(table, &index_filter_map) {
+    if allow_index_short_circuit
+        && let Some((index, lookup_key)) = choose_index_lookup(table, &index_filter_map) {
             return RelationAccessPlan {
                 strategy: RelationAccessStrategy::RuntimeIndexLookup {
                     index_id: index.index_id.0.clone(),
@@ -185,7 +185,6 @@ pub fn plan_relation_access(
                 },
             };
         }
-    }
 
     if index_filter_map.len() == 1 {
 
@@ -229,11 +228,10 @@ pub fn materialize_relation_rows(
             index_id,
             lookup_key,
         } => {
-            if let Some(state) = runtime_indexes.index(index_id) {
-                if state.cardinality() > 0 && !state.contains(lookup_key) {
+            if let Some(state) = runtime_indexes.index(index_id)
+                && state.cardinality() > 0 && !state.contains(lookup_key) {
                     return Vec::new();
                 }
-            }
 
             load_live_rows(wal, &table.table_id, schema)
         },

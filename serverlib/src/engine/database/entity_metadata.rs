@@ -1,25 +1,11 @@
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct EntityMetadata {
     pub created_by: Option<String>,
     pub created_at_epoch_ms: Option<u64>,
     pub updated_by: Option<String>,
     pub updated_at_epoch_ms: Option<u64>,
     pub tags: Vec<String>,
-}
-
-impl Default for EntityMetadata {
-
-    fn default() -> Self {
-        Self {
-            created_by: None,
-            created_at_epoch_ms: None,
-            updated_by: None,
-            updated_at_epoch_ms: None,
-            tags: Vec::new(),
-        }
-    }
-    
 }
 
 impl EntityMetadata {

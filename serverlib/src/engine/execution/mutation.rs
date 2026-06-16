@@ -9,6 +9,7 @@ use super::{
     build_joined_row_tuples, row_matches_select_condition, JoinedRowTuple,
 };
 
+#[expect(clippy::too_many_arguments, reason="Necessary for the complex logic of selecting mutation target rows across multiple relations and conditions")]
 pub fn select_mutation_target_rows<E>(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
