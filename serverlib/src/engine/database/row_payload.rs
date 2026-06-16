@@ -80,6 +80,7 @@ pub fn decode_row_payload(
     }
 
     Err("row payload decode failed".to_string())
+    
 }
 
 

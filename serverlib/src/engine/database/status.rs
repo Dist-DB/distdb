@@ -1,11 +1,31 @@
 
+use std::fmt::Display;
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectStatus {
     Load,
-    Sync,
     Ready,
     Lock,
+    Sync,
 }
+
+impl Display for ObjectStatus {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Load => write!(f, "Load"),
+            Self::Ready => write!(f, "Ready"),
+            Self::Lock => write!(f, "Lock"),
+            Self::Sync => write!(f, "Sync"),
+        }
+    }
+
+}
+
+// load -> sync -> ready
+// load -> ready -> lock -> sync -> ready
+// load -> lock -> ready
 
 /*
 
