@@ -11,7 +11,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use common::p2p::{
+use common::helpers::p2p::{
     CaBootstrapRequest, decode_ca_bootstrap_response, encode_ca_bootstrap_request,
 };
 

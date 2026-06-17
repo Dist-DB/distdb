@@ -31,7 +31,6 @@
 #![allow(dead_code)]
 
 pub mod helpers;
-pub mod p2p;
 pub mod schema;
 
 pub use schema::{

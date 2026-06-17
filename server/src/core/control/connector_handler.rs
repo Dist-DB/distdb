@@ -24,7 +24,7 @@ use serverlib::{
     AffinityProcessor, ServerP2pEvent, ServerP2pRuntime, encode_wal_frame,
     import_p2p_ca_pem_if_missing, sign_tls_enrollment_csr,
 };
-use common::p2p::{
+use common::helpers::p2p::{
     decode_ca_bootstrap_request, encode_ca_bootstrap_response, is_ca_bootstrap_frame,
     CaBootstrapResponse,
 };
