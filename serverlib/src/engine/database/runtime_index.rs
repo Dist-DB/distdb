@@ -188,10 +188,14 @@ pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8
 
 }
 
-
-pub fn primary_key_index<'a>(table: &'a DatabaseTable) -> Option<&'a DatabaseIndex> {
+pub fn primary_key_index(table: &DatabaseTable) -> Option<&DatabaseIndex> {
     table.indexes.values().find(|index| index.is_primary_key())
 }
+
+
+// pub fn primary_key_index<'a>(table: &'a DatabaseTable) -> Option<&'a DatabaseIndex> {
+//     table.indexes.values().find(|index| index.is_primary_key())
+// }
 
 pub fn derived_indexes_for_table(table: &DatabaseTable) -> impl Iterator<Item = &DatabaseIndex> + '_ {
     table.indexes.values().filter(|index| !matches!(index.origin, DatabaseIndexOrigin::Temporary))

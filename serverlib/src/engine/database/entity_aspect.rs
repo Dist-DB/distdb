@@ -8,6 +8,7 @@ pub trait DatabaseEntityAspect {
     fn name(&self) -> &str;
     fn kind(&self) -> DatabaseEntityKind;
     fn storage_key(&self) -> String;
+    fn set_entity_id(&mut self, entity_id: String);
     fn status(&self) -> ObjectStatus;
     fn metadata(&self) -> &EntityMetadata;
     fn wal_stream_id(&self, database_wal_id: &str) -> String;

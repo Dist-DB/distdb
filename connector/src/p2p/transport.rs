@@ -4,14 +4,25 @@ use crate::core::{
 };
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Write};
+use std::net::IpAddr;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use common::{DEFAULT_SERVER_PORT, PeerSession, epoch_nanos};
 use common::helpers::utils::{md5};
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConnectorTlsConfig {
+    pub mode: common::TlsMode,
+    pub ca_path: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectorDiscoveryMode {
@@ -22,6 +33,7 @@ pub enum ConnectorDiscoveryMode {
 pub struct ConnectorP2pConfig {
     pub protocol: String,
     pub bootstrap_peers: Vec<String>,
+    pub tls: ConnectorTlsConfig,
 }
 
 impl ConnectorP2pConfig {
@@ -29,11 +41,22 @@ impl ConnectorP2pConfig {
         Self {
             protocol: protocol.into(),
             bootstrap_peers: Vec::new(),
+            tls: ConnectorTlsConfig::default(),
         }
     }
 
     pub fn with_bootstrap_peers(mut self, peers: Vec<String>) -> Self {
         self.bootstrap_peers = peers;
+        self
+    }
+
+    pub fn with_tls_mode(mut self, mode: common::TlsMode) -> Self {
+        self.tls.mode = mode;
+        self
+    }
+
+    pub fn with_tls_ca_path(mut self, ca_path: impl Into<PathBuf>) -> Self {
+        self.tls.ca_path = Some(ca_path.into());
         self
     }
 }
@@ -57,8 +80,47 @@ pub struct ConnectorP2pTransport {
 #[derive(Debug)]
 struct LiveConnection {
     peer_id: String,
-    stream: TcpStream,
+    stream: ConnectorWireStream,
     session: PeerSession,
+}
+
+enum ConnectorWireStream {
+    Plain(TcpStream),
+    Tls(StreamOwned<ClientConnection, TcpStream>),
+}
+
+impl std::fmt::Debug for ConnectorWireStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain(_) => f.write_str("ConnectorWireStream::Plain"),
+            Self::Tls(_) => f.write_str("ConnectorWireStream::Tls"),
+        }
+    }
+}
+
+impl Read for ConnectorWireStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buf),
+            Self::Tls(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for ConnectorWireStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buf),
+            Self::Tls(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
 }
 
 impl ConnectorP2pTransport {
@@ -84,9 +146,19 @@ impl ConnectorP2pTransport {
         &self.config.bootstrap_peers
     }
 
+    pub fn tls_mode(&self) -> common::TlsMode {
+        self.config.tls.mode
+    }
+
+    pub fn tls_ca_path(&self) -> Option<&PathBuf> {
+        self.config.tls.ca_path.as_ref()
+    }
+
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
+
         let peer_id = peer.peer_id.clone();
         let is_discovered = peer.is_discovered;
+
         log::debug!(
             "connector transport upsert peer peer_id={} addrs={}",
             peer_id,
@@ -131,6 +203,7 @@ impl ConnectorP2pTransport {
         if is_discovered && (self.active_peer_id.is_none() || active_was_stale) {
             self.active_peer_id = Some(peer_id);
         }
+        
     }
 
     pub fn discovered_peers(&self) -> Vec<ConnectorPeer> {
@@ -195,8 +268,9 @@ impl ConnectorP2pTransport {
     }
 
     pub fn connect_active_peer(&mut self) -> Result<(), ConnectorError> {
-        if self.active_peer_id.is_none() {
-            if let Some(addr) = self.config.bootstrap_peers.first().cloned() {
+
+        if self.active_peer_id.is_none()
+            && let Some(addr) = self.config.bootstrap_peers.first().cloned() {
                 self.peers.entry(addr.clone()).or_insert(ConnectorPeer {
                     peer_id: addr.clone(),
                     addrs: vec![addr.clone()],
@@ -204,7 +278,6 @@ impl ConnectorP2pTransport {
                 });
                 self.active_peer_id = Some(addr);
             }
-        }
 
         let Some(peer) = self.active_peer().cloned() else {
             return Err(ConnectorError::Transport(
@@ -213,6 +286,7 @@ impl ConnectorP2pTransport {
         };
 
         ensure_live_connection(self, &peer)
+
     }
 
     pub fn disconnect_active_peer(&self) {
@@ -220,6 +294,7 @@ impl ConnectorP2pTransport {
     }
 
     pub fn set_session_auth_token(&self, token: Option<String>) -> Result<(), ConnectorError> {
+
         let mut connection = self
             .live_connection
             .lock()
@@ -232,10 +307,13 @@ impl ConnectorP2pTransport {
         };
 
         live.session.auth_token = token;
+        
         Ok(())
+
     }
 
     pub fn session_auth_token(&self) -> Result<Option<String>, ConnectorError> {
+
         let connection = self
             .live_connection
             .lock()
@@ -251,6 +329,7 @@ impl ConnectorP2pTransport {
     }
 
     pub fn session_id(&self) -> Result<Option<String>, ConnectorError> {
+
         let connection = self
             .live_connection
             .lock()
@@ -266,15 +345,16 @@ impl ConnectorP2pTransport {
     }
 
     fn clear_live_connection(&self, reason: &str) {
-        if let Ok(mut connection) = self.live_connection.lock() {
-            if let Some(live) = connection.take() {
+        
+        if let Ok(mut connection) = self.live_connection.lock()
+            && let Some(live) = connection.take() {
                 log::info!(
                     "connector transport disconnected peer={} reason={}",
                     live.peer_id,
                     reason
                 );
             }
-        }
+        
     }
 }
 
@@ -306,9 +386,11 @@ impl ConnectorTransport for ConnectorP2pTransport {
             );
         }
 
-        if has_live_connection {
-            if let Some(peer) = self.active_peer() {
+        if has_live_connection
+            && let Some(peer) = self.active_peer() {
+
             match send_request_over_tcp(self, peer, request) {
+
                 Ok(response) => {
                     log::debug!(
                         "connector transport received network response request_id={} status={:?}",
@@ -316,7 +398,8 @@ impl ConnectorTransport for ConnectorP2pTransport {
                         response.status
                     );
                     return Ok(response);
-                }
+                },
+
                 Err(err) => {
                     log::warn!(
                         "connector transport network request failed for request_id={}: {}",
@@ -324,8 +407,9 @@ impl ConnectorTransport for ConnectorP2pTransport {
                         err
                     );
                 }
+
             }
-            }
+
         }
 
         self.queued_responses
@@ -409,8 +493,7 @@ fn ensure_live_connection(
     };
 
     let socket_addr = normalize_peer_addr(addr);
-    let mut stream = TcpStream::connect(&socket_addr)
-        .map_err(|e| ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}")))?;
+    let mut stream = connect_connector_stream(&socket_addr, &transport.config.tls)?;
 
     let challenge = read_response_frame(&mut stream)?;
     if challenge.request_id != SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
@@ -455,7 +538,7 @@ fn ensure_live_connection(
 }
 
 fn send_request_frame(
-    stream: &mut TcpStream,
+    stream: &mut ConnectorWireStream,
     request: &ConnectorRequest,
 ) -> Result<ConnectorResponse, ConnectorError> {
 
@@ -473,7 +556,7 @@ fn send_request_frame(
 
 }
 
-fn read_response_frame(stream: &mut TcpStream) -> Result<ConnectorResponse, ConnectorError> {
+fn read_response_frame(stream: &mut ConnectorWireStream) -> Result<ConnectorResponse, ConnectorError> {
 
     let mut response_len_buf = [0u8; 4];
     stream
@@ -492,25 +575,154 @@ fn read_response_frame(stream: &mut TcpStream) -> Result<ConnectorResponse, Conn
 
 }
 
+fn load_tls_root_store(path: &PathBuf) -> Result<RootCertStore, ConnectorError> {
+
+    let file = File::open(path).map_err(|err| {
+        ConnectorError::Transport(format!("failed to open tls CA file '{}': {err}", path.display()))
+    })?;
+
+    let mut reader = std::io::BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            ConnectorError::Transport(format!(
+                "failed to parse tls CA file '{}': {err}",
+                path.display()
+            ))
+        })?;
+
+    if certs.is_empty() {
+        return Err(ConnectorError::Transport(format!(
+            "tls CA file '{}' is empty",
+            path.display()
+        )));
+    }
+
+    let mut roots = RootCertStore::empty();
+    for cert in certs {
+        roots.add(cert).map_err(|err| {
+            ConnectorError::Transport(format!(
+                "failed to add tls root from '{}': {err}",
+                path.display()
+            ))
+        })?;
+    }
+
+    Ok(roots)
+
+}
+
+fn server_name_from_socket_addr(socket_addr: &str) -> Result<ServerName<'static>, ConnectorError> {
+
+    let host = socket_addr
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(socket_addr)
+        .trim_matches('[')
+        .trim_matches(']');
+
+    if host.is_empty() {
+        return Err(ConnectorError::Transport(format!(
+            "cannot derive tls server name from '{socket_addr}'"
+        )));
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(ServerName::IpAddress(ip.into()));
+    }
+
+    ServerName::try_from(host.to_string()).map_err(|_| {
+        ConnectorError::Transport(format!("invalid tls server name '{}': {}", host, socket_addr))
+    })
+
+}
+
+fn connect_tls_stream(
+    socket_addr: &str,
+    tls: &ConnectorTlsConfig,
+) -> Result<ConnectorWireStream, ConnectorError> {
+
+    let Some(ca_path) = tls.ca_path.as_ref() else {
+        return Err(ConnectorError::Transport(
+            "tls_ca path is required for connector TLS".to_string(),
+        ));
+    };
+
+    let roots = load_tls_root_store(ca_path)?;
+
+    let mut client_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"distdb-p2p/1".to_vec()];
+
+    let mut tcp = TcpStream::connect(socket_addr).map_err(|e| {
+        ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}"))
+    })?;
+
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+
+    let server_name = server_name_from_socket_addr(socket_addr)?;
+    let mut connection = ClientConnection::new(Arc::new(client_config), server_name).map_err(|e| {
+        ConnectorError::Transport(format!("failed to create TLS client connection: {e}"))
+    })?;
+
+    while connection.is_handshaking() {
+        connection
+            .complete_io(&mut tcp)
+            .map_err(|e| ConnectorError::Transport(format!("TLS handshake failed: {e}")))?;
+    }
+
+    Ok(ConnectorWireStream::Tls(StreamOwned::new(connection, tcp)))
+
+}
+
+fn connect_plain_stream(socket_addr: &str) -> Result<ConnectorWireStream, ConnectorError> {
+    let tcp = TcpStream::connect(socket_addr)
+        .map_err(|e| ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}")))?;
+    Ok(ConnectorWireStream::Plain(tcp))
+}
+
+fn connect_connector_stream(
+    socket_addr: &str,
+    tls: &ConnectorTlsConfig,
+) -> Result<ConnectorWireStream, ConnectorError> {
+
+    match tls.mode {
+        common::TlsMode::Off => connect_plain_stream(socket_addr),
+        common::TlsMode::Required => connect_tls_stream(socket_addr, tls),
+        common::TlsMode::Optional => match connect_tls_stream(socket_addr, tls) {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                log::debug!(
+                    "connector optional tls failed for {}; falling back to plaintext: {}",
+                    socket_addr,
+                    err
+                );
+                connect_plain_stream(socket_addr)
+            }
+        },
+    }
+    
+}
+
 fn normalize_peer_addr(raw: &str) -> String {
 
     let trimmed = raw.trim();
 
-    if let Some(rest) = trimmed.strip_prefix("/ip4/") {
-        if let Some((host, port)) = rest.split_once("/tcp/") {
-            if !host.is_empty() && port.parse::<u16>().is_ok() {
+    if let Some(rest) = trimmed.strip_prefix("/ip4/")
+        && let Some((host, port)) = rest.split_once("/tcp/")
+            && !host.is_empty() && port.parse::<u16>().is_ok() {
                 return format!("{host}:{port}");
             }
-        }
-    }
 
-    if let Some(rest) = trimmed.strip_prefix("/dns/") {
-        if let Some((host, port)) = rest.split_once("/tcp/") {
-            if !host.is_empty() && port.parse::<u16>().is_ok() {
+    if let Some(rest) = trimmed.strip_prefix("/dns/")
+        && let Some((host, port)) = rest.split_once("/tcp/")
+            && !host.is_empty() && port.parse::<u16>().is_ok() {
                 return format!("{host}:{port}");
             }
-        }
-    }
 
     if trimmed.contains(':') {
         return trimmed.to_string();

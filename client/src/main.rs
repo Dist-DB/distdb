@@ -1,18 +1,72 @@
 
+/*
+
+	This file is part of DistDB.
+
+	DistDB is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	DistDB is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with DistDB.  If not, see <http://www.gnu.org/licenses/>.
+
+    The client application provides a basis and set of examples for building 
+    DistDB client applications, including the interactive console client. 
+    It demonstrates how to use the `distdb-client` library to connect to a 
+    DistDB server, send commands, and handle responses. It is not 
+    intended for production use, but rather as a reference implementation 
+    and testing ground for client-side features.
+
+    The client application is distributed under the MIT License.
+    See the LICENSE file in the project root for more information.
+	
+	Written in 2026 by Sam Colak <sam@samcolak.com>
+	For information on the author and contributors, see the DistDB 
+	website (www.distdb.com) or the GitHub repository (www.github.com/dist-db).
+
+    Copyright (c) 2026 Sam Colak. All rights reserved.
+
+*/
+
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorP2pConfig, ConnectorP2pEvent,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, ConnectorPeer, FieldKind, FieldSpec,
-    SchemaChangeRequest, SchemaCommand, SchemaResult,
+    ConnectorResponse, ConnectorResult, ConnectorPeer,
+    FieldKind, FieldSpec, SchemaChangeRequest, SchemaCommand, SchemaResult,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+
+    let tls_mode = match args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
+        Some(raw) => common::TlsMode::parse(raw).ok_or_else(|| {
+            format!("invalid tls mode '{}'; expected off|optional|required", raw)
+        })?,
+        None => common::TlsMode::Off,
+    };
+
+    let tls_ca_path = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("tls_ca="))
+        .map(ToOwned::to_owned);
+
     // Client bootstraps connector transport over p2p.
-    let transport = ConnectorP2pTransport::new(
-        ConnectorP2pConfig::new("/distdb/kad/1.0.0")
-            .with_bootstrap_peers(vec!["bootstrap-peer-1".to_string()]),
-    );
+    let mut p2p_config = ConnectorP2pConfig::new("/distdb/kad/1.0.0")
+        .with_bootstrap_peers(vec!["bootstrap-peer-1".to_string()])
+        .with_tls_mode(tls_mode);
+
+    if let Some(ca_path) = tls_ca_path {
+        p2p_config = p2p_config.with_tls_ca_path(ca_path);
+    }
+
+    let transport = ConnectorP2pTransport::new(p2p_config);
     
     let mut runtime = ConnectorP2pRuntime::new(transport);
 

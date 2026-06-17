@@ -1181,6 +1181,7 @@ fn explicit_transaction_rejects_non_dml_schema_statements() {
 
 #[test]
 fn snapshot_isolation_rejects_concurrent_write_write_conflicts() {
+
     let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -1205,6 +1206,7 @@ fn snapshot_isolation_rejects_concurrent_write_write_conflicts() {
             },
         },
     );
+
     assert_eq!(app.handle_connector_request(&create_table).status, ResponseStatus::Applied);
 
     let seed_row = ConnectorRequest::new(
@@ -1220,7 +1222,7 @@ fn snapshot_isolation_rejects_concurrent_write_write_conflicts() {
 
     for session_id in ["session-a", "session-b"] {
         let begin = ConnectorRequest::new(
-            &format!("req-begin-snapshot-conflict-{session_id}"),
+            format!("req-begin-snapshot-conflict-{session_id}"),
             ConnectorCommand::Query {
                 query: connector::DataQuery {
                     database_id: "main".to_string(),
@@ -1542,7 +1544,7 @@ fn serializable_rejects_write_skew_across_disjoint_rows() {
 
     for session_id in ["session-a", "session-b"] {
         let begin = ConnectorRequest::new(
-            &format!("req-begin-serializable-write-skew-{session_id}"),
+            format!("req-begin-serializable-write-skew-{session_id}"),
             ConnectorCommand::Query {
                 query: connector::DataQuery {
                     database_id: "main".to_string(),

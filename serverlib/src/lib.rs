@@ -1,3 +1,40 @@
+
+/*
+
+	This file is part of DistDB.
+
+	DistDB is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	DistDB is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with DistDB.  If not, see <http://www.gnu.org/licenses/>.
+	
+	This libary provides the core server-side types and logic for DistDB, 
+	including database entities, execution plans, schema management, and 
+	replication. It is used by the DistDB server to manage databases, execute queries, 
+	and handle replication and affinity. It is not intended 
+	for use by client applications, which should use the public 
+	API provided by the `distdb-client` crate.
+
+	This library is distributed under the GNU General Public License. See 
+	the LICENSE file in the project root for more information.
+
+	Written in 2026 by Sam Colak <sam@samcolak.com>
+	For information on the author and contributors, see the DistDB 
+	website (www.distdb.com) or the GitHub repository (www.github.com/dist-db).
+
+    Copyright (c) 2026 Sam Colak. All rights reserved.
+
+*/
+
+
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
@@ -44,10 +81,11 @@ pub use engine::execution::{
 };
 
 pub use engine::database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
-pub use engine::database::transaction::{
-	EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
+pub use engine::database::transaction::
+	{EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
 	SqlObjectKind, TableLifecycleAction, TableLifecyclePayload,
 	TransactionId, TransactionKind, TransactionRecord,
+	encode_wal_frame, decode_wal_frame,
 };
 
 pub use engine::affinity::{

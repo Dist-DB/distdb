@@ -146,7 +146,7 @@ impl ServerApp {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_nanos() as u64)
-                .unwrap_or(common::epoch_nanos!() as u64),
+                .unwrap_or(common::epoch_nanos!()),
         );
         let mut touched_tables = HashSet::new();
 
@@ -171,15 +171,14 @@ impl ServerApp {
             }
         }
 
-        if !touched_tables.is_empty() {
-            if let Err(err) = commit_external_write_group(&sandbox_wal, &touched_tables, write_group_id)
+        if !touched_tables.is_empty()
+            && let Err(err) = commit_external_write_group(&sandbox_wal, &touched_tables, write_group_id)
             {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("failed to finalize transactional read snapshot: {}", err),
                 );
             }
-        }
 
         let response = handle_query_command(
             request_id,

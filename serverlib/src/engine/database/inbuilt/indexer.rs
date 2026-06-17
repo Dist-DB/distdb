@@ -37,10 +37,7 @@ pub(super) fn function_argument_expr(argument: &FunctionArg) -> Result<&Expr, St
 
     match argument {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr),
-        FunctionArg::Named { arg, .. } => match arg {
-            FunctionArgExpr::Expr(expr) => Ok(expr),
-            _ => Err("unsupported inbuilt command argument".to_string()),
-        },
+        FunctionArg::Named { arg: FunctionArgExpr::Expr(expr), .. } => Ok(expr),
         _ => Err("unsupported inbuilt command argument".to_string()),
     }
 

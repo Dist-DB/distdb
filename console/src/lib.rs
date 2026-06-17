@@ -2,7 +2,8 @@
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorP2pConfig,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, DataQuery, ResponseStatus,
+    ConnectorResponse, ConnectorResult, ConnectorTlsConfig,
+    DataQuery, ResponseStatus,
 };
 use common::DEFAULT_SERVER_PORT;
 use common::helpers::utils::md5_hash;
@@ -39,17 +40,25 @@ pub struct ConsoleSession {
 
 impl ConsoleSession {
 
-    pub fn new(server_list: Vec<String>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        server_list: Vec<String>,
+        tls_config: ConnectorTlsConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let bootstrap_peers = normalize_bootstrap_peers(server_list);
 
         if bootstrap_peers.is_empty() {
             return Err("at least one server address is required".into());
         }
 
-        let transport = ConnectorP2pTransport::new(
-            ConnectorP2pConfig::new("/distdb/kad/1.0.0")
-                .with_bootstrap_peers(bootstrap_peers.clone()),
-        );
+        let mut p2p_config = ConnectorP2pConfig::new("/distdb/kad/1.0.0")
+            .with_bootstrap_peers(bootstrap_peers.clone())
+            .with_tls_mode(tls_config.mode);
+
+        if let Some(ca_path) = tls_config.ca_path {
+            p2p_config = p2p_config.with_tls_ca_path(ca_path);
+        }
+
+        let transport = ConnectorP2pTransport::new(p2p_config);
 
         let runtime = ConnectorP2pRuntime::new(transport);
 
@@ -360,6 +369,17 @@ impl ConsoleSession {
         println!("connector p2p:");
         println!("  mode={mode}");
         println!("  protocol={}", transport.protocol());
+        let tls_mode = match transport.tls_mode() {
+            common::TlsMode::Off => "off",
+            common::TlsMode::Optional => "optional",
+            common::TlsMode::Required => "required",
+        };
+        println!("  tls_mode={tls_mode}");
+        if let Some(ca_path) = transport.tls_ca_path() {
+            println!("  tls_ca={}", ca_path.display());
+        } else {
+            println!("  tls_ca=<none>");
+        }
 
         if transport.bootstrap_peers().is_empty() {
             println!("  bootstrap_peers=<none>");
@@ -502,6 +522,24 @@ pub fn bootstrap_peers_from_cli_args(args: &[String]) -> Vec<String> {
     
     normalize_bootstrap_peers(candidates)
 
+}
+
+pub fn connector_tls_config_from_cli_args(
+    args: &[String],
+) -> Result<ConnectorTlsConfig, String> {
+    let mode = match args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
+        Some(raw) => common::TlsMode::parse(raw).ok_or_else(|| {
+            format!("invalid tls mode '{}'; expected off|optional|required", raw)
+        })?,
+        None => common::TlsMode::Off,
+    };
+
+    let ca_path = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("tls_ca="))
+        .map(std::path::PathBuf::from);
+
+    Ok(ConnectorTlsConfig { mode, ca_path })
 }
 
 trait ConsoleRequestExt {

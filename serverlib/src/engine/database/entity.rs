@@ -51,6 +51,16 @@ impl DatabaseEntityAspect for DatabaseEntity {
         }
     }
 
+    fn set_entity_id(&mut self, entity_id: String) {
+        match self {
+            Self::Table(t) => t.set_entity_id(entity_id),
+            Self::View(v) => v.set_entity_id(entity_id),
+            Self::Relationship(r) => r.set_entity_id(entity_id),
+            Self::Trigger(t) => t.set_entity_id(entity_id),
+            Self::StoredProcedure(p) => p.set_entity_id(entity_id),
+        }
+    }
+
     fn status(&self) -> ObjectStatus {
         match self {
             Self::Table(t)        => t.status(),

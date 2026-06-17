@@ -1,3 +1,4 @@
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
@@ -969,13 +970,12 @@ fn execute_drop_database(
     };
 
     let catalog_file = node_data_dir.join(catalog.file_name());
-    if let Err(err) = fs::remove_file(&catalog_file) {
-        if err.kind() != ErrorKind::NotFound {
+    if let Err(err) = fs::remove_file(&catalog_file)
+        && err.kind() != ErrorKind::NotFound {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("drop database failed: cannot remove catalog file: {err}"),
             );
-        }
     }
 
     ConnectorResponse::applied(
@@ -1053,15 +1053,13 @@ fn execute_drop_entity_object(
     // Only remove a dedicated entity stream. SQL-backed objects currently
     // share the database stream and must not delete it.
 
-    if let Some(stream_id) = entity_wal_stream_id {
-        if stream_id != wal_id {
-            if let Err(err) = wal.delete_stream(&stream_id) {
+    if let Some(stream_id) = entity_wal_stream_id
+        && stream_id != wal_id
+            && let Err(err) = wal.delete_stream(&stream_id) {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("drop {kind_label} WAL delete failed: {err}"),
                 );
-            }
-        }
     }
 
     let timestamp = common::epoch_nanos!();
@@ -2072,6 +2070,7 @@ where
 
 }
 
+#[expect(clippy::type_complexity, reason="complexity is inherent to the operation being performed and attempting to simplify it would reduce readability")]
 fn load_mutation_rows(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -2710,6 +2709,7 @@ fn append_payload_record_with_group(
     let last = existing.last();
     let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
     let refid = last.map(|record| record.id);
+    
     let record_group_id = group_id.or_else(|| {
         if matches!(kind, TransactionKind::WriteBegin) {
             Some(next_id)
@@ -2803,8 +2803,8 @@ where
 
     if let (Some(write_group_id), Some(touched_tables)) = (external_write_group_id, touched_tables)
     {
-        if touched_tables.insert(table.table_id.clone()) {
-            if let Err(err) = append_payload_record_with_group(
+        if touched_tables.insert(table.table_id.clone())
+            && let Err(err) = append_payload_record_with_group(
                 wal,
                 &table.table_id,
                 TransactionKind::WriteBegin,
@@ -2817,7 +2817,6 @@ where
                     format!("transaction write begin failed: {err}"),
                 );
             }
-        }
 
         return execute(write_group_id, runtime_indexes);
     }
@@ -3063,12 +3062,13 @@ fn remove_table_stream_files(node_data_dir: &Path, table_id: &str) -> Result<(),
     ];
 
     for file_name in candidates {
+
         let path = node_data_dir.join(file_name);
-        if let Err(err) = fs::remove_file(&path) {
-            if err.kind() != ErrorKind::NotFound {
+        
+        if let Err(err) = fs::remove_file(&path)
+            && err.kind() != ErrorKind::NotFound {
                 return Err(format!("cannot remove '{}': {err}", path.display()));
             }
-        }
     }
 
     Ok(())
@@ -3106,11 +3106,10 @@ fn remove_entity_snapshot_file(node_data_dir: &Path, entity_id: &str) -> Result<
     
     let path = entity_snapshot_path(node_data_dir, entity_id);
 
-    if let Err(err) = fs::remove_file(&path) {
-        if err.kind() != ErrorKind::NotFound {
+    if let Err(err) = fs::remove_file(&path)
+        && err.kind() != ErrorKind::NotFound {
             return Err(format!("cannot remove '{}': {err}", path.display()));
         }
-    }
 
     Ok(())
     

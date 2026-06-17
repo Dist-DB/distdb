@@ -43,6 +43,10 @@ impl DatabaseEntityAspect for DatabaseStoredProcedure {
         self.entity_id.clone()
     }
 
+    fn set_entity_id(&mut self, entity_id: String) {
+        self.entity_id = entity_id;
+    }
+
     fn status(&self) -> ObjectStatus {
         ObjectStatus::Ready
     }

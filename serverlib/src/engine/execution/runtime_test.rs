@@ -101,8 +101,10 @@ fn compare_provider_fields_reads_from_tuple_and_candidate_provider() {
 
 #[test]
 fn joined_row_tuple_missing_relation_helpers_preserve_available_rows() {
+    
     let relation = relation("users", "u");
-    let missing = JoinedRowTuple::from_missing_relations(&[relation.clone()]);
+    let missing = JoinedRowTuple::from_missing_relations(std::slice::from_ref(&relation));
+    
     assert!(missing.first_relation_row().is_none());
     assert!(missing.value("u.id").is_none());
 

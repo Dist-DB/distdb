@@ -6,12 +6,21 @@ use serverlib::NodeConfig;
 pub const DEFAULT_LOCAL_NODE_ID: &str = "server-node-01";
 pub const DEFAULT_LOCAL_SWARM_ID: &str = "distdb-devnet";
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServerTlsConfig {
+    pub cert_path: Option<PathBuf>,
+    pub key_path: Option<PathBuf>,
+    pub ca_path: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerRuntimeConfig {
     pub node_id: String,
     pub swarm_id: String,
     pub data_dir: PathBuf,
     pub listen_addrs: Vec<String>,
+    pub tls_mode: common::TlsMode,
+    pub tls: ServerTlsConfig,
 }
 
 impl ServerRuntimeConfig {
@@ -26,6 +35,8 @@ impl ServerRuntimeConfig {
             swarm_id: DEFAULT_LOCAL_SWARM_ID.to_string(),
             data_dir,
             listen_addrs: vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")],
+            tls_mode: common::TlsMode::Off,
+            tls: ServerTlsConfig::default(),
         }
     }
 
@@ -38,6 +49,8 @@ impl ServerRuntimeConfig {
             swarm_id: DEFAULT_LOCAL_SWARM_ID.to_string(),
             data_dir,
             listen_addrs: vec![listen_addr.into()],
+            tls_mode: common::TlsMode::Off,
+            tls: ServerTlsConfig::default(),
         }
     }
 
@@ -66,6 +79,8 @@ mod tests {
             config.listen_addrs,
             vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")]
         );
+        assert_eq!(config.tls_mode, common::TlsMode::Off);
+        assert_eq!(config.tls, ServerTlsConfig::default());
     }
     
 }

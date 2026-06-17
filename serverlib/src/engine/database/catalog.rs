@@ -696,6 +696,7 @@ impl DatabaseCatalog {
                 match payload.object_kind {
 
                     SqlObjectKind::View => {
+
                         if self.view(&object_id).is_none() {
                             self.register_view(
                                 object_id.clone(),
@@ -707,13 +708,17 @@ impl DatabaseCatalog {
                         let view = self.view_mut(&object_id).ok_or(DatabaseError::ViewNotFound)?;
                         view.sql = payload.sql;
                         view.dependencies = normalized_dependencies;
+                        
                         if existed_before {
                             self.accept_schema_epoch(payload.schema_epoch);
                         }
+                        
                         Ok(())
+                        
                     },
 
                     SqlObjectKind::Trigger => {
+
                         if self.trigger(&object_id).is_none() {
                             self.register_trigger(
                                 object_id.clone(),
@@ -725,15 +730,20 @@ impl DatabaseCatalog {
                         let trigger = self
                             .trigger_mut(&object_id)
                             .ok_or(DatabaseError::TriggerNotFound)?;
+
                         trigger.sql = payload.sql;
                         trigger.dependencies = normalized_dependencies;
+
                         if existed_before {
                             self.accept_schema_epoch(payload.schema_epoch);
                         }
+
                         Ok(())
+
                     },
 
                     SqlObjectKind::StoredProcedure => {
+
                         if self.stored_procedure(&object_id).is_none() {
                             self.register_stored_procedure(
                                 object_id.clone(),
@@ -747,10 +757,13 @@ impl DatabaseCatalog {
                             .ok_or(DatabaseError::StoredProcedureNotFound)?;
                         procedure.sql = payload.sql;
                         procedure.dependencies = normalized_dependencies;
+
                         if existed_before {
                             self.accept_schema_epoch(payload.schema_epoch);
                         }
+
                         Ok(())
+                        
                     },
 
                 }
@@ -1196,7 +1209,9 @@ impl DatabaseCatalog {
     }
 
     fn indexes_for_schema(table_id: &str, schema: &TableSchema) -> HashMap<String, DatabaseIndex> {
+        
         let mut indexes = HashMap::new();
+
         let primary_key_fields = schema
             .fields
             .iter()
@@ -1205,6 +1220,7 @@ impl DatabaseCatalog {
             .collect::<Vec<_>>();
 
         if !primary_key_fields.is_empty() {
+
             let index = DatabaseIndex::from_table_fields_with_origin(
                 table_id,
                 DatabaseIndexKind::PrimaryKey,
@@ -1212,14 +1228,16 @@ impl DatabaseCatalog {
                 None,
                 primary_key_fields,
             );
+            
             indexes.insert(index.index_id.0.clone(), index);
+
         }
 
         for field in &schema.fields {
             if matches!(field.indexed, FieldIndex::Indexed) {
-                let index_kind = match field.indexed {
-                    _ => DatabaseIndexKind::Indexed,
-                };
+                
+                let index_kind = DatabaseIndexKind::Indexed;
+
                 let index = DatabaseIndex::from_table_fields_with_origin(
                     table_id,
                     index_kind,
@@ -1227,10 +1245,13 @@ impl DatabaseCatalog {
                     None,
                     vec![field.field_name.clone()],
                 );
+                
                 indexes.insert(index.index_id.0.clone(), index);
             }
         }
+        
         indexes
+
     }
 
     fn bump_schema_epoch(&mut self) {
@@ -1252,17 +1273,7 @@ impl DatabaseCatalog {
         for (_legacy_key, mut entity) in std::mem::take(&mut self.entities) {
 
             if entity.storage_key().is_empty() {
-                match &mut entity {
-                    DatabaseEntity::Table(table) => table.entity_id = common::helpers::utils::unique_id(),
-                    DatabaseEntity::View(view) => view.entity_id = common::helpers::utils::unique_id(),
-                    DatabaseEntity::Relationship(relationship) => {
-                        relationship.entity_id = common::helpers::utils::unique_id()
-                    }
-                    DatabaseEntity::Trigger(trigger) => trigger.entity_id = common::helpers::utils::unique_id(),
-                    DatabaseEntity::StoredProcedure(procedure) => {
-                        procedure.entity_id = common::helpers::utils::unique_id()
-                    }
-                }
+                entity.set_entity_id(common::helpers::utils::unique_id());                
             }
 
             entity.normalize_in_place();
@@ -1283,6 +1294,7 @@ impl DatabaseCatalog {
         Ok(())
 
     }
+
 }
 
 

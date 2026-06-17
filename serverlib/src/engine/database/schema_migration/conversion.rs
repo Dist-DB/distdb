@@ -49,6 +49,7 @@ pub fn apply_schema_rules_to_payload(
 
 }
 
+#[expect(clippy::result_unit_err, reason="the error context is sufficiently conveyed by the variant and additional information would not be helpful for handling the error")]
 pub fn convert_value_to_field_type(
     value: &[u8],
     target_type: &FieldType,
@@ -109,16 +110,19 @@ pub fn convert_value_to_field_type(
 
 }
 
+#[expect(clippy::result_unit_err, reason="the error context is sufficiently conveyed by the variant and additional information would not be helpful for handling the error")]
 pub fn parse_i128_bytes(value: &[u8]) -> Result<i128, ()> {
     let text = std::str::from_utf8(value).map_err(|_| ())?.trim();
     text.parse::<i128>().map_err(|_| ())
 }
 
+#[expect(clippy::result_unit_err, reason="the error context is sufficiently conveyed by the variant and additional information would not be helpful for handling the error")]
 pub fn parse_u128_bytes(value: &[u8]) -> Result<u128, ()> {
     let text = std::str::from_utf8(value).map_err(|_| ())?.trim();
     text.parse::<u128>().map_err(|_| ())
 }
 
+#[expect(clippy::result_unit_err, reason="the error context is sufficiently conveyed by the variant and additional information would not be helpful for handling the error")]   
 pub fn parse_f64_bytes(value: &[u8]) -> Result<f64, ()> {
     let text = std::str::from_utf8(value).map_err(|_| ())?.trim();
     text.parse::<f64>().map_err(|_| ())

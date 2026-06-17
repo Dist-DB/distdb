@@ -8,4 +8,4 @@ pub use super::table_lifecycle_payload::{TableLifecycleAction, TableLifecyclePay
 pub use super::transaction_id::TransactionId;
 pub use super::transaction_kind::TransactionKind;
 pub use super::transaction_log::TransactionLog;
-pub use super::transaction_record::TransactionRecord;
+pub use super::transaction_record::{decode_wal_frame, encode_wal_frame, TransactionRecord};
