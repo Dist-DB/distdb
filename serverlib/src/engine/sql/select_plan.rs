@@ -280,6 +280,7 @@ pub fn derive_relation_pushdown_conditions(
 
     let clauses = flatten_and_clauses(condition);
 
+    #[expect(clippy::single_match, reason="the function may be extended in the future to support more condition types that can be pushed down, but currently only one type is supported")]
     for clause in clauses {
         match relation_index_for_condition(clause, relation_bindings) {
             Some(index) => {
@@ -299,7 +300,8 @@ pub fn derive_relation_pushdown_conditions(
         .collect::<Vec<_>>()
 }
 
-fn flatten_and_clauses<'a>(condition: &'a SelectCondition) -> Vec<&'a SelectCondition> {
+fn flatten_and_clauses(condition: &SelectCondition) -> Vec<&SelectCondition> {
+
     match condition {
         SelectCondition::And(children) => children
             .iter()
@@ -307,6 +309,7 @@ fn flatten_and_clauses<'a>(condition: &'a SelectCondition) -> Vec<&'a SelectCond
             .collect::<Vec<_>>(),
         _ => vec![condition],
     }
+    
 }
 
 fn combine_conditions(conditions: Vec<SelectCondition>) -> Option<SelectCondition> {

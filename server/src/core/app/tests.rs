@@ -1758,6 +1758,7 @@ fn commit_groups_staged_dml_into_one_write_batch() {
 
 }
 
+#[expect(clippy::single_element_loop, reason = "loop allows use of `break` to fail test immediately when condition is not met")]
 #[test]
 fn failed_commit_validation_leaves_real_wal_and_indexes_clean() {
     let unique_suffix = common::epoch_nanos!();
@@ -4241,7 +4242,9 @@ fn query_path_stress_respects_timing_thresholds() {
     );
 }
 
+#[expect(clippy::manual_div_ceil, reason = "clarity of rank calculation")]
 fn percentile(sorted_values: &[u128], pct: usize) -> u128 {
+
     if sorted_values.is_empty() {
         return 0;
     }

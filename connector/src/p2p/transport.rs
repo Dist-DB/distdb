@@ -84,6 +84,7 @@ struct LiveConnection {
     session: PeerSession,
 }
 
+#[expect(clippy::large_enum_variant, reason="the variants represent distinct connection types and the enum is not expected to be used in performance-critical code paths where the size difference would be a concern")]
 enum ConnectorWireStream {
     Plain(TcpStream),
     Tls(StreamOwned<ClientConnection, TcpStream>),

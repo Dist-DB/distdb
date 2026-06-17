@@ -2710,7 +2710,7 @@ fn append_payload_record_with_group(
     let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
     let refid = last.map(|record| record.id);
     
-    let record_group_id = group_id.or_else(|| {
+    let record_group_id = group_id.or({
         if matches!(kind, TransactionKind::WriteBegin) {
             Some(next_id)
         } else {

@@ -354,16 +354,15 @@ fn first_object_name_in_grant_objects(objects: &GrantObjects) -> Option<String> 
 pub(super) fn classify_text_fallback(
     statement: &str,
 ) -> Option<(SqlDirective, SqlOperation, Option<String>)> {
+    
     let tokens = statement
         .split_whitespace()
         .map(|token| token.trim_matches(';'))
         .collect::<Vec<_>>();
 
-    let Some(first) = tokens.first() else {
-        return None;
-    };
-
+    let first = tokens.first()?;
     let verb = first.to_ascii_lowercase();
+    
     if verb != "create" && verb != "drop" {
         return None;
     }

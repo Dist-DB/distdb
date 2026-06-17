@@ -389,20 +389,23 @@ fn parse_sql_type_len(lowered_type: &str, marker: &str) -> Option<usize> {
     lowered_type[start..end].trim().parse::<usize>().ok()
 }
 
+#[expect(clippy::field_reassign_with_default, reason = "metadata fields are conditionally set based on column options")]
 fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMetadata> {
 
     let mut metadata = FieldMetadata::default();
     metadata.original_sql_type = Some(column.data_type.to_string());
 
     for option in &column.options {
+
         match &option.option {
+            
             ColumnOption::Comment(comment) => {
                 metadata.comment = Some(comment.clone());
-            }
+            },
 
             ColumnOption::CharacterSet(charset) => {
                 metadata.character_set = Some(charset.to_string());
-            }
+            },
 
             ColumnOption::DialectSpecific(tokens) => {
                 let lowered = tokens
@@ -418,7 +421,9 @@ fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMet
             }
 
             _ => {}
+
         }
+
     }
 
     if metadata.collation.is_none() {
@@ -457,6 +462,7 @@ fn extract_collation_from_column(column: &sqlparser::ast::ColumnDef) -> Option<S
     }
 
     None
+    
 }
 
 

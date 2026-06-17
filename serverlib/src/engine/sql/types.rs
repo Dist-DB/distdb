@@ -165,6 +165,7 @@ pub enum SelectCondition {
     Predicate(SelectPredicate),
 }
 
+#[expect(clippy::large_enum_variant, reason="the variants are sufficiently distinct in their usage and the enum is not expected to be used in performance-critical code paths where the size difference would be a concern")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectProjectionItem {
     Column {
