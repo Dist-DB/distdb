@@ -29,13 +29,27 @@
 
 use console::{
     bootstrap_peers_from_cli_args, connector_tls_config_from_cli_args,
-    parse_console_command, ConsoleSession,
+    parse_console_command, ConsoleCommand, ConsoleSession,
 };
 
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::env;
 use std::io;
+
+fn startup_user_from_cli_args(args: &[String]) -> Option<String> {
+    args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("user="))
+        .map(ToOwned::to_owned)
+}
+
+fn startup_password_from_cli_args(args: &[String]) -> Option<String> {
+    args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("password="))
+        .map(ToOwned::to_owned)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
@@ -46,6 +60,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = env::args().skip(1).collect::<Vec<_>>();
+    let startup_user = startup_user_from_cli_args(&args);
+    let startup_password = startup_password_from_cli_args(&args);
 
     let server_list = bootstrap_peers_from_cli_args(&args);
     let tls_config = connector_tls_config_from_cli_args(&args)
@@ -54,13 +70,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if server_list.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: console <server-address>[:<port>] [servers=host1[:port],host2[:port]] [tls=off|optional|required] [tls_ca=/path/to/ca.pem]",
+            "usage: console <server-address>[:<port>] [servers=host1[:port],host2[:port]] [tls=off|optional|required] [tls_ca=/path/to/ca.pem] [user=<username@peer-id>] [password=<secret>]",
         )
         .into());
     }
 
     let mut session = ConsoleSession::new(server_list.clone(), tls_config)?;
     log::info!("console bootstrap peers: {}", server_list.join(", "));
+
+    if startup_password.is_some() && startup_user.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "password=<secret> requires user=<username@peer-id>",
+        )
+        .into());
+    }
+
+    if let Some(user_and_peer) = startup_user {
+        let (user, peer_id) = user_and_peer
+            .split_once('@')
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "user must be formatted as <username@peer-id>",
+                )
+            })?;
+
+        if user.trim().is_empty() || peer_id.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "user must be formatted as <username@peer-id>",
+            )
+            .into());
+        }
+
+        let resolved_peer_id = session.startup_connect_user(user, peer_id)?;
+        if resolved_peer_id != peer_id {
+            println!(
+                "notification: startup peer '{}' was not discovered; connected to discovered peer '{}'",
+                peer_id, resolved_peer_id
+            );
+        } else {
+            println!("notification: startup peer connection established");
+        }
+
+        if let Some(password) = startup_password {
+            session.execute(ConsoleCommand::Sql(format!("password {}", password)))?;
+            println!("notification: startup password passthrough applied");
+        }
+    }
 
     let mut editor = DefaultEditor::new()?;
 

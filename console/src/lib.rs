@@ -77,6 +77,48 @@ impl ConsoleSession {
         format!("console-req-{}", self.request_seq)
     }
 
+    pub fn startup_connect_user(
+        &mut self,
+        user: &str,
+        requested_peer_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        self.refresh_discovered_peers_from_server()?;
+
+        let discovered_peers = self.runtime.transport().discovered_peers();
+        let resolved_peer_id = if discovered_peers
+            .iter()
+            .any(|peer| peer.peer_id == requested_peer_id)
+        {
+            requested_peer_id.to_string()
+        } else if discovered_peers.len() == 1 {
+            discovered_peers[0].peer_id.clone()
+        } else {
+            let discovered_ids = discovered_peers
+                .iter()
+                .map(|peer| peer.peer_id.clone())
+                .collect::<Vec<_>>();
+
+            let hint = if discovered_ids.is_empty() {
+                "none".to_string()
+            } else {
+                discovered_ids.join(", ")
+            };
+
+            return Err(format!(
+                "peer '{}' is not discovered (discovered peers: {})",
+                requested_peer_id, hint
+            )
+            .into());
+        };
+
+        self.execute(ConsoleCommand::ConnectPeer {
+            user: user.to_string(),
+            peer_id: resolved_peer_id.clone(),
+        })?;
+
+        Ok(resolved_peer_id)
+    }
+
     pub fn execute(&mut self, command: ConsoleCommand) -> Result<bool, Box<dyn std::error::Error>> {
 
         match command {
