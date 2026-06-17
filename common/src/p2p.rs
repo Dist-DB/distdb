@@ -1,11 +1,15 @@
 
-/// Lightweight CA certificate bootstrap protocol.
-///
-/// Before a client establishes a TLS connection it may not have the cluster CA cert.
-/// This module defines a tiny pre-TLS request/response wire format (magic `CACB`)
-/// that lets a client fetch the CA cert over plain TCP and then reconnect with TLS.
-///
-/// Wire format (both directions): 4-byte magic + bincode-encoded struct.
+/*
+/
+/ Lightweight CA certificate bootstrap protocol.
+/
+/ Before a client establishes a TLS connection it may not have the cluster CA cert.
+/ This module defines a tiny pre-TLS request/response wire format (magic `CACB`)
+/ that lets a client fetch the CA cert over plain TCP and then reconnect with TLS.
+/
+/ Wire format (both directions): 4-byte magic + bincode-encoded struct.
+/
+*/
 
 pub const CA_BOOTSTRAP_MAGIC: &[u8; 4] = b"CACB";
 
@@ -68,5 +72,5 @@ pub fn is_ca_bootstrap_frame(payload: &[u8]) -> bool {
 
     payload.len() >= CA_BOOTSTRAP_MAGIC.len()
         && &payload[..CA_BOOTSTRAP_MAGIC.len()] == CA_BOOTSTRAP_MAGIC
-        
+
 }
