@@ -118,11 +118,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.execute(ConsoleCommand::Sql(format!("password {}", password)))?;
             println!("notification: startup password passthrough applied");
         }
+
     }
 
     let mut editor = DefaultEditor::new()?;
 
-    println!("distdb console");
+    println!("Distdb console (www.distdb.com)");
+    println!("Copyright (c) 2026 Sam Colak. All rights reserved.");
     println!("type help for commands, or \\q to quit");
     println!("all commands must end with ';' to execute");
 

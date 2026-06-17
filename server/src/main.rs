@@ -212,6 +212,9 @@ fn try_enroll_tls_from_peers(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
+    println!("Distdb server (www.distdb.com)");
+    println!("Copyright (c) 2026 Sam Colak. All rights reserved.");
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls ring crypto provider");
