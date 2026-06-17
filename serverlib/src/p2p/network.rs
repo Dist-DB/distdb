@@ -19,6 +19,7 @@ impl<T: Transport> ServerP2pNetwork<T> {
         }
     }
 
+    #[expect(clippy::let_and_return, reason="clarity in logging before return")]
     pub fn discover_peers(&self) -> Vec<NodeDescriptor> {
         let peers = self.discovery.discover_peers();
         // log::debug!("server p2p discover peers count={}", peers.len());
