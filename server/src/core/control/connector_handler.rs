@@ -17,9 +17,17 @@ use serverlib::core::cluster::NodeDescriptor;
 use serverlib::core::identity::NodeId;
 use serverlib::p2p::protocol::{
     AffinityJoinResponse, DataSnapshotResponse, SchemaCatalogResponse, ServiceMessage,
+    TlsCertEnrollResponse,
     TransactionsSinceResponse,
 };
-use serverlib::{AffinityProcessor, ServerP2pEvent, ServerP2pRuntime, encode_wal_frame};
+use serverlib::{
+    AffinityProcessor, ServerP2pEvent, ServerP2pRuntime, encode_wal_frame,
+    import_p2p_ca_pem_if_missing, sign_tls_enrollment_csr,
+};
+use common::p2p::{
+    decode_ca_bootstrap_request, encode_ca_bootstrap_response, is_ca_bootstrap_frame,
+    CaBootstrapResponse,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -42,7 +50,9 @@ pub async fn maybe_server_peer_discovery_response(
     request: &ConnectorRequest,
     p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     local_node: &NodeDescriptor,
+    service_registry: &Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) -> Option<ConnectorResponse> {
+    
     let ConnectorCommand::Query { query } = &request.command else {
         return None;
     };
@@ -63,9 +73,25 @@ pub async fn maybe_server_peer_discovery_response(
     let mut seen_ids = HashSet::new();
     peers.retain(|peer| seen_ids.insert(peer.id.0.clone()));
 
+    let service_snapshot = {
+        let registry = service_registry.lock().await;
+        registry.clone()
+    };
+
     let rows = peers
         .into_iter()
-        .map(|peer| vec![peer.id.0.into_bytes(), peer.addrs.join(",").into_bytes()])
+        .map(|peer| {
+            let services = service_snapshot
+                .get(&peer.id.0)
+                .cloned()
+                .unwrap_or_default()
+                .join(",");
+            vec![
+                peer.id.0.into_bytes(),
+                peer.addrs.join(",").into_bytes(),
+                services.into_bytes(),
+            ]
+        })
         .collect::<Vec<_>>();
 
     let response = ConnectorResponse::applied(
@@ -90,6 +116,15 @@ pub async fn maybe_server_peer_discovery_response(
                     default_value: None,
                     metadata: None,
                 },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "services".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
             ],
             rows,
             timings: QueryTimings {
@@ -106,6 +141,7 @@ pub async fn maybe_server_peer_discovery_response(
 }
 
 pub fn is_valid_server_node(node: &NodeDescriptor) -> bool {
+
     if node.id.0.trim().is_empty() {
         return false;
     }
@@ -117,6 +153,7 @@ pub fn is_valid_server_node(node: &NodeDescriptor) -> bool {
     node.addrs
         .iter()
         .all(|addr| multiaddr_to_socket_addr(addr).is_some())
+
 }
 
 #[expect(clippy::too_many_arguments, reason = "necessary for handling connector stream with access to app, p2p runtime, affinity processor, and connection context")]
@@ -126,10 +163,13 @@ pub async fn handle_connector_stream(
     p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
     seen_node_announces: Arc<Mutex<HashSet<String>>>,
+    service_registry: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    ca_root_enabled: bool,
     local_node: NodeDescriptor,
     peer_addr: String,
     connection_id: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
     let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
 
     async fn rollback_active_session_transaction(app: &Arc<Mutex<ServerApp>>, session_id: &str) {
@@ -156,6 +196,7 @@ pub async fn handle_connector_stream(
     }
 
     loop {
+
         let mut len_buf = [0u8; 4];
 
         if let Err(err) = stream.read_exact(&mut len_buf).await {
@@ -179,6 +220,56 @@ pub async fn handle_connector_stream(
             return Err(Box::new(err));
         }
 
+        if is_ca_bootstrap_frame(&payload) {
+            let node_data_dir = {
+                let app_guard = app.lock().await;
+                app_guard.node_data_dir().clone()
+            };
+
+            let response = if let Some(_req) = decode_ca_bootstrap_request(&payload) {
+                match serverlib::load_p2p_ca_pem(&node_data_dir) {
+                    Ok(Some(ca_cert_pem)) => CaBootstrapResponse {
+                        ok: true,
+                        ca_cert_pem: Some(ca_cert_pem),
+                        error: None,
+                    },
+                    Ok(None) => CaBootstrapResponse {
+                        ok: false,
+                        ca_cert_pem: None,
+                        error: Some("no CA cert is available on this node".to_string()),
+                    },
+                    Err(err) => CaBootstrapResponse {
+                        ok: false,
+                        ca_cert_pem: None,
+                        error: Some(format!("failed loading CA cert: {err}")),
+                    },
+                }
+            } else {
+                CaBootstrapResponse {
+                    ok: false,
+                    ca_cert_pem: None,
+                    error: Some("malformed CA bootstrap request".to_string()),
+                }
+            };
+
+            if let Some(encoded) = encode_ca_bootstrap_response(&response) {
+                let len = encoded.len() as u32;
+                use tokio::io::AsyncWriteExt;
+                let _ = stream.write_all(&len.to_le_bytes()).await;
+                let _ = stream.write_all(&encoded).await;
+            }
+
+            log::debug!(
+                "served CA bootstrap request from {} ok={}",
+                peer_addr,
+                response.ok
+            );
+
+            session.mark_disconnect();
+            rollback_active_session_transaction(&app, &session.session_id).await;
+            return Ok(());
+        }
+
         if let Some(message) = decode_service_message(&payload) {
             if let ServiceMessage::NodeAnnounce(node) = &message && !is_valid_server_node(node) {
                 log::debug!(
@@ -199,7 +290,142 @@ pub async fn handle_connector_stream(
                 log::debug!("server p2p message handling failed from {}: {}", peer_addr, err);
             }
 
+            if let ServiceMessage::TlsCaDistribution(distribution) = &message_for_fanout {
+                let node_data_dir = {
+                    let app_guard = app.lock().await;
+                    app_guard.node_data_dir().clone()
+                };
+
+                match import_p2p_ca_pem_if_missing(&node_data_dir, &distribution.ca_cert_pem) {
+                    Ok(true) => {
+                        log::info!(
+                            "imported p2p CA certificate from issuer_node_id={} via peer={}",
+                            distribution.issuer_node_id,
+                            peer_addr
+                        );
+                    }
+                    Ok(false) => {
+                        log::debug!(
+                            "ignored p2p CA distribution from issuer_node_id={} because local CA already exists",
+                            distribution.issuer_node_id
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "failed importing p2p CA distribution from issuer_node_id={}: {}",
+                            distribution.issuer_node_id,
+                            err
+                        );
+                    }
+                }
+
+                session.mark_disconnect();
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                
+                return Ok(());
+
+            }
+
+            if let ServiceMessage::TlsCertEnrollRequest(enroll_req) = &message_for_fanout {
+
+                if !ca_root_enabled {
+                    let response_message = ServiceMessage::TlsCertEnrollResponse(
+                        TlsCertEnrollResponse {
+                            request_id: enroll_req.request_id.clone(),
+                            ok: false,
+                            error: Some("tls enrollment disabled on this node; ca_root is not enabled".to_string()),
+                            node_cert_pem: None,
+                            ca_cert_pem: None,
+                        },
+                    );
+
+                    if let Err(err) =
+                        write_service_message_to_stream(&mut stream, &response_message).await
+                    {
+                        log::warn!(
+                            "failed sending tls enrollment rejection to {}: {}",
+                            peer_addr,
+                            err
+                        );
+                    }
+
+                    session.mark_disconnect();
+                    rollback_active_session_transaction(&app, &session.session_id).await;
+                    return Ok(());
+                }
+                
+                let node_data_dir = {
+                    let app_guard = app.lock().await;
+                    app_guard.node_data_dir().clone()
+                };
+
+                let response = match sign_tls_enrollment_csr(&node_data_dir, &enroll_req.csr_pem) {
+                    Ok((node_cert_pem, ca_cert_pem)) => TlsCertEnrollResponse {
+                        request_id: enroll_req.request_id.clone(),
+                        ok: true,
+                        error: None,
+                        node_cert_pem: Some(node_cert_pem),
+                        ca_cert_pem: Some(ca_cert_pem),
+                    },
+                    Err(err) => TlsCertEnrollResponse {
+                        request_id: enroll_req.request_id.clone(),
+                        ok: false,
+                        error: Some(err),
+                        node_cert_pem: None,
+                        ca_cert_pem: None,
+                    },
+                };
+
+                let response_message = ServiceMessage::TlsCertEnrollResponse(response);
+                if let Err(err) = write_service_message_to_stream(&mut stream, &response_message).await {
+                    log::warn!(
+                        "failed sending tls enrollment response to {}: {}",
+                        peer_addr,
+                        err
+                    );
+                }
+
+                session.mark_disconnect();
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                
+                return Ok(());
+
+            }
+
+            if let ServiceMessage::ServiceAnnounce(announcement) = &message_for_fanout {
+                {
+                    let mut services = service_registry.lock().await;
+                    services.insert(announcement.node_id.clone(), announcement.services.clone());
+                }
+
+                let valid_addrs = announcement
+                    .addrs
+                    .iter()
+                    .filter(|addr| multiaddr_to_socket_addr(addr).is_some())
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                if !valid_addrs.is_empty() {
+                    runtime.network_mut().upsert_discovered_peer(NodeDescriptor {
+                        id: NodeId(announcement.node_id.clone()),
+                        addrs: valid_addrs,
+                        is_local: false,
+                    });
+                }
+
+                log::debug!(
+                    "received service announce node_id={} services={}",
+                    announcement.node_id,
+                    announcement.services.join(",")
+                );
+
+                session.mark_disconnect();
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                return Ok(());
+            }
+
             if let ServiceMessage::AffinityJoinRequest(join_req) = &message_for_fanout {
+                
                 let requester_addrs = join_req
                     .requester_addrs
                     .iter()
@@ -221,7 +447,9 @@ pub async fn handle_connector_stream(
                 };
 
                 let processor_lock = affinity_processor.lock().await;
+
                 let response = if let Some(processor) = processor_lock.as_ref() {
+
                     if let Some(doc) = processor.document() {
                         let mut merged_doc = doc.clone();
                         for summary in summaries {
@@ -234,22 +462,29 @@ pub async fn handle_connector_stream(
                             error: None,
                             document: Some(merged_doc),
                         }
+
                     } else {
+
                         AffinityJoinResponse {
                             request_id: join_req.request_id.clone(),
                             ok: false,
                             error: Some("processor has no document yet".to_string()),
                             document: None,
                         }
+
                     }
+
                 } else {
+
                     AffinityJoinResponse {
                         request_id: join_req.request_id.clone(),
                         ok: false,
                         error: Some("affinity not configured".to_string()),
                         document: None,
                     }
+                
                 };
+
                 drop(processor_lock);
 
                 let response_message = ServiceMessage::AffinityJoinResponse(response);
@@ -269,10 +504,13 @@ pub async fn handle_connector_stream(
 
                 session.mark_disconnect();
                 rollback_active_session_transaction(&app, &session.session_id).await;
+                
                 return Ok(());
+
             }
 
             if let ServiceMessage::SchemaCatalogRequest(schema_req) = &message_for_fanout {
+
                 log::debug!(
                     "received schema catalog request from {} database={}",
                     peer_addr,
@@ -292,9 +530,11 @@ pub async fn handle_connector_stream(
                 )
                 .map(schema_catalog_signature)
                 .unwrap_or((0, None));
+                
                 let database_name = resolve_schema_catalog(&app_guard, &schema_req.database_id)
                     .map(|cat| cat.database_name().to_string())
                     .unwrap_or_default();
+                
                 drop(app_guard);
 
                 let response = SchemaCatalogResponse {
@@ -325,9 +565,11 @@ pub async fn handle_connector_stream(
                 session.mark_disconnect();
                 rollback_active_session_transaction(&app, &session.session_id).await;
                 return Ok(());
+
             }
 
             if let ServiceMessage::DataSnapshotRequest(snapshot_req) = &message_for_fanout {
+                
                 log::debug!(
                     "received data snapshot request from {} database={} tables={:?}",
                     peer_addr,
@@ -361,10 +603,13 @@ pub async fn handle_connector_stream(
 
                 session.mark_disconnect();
                 rollback_active_session_transaction(&app, &session.session_id).await;
+                
                 return Ok(());
+
             }
 
             if let ServiceMessage::TransactionsSinceRequest(txn_req) = &message_for_fanout {
+
                 log::debug!(
                     "received transactions since request from {} database={} from_tx={:?}",
                     peer_addr,
@@ -429,10 +674,13 @@ pub async fn handle_connector_stream(
 
                 session.mark_disconnect();
                 rollback_active_session_transaction(&app, &session.session_id).await;
+                
                 return Ok(());
+
             }
 
             if let ServiceMessage::NodeAnnounce(node) = message_for_fanout {
+
                 let dedup_key = node_announce_dedup_key(&node);
                 let should_fanout = {
                     let mut seen = seen_node_announces.lock().await;
@@ -485,12 +733,14 @@ pub async fn handle_connector_stream(
                         }
                     }
                 }
+
             }
 
             session.mark_disconnect();
             rollback_active_session_transaction(&app, &session.session_id).await;
 
             return Ok(());
+
         }
 
         let request = match bincode::deserialize::<ConnectorRequest>(&payload) {
@@ -508,7 +758,7 @@ pub async fn handle_connector_stream(
         );
 
         if let Some(response) =
-            maybe_server_peer_discovery_response(&request, &p2p_runtime, &local_node).await
+            maybe_server_peer_discovery_response(&request, &p2p_runtime, &local_node, &service_registry).await
         {
             if let Err(err) = write_response_frame(&mut stream, response).await {
                 rollback_active_session_transaction(&app, &session.session_id).await;
@@ -518,6 +768,7 @@ pub async fn handle_connector_stream(
         }
 
         if !session.authenticated {
+
             let auth_outcome = match &request.command {
                 ConnectorCommand::Query { query } => {
                     extract_auth_token(&query.sql).map(|token| session.authenticate_if_valid_token(token))
@@ -543,6 +794,7 @@ pub async fn handle_connector_stream(
             }
 
             continue;
+
         }
 
         session.record_request(&request);
@@ -556,11 +808,14 @@ pub async fn handle_connector_stream(
             rollback_active_session_transaction(&app, &session.session_id).await;
             return Err(err);
         }
+
     }
+
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -578,11 +833,13 @@ mod tests {
 
     #[test]
     fn is_valid_server_node_requires_non_empty_id_and_multiaddrs() {
+
         let valid = NodeDescriptor {
             id: NodeId("sam01".to_string()),
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
             is_local: false,
         };
+        
         assert!(is_valid_server_node(&valid));
 
         let empty_id = NodeDescriptor {
@@ -590,6 +847,7 @@ mod tests {
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
             is_local: false,
         };
+
         assert!(!is_valid_server_node(&empty_id));
 
         let bad_addr = NodeDescriptor {
@@ -597,7 +855,9 @@ mod tests {
             addrs: vec!["127.0.0.1:4001".to_string()],
             is_local: false,
         };
+        
         assert!(!is_valid_server_node(&bad_addr));
+
     }
 
     #[test]

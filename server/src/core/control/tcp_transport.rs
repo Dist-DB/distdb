@@ -3,7 +3,7 @@ use crate::core::control::p2p_wire::{bootstrap_nodes_from_server_list, multiaddr
 use serverlib::core::cluster::NodeDescriptor;
 use serverlib::core::identity::NodeId;
 use serverlib::p2p::transport::Transport;
-use serverlib::p2p::protocol::ServiceMessage;
+use serverlib::p2p::protocol::{ServiceAnnounce, ServiceMessage};
 use serverlib::{
     KademliaDiscoveryConfig, KademliaDiscoveryService, ServerP2pEvent, ServerP2pNetwork,
     ServerP2pRuntime,
@@ -25,6 +25,7 @@ impl TcpServerTransport {
 }
 
 impl Transport for TcpServerTransport {
+
     fn send(&mut self, peer_id: &str, message: ServiceMessage) -> serverlib::helpers::error::Result<()> {
         let addr = multiaddr_to_socket_addr(peer_id)
             .ok_or_else(|| serverlib::helpers::error::ServerLibError::Network(format!("invalid peer address '{peer_id}'")))?;
@@ -32,6 +33,7 @@ impl Transport for TcpServerTransport {
     }
 
     fn broadcast(&mut self, message: ServiceMessage) -> serverlib::helpers::error::Result<()> {
+        
         if self.peer_addrs.is_empty() {
             return Ok(());
         }
@@ -63,7 +65,9 @@ impl Transport for TcpServerTransport {
         }
 
         Ok(())
+    
     }
+
 }
 
 pub fn initialize_server_p2p_runtime(
@@ -73,6 +77,7 @@ pub fn initialize_server_p2p_runtime(
     port: u16,
     server_list: &[String],
 ) -> Result<ServerP2pRuntime<TcpServerTransport>, Box<dyn std::error::Error>> {
+
     let bootstrap_nodes = bootstrap_nodes_from_server_list(server_list);
     let discovery = KademliaDiscoveryService::new(
         NodeId(node_id.to_string()),
@@ -95,13 +100,16 @@ pub fn initialize_server_p2p_runtime(
     runtime.network_mut().broadcast_announce(local_node)?;
 
     Ok(runtime)
+
 }
 
 pub fn spawn_p2p_heartbeat_task(
     runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     local_node: NodeDescriptor,
 ) -> JoinHandle<()> {
+
     tokio::spawn(async move {
+
         let mut ticker = interval(Duration::from_secs(30));
 
         loop {
@@ -119,5 +127,60 @@ pub fn spawn_p2p_heartbeat_task(
             let peer_count = runtime.network().discover_peers().len();
             log::debug!("server p2p heartbeat ok discovered_peers={}", peer_count);
         }
+
     })
+
+}
+
+pub fn spawn_service_announce_task(
+    runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    local_node: NodeDescriptor,
+    services: Vec<String>,
+) -> JoinHandle<()> {
+
+    tokio::spawn(async move {
+
+        let mut ticker = interval(Duration::from_secs(30));
+
+        loop {
+            ticker.tick().await;
+
+            let timestamp_epoch_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+
+            let peers = {
+                let runtime = runtime.lock().await;
+                runtime.network().discover_peers()
+            };
+
+            for peer in peers {
+                if peer.is_local {
+                    continue;
+                }
+
+                for addr in peer.addrs {
+                    let mut runtime = runtime.lock().await;
+                    if let Err(err) = runtime.network_mut().send_message(
+                        &addr,
+                        ServiceMessage::ServiceAnnounce(ServiceAnnounce {
+                            node_id: local_node.id.0.clone(),
+                            addrs: local_node.addrs.clone(),
+                            services: services.clone(),
+                            timestamp_epoch_ms,
+                        }),
+                    ) {
+                        log::debug!(
+                            "server service announce send failed to {}: {}",
+                            addr,
+                            err
+                        );
+                    }
+                }
+            }
+        }
+
+    })
+    
 }

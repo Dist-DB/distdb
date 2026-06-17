@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(raw) => common::TlsMode::parse(raw).ok_or_else(|| {
             format!("invalid tls mode '{}'; expected off|optional|required", raw)
         })?,
-        None => common::TlsMode::Off,
+        None => common::TlsMode::Optional,
     };
 
     let tls_ca_path = args

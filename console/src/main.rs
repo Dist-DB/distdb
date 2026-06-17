@@ -39,6 +39,10 @@ use std::io;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = env::args().skip(1).collect::<Vec<_>>();

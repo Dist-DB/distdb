@@ -41,6 +41,7 @@
 pub mod core;
 pub mod engine;
 pub mod helpers;
+pub mod security;
 pub mod p2p;
 
 pub use core::config::NodeConfig;
@@ -120,5 +121,13 @@ pub use engine::wal::ConcurrentWalManager;
 pub use p2p::{
 	DiscoveryMode, KademliaDiscoveryConfig, KademliaDiscoveryService,
 	ServerP2pEvent, ServerP2pHandleOutcome, ServerP2pNetwork, ServerP2pRuntime,
+};
+
+pub use p2p::protocol::{TlsCaDistribution, TlsCertEnrollRequest, TlsCertEnrollResponse};
+
+pub use security::{
+	AutoTlsPaths, TlsEnrollmentRequestMaterial, build_tls_enrollment_request,
+	ensure_or_generate_p2p_tls, import_p2p_ca_pem_if_missing, install_signed_p2p_tls,
+	load_p2p_ca_pem, sign_tls_enrollment_csr,
 };
 

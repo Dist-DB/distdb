@@ -5,11 +5,15 @@ use crate::core::{
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufReader, Cursor, Read, Write};
 use std::net::IpAddr;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+use common::p2p::{
+    CaBootstrapRequest, decode_ca_bootstrap_response, encode_ca_bootstrap_request,
+};
 
 use common::{DEFAULT_SERVER_PORT, PeerSession, epoch_nanos};
 use common::helpers::utils::{md5};
@@ -75,6 +79,7 @@ pub struct ConnectorP2pTransport {
     active_peer_id: Option<String>,
     queued_responses: HashMap<String, ConnectorResponse>,
     live_connection: Arc<Mutex<Option<LiveConnection>>>,
+    cached_ca_pem: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -132,7 +137,15 @@ impl ConnectorP2pTransport {
             active_peer_id: None,
             queued_responses: HashMap::new(),
             live_connection: Arc::new(Mutex::new(None)),
+            cached_ca_pem: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn cached_ca_pem(&self) -> Option<String> {
+        self.cached_ca_pem
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     pub fn discovery_mode(&self) -> ConnectorDiscoveryMode {
@@ -494,7 +507,47 @@ fn ensure_live_connection(
     };
 
     let socket_addr = normalize_peer_addr(addr);
-    let mut stream = connect_connector_stream(&socket_addr, &transport.config.tls)?;
+
+    // Auto-discover CA cert before TLS connection if not already configured.
+    let ca_pem_override = if matches!(
+        transport.config.tls.mode,
+        common::TlsMode::Optional | common::TlsMode::Required
+    ) && transport.config.tls.ca_path.is_none() {
+        let cached = transport.cached_ca_pem();
+        if cached.is_none() {
+            match fetch_ca_pem_from_peer(&socket_addr, &peer.peer_id) {
+                Ok(Some(pem)) => {
+                    log::info!(
+                        "connector auto-discovered CA cert from peer={} addr={}",
+                        peer.peer_id,
+                        socket_addr
+                    );
+                    if let Ok(mut guard) = transport.cached_ca_pem.lock() {
+                        *guard = Some(pem.clone());
+                    }
+                    Some(pem)
+                }
+                Ok(None) => {
+                    log::debug!("CA auto-discovery from {} returned no cert", socket_addr);
+                    None
+                }
+                Err(err) => {
+                    log::debug!("CA auto-discovery from {} failed: {}", socket_addr, err);
+                    None
+                }
+            }
+        } else {
+            cached
+        }
+    } else {
+        None
+    };
+
+    let ca_pem_ref = ca_pem_override.as_deref()
+        .or_else(|| transport.cached_ca_pem().as_deref().map(|_| ca_pem_override.as_deref().unwrap_or("")))
+        .filter(|s| !s.is_empty());
+
+    let mut stream = connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref)?;
 
     let challenge = read_response_frame(&mut stream)?;
     if challenge.request_id != SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
@@ -582,20 +635,33 @@ fn load_tls_root_store(path: &PathBuf) -> Result<RootCertStore, ConnectorError> 
         ConnectorError::Transport(format!("failed to open tls CA file '{}': {err}", path.display()))
     })?;
 
-    let mut reader = std::io::BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    load_tls_root_store_from_reader(&mut std::io::BufReader::new(file), &path.display().to_string())
+
+}
+
+fn load_tls_root_store_from_pem(pem: &str) -> Result<RootCertStore, ConnectorError> {
+    let cursor = Cursor::new(pem.as_bytes());
+    load_tls_root_store_from_reader(&mut BufReader::new(cursor), "<in-memory>")
+}
+
+fn load_tls_root_store_from_reader<R: Read>(
+    reader: &mut BufReader<R>,
+    source_label: &str,
+) -> Result<RootCertStore, ConnectorError> {
+
+    let certs = rustls_pemfile::certs(reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| {
             ConnectorError::Transport(format!(
-                "failed to parse tls CA file '{}': {err}",
-                path.display()
+                "failed to parse tls CA from '{}': {err}",
+                source_label
             ))
         })?;
 
     if certs.is_empty() {
         return Err(ConnectorError::Transport(format!(
-            "tls CA file '{}' is empty",
-            path.display()
+            "tls CA from '{}' is empty",
+            source_label
         )));
     }
 
@@ -604,7 +670,7 @@ fn load_tls_root_store(path: &PathBuf) -> Result<RootCertStore, ConnectorError> 
         roots.add(cert).map_err(|err| {
             ConnectorError::Transport(format!(
                 "failed to add tls root from '{}': {err}",
-                path.display()
+                source_label
             ))
         })?;
     }
@@ -641,15 +707,19 @@ fn server_name_from_socket_addr(socket_addr: &str) -> Result<ServerName<'static>
 fn connect_tls_stream(
     socket_addr: &str,
     tls: &ConnectorTlsConfig,
+    ca_pem_override: Option<&str>,
 ) -> Result<ConnectorWireStream, ConnectorError> {
 
-    let Some(ca_path) = tls.ca_path.as_ref() else {
-        return Err(ConnectorError::Transport(
-            "tls_ca path is required for connector TLS".to_string(),
-        ));
+    let roots = if let Some(pem) = ca_pem_override {
+        load_tls_root_store_from_pem(pem)?
+    } else {
+        let ca_path = tls.ca_path.as_ref().ok_or_else(|| {
+            ConnectorError::Transport(
+                "tls_ca path is required for connector TLS (or auto-discovery must run first)".to_string(),
+            )
+        })?;
+        load_tls_root_store(ca_path)?
     };
-
-    let roots = load_tls_root_store(ca_path)?;
 
     let mut client_config = ClientConfig::builder()
         .with_root_certificates(roots)
@@ -689,12 +759,13 @@ fn connect_plain_stream(socket_addr: &str) -> Result<ConnectorWireStream, Connec
 fn connect_connector_stream(
     socket_addr: &str,
     tls: &ConnectorTlsConfig,
+    ca_pem_override: Option<&str>,
 ) -> Result<ConnectorWireStream, ConnectorError> {
 
     match tls.mode {
         common::TlsMode::Off => connect_plain_stream(socket_addr),
-        common::TlsMode::Required => connect_tls_stream(socket_addr, tls),
-        common::TlsMode::Optional => match connect_tls_stream(socket_addr, tls) {
+        common::TlsMode::Required => connect_tls_stream(socket_addr, tls, ca_pem_override),
+        common::TlsMode::Optional => match connect_tls_stream(socket_addr, tls, ca_pem_override) {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 log::debug!(
@@ -706,7 +777,78 @@ fn connect_connector_stream(
             }
         },
     }
-    
+
+}
+
+fn fetch_ca_pem_from_peer(
+    socket_addr: &str,
+    node_id: &str,
+) -> Result<Option<String>, ConnectorError> {
+
+    let mut tcp = TcpStream::connect(socket_addr).map_err(|err| {
+        ConnectorError::Transport(format!("CA bootstrap connect to {socket_addr} failed: {err}"))
+    })?;
+
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|err| ConnectorError::Transport(format!("set read timeout failed: {err}")))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|err| ConnectorError::Transport(format!("set write timeout failed: {err}")))?;
+
+    let request = CaBootstrapRequest {
+        node_id: node_id.to_string(),
+    };
+
+    let Some(encoded) = encode_ca_bootstrap_request(&request) else {
+        return Err(ConnectorError::Transport(
+            "failed to encode CA bootstrap request".to_string(),
+        ));
+    };
+
+    let len = encoded.len() as u32;
+    tcp.write_all(&len.to_le_bytes())
+        .and_then(|_| tcp.write_all(&encoded))
+        .map_err(|err| {
+            ConnectorError::Transport(format!("failed to write CA bootstrap request: {err}"))
+        })?;
+
+    // Server first sends a password challenge frame; skip it.
+    let mut header = [0u8; 4];
+    tcp.read_exact(&mut header).map_err(|err| {
+        ConnectorError::Transport(format!("failed to read CA bootstrap challenge header: {err}"))
+    })?;
+    let skip_len = u32::from_le_bytes(header) as usize;
+    let mut skip_buf = vec![0u8; skip_len];
+    tcp.read_exact(&mut skip_buf).map_err(|err| {
+        ConnectorError::Transport(format!("failed to skip CA bootstrap challenge payload: {err}"))
+    })?;
+
+    // Now read the actual response.
+    let mut resp_header = [0u8; 4];
+    tcp.read_exact(&mut resp_header).map_err(|err| {
+        ConnectorError::Transport(format!("failed to read CA bootstrap response header: {err}"))
+    })?;
+    let resp_len = u32::from_le_bytes(resp_header) as usize;
+    let mut resp_buf = vec![0u8; resp_len];
+    tcp.read_exact(&mut resp_buf).map_err(|err| {
+        ConnectorError::Transport(format!("failed to read CA bootstrap response payload: {err}"))
+    })?;
+
+    match decode_ca_bootstrap_response(&resp_buf) {
+        Some(response) if response.ok => Ok(response.ca_cert_pem),
+        Some(response) => {
+            log::debug!(
+                "CA bootstrap from {} failed: {}",
+                socket_addr,
+                response.error.unwrap_or_else(|| "unknown".to_string())
+            );
+            Ok(None)
+        }
+        None => {
+            log::debug!("CA bootstrap response from {} could not be decoded", socket_addr);
+            Ok(None)
+        }
+    }
+
 }
 
 fn normalize_peer_addr(raw: &str) -> String {
