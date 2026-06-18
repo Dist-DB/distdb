@@ -777,10 +777,21 @@ pub async fn handle_connector_stream(
             };
 
             let response = match auth_outcome {
-                Some(true) => ConnectorResponse::applied(
-                    request.request_id,
-                    ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
-                ),
+                Some(true) => {
+                    // Initialize session state in ServerApp
+                    let mut app = app.lock().await;
+                    app.init_session(
+                        session.session_id.clone(),
+                        connection_id,
+                        "root".to_string(),  // temporary user; will be from auth context
+                    );
+                    drop(app);
+                    
+                    ConnectorResponse::applied(
+                        request.request_id,
+                        ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+                    )
+                }
                 Some(false) => ConnectorResponse::rejected(request.request_id, "invalid password"),
                 None => ConnectorResponse::rejected(
                     request.request_id,

@@ -4,6 +4,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use std::cell::RefCell;
 
 use common::helpers::format::{FileKind, HEADER_SIZE, make_header};
 use common::helpers::write_bytes;
@@ -29,6 +30,23 @@ use serverlib::{
     plan_relation_access, primary_key_index,
 };
 
+thread_local! {
+    static LAST_INSERT_ID_CONTEXT: RefCell<i64> = RefCell::new(0);
+}
+
+pub(crate) fn get_and_clear_last_insert_id() -> Option<i64> {
+    LAST_INSERT_ID_CONTEXT.with(|ctx| {
+        let mut val = ctx.borrow_mut();
+        if *val > 0 {
+            let result = Some(*val);
+            *val = 0;
+            result
+        } else {
+            None
+        }
+    })
+}
+
 use super::catalogs::{resolve_catalog, resolve_catalog_mut};
 use super::explain::{
     connector_field_defs, explain_inner_statement, explain_join_mutation_plan,
@@ -46,9 +64,18 @@ pub(crate) fn handle_query_command(
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
 ) -> ConnectorResponse {
 
-    let runtime_context = inbuilt_runtime_context_for_query(request_id, query);
+    let runtime_context = inbuilt_runtime_context_for_query(
+        request_id,
+        query,
+        session_id,
+        connection_id,
+        session_user,
+    );
 
     with_inbuilt_sql_runtime_context(&runtime_context, || {
         handle_query_command_internal(
@@ -60,6 +87,7 @@ pub(crate) fn handle_query_command(
             runtime_indexes,
             None,
             None,
+            session_id,
         )
     })
 
@@ -74,9 +102,18 @@ pub(crate) fn handle_query_command_in_write_group(
     runtime_indexes: &mut RuntimeIndexStore,
     write_group_id: TransactionId,
     touched_tables: &mut HashSet<String>,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
 ) -> ConnectorResponse {
 
-    let runtime_context = inbuilt_runtime_context_for_query(request_id, query);
+    let runtime_context = inbuilt_runtime_context_for_query(
+        request_id,
+        query,
+        session_id,
+        connection_id,
+        session_user,
+    );
 
     with_inbuilt_sql_runtime_context(&runtime_context, || {
         handle_query_command_internal(
@@ -88,31 +125,35 @@ pub(crate) fn handle_query_command_in_write_group(
             runtime_indexes,
             Some(write_group_id),
             Some(touched_tables),
+            session_id,
         )
     })
 
 }
 
-fn inbuilt_runtime_context_for_query(request_id: &str, query: &DataQuery) -> InbuiltSqlRuntimeContext {
+fn inbuilt_runtime_context_for_query(
+    request_id: &str,
+    query: &DataQuery,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
+) -> InbuiltSqlRuntimeContext {
+    let user = session_user.unwrap_or_else(|| {
+        std::env::var("USER")
+            .ok()
+            .map(|user| format!("{}@localhost", user))
+            .unwrap_or_else(|| "root@localhost".to_string())
+    });
+
     InbuiltSqlRuntimeContext {
         current_database: Some(query.database_id.clone()),
-        current_user: std::env::var("USER").ok().map(|user| format!("{}@localhost", user)),
-        session_user: std::env::var("USER").ok().map(|user| format!("{}@localhost", user)),
-        system_user: std::env::var("USER").ok().map(|user| format!("{}@localhost", user)),
-        connection_id: Some(stable_connection_id(request_id)),
+        current_user: Some(user.clone()),
+        session_user: Some(user.clone()),
+        system_user: Some(user),
+        connection_id: Some(connection_id as i64),
         last_insert_id: None,
         version: None,
     }
-
-}
-
-fn stable_connection_id(request_id: &str) -> i64 {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    request_id.hash(&mut hasher);
-    (hasher.finish() & i64::MAX as u64) as i64
-
 }
 
 fn handle_query_command_internal(
@@ -124,6 +165,7 @@ fn handle_query_command_internal(
     runtime_indexes: &mut RuntimeIndexStore,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
+    session_id: &str,
 ) -> ConnectorResponse {
 
     let request_start = Instant::now();
@@ -155,6 +197,7 @@ fn handle_query_command_internal(
                 parsed,
                 external_write_group_id,
                 touched_tables,
+                session_id,
             );
             with_query_timings(response, make_query_timings(request_start, parse_ms))
         },
@@ -174,6 +217,7 @@ struct QueryExecutionContext<'a> {
     runtime_indexes: &'a mut RuntimeIndexStore,
     external_write_group_id: Option<TransactionId>,
     touched_write_tables: Option<&'a mut HashSet<String>>,
+    session_id: &'a str,
 }
 
 type QueryOperationHandler = fn(
@@ -193,6 +237,7 @@ fn execute_parsed_query(
     parsed: Vec<SqlRequest>,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
+    session_id: &str,
 ) -> ConnectorResponse {
 
     if parsed.len() != 1 {
@@ -211,6 +256,7 @@ fn execute_parsed_query(
         runtime_indexes,
         external_write_group_id,
         touched_write_tables: touched_tables,
+        session_id,
     };
 
     log::debug!(
@@ -1472,6 +1518,13 @@ fn execute_insert_locked(
 
                 affected_rows = affected_rows.saturating_add(1);
 
+            }
+
+            // Capture last insert id if any rows were inserted
+            if affected_rows > 0 {
+                LAST_INSERT_ID_CONTEXT.with(|ctx| {
+                    *ctx.borrow_mut() = 1; // Simplified: set to 1 for now (future: track actual auto-increment)
+                });
             }
 
             ConnectorResponse::applied(

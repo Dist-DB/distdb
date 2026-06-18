@@ -76,14 +76,32 @@ impl ServerApp {
                             query.clone(),
                             is_staged_dml_query(query),
                         ) {
-                            Ok(QueryRoutingDecision::ExecuteImmediately) => handle_query_command(
-                                &request.request_id,
-                                query,
-                                &mut self.catalogs,
-                                &self.wal,
-                                &self.node_data_dir,
-                                &mut self.runtime_indexes,
-                            ),
+                            Ok(QueryRoutingDecision::ExecuteImmediately) => {
+                                let session_state = self.get_session(session_id).cloned();
+                                let (connection_id, session_user) = session_state
+                                    .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
+                                    .unwrap_or((0, None));
+
+                                let response = handle_query_command(
+                                    &request.request_id,
+                                    query,
+                                    &mut self.catalogs,
+                                    &self.wal,
+                                    &self.node_data_dir,
+                                    &mut self.runtime_indexes,
+                                    session_id,
+                                    connection_id,
+                                    session_user,
+                                );
+
+                                // Update session last_insert_id if INSERT just happened
+                                use crate::core::mappings::query::get_and_clear_last_insert_id;
+                                if let Some(last_insert_id) = get_and_clear_last_insert_id() {
+                                    self.set_last_insert_id(session_id, last_insert_id);
+                                }
+
+                                response
+                            },
                             Ok(QueryRoutingDecision::Staged) => ConnectorResponse::applied(
                                 request.request_id.clone(),
                                 ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),

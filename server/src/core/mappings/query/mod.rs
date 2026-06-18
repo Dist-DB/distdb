@@ -5,7 +5,7 @@ mod timings;
 
 pub(crate) use core::{
 	abort_external_write_group, commit_external_write_group, handle_query_command,
-	handle_query_command_in_write_group,
+	handle_query_command_in_write_group, get_and_clear_last_insert_id,
 };
 
 #[cfg(test)]

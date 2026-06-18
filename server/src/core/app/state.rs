@@ -9,6 +9,14 @@ use crate::core::transaction_coordinator::TransactionCoordinator;
 use crate::engine::wal_probe::{WalProbeResult, run_wal_probe};
 use crate::helpers::ServerAppError;
 
+#[derive(Debug, Clone)]
+pub struct SessionState {
+    pub session_id: String,
+    pub connection_id: usize,
+    pub user_id: String,
+    pub last_insert_id: i64,
+}
+
 #[derive(Debug)]
 pub struct ServerApp {
     pub(super) config: ServerRuntimeConfig,
@@ -20,6 +28,7 @@ pub struct ServerApp {
     pub(super) tx_begin_epoch_ms_by_session: HashMap<String, u64>,
     pub(super) tx_snapshot_by_session: HashMap<String, SessionSnapshot>,
     pub(super) tx_read_observations_by_session: HashMap<String, Vec<ReadObservation>>,
+    pub(super) session_state_by_id: HashMap<String, SessionState>,
 }
 
 #[derive(Debug)]
@@ -71,6 +80,7 @@ impl ServerApp {
             tx_begin_epoch_ms_by_session: HashMap::new(),
             tx_snapshot_by_session: HashMap::new(),
             tx_read_observations_by_session: HashMap::new(),
+            session_state_by_id: HashMap::new(),
         })
 
     }
@@ -102,6 +112,28 @@ impl ServerApp {
 
     pub fn catalogs(&self) -> &HashMap<String, DatabaseCatalog> {
         &self.catalogs
+    }
+
+    pub fn init_session(&mut self, session_id: String, connection_id: usize, user_id: String) {
+        self.session_state_by_id.insert(
+            session_id.clone(),
+            SessionState {
+                session_id,
+                connection_id,
+                user_id,
+                last_insert_id: 0,
+            },
+        );
+    }
+
+    pub fn get_session(&self, session_id: &str) -> Option<SessionState> {
+        self.session_state_by_id.get(session_id).cloned()
+    }
+
+    pub fn set_last_insert_id(&mut self, session_id: &str, last_insert_id: i64) {
+        if let Some(session) = self.session_state_by_id.get_mut(session_id) {
+            session.last_insert_id = last_insert_id;
+        }
     }
 
     pub fn run_wal_smoke_test(&self) -> Result<WalProbeResult, ServerAppError> {
