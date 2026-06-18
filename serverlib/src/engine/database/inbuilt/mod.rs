@@ -2,6 +2,7 @@ mod strings;
 mod datetime;
 mod numeric;
 mod advanced;
+mod geo;
 
 mod command;
 mod indexer;

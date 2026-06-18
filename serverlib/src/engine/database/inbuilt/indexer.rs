@@ -1,3 +1,4 @@
+
 use std::cell::RefCell;
 
 use sqlparser::ast::{BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value};
@@ -8,6 +9,7 @@ use super::strings;
 use super::datetime;
 use super::numeric;
 use super::advanced;
+use super::geo;
 
 #[derive(Clone, Debug, Default)]
 pub struct InbuiltSqlRuntimeContext {
@@ -186,7 +188,7 @@ fn format_number_result(value: f64) -> Vec<u8> {
     }
 
     text.into_bytes()
-    
+
 }
 
 pub(super) fn function_argument_expr(argument: &FunctionArg) -> Result<&Expr, String> {
@@ -219,6 +221,8 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
     // https://www.w3schools.com/mySQL/mysql_ref_functions.asp
 
     match normalized.as_str() {
+
+        // geo functions
         
         // string functions
         
