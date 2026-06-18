@@ -138,6 +138,7 @@ fn inbuilt_runtime_context_for_query(
     connection_id: usize,
     session_user: Option<String>,
 ) -> InbuiltSqlRuntimeContext {
+
     let user = session_user.unwrap_or_else(|| {
         std::env::var("USER")
             .ok()
@@ -154,6 +155,7 @@ fn inbuilt_runtime_context_for_query(
         last_insert_id: None,
         version: None,
     }
+    
 }
 
 fn handle_query_command_internal(
