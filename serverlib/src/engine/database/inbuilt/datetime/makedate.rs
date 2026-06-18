@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::{date_from_year_and_day, evaluate_i64_arg, expect_arg_count};
 
 pub struct MakeDateCommand;
 
@@ -16,10 +18,18 @@ impl InbuiltServerCommand for MakeDateCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 2, 2, self.name())?;
+
+        let Some(year) = evaluate_i64_arg(args, 0)? else {
+            return Ok(None);
+        };
+        
+        let Some(day_of_year) = evaluate_i64_arg(args, 1)? else {
+            return Ok(None);
+        };
+
+        Ok(date_from_year_and_day(year, day_of_year).map(|date| date.into_bytes()))
         
     }
 

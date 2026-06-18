@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::evaluate_bytes_arg;
 
 pub struct CoalesceCommand;
 
@@ -16,11 +18,16 @@ impl InbuiltServerCommand for CoalesceCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
-        
+        for index in 0..args.len() {
+            if let Some(value) = evaluate_bytes_arg(args, index)? {
+                return Ok(Some(value));
+            }
+        }
+
+        Ok(None)
+
     }
 
 }
+

@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::{evaluate_f64_arg, expect_arg_count, float_result};
 
 pub struct Log2Command;
 
@@ -16,10 +18,18 @@ impl InbuiltServerCommand for Log2Command {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 1, 1, self.name())?;
+
+        let Some(value) = evaluate_f64_arg(args, 0)? else {
+            return Ok(None);
+        };
+        
+        if value <= 0.0 {
+            return Ok(None);
+        }
+
+        Ok(float_result(value.log2()))
         
     }
 

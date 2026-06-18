@@ -1,3 +1,5 @@
+mod helpers;
+
 pub mod adddate;
 pub mod addtime;
 pub mod curdate;
@@ -41,6 +43,7 @@ pub mod time_to_sec;
 pub mod timediff;
 pub mod timestamp;
 pub mod to_days;
+pub mod unixtimestamp;
 pub mod week;
 pub mod weekday;
 pub mod weekofyear;

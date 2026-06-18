@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::{expect_arg_count, runtime_database, string_result};
 
 pub struct DatabaseCommand;
 
@@ -16,11 +18,12 @@ impl InbuiltServerCommand for DatabaseCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
-        
+        expect_arg_count(args, 0, 0, self.name())?;
+
+        Ok(runtime_database().and_then(string_result))
+
     }
 
 }
+

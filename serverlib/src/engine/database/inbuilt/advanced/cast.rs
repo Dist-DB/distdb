@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::{evaluate_bytes_arg, expect_arg_count};
 
 pub struct CastCommand;
 
@@ -16,11 +18,13 @@ impl InbuiltServerCommand for CastCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
-        
+        // CAST is normally represented as Expr::Cast by sqlparser, but this keeps function-style fallback working.
+        expect_arg_count(args, 1, 2, self.name())?;
+
+        evaluate_bytes_arg(args, 0)
+
     }
 
 }
+

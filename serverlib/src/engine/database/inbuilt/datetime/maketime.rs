@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::{evaluate_i64_arg, expect_arg_count, make_time_string};
 
 pub struct MakeTimeCommand;
 
@@ -16,10 +18,22 @@ impl InbuiltServerCommand for MakeTimeCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 3, 3, self.name())?;
+
+        let Some(hours) = evaluate_i64_arg(args, 0)? else {
+            return Ok(None);
+        };
+        
+        let Some(minutes) = evaluate_i64_arg(args, 1)? else {
+            return Ok(None);
+        };
+
+        let Some(seconds) = evaluate_i64_arg(args, 2)? else {
+            return Ok(None);
+        };
+
+        Ok(make_time_string(hours, minutes, seconds).map(|time| time.into_bytes()))
         
     }
 

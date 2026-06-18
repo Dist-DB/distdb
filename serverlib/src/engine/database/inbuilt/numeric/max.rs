@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::{collect_numeric_args, expect_arg_count, float_result};
 
 pub struct MaxCommand;
 
@@ -16,10 +18,15 @@ impl InbuiltServerCommand for MaxCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 1, usize::MAX, self.name())?;
+
+        let maximum = collect_numeric_args(args)?
+			.into_iter()
+			.flatten()
+			.reduce(f64::max);
+
+        Ok(maximum.and_then(float_result))
         
     }
 

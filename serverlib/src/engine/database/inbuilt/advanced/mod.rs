@@ -1,3 +1,5 @@
+mod helpers;
+
 pub mod bin;
 pub mod binary;
 pub mod case;

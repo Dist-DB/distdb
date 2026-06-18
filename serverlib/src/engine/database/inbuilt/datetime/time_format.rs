@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::{expect_arg_count, evaluate_string_arg, format_time_with_mysql_pattern, parse_time};
 
 pub struct TimeFormatCommand;
 
@@ -16,10 +18,18 @@ impl InbuiltServerCommand for TimeFormatCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 2, 2, self.name())?;
+
+        let Some(value) = evaluate_string_arg(args, 0)? else {
+            return Ok(None);
+        };
+        
+        let Some(format) = evaluate_string_arg(args, 1)? else {
+            return Ok(None);
+        };
+
+        Ok(parse_time(&value).map(|time| format_time_with_mysql_pattern(&time, &format).into_bytes()))
         
     }
 

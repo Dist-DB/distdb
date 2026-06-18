@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::{evaluate_bytes_arg, expect_arg_count, is_truthy};
 
 pub struct IfCommand;
 
@@ -16,11 +18,20 @@ impl InbuiltServerCommand for IfCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
-        
+        expect_arg_count(args, 3, 3, self.name())?;
+
+        let Some(condition) = evaluate_bytes_arg(args, 0)? else {
+            return evaluate_bytes_arg(args, 2);
+        };
+
+        if is_truthy(&condition) {
+            return evaluate_bytes_arg(args, 1);
+        }
+
+        evaluate_bytes_arg(args, 2)
+
     }
 
 }
+

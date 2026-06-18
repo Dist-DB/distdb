@@ -1,7 +1,10 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::helpers::{evaluate_string_arg, expect_arg_count, extract_year, number_result};
 
 pub struct YearCommand;
 
@@ -16,10 +19,14 @@ impl InbuiltServerCommand for YearCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 1, 1, self.name())?;
+
+        let Some(value) = evaluate_string_arg(args, 0)? else {
+            return Ok(None);
+        };
+
+        Ok(extract_year(&value).and_then(number_result))
         
     }
 

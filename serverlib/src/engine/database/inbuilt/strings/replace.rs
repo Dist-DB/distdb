@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::{evaluate_string_arg, expect_arg_count, string_result};
 
 pub struct ReplaceCommand;
 
@@ -16,10 +18,26 @@ impl InbuiltServerCommand for ReplaceCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 3, 3, self.name())?;
+
+        let Some(value) = evaluate_string_arg(args, 0)? else {
+            return Ok(None);
+        };
+
+        let Some(from) = evaluate_string_arg(args, 1)? else {
+            return Ok(None);
+        };
+        
+        let Some(to) = evaluate_string_arg(args, 2)? else {
+            return Ok(None);
+        };
+
+        if from.is_empty() {
+            return Ok(string_result(value));
+        }
+
+        Ok(string_result(value.replace(&from, &to)))
         
     }
 

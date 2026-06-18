@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::{evaluate_i64_arg, expect_arg_count, string_result};
 
 pub struct SpaceCommand;
 
@@ -16,10 +18,16 @@ impl InbuiltServerCommand for SpaceCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 1, 1, self.name())?;
+
+        let Some(count) = evaluate_i64_arg(args, 0)? else {
+            return Ok(None);
+        };
+
+        let count = count.max(0) as usize;
+
+        Ok(string_result(" ".repeat(count)))
         
     }
 

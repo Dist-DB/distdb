@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::{evaluate_string_arg, expect_arg_count, string_result};
 
 pub struct ConcatWCommand;
 
@@ -10,16 +12,27 @@ pub struct ConcatWCommand;
 impl InbuiltServerCommand for ConcatWCommand {
 
     fn name(&self) -> &'static str {
-        "CONCAT_W"
+        "CONCAT_WS"
     }
 
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 2, usize::MAX, self.name())?;
+
+        let Some(separator) = evaluate_string_arg(args, 0)? else {
+            return Ok(None);
+        };
+
+        let mut values = Vec::new();
+        for index in 1..args.len() {
+            if let Some(value) = evaluate_string_arg(args, index)? {
+                values.push(value);
+            }
+        }
+
+        Ok(string_result(values.join(&separator)))
         
     }
 

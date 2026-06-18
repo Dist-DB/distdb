@@ -1,4 +1,6 @@
-use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Value};
+use std::cell::RefCell;
+
+use sqlparser::ast::{BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value};
 
 use super::command::InbuiltServerCommand;
 
@@ -7,7 +9,47 @@ use super::datetime;
 use super::numeric;
 use super::advanced;
 
-use super::unixtimestamp::UnixTimestampCommand;
+#[derive(Clone, Debug, Default)]
+pub struct InbuiltSqlRuntimeContext {
+    pub current_database: Option<String>,
+    pub current_user: Option<String>,
+    pub session_user: Option<String>,
+    pub system_user: Option<String>,
+    pub connection_id: Option<i64>,
+    pub last_insert_id: Option<i64>,
+    pub version: Option<String>,
+}
+
+thread_local! {
+    static INBUILT_RUNTIME_CONTEXT_STACK: RefCell<Vec<InbuiltSqlRuntimeContext>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn with_inbuilt_sql_runtime_context<T>(
+    context: &InbuiltSqlRuntimeContext,
+    callback: impl FnOnce() -> T,
+) -> T {
+    INBUILT_RUNTIME_CONTEXT_STACK.with(|stack| {
+        stack.borrow_mut().push(context.clone());
+    });
+
+    let outcome = callback();
+
+    INBUILT_RUNTIME_CONTEXT_STACK.with(|stack| {
+        let _ = stack.borrow_mut().pop();
+    });
+
+    outcome
+}
+
+pub fn inbuilt_sql_runtime_context() -> InbuiltSqlRuntimeContext {
+    INBUILT_RUNTIME_CONTEXT_STACK.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    })
+}
 
 pub fn is_inbuilt_function(function_name: &str) -> bool {
     resolve_command(function_name).is_some()
@@ -24,18 +66,109 @@ pub fn evaluate_inbuilt_sql_function(function: &Function) -> Result<Option<Vec<u
 
 }
 
+pub fn evaluate_inbuilt_sql_function_with_context(
+    function: &Function,
+    context: &InbuiltSqlRuntimeContext,
+) -> Result<Option<Vec<u8>>, String> {
+    with_inbuilt_sql_runtime_context(context, || evaluate_inbuilt_sql_function(function))
+}
+
 pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<Vec<u8>>, String> {
 
     match expression {
+
         Expr::Nested(inner) => evaluate_argument_expression(inner),
 
         Expr::Value(value) => value_to_bytes(value),
 
+        Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
+            (UnaryOperator::Plus, Expr::Value(Value::Number(value, _))) => {
+                Ok(Some(value.as_bytes().to_vec()))
+            }
+            (UnaryOperator::Minus, Expr::Value(Value::Number(value, _))) => {
+                Ok(Some(format!("-{}", value).into_bytes()))
+            }
+            (UnaryOperator::Plus, inner) => {
+                let Some(value) = evaluate_numeric_expression(inner)? else {
+                    return Ok(None);
+                };
+                Ok(Some(format_number_result(value)))
+            }
+            (UnaryOperator::Minus, inner) => {
+                let Some(value) = evaluate_numeric_expression(inner)? else {
+                    return Ok(None);
+                };
+                Ok(Some(format_number_result(-value)))
+            }
+            _ => Err("inbuilt command unary arguments currently support only numeric literals".to_string()),
+        },
+
+        Expr::BinaryOp { left, op, right } => {
+            let Some(left_value) = evaluate_numeric_expression(left)? else {
+                return Ok(None);
+            };
+            let Some(right_value) = evaluate_numeric_expression(right)? else {
+                return Ok(None);
+            };
+
+            let result = match op {
+                BinaryOperator::Plus => left_value + right_value,
+                BinaryOperator::Minus => left_value - right_value,
+                BinaryOperator::Multiply => left_value * right_value,
+                BinaryOperator::Divide => left_value / right_value,
+                BinaryOperator::Modulo => left_value % right_value,
+                _ => {
+                    return Err(
+                        "inbuilt command binary arguments currently support only numeric arithmetic"
+                            .to_string(),
+                    )
+                }
+            };
+
+            if !result.is_finite() {
+                return Ok(None);
+            }
+
+            Ok(Some(format_number_result(result)))
+        }
+
         Expr::Function(function) => evaluate_inbuilt_sql_function(function),
 
         _ => Err("inbuilt command arguments currently support only literals and inbuilt nested calls".to_string()),
+        
     }
 
+}
+
+fn evaluate_numeric_expression(expression: &Expr) -> Result<Option<f64>, String> {
+    let Some(value) = evaluate_argument_expression(expression)? else {
+        return Ok(None);
+    };
+
+    let text = String::from_utf8_lossy(&value);
+    text.trim()
+        .parse::<f64>()
+        .map(Some)
+        .map_err(|_| "inbuilt command arithmetic expressions must evaluate to numeric values".to_string())
+}
+
+fn format_number_result(value: f64) -> Vec<u8> {
+    let mut text = if value == 0.0 {
+        "0".to_string()
+    } else {
+        value.to_string()
+    };
+
+    if text.contains('.') && !text.contains('e') && !text.contains('E') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+
+    text.into_bytes()
 }
 
 pub(super) fn function_argument_expr(argument: &FunctionArg) -> Result<&Expr, String> {
@@ -64,15 +197,17 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
 
     let normalized = normalize_name(function_name);
 
+    // we mirror MySQL's function name normalization and resolution rules, which are case-insensitive and ignore backticks and double quotes
+    // https://www.w3schools.com/mySQL/mysql_ref_functions.asp
+
     match normalized.as_str() {
         
         // string functions
         
-        "unixtimestamp" | "unix_timestamp" => Some(&UnixTimestampCommand),
         "ascii" => Some(&strings::ascii::AsciiCommand),
         "char_length" | "character_length" => Some(&strings::char_length::CharLengthCommand),
         "concat" => Some(&strings::concat::ConcatCommand),
-        "concat_w" => Some(&strings::concat_w::ConcatWCommand),
+        "concat_w" | "concat_ws" => Some(&strings::concat_w::ConcatWCommand),
         "field" => Some(&strings::field::FieldCommand),
         "find_in_set" => Some(&strings::find_in_set::FindInSetCommand),
         "format" => Some(&strings::format::FormatCommand),
@@ -84,6 +219,12 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         "lpad" => Some(&strings::lpad::LpadCommand),
         "rpad" => Some(&strings::rpad::RpadCommand),
         "ltrim" => Some(&strings::ltrim::LtrimCommand),
+        "mid" => Some(&strings::mid::MidCommand),
+        "position" => Some(&strings::position::PositionCommand),
+        "repeat" => Some(&strings::repeat::RepeatCommand),
+        "replace" => Some(&strings::replace::ReplaceCommand),
+        "reverse" => Some(&strings::reverse::ReverseCommand),
+        "right" => Some(&strings::right::RightCommand),
         "rtrim" => Some(&strings::rtrim::RtrimCommand),
         "space" => Some(&strings::space::SpaceCommand),
         "substr" | "substring" => Some(&strings::substr::SubstrCommand),
@@ -96,9 +237,10 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         
         "adddate" => Some(&datetime::adddate::AddDateCommand),
         "addtime" => Some(&datetime::addtime::AddTimeCommand),
-        "curdate" => Some(&datetime::curdate::CurDateCommand),
-        "curtime" => Some(&datetime::curtime::CurTimeCommand),
+        "curdate" | "current_date" => Some(&datetime::curdate::CurDateCommand),
+        "curtime" | "current_time" => Some(&datetime::curtime::CurTimeCommand),
         "date" => Some(&datetime::date::DateCommand),
+        "date_add" => Some(&datetime::adddate::AddDateCommand),
         "datediff" => Some(&datetime::datediff::DateDiffCommand),
         "date_format" => Some(&datetime::date_format::DateFormatCommand),
         "day" => Some(&datetime::day::DayCommand),
@@ -125,6 +267,7 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         "second" => Some(&datetime::second::SecondCommand),
         "str_to_date" => Some(&datetime::str_to_date::StrToDateCommand),
         "subdate" => Some(&datetime::subdate::SubDateCommand),
+        "date_sub" => Some(&datetime::subdate::SubDateCommand),
         "subtime" => Some(&datetime::subtime::SubTimeCommand),
         "sysdate" => Some(&datetime::sysdate::SysDateCommand),
         "time_format" => Some(&datetime::time_format::TimeFormatCommand),
@@ -133,13 +276,14 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         "timediff" => Some(&datetime::timediff::TimeDiffCommand),
         "timestamp" => Some(&datetime::timestamp::TimestampCommand),
         "to_days" => Some(&datetime::to_days::ToDaysCommand),
+        "unixtimestamp" | "unix_timestamp" => Some(&datetime::unixtimestamp::UnixTimestampCommand),
         "week" => Some(&datetime::week::WeekCommand),
         "weekday" => Some(&datetime::weekday::WeekdayCommand),
         "weekofyear" => Some(&datetime::weekofyear::WeekOfYearCommand),
         "year" => Some(&datetime::year::YearCommand),
         "yearweek" => Some(&datetime::yearweek::YearWeekCommand),
 
-        // numeric functions
+        // numeric functions (many of which also work as aggregate functions)
 
         "abs" => Some(&numeric::abs::AbsCommand),
         "acos" => Some(&numeric::acos::AcosCommand),
@@ -149,6 +293,7 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         "avg" => Some(&numeric::avg::AvgCommand),
         "ceil" | "ceiling" => Some(&numeric::ceil::CeilCommand),
         "cos" => Some(&numeric::cos::CosCommand),
+        "count" => Some(&numeric::count::CountCommand),
         "cot" => Some(&numeric::cot::CotCommand),
         "degrees" => Some(&numeric::degrees::DegreesCommand),
         "div" => Some(&numeric::div::DivCommand),
@@ -160,6 +305,8 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         "log" => Some(&numeric::log::LogCommand),
         "log10" => Some(&numeric::log10::Log10Command),
         "log2" => Some(&numeric::log2::Log2Command),
+        "max" => Some(&numeric::max::MaxCommand),
+        "min" => Some(&numeric::min::MinCommand),
         "mod" => Some(&numeric::modulo::ModuloCommand),
         "pi" => Some(&numeric::pi::PiCommand),
         "pow" | "power" => Some(&numeric::pow::PowCommand),
@@ -214,8 +361,11 @@ fn normalize_name(function_name: &str) -> String {
 fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {
     
     match value {
+
         Value::Null => Ok(None),
+
         Value::Boolean(v) => Ok(Some(v.to_string().into_bytes())),
+        
         Value::Number(v, _) => Ok(Some(v.to_string().into_bytes())),
 
         Value::SingleQuotedString(v)
@@ -241,6 +391,7 @@ fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {
             "inbuilt command placeholder '{}' is not supported",
             v
         )),
+
     }
     
 }

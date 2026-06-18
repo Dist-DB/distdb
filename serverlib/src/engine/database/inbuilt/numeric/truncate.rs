@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
 use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::{evaluate_argument_expression, function_argument_expr, function_args};
+use crate::engine::database::inbuilt::indexer::function_args;
+
+use super::{evaluate_f64_arg, evaluate_i64_arg, expect_arg_count, float_result, truncate_mysql};
 
 pub struct TruncateCommand;
 
@@ -16,10 +18,18 @@ impl InbuiltServerCommand for TruncateCommand {
     fn evaluate(&self, function: &Function) -> Result<Option<Vec<u8>>, String> {
 
         let args = function_args(function)?;
-        
-        let mut merged = Vec::new();
 
-        Ok(Some(merged))
+        expect_arg_count(args, 2, 2, self.name())?;
+
+        let Some(value) = evaluate_f64_arg(args, 0)? else {
+            return Ok(None);
+        };
+        
+        let Some(decimals) = evaluate_i64_arg(args, 1)? else {
+            return Ok(None);
+        };
+
+        Ok(float_result(truncate_mysql(value, decimals)))
         
     }
 

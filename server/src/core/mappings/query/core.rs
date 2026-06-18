@@ -8,7 +8,11 @@ use std::time::Instant;
 use common::helpers::format::{FileKind, HEADER_SIZE, make_header};
 use common::helpers::write_bytes;
 use connector::{ConnectorResponse, ConnectorResult, DataQuery, MutationResult, QueryResult};
-use serverlib::engine::database::inbuilt::evaluate_inbuilt_sql_function;
+use serverlib::engine::database::inbuilt::{
+    evaluate_inbuilt_sql_function,
+    with_inbuilt_sql_runtime_context,
+    InbuiltSqlRuntimeContext,
+};
 use serverlib::engine::database::runtime_index::derived_indexes_for_table;
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
@@ -44,16 +48,20 @@ pub(crate) fn handle_query_command(
     runtime_indexes: &mut RuntimeIndexStore,
 ) -> ConnectorResponse {
 
-    handle_query_command_internal(
-        request_id,
-        query,
-        catalogs,
-        wal,
-        node_data_dir,
-        runtime_indexes,
-        None,
-        None,
-    )
+    let runtime_context = inbuilt_runtime_context_for_query(request_id, query);
+
+    with_inbuilt_sql_runtime_context(&runtime_context, || {
+        handle_query_command_internal(
+            request_id,
+            query,
+            catalogs,
+            wal,
+            node_data_dir,
+            runtime_indexes,
+            None,
+            None,
+        )
+    })
 
 }
 
@@ -68,16 +76,42 @@ pub(crate) fn handle_query_command_in_write_group(
     touched_tables: &mut HashSet<String>,
 ) -> ConnectorResponse {
 
-    handle_query_command_internal(
-        request_id,
-        query,
-        catalogs,
-        wal,
-        node_data_dir,
-        runtime_indexes,
-        Some(write_group_id),
-        Some(touched_tables),
-    )
+    let runtime_context = inbuilt_runtime_context_for_query(request_id, query);
+
+    with_inbuilt_sql_runtime_context(&runtime_context, || {
+        handle_query_command_internal(
+            request_id,
+            query,
+            catalogs,
+            wal,
+            node_data_dir,
+            runtime_indexes,
+            Some(write_group_id),
+            Some(touched_tables),
+        )
+    })
+
+}
+
+fn inbuilt_runtime_context_for_query(request_id: &str, query: &DataQuery) -> InbuiltSqlRuntimeContext {
+    InbuiltSqlRuntimeContext {
+        current_database: Some(query.database_id.clone()),
+        current_user: std::env::var("USER").ok().map(|user| format!("{}@localhost", user)),
+        session_user: std::env::var("USER").ok().map(|user| format!("{}@localhost", user)),
+        system_user: std::env::var("USER").ok().map(|user| format!("{}@localhost", user)),
+        connection_id: Some(stable_connection_id(request_id)),
+        last_insert_id: None,
+        version: None,
+    }
+
+}
+
+fn stable_connection_id(request_id: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    request_id.hash(&mut hasher);
+    (hasher.finish() & i64::MAX as u64) as i64
 
 }
 
