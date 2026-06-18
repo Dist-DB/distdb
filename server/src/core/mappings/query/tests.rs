@@ -110,6 +110,9 @@ fn begin_transaction_is_explicitly_recognized() {
         &wal,
         std::path::Path::new("."),
         &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
     );
 
     let ConnectorResult::Error(message) = response.result else {
@@ -136,6 +139,9 @@ fn commit_is_explicitly_recognized() {
         &wal,
         std::path::Path::new("."),
         &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
     );
 
     let ConnectorResult::Error(message) = response.result else {

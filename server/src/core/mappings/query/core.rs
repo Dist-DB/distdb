@@ -132,9 +132,9 @@ pub(crate) fn handle_query_command_in_write_group(
 }
 
 fn inbuilt_runtime_context_for_query(
-    request_id: &str,
+    _request_id: &str,
     query: &DataQuery,
-    session_id: &str,
+    _session_id: &str,
     connection_id: usize,
     session_user: Option<String>,
 ) -> InbuiltSqlRuntimeContext {

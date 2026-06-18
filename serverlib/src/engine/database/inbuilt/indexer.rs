@@ -1,4 +1,5 @@
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use sqlparser::ast::{BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value};
@@ -220,7 +221,7 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
     // we mirror MySQL's function name normalization and resolution rules, which are case-insensitive and ignore backticks and double quotes
     // https://www.w3schools.com/mySQL/mysql_ref_functions.asp
 
-    match normalized.as_str() {
+    match normalized.as_ref() {
 
         // geo functions
         
@@ -372,14 +373,33 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
 
 }
 
-fn normalize_name(function_name: &str) -> String {
+fn normalize_name(function_name: &str) -> Cow<'_, str> {
 
-    function_name
-        .chars()
-        .filter(|ch| *ch != '`' && *ch != '"')
-        .collect::<String>()
-        .to_ascii_lowercase()
-        
+    let needs_strip_quotes = function_name
+        .as_bytes()
+        .iter()
+        .any(|byte| *byte == b'`' || *byte == b'"');
+
+    let needs_lowercase = function_name
+        .as_bytes()
+        .iter()
+        .any(|byte| byte.is_ascii_uppercase());
+
+    if !needs_strip_quotes && !needs_lowercase {
+        return Cow::Borrowed(function_name);
+    }
+
+    let mut normalized = String::with_capacity(function_name.len());
+
+    for ch in function_name.chars() {
+        if ch == '`' || ch == '"' {
+            continue;
+        }
+        normalized.push(ch.to_ascii_lowercase());
+    }
+
+    Cow::Owned(normalized)
+
 }
 
 fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {

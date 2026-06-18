@@ -150,6 +150,11 @@ impl ServerApp {
         );
         let mut touched_tables = HashSet::new();
 
+        let session_state = self.get_session(session_id);
+        let (connection_id, session_user) = session_state
+            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
+            .unwrap_or((0, None));
+
         for (idx, staged_query) in staged_queries.iter().enumerate() {
             let apply_request_id = format!("{}::txread{}", request_id, idx + 1);
             let response = handle_query_command_in_write_group(
@@ -161,6 +166,9 @@ impl ServerApp {
                 &mut sandbox_indexes,
                 write_group_id,
                 &mut touched_tables,
+                session_id,
+                connection_id,
+                session_user.clone(),
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
@@ -187,6 +195,9 @@ impl ServerApp {
             &sandbox_wal,
             &self.node_data_dir,
             &mut sandbox_indexes,
+            session_id,
+            connection_id,
+            session_user,
         );
 
         if matches!(response.status, connector::ResponseStatus::Applied) {

@@ -77,7 +77,7 @@ impl ServerApp {
                             is_staged_dml_query(query),
                         ) {
                             Ok(QueryRoutingDecision::ExecuteImmediately) => {
-                                let session_state = self.get_session(session_id).cloned();
+                                let session_state = self.get_session(session_id);
                                 let (connection_id, session_user) = session_state
                                     .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
                                     .unwrap_or((0, None));
@@ -328,7 +328,12 @@ impl ServerApp {
             }
         }
 
-        self.validate_staged_queries(request_id, staged_queries)?;
+        self.validate_staged_queries(request_id, session_id, staged_queries)?;
+
+        let session_state = self.get_session(session_id);
+        let (connection_id, session_user) = session_state
+            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
+            .unwrap_or((0, None));
 
         let mut total_affected_rows = 0u64;
         let write_group_id = TransactionId(
@@ -350,6 +355,9 @@ impl ServerApp {
                 &mut self.runtime_indexes,
                 write_group_id,
                 &mut touched_tables,
+                session_id,
+                connection_id,
+                session_user.clone(),
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
@@ -395,11 +403,17 @@ impl ServerApp {
     fn validate_staged_queries(
         &self,
         request_id: &str,
+        session_id: &str,
         staged_queries: &[connector::DataQuery],
     ) -> Result<(), String> {
         let mut sandbox_catalogs = self.catalogs.clone();
         let mut sandbox_indexes = self.runtime_indexes.clone();
         let sandbox_wal = ConcurrentWalManager::new();
+
+        let session_state = self.get_session(session_id);
+        let (connection_id, session_user) = session_state
+            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
+            .unwrap_or((0, None));
 
         self.seed_sandbox_wal(&sandbox_wal)?;
 
@@ -412,6 +426,9 @@ impl ServerApp {
                 &sandbox_wal,
                 &self.node_data_dir,
                 &mut sandbox_indexes,
+                session_id,
+                connection_id,
+                session_user.clone(),
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
