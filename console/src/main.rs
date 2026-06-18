@@ -87,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(user_and_peer) = startup_user {
+
         let (user, peer_id) = user_and_peer
             .split_once('@')
             .ok_or_else(|| {
@@ -105,6 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let resolved_peer_id = session.startup_connect_user(user, peer_id)?;
+        
         if resolved_peer_id != peer_id {
             println!(
                 "notification: startup peer '{}' was not discovered; connected to discovered peer '{}'",
@@ -125,8 +127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Distdb console (www.distdb.com)");
     println!("Copyright (c) 2026 Sam Colak. All rights reserved.");
-    println!("type help for commands, or \\q to quit");
-    println!("all commands must end with ';' to execute");
+    println!("Type help for commands, or \\q to quit");
+    println!("All commands must end with ';' to execute");
 
     let mut accumulated_command = String::new();
 
@@ -192,4 +194,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+
 }

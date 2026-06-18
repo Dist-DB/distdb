@@ -44,6 +44,7 @@ impl ConsoleSession {
         server_list: Vec<String>,
         tls_config: ConnectorTlsConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+
         let bootstrap_peers = normalize_bootstrap_peers(server_list);
 
         if bootstrap_peers.is_empty() {
@@ -82,6 +83,7 @@ impl ConsoleSession {
         user: &str,
         requested_peer_id: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
+
         self.refresh_discovered_peers_from_server()?;
 
         let discovered_peers = self.runtime.transport().discovered_peers();
@@ -93,6 +95,7 @@ impl ConsoleSession {
         } else if discovered_peers.len() == 1 {
             discovered_peers[0].peer_id.clone()
         } else {
+
             let discovered_ids = discovered_peers
                 .iter()
                 .map(|peer| peer.peer_id.clone())
@@ -109,6 +112,7 @@ impl ConsoleSession {
                 requested_peer_id, hint
             )
             .into());
+
         };
 
         self.execute(ConsoleCommand::ConnectPeer {
@@ -307,6 +311,7 @@ impl ConsoleSession {
             .unwrap_or_else(|| AUTH_FALLBACK_DATABASE.to_string());
 
         for peer in known_peers {
+
             if !self
                 .runtime
                 .transport()
@@ -392,6 +397,7 @@ impl ConsoleSession {
                     is_discovered: true,
                 });
             }
+
         }
 
         if let Some(active_peer_id) = original_active_peer {
@@ -399,6 +405,7 @@ impl ConsoleSession {
         }
 
         Ok(())
+
     }
 
     fn print_p2p_status(&self) {
@@ -411,11 +418,9 @@ impl ConsoleSession {
         println!("connector p2p:");
         println!("  mode={mode}");
         println!("  protocol={}", transport.protocol());
-        let tls_mode = match transport.tls_mode() {
-            common::TlsMode::Off => "off",
-            common::TlsMode::Optional => "optional",
-            common::TlsMode::Required => "required",
-        };
+        
+        let tls_mode = transport.tls_mode().as_str();
+
         println!("  tls_mode={tls_mode}");
         if let Some(ca_path) = transport.tls_ca_path() {
             println!("  tls_ca={}", ca_path.display());
@@ -467,6 +472,7 @@ impl ConsoleSession {
     }
 
     fn print_log(&self) {
+
         if self.log_entries.is_empty() {
             println!("no console log entries");
             return;
@@ -475,11 +481,13 @@ impl ConsoleSession {
         for entry in &self.log_entries {
             println!("[{}] {}", entry.seqno, entry.message);
         }
+
     }
 
 }
 
 pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {
+    
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -517,6 +525,7 @@ pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {
     };
 
     Some(format!("/{host_prefix}/{host}/tcp/{port}"))
+
 }
 
 pub fn normalize_bootstrap_peers<I>(peers: I) -> Vec<String>
@@ -527,6 +536,7 @@ where
     let mut normalized = Vec::new();
 
     for peer in peers {
+
         let Some(peer) = normalize_bootstrap_addr(&peer) else {
             continue;
         };
@@ -534,6 +544,7 @@ where
         if seen.insert(peer.clone()) {
             normalized.push(peer);
         }
+
     }
 
     normalized
@@ -569,6 +580,7 @@ pub fn bootstrap_peers_from_cli_args(args: &[String]) -> Vec<String> {
 pub fn connector_tls_config_from_cli_args(
     args: &[String],
 ) -> Result<ConnectorTlsConfig, String> {
+
     let mode = match args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
         Some(raw) => common::TlsMode::parse(raw).ok_or_else(|| {
             format!("invalid tls mode '{}'; expected off|optional|required", raw)
@@ -582,6 +594,7 @@ pub fn connector_tls_config_from_cli_args(
         .map(std::path::PathBuf::from);
 
     Ok(ConnectorTlsConfig { mode, ca_path })
+
 }
 
 trait ConsoleRequestExt {
@@ -598,14 +611,15 @@ impl ConsoleRequestExt for ConnectorRequest {
 }
 
 fn summarize_response(response: &ConnectorResponse) -> String {
+
     match &response.result {
         ConnectorResult::Query(result) => format!("query rows={}", result.rows.len()),
         ConnectorResult::Mutation(result) => {
             format!("mutation affected_rows={}", result.affected_rows)
-        }
+        },
         ConnectorResult::Schema(result) => {
             format!("schema table={} revision={}", result.table_id, result.schema_revision)
-        }
+        },
         ConnectorResult::Error(message) => format!("error {}", message),
     }
 }
@@ -630,6 +644,7 @@ fn resolve_database_for_sql(
     is_auth_request: bool,
     sql: &str,
 ) -> Result<String, &'static str> {
+
     if let Some(database) = current_database {
         return Ok(database.to_string());
     }
@@ -639,6 +654,7 @@ fn resolve_database_for_sql(
     }
 
     Err("no active database selected; run `use <database>;` first")
+
 }
 
 fn is_global_sql_without_database(sql: &str) -> bool {
@@ -821,26 +837,32 @@ fn print_query_table(result: &connector::QueryResult) {
     println!("{}", format_table_separator(&widths));
     println!("{}", format_table_row(&headers, &widths));
     println!("{}", format_table_separator(&widths));
+
     for row in &rows {
         println!("{}", format_table_row(row, &widths));
     }
+
     println!("{}", format_table_separator(&widths));
 
 }
 
 fn format_table_separator(widths: &[usize]) -> String {
+
     let mut sep = String::new();
     sep.push('+');
     for width in widths {
         sep.push_str(&"-".repeat(*width + 2));
         sep.push('+');
     }
+
     sep
 }
 
 fn format_table_row(cells: &[String], widths: &[usize]) -> String {
+
     let mut line = String::new();
     line.push('|');
+    
     for (i, width) in widths.iter().enumerate() {
         let cell = cells.get(i).map(|s| s.as_str()).unwrap_or("");
         let padding = width.saturating_sub(cell.chars().count());
@@ -849,6 +871,7 @@ fn format_table_row(cells: &[String], widths: &[usize]) -> String {
         line.push_str(&" ".repeat(padding + 1));
         line.push('|');
     }
+    
     line
 }
 

@@ -7,6 +7,7 @@ pub enum TlsMode {
 }
 
 impl TlsMode {
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -23,4 +24,5 @@ impl TlsMode {
             _ => None,
         }
     }
+    
 }
