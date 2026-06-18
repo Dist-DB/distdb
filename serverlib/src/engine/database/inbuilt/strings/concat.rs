@@ -22,12 +22,16 @@ impl InbuiltServerCommand for ConcatCommand {
         let mut merged = Vec::new();
 
         for argument in args {
+
             let expr = function_argument_expr(argument)?;
+
             let Some(value) = evaluate_argument_expression(expr)? else {
                 // Match MySQL CONCAT behavior: any NULL input yields NULL.
                 return Ok(None);
             };
+
             merged.extend_from_slice(&value);
+            
         }
 
         Ok(Some(merged))

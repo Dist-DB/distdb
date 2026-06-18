@@ -28,6 +28,7 @@ pub fn with_inbuilt_sql_runtime_context<T>(
     context: &InbuiltSqlRuntimeContext,
     callback: impl FnOnce() -> T,
 ) -> T {
+
     INBUILT_RUNTIME_CONTEXT_STACK.with(|stack| {
         stack.borrow_mut().push(context.clone());
     });
@@ -39,9 +40,11 @@ pub fn with_inbuilt_sql_runtime_context<T>(
     });
 
     outcome
+
 }
 
 pub fn inbuilt_sql_runtime_context() -> InbuiltSqlRuntimeContext {
+
     INBUILT_RUNTIME_CONTEXT_STACK.with(|stack| {
         stack
             .borrow()
@@ -49,6 +52,7 @@ pub fn inbuilt_sql_runtime_context() -> InbuiltSqlRuntimeContext {
             .cloned()
             .unwrap_or_default()
     })
+
 }
 
 pub fn is_inbuilt_function(function_name: &str) -> bool {
@@ -82,31 +86,39 @@ pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<V
         Expr::Value(value) => value_to_bytes(value),
 
         Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
+
             (UnaryOperator::Plus, Expr::Value(Value::Number(value, _))) => {
                 Ok(Some(value.as_bytes().to_vec()))
-            }
+            },
+
             (UnaryOperator::Minus, Expr::Value(Value::Number(value, _))) => {
                 Ok(Some(format!("-{}", value).into_bytes()))
-            }
+            },
+
             (UnaryOperator::Plus, inner) => {
                 let Some(value) = evaluate_numeric_expression(inner)? else {
                     return Ok(None);
                 };
                 Ok(Some(format_number_result(value)))
-            }
+            },
+
             (UnaryOperator::Minus, inner) => {
                 let Some(value) = evaluate_numeric_expression(inner)? else {
                     return Ok(None);
                 };
                 Ok(Some(format_number_result(-value)))
-            }
+            },
+
             _ => Err("inbuilt command unary arguments currently support only numeric literals".to_string()),
+
         },
 
         Expr::BinaryOp { left, op, right } => {
+
             let Some(left_value) = evaluate_numeric_expression(left)? else {
                 return Ok(None);
             };
+
             let Some(right_value) = evaluate_numeric_expression(right)? else {
                 return Ok(None);
             };
@@ -130,6 +142,7 @@ pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<V
             }
 
             Ok(Some(format_number_result(result)))
+
         }
 
         Expr::Function(function) => evaluate_inbuilt_sql_function(function),
@@ -141,18 +154,22 @@ pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<V
 }
 
 fn evaluate_numeric_expression(expression: &Expr) -> Result<Option<f64>, String> {
+
     let Some(value) = evaluate_argument_expression(expression)? else {
         return Ok(None);
     };
 
     let text = String::from_utf8_lossy(&value);
+
     text.trim()
         .parse::<f64>()
         .map(Some)
         .map_err(|_| "inbuilt command arithmetic expressions must evaluate to numeric values".to_string())
+
 }
 
 fn format_number_result(value: f64) -> Vec<u8> {
+
     let mut text = if value == 0.0 {
         "0".to_string()
     } else {
@@ -169,6 +186,7 @@ fn format_number_result(value: f64) -> Vec<u8> {
     }
 
     text.into_bytes()
+    
 }
 
 pub(super) fn function_argument_expr(argument: &FunctionArg) -> Result<&Expr, String> {
@@ -365,7 +383,7 @@ fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {
         Value::Null => Ok(None),
 
         Value::Boolean(v) => Ok(Some(v.to_string().into_bytes())),
-        
+
         Value::Number(v, _) => Ok(Some(v.to_string().into_bytes())),
 
         Value::SingleQuotedString(v)

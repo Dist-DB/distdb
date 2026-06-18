@@ -26,6 +26,7 @@ impl InbuiltServerCommand for ConcatWCommand {
         };
 
         let mut values = Vec::new();
+        
         for index in 1..args.len() {
             if let Some(value) = evaluate_string_arg(args, index)? {
                 values.push(value);

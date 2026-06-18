@@ -37,14 +37,18 @@ pub(super) fn expect_arg_count(
 	max: usize,
 	function_name: &str,
 ) -> Result<(), String> {
+
 	if args.len() < min || args.len() > max {
+
 		if min == max {
 			return Err(format!("{} requires {} argument(s)", function_name, min));
 		}
+
 		return Err(format!(
 			"{} requires between {} and {} arguments",
 			function_name, min, max
 		));
+
 	}
 
 	Ok(())
@@ -111,6 +115,7 @@ pub(super) fn left_chars(value: &str, count: i64) -> String {
 }
 
 pub(super) fn right_chars(value: &str, count: i64) -> String {
+
 	if count <= 0 {
 		return String::new();
 	}
@@ -122,9 +127,11 @@ pub(super) fn right_chars(value: &str, count: i64) -> String {
 	}
 
 	chars[chars.len() - count..].iter().collect()
+
 }
 
 pub(super) fn substring_mysql(value: &str, position: i64, length: Option<i64>) -> String {
+
 	if position == 0 {
 		return String::new();
 	}
@@ -149,9 +156,11 @@ pub(super) fn substring_mysql(value: &str, position: i64, length: Option<i64>) -
 	};
 
 	chars[start as usize..end as usize].iter().collect()
+
 }
 
 pub(super) fn insert_mysql(value: &str, position: i64, length: i64, new_value: &str) -> String {
+
 	if position <= 0 || length < 0 {
 		return value.to_string();
 	}
@@ -170,9 +179,11 @@ pub(super) fn insert_mysql(value: &str, position: i64, length: i64, new_value: &
 	let suffix = chars[end..].iter().collect::<String>();
 
 	format!("{}{}{}", prefix, new_value, suffix)
+
 }
 
 pub(super) fn find_substring_position(value: &str, needle: &str, start_position: i64) -> usize {
+
 	let total = char_count(value) as i64;
 	if start_position <= 0 || start_position > total + 1 {
 		return 0;
@@ -193,9 +204,11 @@ pub(super) fn find_substring_position(value: &str, needle: &str, start_position:
 
 	let absolute_index = start_byte + relative_index;
 	lowered_value[..absolute_index].chars().count() + 1
+
 }
 
 pub(super) fn pad_mysql(value: &str, target_length: i64, pad: &str, left_pad: bool) -> Option<String> {
+
 	if target_length < 0 {
 		return None;
 	}
@@ -219,6 +232,7 @@ pub(super) fn pad_mysql(value: &str, target_length: i64, pad: &str, left_pad: bo
 	} else {
 		Some(format!("{}{}", value, filler))
 	}
+
 }
 
 pub(super) fn trim_spaces(value: &str, leading: bool, trailing: bool) -> String {
@@ -226,6 +240,7 @@ pub(super) fn trim_spaces(value: &str, leading: bool, trailing: bool) -> String 
 }
 
 pub(super) fn trim_exact(value: &str, pattern: &str, leading: bool, trailing: bool) -> String {
+
 	if pattern.is_empty() {
 		return value.to_string();
 	}
@@ -246,9 +261,11 @@ pub(super) fn trim_exact(value: &str, pattern: &str, leading: bool, trailing: bo
 	}
 
 	result
+
 }
 
 pub(super) fn substring_index_mysql(value: &str, delimiter: &str, count: i64) -> String {
+
 	if delimiter.is_empty() || count == 0 {
 		return String::new();
 	}
@@ -274,9 +291,11 @@ pub(super) fn substring_index_mysql(value: &str, delimiter: &str, count: i64) ->
 
 	let start = matches[matches.len() - count] + delimiter.len();
 	value[start..].to_string()
+
 }
 
 pub(super) fn format_mysql_number(value: f64, decimals: i64, locale: Option<&str>) -> String {
+
 	let decimals = decimals.clamp(0, 30) as usize;
 	let (thousands_separator, decimal_separator) = locale_separators(locale);
 
@@ -294,26 +313,32 @@ pub(super) fn format_mysql_number(value: f64, decimals: i64, locale: Option<&str
 		}
 		_ => format!("{}{}", sign, grouped_integer),
 	}
+
 }
 
 fn repeat_to_length(pattern: &str, target_length: usize) -> String {
+
 	let mut result = String::new();
 	while result.chars().count() < target_length {
 		result.push_str(pattern);
 	}
 
 	left_chars(&result, target_length as i64)
+
 }
 
 fn char_to_byte_index(value: &str, char_index: usize) -> Option<usize> {
+
 	if char_index == value.chars().count() {
 		return Some(value.len());
 	}
 
 	value.char_indices().nth(char_index).map(|(index, _)| index)
+
 }
 
 fn locale_separators(locale: Option<&str>) -> (char, char) {
+
 	match locale.map(|value| value.trim().to_ascii_lowercase()) {
 		Some(value)
 			if matches!(
@@ -325,9 +350,11 @@ fn locale_separators(locale: Option<&str>) -> (char, char) {
 		}
 		_ => (',', '.'),
 	}
+
 }
 
 fn group_integer(integer: &str, separator: char) -> String {
+
 	let digits = integer.chars().collect::<Vec<_>>();
 	let mut grouped = String::new();
 
@@ -339,6 +366,7 @@ fn group_integer(integer: &str, separator: char) -> String {
 	}
 
 	grouped
+
 }
 
 #[cfg(test)]
@@ -392,7 +420,7 @@ mod tests {
 
 	#[test]
 	fn evaluate_string_functions_matches_mysql_like_samples() {
-        
+
 		let cases = [
 			("ascii('A')", Some("65")),
 			("char_length('Grüße')", Some("5")),
@@ -434,4 +462,5 @@ mod tests {
 		assert_eq!(evaluate_expression("concat_ws(null, 'sam', 'colak')"), None);
 		assert_eq!(evaluate_expression("find_in_set(null, 'a,b')"), None);
 	}
+    
 }
