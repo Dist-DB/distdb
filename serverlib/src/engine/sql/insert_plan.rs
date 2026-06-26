@@ -1,13 +1,8 @@
 use sqlparser::ast::{Expr, SetExpr, Statement, Value};
 
-use crate::engine::database::inbuilt::evaluate_inbuilt_sql_function;
-
 use super::{
-    parse_mysql_statements, 
-    parse_select_read_plan_from_statement, 
-    InsertRowsPlan,
-    InsertRowsSource, 
-    SqlParseError,
+    evaluate_sql_function, parse_mysql_statements, parse_select_read_plan_from_statement,
+    InsertRowsPlan, InsertRowsSource, SqlParseError,
 };
 
 pub fn parse_insert_rows_from_statement(
@@ -95,9 +90,7 @@ fn parse_insert_literal(expr: &Expr) -> Result<Option<Vec<u8>>, SqlParseError> {
         
         Expr::Value(value) => parse_insert_value(value),
         
-        Expr::Function(function) => evaluate_inbuilt_sql_function(function).map_err(|err| {
-            SqlParseError::UnsupportedStatement(format!("INSERT inbuilt function failed: {err}"))
-        }),
+        Expr::Function(function) => evaluate_sql_function(function),
         
         _ => Err(SqlParseError::UnsupportedStatement(format!(
             "INSERT literal '{expr}' is not supported"

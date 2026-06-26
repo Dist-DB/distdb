@@ -24,8 +24,8 @@ pub use select::{
     SelectExecutionResult,
 };
 pub use runtime::{
-    compare_provider_fields, compare_row_value, join_condition_field_names,
-    join_condition_matches_provider, relation_qualifier, row_matches_condition_with,
-    ConditionValueProvider, JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple,
-    MaterializedRelationRow,
+    compare_provider_fields, join_condition_field_names, join_condition_matches_provider,
+    relation_qualifier, row_matches_condition_with, ConditionValueProvider,
+    JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 };
+pub use crate::engine::sql::compare_row_value;

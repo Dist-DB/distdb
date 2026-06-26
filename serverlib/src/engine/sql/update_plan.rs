@@ -1,9 +1,7 @@
 use sqlparser::ast::{AssignmentTarget, Expr, Statement, TableFactor, Value};
 
-use crate::engine::database::inbuilt::evaluate_inbuilt_sql_function;
-
 use super::{
-    derive_relation_pushdown_conditions, parse_joins_from_table_with_joins,
+    derive_relation_pushdown_conditions, evaluate_sql_function, parse_joins_from_table_with_joins,
     parse_mysql_statements, parse_relation_bindings_from_table_with_joins,
     parse_select_condition_from_expr, SqlParseError, UpdateAssignment, UpdateRowsPlan,
 };
@@ -112,9 +110,7 @@ fn parse_update_literal(expr: &Expr) -> Result<Option<Vec<u8>>, SqlParseError> {
 
     match expr {
         Expr::Value(value) => parse_update_value(value),
-        Expr::Function(function) => evaluate_inbuilt_sql_function(function).map_err(|err| {
-            SqlParseError::UnsupportedStatement(format!("UPDATE inbuilt function failed: {err}"))
-        }),
+        Expr::Function(function) => evaluate_sql_function(function),
         _ => Err(SqlParseError::UnsupportedStatement(format!(
             "UPDATE assignment value '{expr}' is not supported"
         ))),

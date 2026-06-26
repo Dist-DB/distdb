@@ -115,6 +115,40 @@ fn select_read_plan_parses_inbuilt_function_literals() {
 }
 
 #[test]
+fn select_read_plan_parses_like_predicates() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where email like 'sam%@example.com'",
+    )
+    .expect("like condition should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(SelectPredicate::Like {
+            negated: false,
+            case_insensitive: false,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn select_read_plan_parses_regex_predicates() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where email regexp '^sam.*@example\\.com$'",
+    )
+    .expect("regex condition should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(SelectPredicate::Regex {
+            negated: false,
+            case_insensitive: false,
+            ..
+        }))
+    ));
+}
+
+#[test]
 fn select_read_plan_parses_inbuilt_function_projection_with_from() {
     let plan =
         parse_select_read_plan_from_statement("select unixtimestamp() as time from __account")
@@ -171,7 +205,26 @@ fn select_alias_qualified_wildcard_is_valid() {
     let plan = parse_select_read_plan_from_statement("select ac.* from __account as ac")
         .expect("alias-qualified wildcard should parse");
 
-    assert!(plan.projection_is_wildcard);
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::Wildcard { relation }]
+            if relation.as_deref() == Some("ac")
+    ));
+    assert!(!plan.projection_is_wildcard);
+}
+
+#[test]
+fn select_join_unqualified_wildcard_is_valid() {
+    let plan = parse_select_read_plan_from_statement(
+        "select * from users u inner join profiles p on u.id = p.user_id",
+    )
+    .expect("unqualified wildcard join should parse");
+
+    assert_eq!(plan.relations.len(), 2);
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::Wildcard { relation }] if relation.is_none()
+    ));
 }
 
 #[test]

@@ -39,7 +39,12 @@ fn collect_subquery_projection_values(
     runtime_indexes: &RuntimeIndexStore,
     subquery: &SelectReadPlan,
 ) -> HashSet<Vec<u8>> {
-    if subquery.is_explain || subquery.projection_is_wildcard {
+    if subquery.is_explain
+        || subquery
+            .projection_items
+            .iter()
+            .any(|item| matches!(item, SelectProjectionItem::Wildcard { .. }))
+    {
         return HashSet::new();
     }
 
@@ -167,6 +172,12 @@ where
             SelectProjectionItem::Column { .. } => {
                 return Err(
                     "select without FROM only supports inbuilt projection functions".to_string(),
+                );
+            }
+
+            SelectProjectionItem::Wildcard { .. } => {
+                return Err(
+                    "select without FROM does not support wildcard projections".to_string(),
                 );
             }
         }
@@ -420,18 +431,7 @@ where
     E: FnMut(&Function) -> Result<Option<Vec<u8>>, String>,
     R: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> bool,
 {
-    let projection_items = if read_plan.projection_is_wildcard {
-        schema
-            .fields
-            .iter()
-            .map(|field| SelectProjectionItem::Column {
-                field_name: field.field_name.clone(),
-                output_name: field.field_name.clone(),
-            })
-            .collect::<Vec<_>>()
-    } else {
-        read_plan.projection_items.clone()
-    };
+    let projection_items = expand_relation_projection_items(schema, &read_plan.projection_items);
 
     let mut columns = Vec::with_capacity(projection_items.len());
 
@@ -467,6 +467,10 @@ where
                     metadata: None,
                 });
             }
+
+            SelectProjectionItem::Wildcard { .. } => {
+                return Err("select failed: wildcard expansion should have been resolved before column building".to_string());
+            }
         }
     }
 
@@ -480,6 +484,7 @@ where
                 static_projection_values.push(Some(value));
             }
             SelectProjectionItem::Column { .. } => static_projection_values.push(None),
+            SelectProjectionItem::Wildcard { .. } => static_projection_values.push(None),
         }
     }
 
@@ -505,6 +510,7 @@ where
 
                         static_value.unwrap_or_else(|| b"NULL".to_vec())
                     }
+                    SelectProjectionItem::Wildcard { .. } => Vec::new(),
                 })
                 .collect::<Vec<_>>()
         })
@@ -527,18 +533,16 @@ where
     RM: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> bool,
     RJ: FnMut(&JoinedRowTuple, Option<&SelectCondition>) -> bool,
 {
-    if read_plan.projection_is_wildcard {
-        return Err("select join failed: wildcard projection is not supported yet for JOIN".to_string());
-    }
-
     if read_plan.is_explain {
         return Err("select join failed: EXPLAIN for JOIN is not supported yet".to_string());
     }
 
-    let mut columns = Vec::with_capacity(read_plan.projection_items.len());
-    let mut static_projection_values = Vec::with_capacity(read_plan.projection_items.len());
+    let projection_items = expand_join_projection_items(catalog, &read_plan.relations, &read_plan.projection_items)?;
 
-    for (seq, projection_item) in read_plan.projection_items.iter().enumerate() {
+    let mut columns = Vec::with_capacity(projection_items.len());
+    let mut static_projection_values = Vec::with_capacity(projection_items.len());
+
+    for (seq, projection_item) in projection_items.iter().enumerate() {
         match projection_item {
             SelectProjectionItem::Column {
                 field_name,
@@ -584,6 +588,10 @@ where
 
                 static_projection_values.push(Some(value));
             }
+
+            SelectProjectionItem::Wildcard { .. } => {
+                return Err("select join failed: wildcard expansion should have been resolved before projection building".to_string());
+            }
         }
     }
 
@@ -601,8 +609,7 @@ where
         .into_iter()
         .filter(|row_tuple| row_matches_joined(row_tuple, read_plan.where_condition.as_ref()))
         .map(|row_tuple| {
-            read_plan
-                .projection_items
+            projection_items
                 .iter()
                 .enumerate()
                 .map(|(projection_idx, projection_item)| match projection_item {
@@ -622,6 +629,7 @@ where
 
                         static_value.unwrap_or_else(|| b"NULL".to_vec())
                     }
+                    SelectProjectionItem::Wildcard { .. } => Vec::new(),
                 })
                 .collect::<Vec<_>>()
         })
@@ -678,7 +686,71 @@ fn projection_output_name(projection_item: &SelectProjectionItem) -> String {
     match projection_item {
         SelectProjectionItem::Column { output_name, .. }
         | SelectProjectionItem::InbuiltFunction { output_name, .. } => output_name.clone(),
+        SelectProjectionItem::Wildcard { relation } => relation.clone().unwrap_or_default(),
     }
+}
+
+fn expand_relation_projection_items(
+    schema: &TableSchema,
+    projection_items: &[SelectProjectionItem],
+) -> Vec<SelectProjectionItem> {
+    let mut expanded = Vec::new();
+
+    for projection_item in projection_items {
+        match projection_item {
+            SelectProjectionItem::Wildcard { .. } => {
+                expanded.extend(schema.fields.iter().map(|field| SelectProjectionItem::Column {
+                    field_name: field.field_name.clone(),
+                    output_name: field.field_name.clone(),
+                }));
+            }
+            _ => expanded.push(projection_item.clone()),
+        }
+    }
+
+    expanded
+}
+
+fn expand_join_projection_items(
+    catalog: &DatabaseCatalog,
+    relations: &[SelectRelation],
+    projection_items: &[SelectProjectionItem],
+) -> Result<Vec<SelectProjectionItem>, String> {
+    let mut expanded = Vec::new();
+
+    for projection_item in projection_items {
+        match projection_item {
+            SelectProjectionItem::Wildcard { relation } => {
+                let target_relations: Vec<&SelectRelation> = match relation {
+                    Some(qualifier) => relations
+                        .iter()
+                        .filter(|candidate| relation_qualifier(candidate) == qualifier)
+                        .collect(),
+                    None => relations.iter().collect(),
+                };
+
+                if target_relations.is_empty() {
+                    return Err(format!("select join failed: unknown wildcard relation '{:?}'", relation));
+                }
+
+                for target_relation in target_relations {
+                    let Some(schema) = catalog.table_schema(&target_relation.table_id) else {
+                        return Err(format!("select join failed: unknown table schema '{}'", target_relation.table_id));
+                    };
+
+                    let qualifier = relation_qualifier(target_relation).to_string();
+
+                    expanded.extend(schema.fields.iter().map(|field| SelectProjectionItem::Column {
+                        field_name: format!("{qualifier}.{}", field.field_name),
+                        output_name: field.field_name.clone(),
+                    }));
+                }
+            }
+            _ => expanded.push(projection_item.clone()),
+        }
+    }
+
+    Ok(expanded)
 }
 
 

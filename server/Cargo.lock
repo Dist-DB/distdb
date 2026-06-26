@@ -3038,6 +3038,7 @@ dependencies = [
  "common",
  "log",
  "rcgen",
+ "regex",
  "serde",
  "sqlparser",
 ]

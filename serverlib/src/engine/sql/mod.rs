@@ -6,6 +6,8 @@ mod literals;
 mod parser;
 mod requests;
 mod schema_plan;
+mod functions;
+mod predicates;
 mod select_plan;
 mod insert_plan;
 mod update_plan;
@@ -28,6 +30,11 @@ pub use select_plan::{
     parse_select_projection_from_statement, parse_select_read_plan_from_statement,
     parse_select_condition_from_expr, parse_relation_bindings_from_table_with_joins,
     parse_joins_from_table_with_joins, derive_relation_pushdown_conditions,
+};
+
+pub use functions::{evaluate_sql_function, is_supported_sql_function};
+pub use predicates::{
+    compare_like_value, compare_regex_value, compare_row_value, validate_regex_pattern,
 };
 
 pub use types::{

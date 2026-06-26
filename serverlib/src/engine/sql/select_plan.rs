@@ -3,11 +3,10 @@ use sqlparser::ast::{
     TableFactor,
 };
 
-use crate::engine::database::inbuilt::{evaluate_inbuilt_sql_function, is_inbuilt_function};
-
 use super::literals::parse_default_value;
 use super::{
-    parse_mysql_statements, SelectComparisonOp, SelectCondition, SelectJoin, SelectJoinKind,
+    evaluate_sql_function, is_supported_sql_function, parse_mysql_statements,
+    validate_regex_pattern, SelectComparisonOp, SelectCondition, SelectJoin, SelectJoinKind,
     SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation, SqlParseError,
 };
 
@@ -64,32 +63,32 @@ fn parse_select_read_plan_from_query(
         &relation_bindings,
     )?;
 
-    let projection_is_wildcard = select
+    let has_wildcard_projection = select
         .projection
         .iter()
         .any(|item| matches!(item, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)));
+    let projection_is_wildcard = select
+        .projection
+        .iter()
+        .any(|item| matches!(item, SelectItem::Wildcard(_)));
 
-    let (projection, projection_items) = if projection_is_wildcard {
-        if relation_bindings.len() > 1 {
-            return Err(SqlParseError::UnsupportedStatement(
-                "SELECT wildcard with JOIN is not supported yet; project explicit columns"
-                    .to_string(),
-            ));
-        }
-
+    let (projection, projection_items) = if has_wildcard_projection {
         for item in &select.projection {
             if let SelectItem::QualifiedWildcard(prefix, _) = item {
                 validate_qualified_prefix(prefix, &relation_bindings)?;
             }
         }
 
-        (None, Vec::new())
+        (None, select
+            .projection
+            .iter()
+            .map(|item| parse_select_projection_item(item, &relation_bindings))
+            .collect::<Result<Vec<_>, _>>()?)
     } else {
         let mut fields = Vec::new();
         let mut items = Vec::new();
 
         for item in &select.projection {
-
             let projection_item = parse_select_projection_item(item, &relation_bindings)?;
 
             if let SelectProjectionItem::Column { field_name, .. } = &projection_item {
@@ -175,10 +174,9 @@ fn parse_select_projection_item(
         },
 
         SelectItem::UnnamedExpr(Expr::Function(function)) => {
-
             let function_name = function.name.to_string();
 
-            if !is_inbuilt_function(&function_name) {
+            if !is_supported_sql_function(&function_name) {
                 return Err(SqlParseError::UnsupportedStatement(format!(
                     "SELECT projection function '{}' is not supported",
                     function_name
@@ -189,7 +187,13 @@ fn parse_select_projection_item(
                 output_name: common::normalize_identifier!(&function_name),
                 function: function.clone(),
             })
+        },
 
+        SelectItem::Wildcard(_) => Ok(SelectProjectionItem::Wildcard { relation: None }),
+
+        SelectItem::QualifiedWildcard(prefix, _) => {
+            let relation = validate_qualified_prefix(prefix, relation_bindings)?;
+            Ok(SelectProjectionItem::Wildcard { relation: Some(relation) })
         },
 
         SelectItem::ExprWithAlias { expr, alias } => match expr {
@@ -219,7 +223,7 @@ fn parse_select_projection_item(
             Expr::Function(function) => {
                 let function_name = function.name.to_string();
 
-                if !is_inbuilt_function(&function_name) {
+                if !is_supported_sql_function(&function_name) {
                     return Err(SqlParseError::UnsupportedStatement(format!(
                         "SELECT projection function '{}' is not supported",
                         function_name
@@ -256,6 +260,7 @@ pub fn parse_select_condition_from_expr(
     selection: Option<&Expr>,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<Option<SelectCondition>, SqlParseError> {
+
     let Some(selection) = selection else {
         return Ok(None);
     };
@@ -268,6 +273,7 @@ pub fn derive_relation_pushdown_conditions(
     relation_bindings: &[SelectRelationBinding],
     joins: &[SelectJoin],
 ) -> Vec<Option<SelectCondition>> {
+
     if relation_bindings.is_empty() {
         return Vec::new();
     }
@@ -298,6 +304,7 @@ pub fn derive_relation_pushdown_conditions(
         .into_iter()
         .map(combine_conditions)
         .collect::<Vec<_>>()
+
 }
 
 fn flatten_and_clauses(condition: &SelectCondition) -> Vec<&SelectCondition> {
@@ -326,6 +333,8 @@ fn relation_index_for_condition(
 ) -> Option<usize> {
     let field_name = match condition {
         SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. })
+        | SelectCondition::Predicate(SelectPredicate::Like { field_name, .. })
+        | SelectCondition::Predicate(SelectPredicate::Regex { field_name, .. })
         | SelectCondition::Predicate(SelectPredicate::InList { field_name, .. })
         | SelectCondition::Predicate(SelectPredicate::IsNull { field_name, .. })
         | SelectCondition::Predicate(SelectPredicate::InSubquery { field_name, .. }) => field_name,
@@ -360,6 +369,30 @@ fn localize_condition_for_relation(condition: &SelectCondition) -> Option<Select
             value: value.clone(),
         })),
 
+        SelectCondition::Predicate(SelectPredicate::Like {
+            field_name,
+            pattern,
+            negated,
+            case_insensitive,
+        }) => Some(SelectCondition::Predicate(SelectPredicate::Like {
+            field_name: unqualify_field_name(field_name)?,
+            pattern: pattern.clone(),
+            negated: *negated,
+            case_insensitive: *case_insensitive,
+        })),
+
+        SelectCondition::Predicate(SelectPredicate::Regex {
+            field_name,
+            pattern,
+            negated,
+            case_insensitive,
+        }) => Some(SelectCondition::Predicate(SelectPredicate::Regex {
+            field_name: unqualify_field_name(field_name)?,
+            pattern: pattern.clone(),
+            negated: *negated,
+            case_insensitive: *case_insensitive,
+        })),
+
         SelectCondition::Predicate(SelectPredicate::InList {
             field_name,
             values,
@@ -390,7 +423,9 @@ fn localize_condition_for_relation(condition: &SelectCondition) -> Option<Select
         SelectCondition::Predicate(SelectPredicate::FieldComparison { .. }) => None,
 
         _ => None,
+    
     }
+
 }
 
 fn unqualify_field_name(field_name: &str) -> Option<String> {
@@ -408,6 +443,46 @@ fn parse_select_condition_expression(
     match expression {
 
         Expr::Nested(inner) => parse_select_condition_expression(inner, relation_bindings),
+
+        Expr::Like {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        } => parse_like_condition_expression(
+            expr,
+            pattern,
+            *negated,
+            false,
+            escape_char.as_deref(),
+            relation_bindings,
+        ),
+
+        Expr::ILike {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        } => parse_like_condition_expression(
+            expr,
+            pattern,
+            *negated,
+            true,
+            escape_char.as_deref(),
+            relation_bindings,
+        ),
+
+        Expr::RLike {
+            negated,
+            expr,
+            pattern,
+            regexp: _,
+        } => parse_regex_condition_expression(
+            expr,
+            pattern,
+            *negated,
+            relation_bindings,
+        ),
 
         Expr::BinaryOp { left, op, right } => match op {
             BinaryOperator::And => Ok(SelectCondition::And(vec![
@@ -561,17 +636,17 @@ fn parse_condition_column_name(
         Expr::Identifier(ident) => {
             ensure_unqualified_allowed(relation_bindings, &ident.value, "WHERE clause")?;
             common::normalize_identifier!(&ident.value)
-        }
+        },
 
         Expr::CompoundIdentifier(parts) => {
             parse_qualified_field_name(parts, relation_bindings, "WHERE clause")?
-        }
+        },
 
         _ => {
             return Err(SqlParseError::UnsupportedStatement(
                 "WHERE currently supports only direct column predicates".to_string(),
             ));
-        }
+        },
 
     };
 
@@ -579,10 +654,61 @@ fn parse_condition_column_name(
 
 }
 
+fn parse_like_condition_expression(
+    expr: &Expr,
+    pattern: &Expr,
+    negated: bool,
+    case_insensitive: bool,
+    escape_char: Option<&str>,
+    relation_bindings: &[SelectRelationBinding],
+) -> Result<SelectCondition, SqlParseError> {
+    
+    if escape_char.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "LIKE ESCAPE is not supported yet".to_string(),
+        ));
+    }
+
+    let field_name = parse_condition_column_name(expr, relation_bindings)?;
+    let pattern = parse_condition_literal_value(pattern)?;
+
+    Ok(SelectCondition::Predicate(SelectPredicate::Like {
+        field_name,
+        pattern,
+        negated,
+        case_insensitive,
+    }))
+
+}
+
+fn parse_regex_condition_expression(
+    expr: &Expr,
+    pattern: &Expr,
+    negated: bool,
+    relation_bindings: &[SelectRelationBinding],
+) -> Result<SelectCondition, SqlParseError> {
+
+    let field_name = parse_condition_column_name(expr, relation_bindings)?;
+    let pattern = parse_condition_literal_value(pattern)?;
+
+    validate_regex_pattern(&pattern).map_err(|err| {
+        SqlParseError::UnsupportedStatement(format!("REGEXP pattern is invalid: {err}"))
+    })?;
+
+    Ok(SelectCondition::Predicate(SelectPredicate::Regex {
+        field_name,
+        pattern,
+        negated,
+        case_insensitive: false,
+    }))
+
+}
+
 pub fn parse_relation_bindings_from_table_with_joins(
     from: Option<&sqlparser::ast::TableWithJoins>,
     statement: &str,
 ) -> Result<Vec<SelectRelationBinding>, SqlParseError> {
+
     let Some(table_with_joins) = from else {
         return Ok(Vec::new());
     };
@@ -598,12 +724,14 @@ pub fn parse_relation_bindings_from_table_with_joins(
     }
 
     Ok(relations)
+
 }
 
 fn parse_relation_binding_from_factor(
     relation: &TableFactor,
     statement: &str,
 ) -> Result<SelectRelationBinding, SqlParseError> {
+
     let TableFactor::Table { name, alias, .. } = relation else {
         return Err(SqlParseError::UnsupportedStatement(
             "only direct table SELECT is currently supported".to_string(),
@@ -611,6 +739,7 @@ fn parse_relation_binding_from_factor(
     };
 
     let table_id = common::normalize_identifier!(&name.to_string());
+
     if table_id.is_empty() {
         return Err(SqlParseError::MissingIdentifier {
             keyword: "from",
@@ -624,6 +753,7 @@ fn parse_relation_binding_from_factor(
             .as_ref()
             .map(|table_alias| common::normalize_identifier!(&table_alias.name.value)),
     })
+
 }
 
 pub fn parse_joins_from_table_with_joins(
@@ -631,6 +761,7 @@ pub fn parse_joins_from_table_with_joins(
     statement: &str,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<Vec<SelectJoin>, SqlParseError> {
+
     let Some(table_with_joins) = from else {
         return Ok(Vec::new());
     };
@@ -643,6 +774,7 @@ pub fn parse_joins_from_table_with_joins(
     let mut joins = Vec::with_capacity(table_with_joins.joins.len());
 
     for (idx, join) in table_with_joins.joins.iter().enumerate() {
+        
         let relation = relation_bindings
             .get(idx + 1)
             .cloned()
@@ -670,9 +802,11 @@ pub fn parse_joins_from_table_with_joins(
         });
 
         available.push(relation);
+    
     }
 
     Ok(joins)
+
 }
 
 fn parse_join_on_expression(
@@ -764,7 +898,7 @@ fn parse_join_qualified_field_name(
 fn validate_qualified_prefix(
     prefix: &sqlparser::ast::ObjectName,
     relation_bindings: &[SelectRelationBinding],
-) -> Result<(), SqlParseError> {
+) -> Result<String, SqlParseError> {
     let parts = &prefix.0;
 
     if parts.len() != 1 {
@@ -773,7 +907,7 @@ fn validate_qualified_prefix(
         ));
     }
 
-    validate_qualifier(&parts[0].value, relation_bindings, "SELECT wildcard").map(|_| ())
+    validate_qualifier(&parts[0].value, relation_bindings, "SELECT wildcard")
 }
 
 fn validate_qualifier(
@@ -832,9 +966,7 @@ fn parse_condition_literal_value(expression: &Expr) -> Result<Vec<u8>, SqlParseE
     let expression = unwrap_nested_expression(expression);
 
     if let Expr::Function(function) = expression {
-        let value = evaluate_inbuilt_sql_function(function).map_err(|err| {
-            SqlParseError::UnsupportedStatement(format!("WHERE inbuilt function failed: {err}"))
-        })?;
+        let value = evaluate_sql_function(function)?;
 
         return value.ok_or_else(|| {
             SqlParseError::UnsupportedStatement(

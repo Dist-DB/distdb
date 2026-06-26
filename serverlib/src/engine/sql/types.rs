@@ -136,6 +136,18 @@ pub enum SelectPredicate {
         op: SelectComparisonOp,
         value: Vec<u8>,
     },
+    Like {
+        field_name: String,
+        pattern: Vec<u8>,
+        negated: bool,
+        case_insensitive: bool,
+    },
+    Regex {
+        field_name: String,
+        pattern: Vec<u8>,
+        negated: bool,
+        case_insensitive: bool,
+    },
     FieldComparison {
         left_field_name: String,
         op: SelectComparisonOp,
@@ -171,6 +183,9 @@ pub enum SelectProjectionItem {
     Column {
         field_name: String,
         output_name: String,
+    },
+    Wildcard {
+        relation: Option<String>,
     },
     InbuiltFunction {
         output_name: String,

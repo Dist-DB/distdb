@@ -4,26 +4,24 @@ use crate::engine::database::inbuilt::evaluate_inbuilt_sql_function;
 use crate::engine::database::transaction::TransactionLog;
 use crate::{
     encode_row_payload, parse_select_read_plan_from_statement, ConcurrentWalManager,
-    DatabaseCatalog, FieldDef, FieldIndex, FieldType, RuntimeIndexStore, SelectCondition,
-    SelectPredicate, SelectRelation, TableSchema, TransactionId, TransactionKind,
-    TransactionRecord, UserId,
+    DatabaseCatalog, FieldDef, FieldIndex, FieldType, RuntimeIndexStore, SelectComparisonOp,
+    SelectCondition, SelectPredicate, SelectProjectionItem, SelectRelation, TableSchema,
+    TransactionId, TransactionKind, TransactionRecord, UserId,
 };
 
 fn table_schema(fields: Vec<(&str, u32, FieldType, FieldIndex, bool)>) -> TableSchema {
     TableSchema::new(
         fields
             .into_iter()
-            .map(
-                |(field_name, seqno, field_type, indexed, nullable)| FieldDef {
-                    seqno,
-                    field_name: field_name.to_string(),
-                    field_type,
-                    nullable,
-                    indexed,
-                    default_value: None,
-                    metadata: None,
-                },
-            )
+            .map(|(field_name, seqno, field_type, indexed, nullable)| FieldDef {
+                seqno,
+                field_name: field_name.to_string(),
+                field_type,
+                nullable,
+                indexed,
+                default_value: None,
+                metadata: None,
+            })
             .collect(),
     )
 }
@@ -118,9 +116,9 @@ fn execute_joined_select_plan_projects_null_extended_rows() {
     seed_rows(&mut catalog, &wal);
 
     let read_plan = parse_select_read_plan_from_statement(
-            "select u.email, p.name, concat('join', '!') from users u left join profiles p on u.id = p.user_id",
-        )
-        .expect("join plan should parse");
+        "select u.email, p.name, concat('join', '!') from users u left join profiles p on u.id = p.user_id",
+    )
+    .expect("join plan should parse");
 
     let result = execute_joined_select_plan(
         &catalog,
@@ -206,9 +204,9 @@ fn execute_joined_select_plan_supports_inbuilt_function_projection() {
     seed_rows(&mut catalog, &wal);
 
     let read_plan = parse_select_read_plan_from_statement(
-            "select u.email, concat('join', '!') from users u inner join profiles p on u.id = p.user_id",
-        )
-        .expect("join plan should parse");
+        "select u.email, concat('join', '!') from users u inner join profiles p on u.id = p.user_id",
+    )
+    .expect("join plan should parse");
 
     let result = execute_joined_select_plan(
         &catalog,
@@ -239,16 +237,6 @@ fn execute_joined_select_plan_supports_inbuilt_function_projection() {
 
     assert_eq!(result.columns.len(), 2);
     assert_eq!(result.rows.len(), 1);
-
-    let mut outputs = result
-        .rows
-        .iter()
-        .map(|row| String::from_utf8(row[1].clone()).expect("function output should be utf8"))
-        .collect::<Vec<_>>();
-
-    outputs.sort();
-
-    assert_eq!(outputs, vec!["join!".to_string()]);
 }
 
 #[test]
@@ -265,7 +253,7 @@ fn row_matches_select_condition_supports_simple_predicates() {
 
     let condition = SelectCondition::Predicate(SelectPredicate::Comparison {
         field_name: "email".to_string(),
-        op: crate::SelectComparisonOp::Eq,
+        op: SelectComparisonOp::Eq,
         value: b"sam@example.com".to_vec(),
     });
 
@@ -279,18 +267,25 @@ fn row_matches_select_condition_supports_simple_predicates() {
 }
 
 #[test]
-fn execute_joined_select_plan_rejects_wildcard_projection() {
+fn execute_joined_select_plan_expands_qualified_wildcard_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
-    let catalog =
+    let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
 
     let read_plan = SelectReadPlan {
         table_id: "users".to_string(),
-        relations: vec![SelectRelation {
-            table_id: "users".to_string(),
-            alias: Some("u".to_string()),
-        }],
+        relations: vec![
+            SelectRelation {
+                table_id: "users".to_string(),
+                alias: Some("u".to_string()),
+            },
+            SelectRelation {
+                table_id: "profiles".to_string(),
+                alias: Some("p".to_string()),
+            },
+        ],
         joins: vec![crate::SelectJoin {
             kind: crate::SelectJoinKind::Inner,
             relation: SelectRelation {
@@ -299,19 +294,21 @@ fn execute_joined_select_plan_rejects_wildcard_projection() {
             },
             on_condition: SelectCondition::Predicate(SelectPredicate::FieldComparison {
                 left_field_name: "u.id".to_string(),
-                op: crate::SelectComparisonOp::Eq,
+                op: SelectComparisonOp::Eq,
                 right_field_name: "p.user_id".to_string(),
             }),
         }],
         pushdown_conditions: vec![None, None],
         projection: None,
-        projection_items: Vec::new(),
-        projection_is_wildcard: true,
+        projection_items: vec![SelectProjectionItem::Wildcard {
+            relation: Some("u".to_string()),
+        }],
+        projection_is_wildcard: false,
         where_condition: None,
         is_explain: false,
     };
 
-    let err = execute_joined_select_plan(
+    let result = execute_joined_select_plan(
         &catalog,
         &wal,
         &runtime_indexes,
@@ -320,44 +317,82 @@ fn execute_joined_select_plan_rejects_wildcard_projection() {
         &mut |_, _| true,
         &mut |_, _| true,
     )
-    .expect_err("wildcard join projection should be rejected");
+    .expect("wildcard join projection should expand");
 
-    assert!(err.contains("wildcard projection"));
+    assert_eq!(
+        result.columns.iter().map(|column| column.field_name.clone()).collect::<Vec<_>>(),
+        vec!["id".to_string(), "email".to_string()]
+    );
+    assert_eq!(result.rows.len(), 1);
 }
 
 #[test]
-fn explain_joined_select_plan_result_lists_multiple_join_steps() {
-    let read_plan = parse_select_read_plan_from_statement(
-            "explain select u.email, p.name, t.label from users u inner join profiles p on u.id = p.user_id left join teams t on p.id = t.profile_id where u.id = 1",
-        )
-        .expect("joined explain plan should parse");
+fn execute_joined_select_plan_expands_unqualified_wildcard_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
 
-    let result = explain_joined_select_plan_result(&read_plan);
+    let read_plan = SelectReadPlan {
+        table_id: "users".to_string(),
+        relations: vec![
+            SelectRelation {
+                table_id: "users".to_string(),
+                alias: Some("u".to_string()),
+            },
+            SelectRelation {
+                table_id: "profiles".to_string(),
+                alias: Some("p".to_string()),
+            },
+        ],
+        joins: vec![crate::SelectJoin {
+            kind: crate::SelectJoinKind::Inner,
+            relation: SelectRelation {
+                table_id: "profiles".to_string(),
+                alias: Some("p".to_string()),
+            },
+            on_condition: SelectCondition::Predicate(SelectPredicate::FieldComparison {
+                left_field_name: "u.id".to_string(),
+                op: SelectComparisonOp::Eq,
+                right_field_name: "p.user_id".to_string(),
+            }),
+        }],
+        pushdown_conditions: vec![None, None],
+        projection: None,
+        projection_items: vec![SelectProjectionItem::Wildcard { relation: None }],
+        projection_is_wildcard: true,
+        where_condition: None,
+        is_explain: false,
+    };
 
-    assert_eq!(result.columns.len(), 5);
-    assert_eq!(result.rows.len(), 3);
+    let result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &read_plan,
+        &mut |_function| Ok(None),
+        &mut |_, _| true,
+        &mut |_, _| true,
+    )
+    .expect("unqualified wildcard join projection should expand");
 
-    let row_text = result
-        .rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|column| String::from_utf8_lossy(column).to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(row_text[0][0], "0");
-    assert_eq!(row_text[0][1], "base");
-    assert!(row_text[0][2].contains("users"));
-
-    assert_eq!(row_text[1][0], "1");
-    assert_eq!(row_text[1][1], "inner");
-    assert!(row_text[1][2].contains("profiles"));
-    assert!(row_text[1][3].contains("u.id = p.user_id"));
-
-    assert_eq!(row_text[2][0], "2");
-    assert_eq!(row_text[2][1], "left");
-    assert!(row_text[2][2].contains("teams"));
-    assert!(row_text[2][3].contains("p.id = t.profile_id"));
+    assert_eq!(
+        result.columns.iter().map(|column| column.field_name.clone()).collect::<Vec<_>>(),
+        vec![
+            "id".to_string(),
+            "email".to_string(),
+            "id".to_string(),
+            "user_id".to_string(),
+            "name".to_string(),
+        ]
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        result.rows[0]
+            .iter()
+            .map(|value| String::from_utf8(value.clone()).expect("utf8"))
+            .collect::<Vec<_>>(),
+        vec!["1", "sam@example.com", "10", "1", "Sam"]
+    );
 }

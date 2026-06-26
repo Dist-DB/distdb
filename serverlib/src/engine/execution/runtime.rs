@@ -5,6 +5,8 @@ use crate::{
     SelectRelation,
 };
 
+use super::super::sql::{compare_like_value, compare_regex_value, compare_row_value};
+
 #[derive(Debug, Clone)]
 pub struct MaterializedRelationRow {
     pub row_id: u64,
@@ -156,6 +158,7 @@ where
         }
 
         SelectCondition::Predicate(predicate) => match predicate {
+
             SelectPredicate::Comparison {
                 field_name,
                 op,
@@ -164,6 +167,42 @@ where
                 Some(actual) => compare_row_value(actual, value, op),
                 None => false,
             },
+
+            SelectPredicate::Like {
+                field_name,
+                pattern,
+                negated,
+                case_insensitive,
+            } => {
+                let found = provider
+                    .value(field_name)
+                    .map(|actual| compare_like_value(actual, pattern, *case_insensitive))
+                    .unwrap_or(false);
+
+                if *negated {
+                    !found
+                } else {
+                    found
+                }
+            }
+
+            SelectPredicate::Regex {
+                field_name,
+                pattern,
+                negated,
+                case_insensitive,
+            } => {
+                let found = provider
+                    .value(field_name)
+                    .map(|actual| compare_regex_value(actual, pattern, *case_insensitive))
+                    .unwrap_or(false);
+
+                if *negated {
+                    !found
+                } else {
+                    found
+                }
+            }
 
             SelectPredicate::FieldComparison {
                 left_field_name,
@@ -185,7 +224,7 @@ where
                 } else {
                     found
                 }
-            }
+            },
 
             SelectPredicate::IsNull { field_name, negated } => {
                 let is_null = provider.value(field_name).is_none();
@@ -194,7 +233,7 @@ where
                 } else {
                     is_null
                 }
-            }
+            },
 
             SelectPredicate::InSubquery {
                 field_name,
@@ -213,8 +252,11 @@ where
                     found
                 }
             }
+
         },
+
     }
+
 }
 
 pub fn relation_qualifier(relation: &SelectRelation) -> &str {
@@ -261,29 +303,6 @@ pub fn compare_provider_fields(
     };
 
     compare_row_value(left_value, right_value, op)
-}
-
-pub fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp) -> bool {
-    let ordering = compare_scalar_bytes(actual, expected);
-
-    match op {
-        SelectComparisonOp::Eq => ordering == std::cmp::Ordering::Equal,
-        SelectComparisonOp::NotEq => ordering != std::cmp::Ordering::Equal,
-        SelectComparisonOp::Gt => ordering == std::cmp::Ordering::Greater,
-        SelectComparisonOp::Gte => ordering != std::cmp::Ordering::Less,
-        SelectComparisonOp::Lt => ordering == std::cmp::Ordering::Less,
-        SelectComparisonOp::Lte => ordering != std::cmp::Ordering::Greater,
-    }
-}
-
-fn compare_scalar_bytes(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
-    let left_text = String::from_utf8_lossy(left);
-    let right_text = String::from_utf8_lossy(right);
-
-    match (left_text.parse::<i128>(), right_text.parse::<i128>()) {
-        (Ok(lhs), Ok(rhs)) => lhs.cmp(&rhs),
-        _ => left_text.cmp(&right_text),
-    }
 }
 
 
