@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::net::IpAddr;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -21,7 +21,28 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
+const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
 const CONNECTOR_STREAM_TIMEOUT_SECS: u64 = 120;
+const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 1;
+const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
+const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 1;
+const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
+
+fn connector_connect_timeout_secs() -> u64 {
+    std::env::var(CONNECTOR_CONNECT_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(1, 30))
+        .unwrap_or(CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT)
+}
+
+fn connector_handshake_timeout_secs() -> u64 {
+    std::env::var(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(1, 30))
+        .unwrap_or(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConnectorTlsConfig {
@@ -126,6 +147,34 @@ impl Write for ConnectorWireStream {
         match self {
             Self::Plain(stream) => stream.flush(),
             Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+impl ConnectorWireStream {
+    fn set_timeouts(
+        &mut self,
+        read_timeout: Option<std::time::Duration>,
+        write_timeout: Option<std::time::Duration>,
+    ) -> Result<(), ConnectorError> {
+        match self {
+            Self::Plain(stream) => {
+                stream
+                    .set_read_timeout(read_timeout)
+                    .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+                stream
+                    .set_write_timeout(write_timeout)
+                    .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+                Ok(())
+            }
+            Self::Tls(stream) => {
+                let tcp = stream.get_mut();
+                tcp.set_read_timeout(read_timeout)
+                    .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+                tcp.set_write_timeout(write_timeout)
+                    .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+                Ok(())
+            }
         }
     }
 }
@@ -306,6 +355,25 @@ impl ConnectorP2pTransport {
 
     pub fn disconnect_active_peer(&self) {
         self.clear_live_connection("disconnect directive");
+    }
+
+    pub fn set_active_connection_timeouts(
+        &self,
+        read_timeout: Option<std::time::Duration>,
+        write_timeout: Option<std::time::Duration>,
+    ) -> Result<(), ConnectorError> {
+        let mut connection = self
+            .live_connection
+            .lock()
+            .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
+
+        let Some(live) = connection.as_mut() else {
+            return Err(ConnectorError::Transport(
+                "no active peer connection for timeout update".to_string(),
+            ));
+        };
+
+        live.stream.set_timeouts(read_timeout, write_timeout)
     }
 
     pub fn set_session_auth_token(&self, token: Option<String>) -> Result<(), ConnectorError> {
@@ -540,6 +608,10 @@ fn ensure_live_connection(
                     None
                 }
                 Err(err) => {
+                    if let ConnectorError::Rejected(message) = &err
+                        && message.to_ascii_lowercase().contains("bootstrapp") {
+                            return Err(err);
+                        }
                     log::debug!("CA auto-discovery from {} failed: {}", socket_addr, err);
                     None
                 }
@@ -555,9 +627,26 @@ fn ensure_live_connection(
         .or_else(|| transport.cached_ca_pem().as_deref().map(|_| ca_pem_override.as_deref().unwrap_or("")))
         .filter(|s| !s.is_empty());
 
+    let handshake_timeout_secs = connector_handshake_timeout_secs();
     let mut stream = connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref)?;
+    stream.set_timeouts(
+        Some(std::time::Duration::from_secs(handshake_timeout_secs)),
+        Some(std::time::Duration::from_secs(handshake_timeout_secs)),
+    )?;
 
     let challenge = read_response_frame(&mut stream)?;
+
+    if challenge.request_id == SERVER_BOOTSTRAP_REJECT_REQUEST_ID {
+        return match (&challenge.status, &challenge.result) {
+            (ResponseStatus::Rejected, ConnectorResult::Error(message)) => {
+                Err(ConnectorError::Rejected(message.clone()))
+            }
+            _ => Err(ConnectorError::InvalidResponse(
+                "bootstrap rejection frame had unexpected status/result".to_string(),
+            )),
+        };
+    }
+
     if challenge.request_id != SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
         return Err(ConnectorError::InvalidResponse(format!(
             "missing server password challenge on connect; received request_id='{}'",
@@ -594,6 +683,13 @@ fn ensure_live_connection(
         stream,
         session: PeerSession::new().with_session_id(shared_session_token),
     });
+
+    if let Some(live) = connection.as_mut() {
+        live.stream.set_timeouts(
+            Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)),
+            Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)),
+        )?;
+    }
 
     Ok(())
 
@@ -738,13 +834,12 @@ fn connect_tls_stream(
         .with_no_client_auth();
     client_config.alpn_protocols = vec![b"distdb-p2p/1".to_vec()];
 
-    let mut tcp = TcpStream::connect(socket_addr).map_err(|e| {
-        ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}"))
-    })?;
+    let mut tcp = connect_tcp_with_timeout(socket_addr)?;
+    let handshake_timeout_secs = connector_handshake_timeout_secs();
 
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
     tcp.set_nodelay(true)
         .map_err(|e| ConnectorError::Transport(format!("failed to set TCP_NODELAY: {e}")))?;
@@ -765,8 +860,7 @@ fn connect_tls_stream(
 }
 
 fn connect_plain_stream(socket_addr: &str) -> Result<ConnectorWireStream, ConnectorError> {
-    let tcp = TcpStream::connect(socket_addr)
-        .map_err(|e| ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}")))?;
+    let tcp = connect_tcp_with_timeout(socket_addr)?;
 
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
@@ -807,13 +901,14 @@ fn fetch_ca_pem_from_peer(
     node_id: &str,
 ) -> Result<Option<String>, ConnectorError> {
 
-    let mut tcp = TcpStream::connect(socket_addr).map_err(|err| {
+    let mut tcp = connect_tcp_with_timeout(socket_addr).map_err(|err| {
         ConnectorError::Transport(format!("CA bootstrap connect to {socket_addr} failed: {err}"))
     })?;
 
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+    let handshake_timeout_secs = connector_handshake_timeout_secs();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
         .map_err(|err| ConnectorError::Transport(format!("set read timeout failed: {err}")))?;
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
         .map_err(|err| ConnectorError::Transport(format!("set write timeout failed: {err}")))?;
     tcp.set_nodelay(true)
         .map_err(|err| ConnectorError::Transport(format!("set TCP_NODELAY failed: {err}")))?;
@@ -838,7 +933,7 @@ fn fetch_ca_pem_from_peer(
         ConnectorError::Transport(format!("failed to flush CA bootstrap request: {err}"))
     })?;
 
-    // Server first sends a password challenge frame; skip it.
+    // Server first sends a connector response frame (usually password challenge).
     let mut header = [0u8; 4];
     tcp.read_exact(&mut header).map_err(|err| {
         ConnectorError::Transport(format!("failed to read CA bootstrap challenge header: {err}"))
@@ -848,6 +943,18 @@ fn fetch_ca_pem_from_peer(
     tcp.read_exact(&mut skip_buf).map_err(|err| {
         ConnectorError::Transport(format!("failed to skip CA bootstrap challenge payload: {err}"))
     })?;
+
+    if let Ok(frame) = bincode::deserialize::<ConnectorResponse>(&skip_buf)
+        && frame.request_id == SERVER_BOOTSTRAP_REJECT_REQUEST_ID {
+            return match (frame.status, frame.result) {
+                (ResponseStatus::Rejected, ConnectorResult::Error(message)) => {
+                    Err(ConnectorError::Rejected(message))
+                }
+                _ => Err(ConnectorError::InvalidResponse(
+                    "bootstrap rejection frame had unexpected status/result".to_string(),
+                )),
+            };
+        }
 
     // Now read the actual response.
     let mut resp_header = [0u8; 4];
@@ -900,6 +1007,42 @@ fn normalize_peer_addr(raw: &str) -> String {
     
     format!("{}:{}", trimmed, DEFAULT_SERVER_PORT)
 
+}
+
+fn connect_tcp_with_timeout(socket_addr: &str) -> Result<TcpStream, ConnectorError> {
+    let timeout = std::time::Duration::from_secs(connector_connect_timeout_secs());
+
+    let addrs = socket_addr
+        .to_socket_addrs()
+        .map_err(|err| ConnectorError::Transport(format!("failed to resolve {socket_addr}: {err}")))?
+        .collect::<Vec<_>>();
+
+    if addrs.is_empty() {
+        return Err(ConnectorError::Transport(format!(
+            "failed to resolve {socket_addr}: no socket addresses",
+        )));
+    }
+
+    let mut last_err: Option<std::io::Error> = None;
+
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                return Ok(stream);
+            }
+            Err(err) => {
+                last_err = Some(err);
+            }
+        }
+    }
+
+    let err = last_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "unknown connect error".to_string());
+
+    Err(ConnectorError::Transport(format!(
+        "failed to connect to {socket_addr}: {err}",
+    )))
 }
 
 fn extract_session_id(message: &str) -> Option<String> {

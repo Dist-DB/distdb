@@ -11,7 +11,7 @@ use crate::{
 use crate::engine::sql::SelectExpression;
 
 use super::{
-    build_joined_row_tuples, collect_indexable_equality_filters, materialize_relation_rows,
+    build_joined_row_tuples, collect_indexable_equality_filters_for_schema, materialize_relation_rows,
     plan_relation_access, relation_qualifier, row_matches_condition_with_result,
     ConditionValueProvider, JoinedRowTuple,
 };
@@ -145,7 +145,13 @@ fn collect_subquery_exists_with_outer(
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
-            .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+            .map(|condition| {
+                collect_indexable_equality_filters_for_schema(
+                    schema,
+                    condition,
+                    &mut index_filter_map,
+                )
+            })
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
@@ -265,7 +271,13 @@ fn collect_subquery_projection_values_with_outer(
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
-            .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+            .map(|condition| {
+                collect_indexable_equality_filters_for_schema(
+                    schema,
+                    condition,
+                    &mut index_filter_map,
+                )
+            })
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
@@ -369,7 +381,13 @@ fn collect_subquery_scalar_value_with_outer(
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
-            .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+            .map(|condition| {
+                collect_indexable_equality_filters_for_schema(
+                    schema,
+                    condition,
+                    &mut index_filter_map,
+                )
+            })
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);

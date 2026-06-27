@@ -7,8 +7,9 @@ use crate::{
 };
 
 use super::access::{
-    build_relation_probe_index, collect_indexable_equality_filters, field_has_single_column_index,
-    materialize_relation_rows, plan_relation_access, EqualityProbeSource,
+    build_relation_probe_index, collect_indexable_equality_filters_for_schema,
+    field_has_single_column_index, materialize_relation_rows, plan_relation_access,
+    EqualityProbeSource,
 };
 use super::{
     join_condition_field_names, join_condition_matches_provider, JoinedRowCandidateProvider,
@@ -50,7 +51,13 @@ where
     let mut primary_filter_map = HashMap::new();
     let primary_allow_index_short_circuit = primary_condition
         .as_ref()
-        .map(|condition| collect_indexable_equality_filters(condition, &mut primary_filter_map))
+        .map(|condition| {
+            collect_indexable_equality_filters_for_schema(
+                primary_schema,
+                condition,
+                &mut primary_filter_map,
+            )
+        })
         .unwrap_or(true);
 
     let primary_access_plan = plan_relation_access(
@@ -100,7 +107,13 @@ where
         let mut right_filter_map = HashMap::new();
         let right_allow_index_short_circuit = right_condition
             .as_ref()
-            .map(|condition| collect_indexable_equality_filters(condition, &mut right_filter_map))
+            .map(|condition| {
+                collect_indexable_equality_filters_for_schema(
+                    right_schema,
+                    condition,
+                    &mut right_filter_map,
+                )
+            })
             .unwrap_or(true);
 
         let right_access_plan = plan_relation_access(

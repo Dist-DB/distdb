@@ -6,6 +6,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::time::{Duration, timeout};
 use tokio_rustls::TlsAcceptor;
 
 use crate::core::config::ServerTlsConfig;
@@ -13,6 +14,7 @@ use crate::core::config::ServerTlsConfig;
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 pub type BoxedConnectorStream = Box<dyn AsyncReadWrite>;
+const OPTIONAL_TLS_PROBE_TIMEOUT_MS: u64 = 250;
 
 pub fn parse_tls_mode_from_args(args: &[String]) -> Result<common::TlsMode, String> {
     match args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
@@ -189,7 +191,25 @@ pub async fn negotiate_connector_stream(
             };
 
             let mut probe = [0u8; 8];
-            let bytes_peeked = stream.peek(&mut probe).await?;
+            let bytes_peeked = match timeout(
+                Duration::from_millis(OPTIONAL_TLS_PROBE_TIMEOUT_MS),
+                stream.peek(&mut probe),
+            )
+            .await
+            {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(err)) => return Err(Box::new(err)),
+                Err(_) => {
+                    // Client sent no bytes yet; avoid deadlock with clients that
+                    // wait for the server challenge before sending application data.
+                    return Ok(Box::new(stream));
+                }
+            };
+
+            if bytes_peeked == 0 {
+                return Ok(Box::new(stream));
+            }
+
             if looks_like_tls_client_hello(&probe[..bytes_peeked]) {
                 let tls_stream = acceptor.accept(stream).await.map_err(|err| {
                     std::io::Error::new(

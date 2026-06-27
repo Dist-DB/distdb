@@ -7,7 +7,8 @@ use super::{collect_numeric_args, expect_arg_count, number_result};
 
 pub struct CountCommand;
 
-// returns the count of the number
+// Counts non-NULL function arguments only.
+// SELECT COUNT(*) row aggregation is handled in select execution, not here.
 
 impl InbuiltServerCommand for CountCommand {
 

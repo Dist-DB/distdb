@@ -1,9 +1,12 @@
 use common::helpers::format::FileKind;
 use common::helpers::list_files;
 use serverlib::DatabaseCatalog;
+use std::time::Instant;
 
 use crate::core::app::ServerApp;
 use crate::helpers::ServerAppError;
+
+const DEFAULT_SYSTEM_DATABASE: &str = "main";
 
 impl ServerApp {
 
@@ -52,7 +55,7 @@ impl ServerApp {
 
             let table_ids = catalog.table_ids();
             log::info!(
-                "loaded catalog '{}' for database='{}' with {} table identifier(s)",
+                "loaded catalog '{}' for database='{}' with {} table identifier(s) before WAL replay",
                 file.display(),
                 catalog.database_id.0,
                 table_ids.len()
@@ -62,28 +65,81 @@ impl ServerApp {
             
         }
 
+        if !self.catalogs.contains_key(DEFAULT_SYSTEM_DATABASE) {
+            let catalog = DatabaseCatalog::create_new_database(
+                DEFAULT_SYSTEM_DATABASE,
+                &self.node_data_dir,
+            )
+            .map_err(|err| {
+                ServerAppError::Runtime(format!(
+                    "failed to initialize default system catalog '{}': {}",
+                    DEFAULT_SYSTEM_DATABASE,
+                    err
+                ))
+            })?;
+
+            log::info!(
+                "initialized default system catalog database='{}'",
+                DEFAULT_SYSTEM_DATABASE,
+            );
+
+            self.catalogs.insert(catalog.database_id.0.clone(), catalog);
+        }
+
         Ok(())
 
     }
 
     pub(super) fn replay_catalog_state_from_wal(&mut self) -> Result<(), ServerAppError> {
 
+        let replay_started_at = Instant::now();
+        let mut replayed_transactions = 0usize;
+
         for catalog in self.catalogs.values_mut() {
+
+            let catalog_started_at = Instant::now();
 
             let wal_id = catalog.database_id.0.clone();
             let applied = catalog
                 .replay_entity_construction_from_log(&wal_id, &self.wal)
                 .map_err(|msg| ServerAppError::Runtime(msg.to_string()))?;
 
+            replayed_transactions += applied;
+
+            let catalog_elapsed_ms = catalog_started_at.elapsed().as_millis();
+
             if applied > 0 {
                 log::info!(
-                    "replayed {} catalog transaction(s) for database='{}'",
+                    "replayed {} catalog transaction(s) for database='{}' elapsed_ms={} tables_after_replay={}",
                     applied,
-                    catalog.database_id.0
+                    catalog.database_id.0,
+                    catalog_elapsed_ms,
+                    catalog.table_ids().len(),
+                );
+            } else if catalog_elapsed_ms >= 1_000 {
+                log::info!(
+                    "catalog replay scanned zero transactions for database='{}' elapsed_ms={} tables_after_replay={}",
+                    catalog.database_id.0,
+                    catalog_elapsed_ms,
+                    catalog.table_ids().len(),
                 );
             }
 
         }
+
+        let replayed_table_count = self
+            .catalogs
+            .values()
+            .map(|catalog| catalog.table_ids().len())
+            .sum::<usize>();
+
+        log::info!(
+            "catalog replay complete catalogs={} tables={} transactions={} elapsed_ms={}",
+            self.catalogs.len(),
+            replayed_table_count,
+            replayed_transactions,
+            replay_started_at.elapsed().as_millis(),
+        );
 
         Ok(())
 

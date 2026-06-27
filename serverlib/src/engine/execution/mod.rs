@@ -12,7 +12,9 @@ mod mutation_test;
 
 pub use access::{
     build_relation_probe_index, choose_index_lookup, collect_indexable_equality_filters,
-    count_condition_predicates, field_has_single_column_index, load_live_rows,
+    collect_indexable_equality_filters_for_schema, count_condition_predicates,
+    field_has_single_column_index, load_live_row_count,
+    load_live_rows, warm_equality_cache_from_live_rows,
     materialize_relation_rows, plan_relation_access, EqualityProbeSource,
     RelationAccessPlan, RelationAccessStrategy,
 };

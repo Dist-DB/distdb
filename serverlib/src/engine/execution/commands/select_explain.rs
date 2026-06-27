@@ -13,6 +13,7 @@ pub fn explain_select_plan_result(
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
 ) -> SelectExecutionResult {
+    
     let columns = vec![
         FieldDef {
             seqno: 1,
@@ -109,7 +110,9 @@ pub fn explain_select_plan_result(
     let advice = advise_select_execution(read_plan);
 
     let (access_path, index_id, lookup_key, cardinality, lookup_hit) =
+
         if let Some((index, key)) = index_lookup {
+
             let state = runtime_indexes.index(&index.index_id.0);
 
             let hit = state.map(|s| s.contains(&key)).unwrap_or(false);
@@ -134,14 +137,17 @@ pub fn explain_select_plan_result(
                 card.to_string(),
                 if hit { "true" } else { "false" }.to_string(),
             )
+
         } else {
+
             (
                 "full_scan".to_string(),
                 "".to_string(),
                 "".to_string(),
-                "0".to_string(),
+                "n/a".to_string(),
                 "".to_string(),
             )
+
         };
 
     let rows = vec![vec![
@@ -158,9 +164,11 @@ pub fn explain_select_plan_result(
     ]];
 
     SelectExecutionResult { columns, rows }
+
 }
 
 pub fn explain_joined_select_plan_result(read_plan: &SelectReadPlan) -> SelectExecutionResult {
+
     let columns = vec![
         FieldDef {
             seqno: 1,
@@ -277,6 +285,7 @@ pub fn explain_joined_select_plan_result(read_plan: &SelectReadPlan) -> SelectEx
     }
 
     SelectExecutionResult { columns, rows }
+
 }
 
 fn relation_label(relation: &SelectRelation) -> String {
@@ -423,7 +432,7 @@ fn count_subquery_predicates(condition: &SelectCondition) -> usize {
 
         SelectCondition::And(children) | SelectCondition::Or(children) => {
             children.iter().map(count_subquery_predicates).sum()
-        }
+        },
 
         SelectCondition::Not(child) => count_subquery_predicates(child),
 
@@ -435,6 +444,7 @@ fn count_subquery_predicates(condition: &SelectCondition) -> usize {
             | SelectPredicate::Exists { .. } => 1,
             _ => 0,
         },
+
     }
 
 }

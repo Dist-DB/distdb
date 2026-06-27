@@ -4336,6 +4336,9 @@ fn rebuild_runtime_indexes_for_table(
     let live_rows = load_live_rows(wal, &table.table_id, table.schema());
 
     for index in derived_indexes_for_table(table) {
+        if !runtime_indexes.should_track_index(index) {
+            continue;
+        }
 
         runtime_indexes.index_mut(&index.index_id.0).rebuild(
             live_rows

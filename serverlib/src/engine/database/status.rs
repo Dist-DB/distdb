@@ -5,6 +5,7 @@ use std::fmt::Display;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectStatus {
     Load,
+    Indexing,
     Ready,
     Lock,
     Sync,
@@ -15,6 +16,7 @@ impl Display for ObjectStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Load => write!(f, "Load"),
+            Self::Indexing => write!(f, "Indexing"),
             Self::Ready => write!(f, "Ready"),
             Self::Lock => write!(f, "Lock"),
             Self::Sync => write!(f, "Sync"),
@@ -23,7 +25,8 @@ impl Display for ObjectStatus {
 
 }
 
-// load -> sync -> ready
+// load -> indexing -> ready
+// load -> sync -> indexing -> ready
 // load -> ready -> lock -> sync -> ready
 // load -> lock -> ready
 
@@ -58,6 +61,13 @@ The state machine for database objects (databases, tables, indexes) is as follow
         -> ready (e.g. when a long-running mutation or schema change is complete and the object is already 
             synchronized, such as in an abort path)
 
+    - Indexing: the object is rebuilding or warming index structures. During this phase, reads may be partially available
+        depending on the caller path, but write paths should typically wait until indexing is complete
+
+        -> ready (e.g. when index population and warm-up are complete)
+        -> sync (e.g. when additional synchronization is needed after indexing)
+        -> lock (e.g. when a schema/write operation needs exclusive access while indexing was in progress)
+
  */
 
 impl ObjectStatus {
@@ -68,12 +78,19 @@ impl ObjectStatus {
             (Self::Load, Self::Sync)
             | (Self::Load, Self::Ready)
             | (Self::Load, Self::Lock)
+            | (Self::Load, Self::Indexing)
             | (Self::Sync, Self::Ready)
             | (Self::Sync, Self::Lock)
+            | (Self::Sync, Self::Indexing)
             | (Self::Ready, Self::Sync)
             | (Self::Ready, Self::Lock)
+            | (Self::Ready, Self::Indexing)
             | (Self::Lock, Self::Sync)
             | (Self::Lock, Self::Ready)
+            | (Self::Lock, Self::Indexing)
+            | (Self::Indexing, Self::Ready)
+            | (Self::Indexing, Self::Sync)
+            | (Self::Indexing, Self::Lock)
         )
     }
 

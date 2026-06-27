@@ -1,13 +1,102 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use crate::engine::database::transaction::TransactionLog;
 use crate::engine::database::runtime_index::derived_indexes_for_table;
+use crate::engine::database::schema_migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::{
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
     SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
 };
 
 use super::MaterializedRelationRow;
+
+static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<HashMap<String, (u64, usize)>>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct EqualityTableCacheEntry {
+    latest_tx_id: u64,
+    rows_by_id: HashMap<u64, HashMap<String, Vec<u8>>>,
+    row_ids_by_field_value: HashMap<String, HashMap<Vec<u8>, Vec<u64>>>,
+}
+
+static EQUALITY_TABLE_CACHE: OnceLock<Mutex<HashMap<String, EqualityTableCacheEntry>>> =
+    OnceLock::new();
+
+fn build_postings_for_field(
+    rows_by_id: &HashMap<u64, HashMap<String, Vec<u8>>>,
+    field_name: &str,
+) -> HashMap<Vec<u8>, Vec<u64>> {
+    let mut row_ids_by_value = HashMap::<Vec<u8>, Vec<u64>>::new();
+
+    for (row_id, row_map) in rows_by_id {
+        if let Some(value) = row_map.get(field_name).cloned() {
+            row_ids_by_value.entry(value).or_default().push(*row_id);
+        }
+    }
+
+    row_ids_by_value
+}
+
+fn rows_for_field_value(
+    entry: &EqualityTableCacheEntry,
+    field_name: &str,
+    lookup_value: &[u8],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+    entry
+        .row_ids_by_field_value
+        .get(field_name)
+        .and_then(|row_ids_by_value| row_ids_by_value.get(lookup_value).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row_id| {
+            entry
+                .rows_by_id
+                .get(&row_id)
+                .cloned()
+                .map(|row_map| (row_id, row_map))
+        })
+        .collect()
+}
+
+pub fn warm_equality_cache_from_live_rows(
+    table_id: &str,
+    latest_tx_id: u64,
+    live_rows: &[(u64, HashMap<String, Vec<u8>>) ],
+    field_names: &[String],
+) {
+    if field_names.is_empty() {
+        return;
+    }
+
+    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+    for (row_id, row_map) in live_rows {
+        rows_by_id.insert(*row_id, row_map.clone());
+    }
+
+    let mut row_ids_by_field_value = HashMap::<String, HashMap<Vec<u8>, Vec<u64>>>::new();
+    for field_name in field_names {
+        if field_name.is_empty() {
+            continue;
+        }
+        row_ids_by_field_value.insert(
+            field_name.clone(),
+            build_postings_for_field(&rows_by_id, field_name),
+        );
+    }
+
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.insert(
+            table_id.to_string(),
+            EqualityTableCacheEntry {
+                latest_tx_id,
+                rows_by_id,
+                row_ids_by_field_value,
+            },
+        );
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum RelationAccessStrategy {
@@ -65,6 +154,45 @@ impl RelationAccessPlan {
 
 }
 
+pub fn collect_indexable_equality_filters_for_schema(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+    filters: &mut HashMap<String, Vec<u8>>,
+) -> bool {
+
+    match condition {
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| collect_indexable_equality_filters_for_schema(schema, child, filters)),
+
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name,
+            op: SelectComparisonOp::Eq,
+            value,
+        }) => {
+            let normalized_value = schema
+                .field(field_name)
+                .and_then(|field| {
+                    convert_value_to_field_type(
+                        value,
+                        &field.field_type,
+                        TypeConversionPolicy::Safe,
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| value.clone());
+
+            filters.insert(field_name.clone(), normalized_value);
+            true
+        }
+
+        SelectCondition::Predicate(_) => true,
+
+        SelectCondition::Or(_) | SelectCondition::Not(_) => false,
+
+    }
+
+}
 pub fn field_has_single_column_index(table: &DatabaseTable, field_name: &str) -> bool {
     table.indexes.values().any(|index| {
         let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
@@ -170,6 +298,150 @@ pub fn load_live_rows(
 
 }
 
+pub fn load_live_rows_by_equality(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    lookup_value: &[u8],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    let latest_tx_id = wal
+        .latest_transaction_id(table_id)
+        .map(|tx| tx.0)
+        .unwrap_or(0);
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = cache_guard.get_mut(table_id)
+        && entry.latest_tx_id == latest_tx_id {
+            if !entry.row_ids_by_field_value.contains_key(field_name) {
+                entry.row_ids_by_field_value.insert(
+                    field_name.to_string(),
+                    build_postings_for_field(&entry.rows_by_id, field_name),
+                );
+            }
+
+            return rows_for_field_value(entry, field_name, lookup_value);
+        }
+
+    let live_rows = load_live_rows(wal, table_id, schema);
+    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+    for (row_id, row_map) in live_rows {
+        rows_by_id.insert(row_id, row_map);
+    }
+
+    let mut row_ids_by_field_value = HashMap::<String, HashMap<Vec<u8>, Vec<u64>>>::new();
+    row_ids_by_field_value.insert(
+        field_name.to_string(),
+        build_postings_for_field(&rows_by_id, field_name),
+    );
+
+    let entry = EqualityTableCacheEntry {
+        latest_tx_id,
+        rows_by_id,
+        row_ids_by_field_value,
+    };
+
+    let result = rows_for_field_value(&entry, field_name, lookup_value);
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.insert(table_id.to_string(), entry);
+    }
+
+    result
+
+}
+
+pub fn load_live_row_count(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+) -> usize {
+
+    let latest_tx_id = wal
+        .latest_transaction_id(table_id)
+        .map(|tx| tx.0)
+        .unwrap_or(0);
+
+    let cache = LIVE_ROW_COUNT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache_guard) = cache.lock()
+        && let Some((cached_latest_tx_id, cached_count)) = cache_guard.get(table_id)
+        && *cached_latest_tx_id == latest_tx_id {
+            return *cached_count;
+        }
+
+    let wal_records = wal.since(table_id, None);
+    let mut live_row_ids = HashSet::new();
+    let mut committed_groups = HashSet::new();
+    let mut aborted_groups = HashSet::new();
+
+    for record in &wal_records {
+
+        match record.kind {
+
+            TransactionKind::WriteCommit => {
+                if let Some(group_id) = record.groupid {
+                    committed_groups.insert(group_id.0);
+                }
+            },
+
+            TransactionKind::WriteAbort => {
+                if let Some(group_id) = record.groupid {
+                    aborted_groups.insert(group_id.0);
+                }
+            },
+
+            _ => {}
+
+        }
+
+    }
+
+    for record in &wal_records {
+
+        if let Some(group_id) = record.groupid {
+            
+            let group_id = group_id.0;
+            
+            if aborted_groups.contains(&group_id) {
+                continue;
+            }
+
+            if !committed_groups.contains(&group_id)
+                && !matches!(record.kind, TransactionKind::WriteCommit | TransactionKind::WriteAbort)
+            {
+                continue;
+            }
+
+        }
+
+        match record.kind {
+
+            TransactionKind::Insert | TransactionKind::Update => {
+                live_row_ids.insert(record.id.0);
+            },
+
+            TransactionKind::Delete => {
+                if let Some(refid) = record.refid {
+                    live_row_ids.remove(&refid.0);
+                }
+            },
+            
+            _ => {}
+
+        }
+
+    }
+
+    let count = live_row_ids.len();
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.insert(table_id.to_string(), (latest_tx_id, count));
+    }
+
+    count
+
+}
+
 pub fn plan_relation_access(
     table: &DatabaseTable,
     allow_index_short_circuit: bool,
@@ -233,7 +505,29 @@ pub fn materialize_relation_rows(
                     return Vec::new();
                 }
 
+            if lookup_key.len() == 1
+                && let Some(index) = table.indexes.values().find(|index| index.index_id.0 == *index_id) {
+                    
+                    let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
+                        vec![index.field_name.clone()]
+                    } else {
+                        index.field_names.clone()
+                    };
+
+                    if field_names.len() == 1 {
+                        return load_live_rows_by_equality(
+                            wal,
+                            &table.table_id,
+                            schema,
+                            &field_names[0],
+                            &lookup_key[0],
+                        );
+                    }
+
+                }
+
             load_live_rows(wal, &table.table_id, schema)
+
         },
 
         RelationAccessStrategy::EqualityProbe {
@@ -251,20 +545,13 @@ pub fn materialize_relation_rows(
                 }
             );
 
-            let live_rows = load_live_rows(wal, &table.table_id, schema);
-            let materialized_rows = live_rows
-                .into_iter()
-                .map(|(row_id, row_map)| MaterializedRelationRow { row_id, row_map })
-                .collect::<Vec<_>>();
-            let probe_index = build_relation_probe_index(&materialized_rows, field_name);
-
-            probe_index
-                .get(lookup_value)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|row| (row.row_id, row.row_map))
-                .collect()
+            load_live_rows_by_equality(
+                wal,
+                &table.table_id,
+                schema,
+                field_name,
+                lookup_value,
+            )
         },
 
         RelationAccessStrategy::FullScan => load_live_rows(wal, &table.table_id, schema),
@@ -279,6 +566,7 @@ pub fn collect_indexable_equality_filters(
 ) -> bool {
 
     match condition {
+        
         SelectCondition::And(children) => children
             .iter()
             .all(|child| collect_indexable_equality_filters(child, filters)),

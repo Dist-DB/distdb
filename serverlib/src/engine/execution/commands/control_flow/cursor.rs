@@ -5,7 +5,7 @@ use crate::engine::execution::{
     row_matches_select_condition_result, ConditionValueProvider,
 };
 use crate::{
-    collect_indexable_equality_filters, execute_joined_select_plan,
+    collect_indexable_equality_filters_for_schema, execute_joined_select_plan,
     execute_projection_only_select_plan, execute_relation_select_plan,
     plan_relation_access,
     ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, SelectReadPlan,
@@ -64,7 +64,9 @@ impl SelectReadPlanCursorSource {
         runtime_indexes: &RuntimeIndexStore,
         read_plan: &SelectReadPlan,
     ) -> Result<Self, String> {
+
         let execution_result = if !read_plan.joins.is_empty() {
+
             execute_joined_select_plan(
                 catalog,
                 wal,
@@ -90,11 +92,15 @@ impl SelectReadPlanCursorSource {
                     )
                 },
             )?
+        
         } else if read_plan.table_id.is_empty() {
+
             execute_projection_only_select_plan(read_plan, &mut |function| {
                 evaluate_inbuilt_sql_function(function)
             })?
+        
         } else {
+
             let table_id = read_plan.table_id.as_str();
 
             let table = catalog
@@ -110,7 +116,13 @@ impl SelectReadPlanCursorSource {
             let allow_index_short_circuit = read_plan
                 .where_condition
                 .as_ref()
-                .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+                .map(|condition| {
+                    collect_indexable_equality_filters_for_schema(
+                        schema,
+                        condition,
+                        &mut index_filter_map,
+                    )
+                })
                 .unwrap_or(true);
 
             let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
@@ -133,6 +145,7 @@ impl SelectReadPlanCursorSource {
                     )
                 },
             )?
+
         };
 
         let rows = execution_result
@@ -151,7 +164,9 @@ impl SelectReadPlanCursorSource {
             .collect::<Vec<_>>();
 
         Ok(Self { rows, index: 0 })
+    
     }
+
 }
 
 impl SqlCursorFrame {

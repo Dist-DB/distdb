@@ -1,12 +1,13 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use sqlparser::ast::Function;
+use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr, FunctionArguments};
 
 use crate::{
     ConcurrentWalManager, DatabaseCatalog, DatabaseTable, FieldDef, FieldIndex, FieldType,
     RelationAccessPlan, RuntimeIndexStore, SelectCondition, SelectJoin,
     SelectJoinKind, SelectProjectionItem, SelectReadPlan, SelectRelation, TableSchema,
+    primary_key_index,
 };
 use crate::engine::sql::{
     evaluate_sql_function_with_lookup, expression_references_column,
@@ -14,7 +15,8 @@ use crate::engine::sql::{
 };
 
 use super::super::{
-    build_joined_row_tuples, materialize_relation_rows, relation_qualifier,
+    build_joined_row_tuples, load_live_row_count, materialize_relation_rows,
+    relation_qualifier,
     JoinedRowTuple,
 };
 
@@ -136,6 +138,70 @@ where
     R: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
 {
 
+    let count_star_projection = count_star_projection(read_plan);
+
+    if let Some(output_name) = &count_star_projection {
+
+        if count_star_is_strict_full_table(read_plan) {
+
+            if let Some(pk_count) = count_star_primary_key_cardinality(table, runtime_indexes, read_plan)
+                && pk_count > 0 {
+                return Ok(SelectExecutionResult {
+                    columns: vec![FieldDef {
+                        seqno: 1,
+                        field_name: output_name.clone(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    }],
+                    rows: vec![vec![pk_count.to_string().into_bytes()]],
+                });
+            }
+
+            let live_row_count = load_live_row_count(wal, &table.table_id);
+            return Ok(SelectExecutionResult {
+                columns: vec![FieldDef {
+                    seqno: 1,
+                    field_name: output_name.clone(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                }],
+                rows: vec![vec![live_row_count.to_string().into_bytes()]],
+            });
+
+        }
+
+        let mut matched_rows = 0usize;
+
+        for (_, row_map) in materialize_relation_rows(wal, table, schema, runtime_indexes, access_plan) {
+            
+            if !row_matches(&row_map, read_plan.where_condition.as_ref())? {
+                continue;
+            }
+
+            matched_rows += 1;
+        }
+
+        return Ok(SelectExecutionResult {
+            columns: vec![FieldDef {
+                seqno: 1,
+                field_name: output_name.clone(),
+                field_type: FieldType::Text,
+                nullable: false,
+                indexed: FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            }],
+            rows: vec![vec![matched_rows.to_string().into_bytes()]],
+        });
+
+    }
+
     let projection_items = expand_relation_projection_items(schema, &read_plan.projection_items);
     let visible_projection_len = projection_items.len();
     let projection_items = ensure_order_by_projection_items(projection_items, read_plan);
@@ -151,6 +217,7 @@ where
                 field_name,
                 output_name,
             } => {
+
                 let Some(field) = schema.field(field_name) else {
                     return Err(format!("select failed: unknown column '{}'", field_name));
                 };
@@ -164,6 +231,7 @@ where
                     default_value: field.default_value.clone(),
                     metadata: column_metadata_with_visibility(field.metadata.clone(), is_hidden_sort_key),
                 });
+                
             },
 
             SelectProjectionItem::InbuiltFunction { output_name, .. } => {
@@ -319,6 +387,42 @@ where
 
     if read_plan.is_explain {
         return Ok(explain_joined_select_plan_result(read_plan));
+    }
+
+    let count_star_projection = count_star_projection(read_plan);
+    if let Some(output_name) = &count_star_projection {
+        let row_tuples = build_joined_row_tuples(
+            catalog,
+            wal,
+            runtime_indexes,
+            &read_plan.relations,
+            &read_plan.pushdown_conditions,
+            &read_plan.joins,
+            row_matches_relation,
+        )?;
+
+        let mut matched_rows = 0usize;
+
+        for row_tuple in row_tuples {
+            if !row_matches_joined(&row_tuple, read_plan.where_condition.as_ref())? {
+                continue;
+            }
+
+            matched_rows += 1;
+        }
+
+        return Ok(SelectExecutionResult {
+            columns: vec![FieldDef {
+                seqno: 1,
+                field_name: output_name.clone(),
+                field_type: FieldType::Text,
+                nullable: false,
+                indexed: FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            }],
+            rows: vec![vec![matched_rows.to_string().into_bytes()]],
+        });
     }
 
     let projection_items = expand_join_projection_items(catalog, &read_plan.relations, &read_plan.projection_items)?;
@@ -745,6 +849,83 @@ fn projection_output_name(projection_item: &SelectProjectionItem) -> String {
         SelectProjectionItem::Wildcard { relation } => relation.clone().unwrap_or_default(),
 
     }
+
+}
+
+fn count_star_projection(read_plan: &SelectReadPlan) -> Option<String> {
+
+    if read_plan.projection_items.len() != 1 {
+        return None;
+    }
+
+    if !read_plan.group_by.is_empty() {
+        return None;
+    }
+
+    let SelectProjectionItem::InbuiltFunction {
+        output_name,
+        function,
+    } = read_plan.projection_items.first()?
+    else {
+        return None;
+    };
+
+    if !function.name.to_string().eq_ignore_ascii_case("count") {
+        return None;
+    }
+
+    if !function_is_count_star(function) {
+        return None;
+    }
+
+    Some(output_name.clone())
+
+}
+
+fn count_star_is_strict_full_table(read_plan: &SelectReadPlan) -> bool {
+    read_plan.where_condition.is_none()
+        && read_plan.joins.is_empty()
+        && read_plan.group_by.is_empty()
+        && read_plan.having_condition.is_none()
+        && !read_plan.distinct
+        && read_plan.order_by.is_empty()
+        && read_plan.limit.is_none()
+        && read_plan.offset.is_none()
+}
+
+fn count_star_primary_key_cardinality(
+    table: &DatabaseTable,
+    runtime_indexes: &RuntimeIndexStore,
+    read_plan: &SelectReadPlan,
+) -> Option<usize> {
+
+    if !count_star_is_strict_full_table(read_plan) {
+        return None;
+    }
+
+    let pk_index = primary_key_index(table)?;
+    runtime_indexes.cardinality(&pk_index.index_id.0)
+
+}
+
+fn function_is_count_star(function: &Function) -> bool {
+
+    let FunctionArguments::List(list) = &function.args else {
+        return false;
+    };
+
+    if list.args.len() != 1 {
+        return false;
+    }
+
+    matches!(
+        list.args.first(),
+        Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard))
+            | Some(FunctionArg::Named {
+                arg: FunctionArgExpr::Wildcard,
+                ..
+            })
+    )
 
 }
 

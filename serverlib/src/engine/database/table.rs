@@ -74,6 +74,26 @@ impl DatabaseTable {
         self.transition(ObjectStatus::Ready)
     }
 
+    /// Mark the table as entering index build/warm-up.
+    pub fn begin_indexing(&mut self) -> DatabaseResult<()> {
+        
+        if self.status == ObjectStatus::Indexing {
+            return Ok(());
+        }
+
+        self.transition(ObjectStatus::Indexing)
+    }
+
+    /// Mark indexing complete and restore ready state.
+    pub fn complete_indexing(&mut self) -> DatabaseResult<()> {
+
+        if self.status == ObjectStatus::Ready {
+            return Ok(());
+        }
+
+        self.transition(ObjectStatus::Ready)
+    }
+
     pub fn replace_schema(
         &mut self,
         revision: u64,

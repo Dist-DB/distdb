@@ -230,6 +230,186 @@ fn execute_projection_only_select_plan_supports_row_independent_case_projection(
 }
 
 #[test]
+fn execute_relation_select_plan_supports_count_star_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement("select count(*) from users")
+        .expect("count select should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("count select should execute");
+
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].field_name, "count");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0], vec![b"2".to_vec()]);
+}
+
+#[test]
+fn execute_relation_select_plan_count_star_uses_pk_cardinality_when_full_table() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let users_schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("email", 2, FieldType::Text, FieldIndex::None, false),
+    ]);
+    catalog
+        .register_table("users", users_schema.clone())
+        .expect("users table should register");
+
+    // Build runtime indexes from seeded rows, then execute count against an
+    // empty WAL to prove the result can come directly from PK cardinality.
+    let wal_seed = ConcurrentWalManager::in_memory();
+    let actor = UserId("test-user".to_string());
+
+    for i in 1..=3u64 {
+        let mut row_map = std::collections::HashMap::new();
+        row_map.insert("id".to_string(), i.to_string().into_bytes());
+        row_map.insert("email".to_string(), format!("u{}@example.com", i).into_bytes());
+        wal_seed
+            .append(
+                "users",
+                TransactionRecord {
+                    id: TransactionId(i),
+                    groupid: None,
+                    refid: None,
+                    timestamp_epoch_ms: i,
+                    actor: actor.clone(),
+                    kind: TransactionKind::Insert,
+                    payload: encode_row_payload(&users_schema, &row_map)
+                        .expect("row should encode"),
+                },
+            )
+            .expect("row should append");
+    }
+
+    let mut catalogs = std::collections::HashMap::new();
+    catalogs.insert(catalog.database_id.0.clone(), catalog.clone());
+    runtime_indexes.bootstrap_from_catalogs(&catalogs, &wal_seed);
+
+    let read_plan = parse_select_read_plan_from_statement("select count(*) from users")
+        .expect("count select should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |_row_map, _nested_condition| Ok(true),
+    )
+    .expect("count select should execute from pk cardinality");
+
+    assert_eq!(result.rows, vec![vec![b"3".to_vec()]]);
+    
+}
+
+#[test]
+fn execute_relation_select_plan_count_star_falls_back_when_pk_cardinality_is_zero() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement("select count(*) from users")
+        .expect("count select should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+
+    let pk_index = relation
+        .indexes
+        .values()
+        .find(|index| index.is_primary_key())
+        .cloned()
+        .expect("primary key index should exist");
+
+    // Simulate a stale bootstrap state: index metadata is present but contains no rows.
+    runtime_indexes.register_index(pk_index);
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("count select should fall back to scanning rows");
+
+    assert_eq!(result.rows, vec![vec![b"2".to_vec()]]);
+
+}
+
+#[test]
 fn execute_joined_select_plan_supports_inbuilt_function_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();

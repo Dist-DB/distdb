@@ -320,6 +320,68 @@ fn load_live_rows_tracks_latest_version_chain_and_delete() {
 }
 
 #[test]
+fn load_live_row_count_tracks_latest_version_chain_and_delete() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal);
+    let actor = UserId::from_username("test-user");
+
+    let mut updated_row = HashMap::new();
+    updated_row.insert("id".to_string(), b"1".to_vec());
+    updated_row.insert("email".to_string(), b"sam+updated@example.com".to_vec());
+    updated_row.insert("nickname".to_string(), b"sam".to_vec());
+
+    wal.append(
+        "users",
+        TransactionRecord {
+            id: TransactionId(4),
+            groupid: None,
+            refid: Some(TransactionId(1)),
+            timestamp_epoch_ms: 4,
+            actor: actor.clone(),
+            kind: TransactionKind::Delete,
+            payload: Vec::new(),
+        },
+    )
+    .expect("delete old version should append");
+
+    wal.append(
+        "users",
+        TransactionRecord {
+            id: TransactionId(5),
+            groupid: None,
+            refid: Some(TransactionId(1)),
+            timestamp_epoch_ms: 5,
+            actor: actor.clone(),
+            kind: TransactionKind::Update,
+            payload: encode_row_payload(&schema, &updated_row).expect("updated row should encode"),
+        },
+    )
+    .expect("updated version should append");
+
+    assert_eq!(load_live_row_count(&wal, "users"), 1);
+
+    wal.append(
+        "users",
+        TransactionRecord {
+            id: TransactionId(6),
+            groupid: None,
+            refid: Some(TransactionId(5)),
+            timestamp_epoch_ms: 6,
+            actor,
+            kind: TransactionKind::Delete,
+            payload: Vec::new(),
+        },
+    )
+    .expect("delete latest version should append");
+
+    assert_eq!(load_live_row_count(&wal, "users"), 0);
+
+}
+
+#[test]
 fn runtime_index_bootstrap_uses_latest_live_row_keys() {
 
     let wal = ConcurrentWalManager::in_memory();

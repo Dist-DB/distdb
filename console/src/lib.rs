@@ -2,7 +2,7 @@
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorP2pConfig,
     ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, ConnectorTlsConfig,
+    ConnectorResponse, ConnectorResult, ConnectorTlsConfig, ConnectorError,
     DataQuery, ResponseStatus,
 };
 use common::DEFAULT_SERVER_PORT;
@@ -21,9 +21,20 @@ const IMPORT_TRANSACTION_BATCH_MAX_AGE_MS: u128 = 500;
 const IMPORT_PROGRESS_EVERY_STATEMENTS: usize = 5_000;
 const IMPORT_PROGRESS_EVERY_MS: u128 = 2_000;
 const IMPORT_BEGIN_STATEMENT: &str = "begin /*distdb_import*/";
+const SHOW_PEERS_REQUEST_TIMEOUT_SECS_DEFAULT: u64 = 1;
+const SHOW_PEERS_REQUEST_TIMEOUT_SECS_ENV: &str = "DISTDB_CONSOLE_SHOW_PEERS_TIMEOUT_SECS";
+const DEFAULT_CONNECTOR_IO_TIMEOUT_SECS: u64 = 120;
 const IMPORT_LARGE_STATEMENT_BYTES: usize = 256_000;
 const IMPORT_INSERT_CHUNK_TARGET_BYTES: usize = 256_000;
 const IMPORT_INSERT_CHUNK_MAX_TUPLES: usize = 512;
+
+fn show_peers_request_timeout_secs() -> u64 {
+    std::env::var(SHOW_PEERS_REQUEST_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(1, 30))
+        .unwrap_or(SHOW_PEERS_REQUEST_TIMEOUT_SECS_DEFAULT)
+}
 
 pub enum ConsoleCommand {
     Help,
@@ -616,6 +627,8 @@ impl ConsoleSession {
     }
 
     fn refresh_discovered_peers_from_server(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let show_peers_timeout_secs = show_peers_request_timeout_secs();
+
         let mut known_peers = self.runtime.transport().known_peers();
         if known_peers.is_empty() {
             known_peers = self
@@ -632,10 +645,17 @@ impl ConsoleSession {
         }
 
         let original_active_peer = self.runtime.transport().active_peer_id().map(ToOwned::to_owned);
+        if let Some(active_peer_id) = original_active_peer.as_deref()
+            && let Some(position) = known_peers.iter().position(|peer| peer.peer_id == active_peer_id) {
+                let active_peer = known_peers.remove(position);
+                known_peers.insert(0, active_peer);
+            }
         let database_id = self
             .current_database
             .clone()
             .unwrap_or_else(|| AUTH_FALLBACK_DATABASE.to_string());
+
+        let mut refreshed_from_server = false;
 
         for peer in known_peers {
 
@@ -663,6 +683,15 @@ impl ConsoleSession {
             }
 
             if let Err(err) = self.runtime.transport_mut().connect_active_peer() {
+                if let ConnectorError::Rejected(message) = &err
+                    && message.to_ascii_lowercase().contains("bootstrapp") {
+                        return Err(format!(
+                            "server is bootstrapping; retry shortly (peer_id={}): {}",
+                            peer.peer_id,
+                            message
+                        )
+                        .into());
+                    }
                 log::debug!(
                     "server peer refresh skipped for peer_id={}: {}",
                     peer.peer_id,
@@ -682,9 +711,17 @@ impl ConsoleSession {
             );
 
             let client = ConnectorClient::new(self.runtime.transport().clone());
+            let _ = self.runtime.transport().set_active_connection_timeouts(
+                Some(Duration::from_secs(show_peers_timeout_secs)),
+                Some(Duration::from_secs(show_peers_timeout_secs)),
+            );
             let response = match client.execute(&request) {
                 Ok(response) => response,
                 Err(err) => {
+                    let _ = self.runtime.transport().set_active_connection_timeouts(
+                        Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
+                        Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
+                    );
                     log::debug!(
                         "server peer refresh request failed for peer_id={}: {}",
                         peer.peer_id,
@@ -693,6 +730,11 @@ impl ConsoleSession {
                     continue;
                 }
             };
+
+            let _ = self.runtime.transport().set_active_connection_timeouts(
+                Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
+                Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
+            );
 
             let ConnectorResult::Query(result) = response.result else {
                 continue;
@@ -725,10 +767,19 @@ impl ConsoleSession {
                 });
             }
 
+            refreshed_from_server = true;
+            break;
+
         }
 
         if let Some(active_peer_id) = original_active_peer {
             let _ = self.runtime.transport_mut().select_peer(&active_peer_id);
+        }
+
+        if !refreshed_from_server {
+            log::debug!(
+                "server peer refresh completed without a successful discovery response"
+            );
         }
 
         Ok(())
@@ -1057,9 +1108,21 @@ fn is_global_sql_without_database(sql: &str) -> bool {
         return false;
     }
 
+    if tokens[0] == "show" && tokens[1] == "bootstrap" {
+        return tokens.get(2).is_some_and(|token| token == "status");
+    }
+
+    if tokens[0] == "show" && tokens[1] == "catalog" {
+        return tokens.get(2).is_some_and(|token| token == "workers");
+    }
+
     matches!(
         (tokens[0].as_str(), tokens[1].as_str()),
-        ("show", "databases") | ("create", "database") | ("drop", "database")
+        ("show", "databases")
+            | ("show", "entities")
+            | ("show", "server")
+            | ("create", "database")
+            | ("drop", "database")
     )
     
 }
@@ -2532,6 +2595,25 @@ mod tests {
         let database = resolve_database_for_sql(None, false, "show databases;")
             .expect("show databases should not require explicit selection");
         assert_eq!(database, "main");
+    }
+
+    #[test]
+    fn resolve_database_without_selection_allows_status_commands() {
+        let entities_db = resolve_database_for_sql(None, false, "show entities;")
+            .expect("show entities should not require explicit selection");
+        assert_eq!(entities_db, "main");
+
+        let bootstrap_db = resolve_database_for_sql(None, false, "show bootstrap status;")
+            .expect("show bootstrap status should not require explicit selection");
+        assert_eq!(bootstrap_db, "main");
+
+        let peers_db = resolve_database_for_sql(None, false, "show server peers;")
+            .expect("show server peers should not require explicit selection");
+        assert_eq!(peers_db, "main");
+
+        let workers_db = resolve_database_for_sql(None, false, "show catalog workers;")
+            .expect("show catalog workers should not require explicit selection");
+        assert_eq!(workers_db, "main");
     }
 
     #[test]

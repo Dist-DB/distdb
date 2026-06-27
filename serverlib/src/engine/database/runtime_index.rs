@@ -1,10 +1,11 @@
 use ahash::{AHashMap, AHashSet};
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
+use std::time::Instant;
 
 use super::table::DatabaseTable;
 use crate::{
-    load_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
+    load_live_rows, warm_equality_cache_from_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
     TransactionKind,
 };
 
@@ -69,15 +70,31 @@ impl RuntimeIndexState {
 }
 
 /// Runtime indexes for all tables across all databases.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeIndexStore {
     indexes: AHashMap<String, RuntimeIndexState>,
+    materialize_non_primary: bool,
+    non_primary_field_allowlist: AHashSet<String>,
+    non_primary_index_allowlist: AHashSet<String>,
 }
 
 impl RuntimeIndexStore {
 
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            indexes: AHashMap::new(),
+            materialize_non_primary: runtime_index_materialize_non_primary(),
+            non_primary_field_allowlist: runtime_index_non_primary_field_allowlist(),
+            non_primary_index_allowlist: runtime_index_non_primary_index_allowlist(),
+        }
+    }
+
+    pub fn should_track_index(&self, index: &DatabaseIndex) -> bool {
+        if index.is_temporary() {
+            return false;
+        }
+
+        true
     }
 
     pub fn index(&self, index_id: &str) -> Option<&RuntimeIndexState> {
@@ -102,6 +119,10 @@ impl RuntimeIndexStore {
     }
 
     pub fn register_index(&mut self, index: DatabaseIndex) {
+        if !self.should_track_index(&index) {
+            return;
+        }
+
         let index_id = index.index_id.0.clone();
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index),
@@ -110,6 +131,10 @@ impl RuntimeIndexStore {
     }
 
     pub fn record_row(&mut self, index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) {
+        if !self.should_track_index(index) {
+            return;
+        }
+
         let key = index_value_tuple(index, row_map);
         self.index_mut(&index.index_id.0).insert(key);
     }
@@ -128,6 +153,11 @@ impl RuntimeIndexStore {
         I: IntoIterator<Item = &'a DatabaseIndex>,
     {
         for index in indexes {
+            
+            if !self.should_track_index(index) {
+                continue;
+            }
+
             let key = index_value_tuple(index, row_map);
             self.index_mut(&index.index_id.0).remove(&key);
         }
@@ -143,6 +173,11 @@ impl RuntimeIndexStore {
         }
 
         for index in indexes {
+
+            if !self.should_track_index(index) {
+                continue;
+            }
+
             let state = self.index_mut(&index.index_id.0);
             state.reserve_entries(row_maps.len());
 
@@ -163,11 +198,17 @@ impl RuntimeIndexStore {
         }
 
         for index in indexes {
+
+            if !self.should_track_index(index) {
+                continue;
+            }
+
             let state = self.index_mut(&index.index_id.0);
             for row_map in row_maps {
                 let key = index_value_tuple(index, row_map);
                 state.remove(&key);
             }
+
         }
     }
 
@@ -176,6 +217,10 @@ impl RuntimeIndexStore {
         I: IntoIterator<Item = &'a DatabaseIndex>,
     {
         for index in indexes {
+            if !self.should_track_index(index) {
+                continue;
+            }
+
             self.index_mut(&index.index_id.0).reserve_entries(additional);
         }
     }
@@ -207,9 +252,39 @@ impl RuntimeIndexStore {
         wal: &ConcurrentWalManager,
     ) {
 
+        let bootstrap_started_at = Instant::now();
+        log::info!(
+            "runtime index bootstrap mode materialize_non_primary={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
+            self.materialize_non_primary,
+            if self.non_primary_field_allowlist.is_empty() {
+                "<none>".to_string()
+            } else {
+                self.non_primary_field_allowlist
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+            if self.non_primary_index_allowlist.is_empty() {
+                "<none>".to_string()
+            } else {
+                self.non_primary_index_allowlist
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+
+        let mut bootstrapped_tables = 0usize;
+        let mut bootstrapped_indexes = 0usize;
+        let mut bootstrapped_rows = 0usize;
+
         for (database_id, catalog) in catalogs {
             
             for table_id in catalog.table_ids() {
+
+                let table_started_at = Instant::now();
 
                 let Some(table) = catalog.table(&table_id) else {
                     continue;
@@ -219,32 +294,129 @@ impl RuntimeIndexStore {
                     continue;
                 }
 
+                let tracked_indexes = table
+                    .indexes
+                    .values()
+                    .filter(|index| self.should_track_index(index))
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                if tracked_indexes.is_empty() {
+                    continue;
+                }
+
                 for index in table.indexes.values() {
                     self.register_index(index.clone());
                 }
 
+                let live_rows_started_at = Instant::now();
                 let live_rows = load_live_rows(wal, &table_id, &table.schema);
-                for index in table.indexes.values() {
-                    let state = self.index_mut(&index.index_id.0);
-                    state.rebuild(
-                        live_rows
-                            .iter()
-                            .map(|(_, row_map)| index_value_tuple(index, row_map))
-                            .collect(),
+                let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
+
+                let latest_tx_id = wal
+                    .latest_transaction_id(&table_id)
+                    .map(|tx| tx.0)
+                    .unwrap_or(0);
+
+                let mut warm_fields = tracked_indexes
+                    .iter()
+                    .flat_map(|index| {
+                        if index.field_names.is_empty() && !index.field_name.is_empty() {
+                            vec![index.field_name.clone()]
+                        } else {
+                            index.field_names.clone()
+                        }
+                    })
+                    .filter(|field_name| !field_name.is_empty())
+                    .map(|field_name| common::normalize_identifier!(field_name))
+                    .collect::<Vec<_>>();
+                warm_fields.sort();
+                warm_fields.dedup();
+
+                warm_equality_cache_from_live_rows(
+                    &table_id,
+                    latest_tx_id,
+                    &live_rows,
+                    &warm_fields,
+                );
+
+                if live_rows_elapsed_ms >= 1_000 {
+                    log::info!(
+                        "runtime index bootstrap live-row materialization database={} table={} live_rows={} elapsed_ms={}",
+                        database_id,
+                        table_id,
+                        live_rows.len(),
+                        live_rows_elapsed_ms,
                     );
-                    state.index = Some(index.clone());
                 }
 
+                let mut rebuilt = tracked_indexes
+                    .iter()
+                    .map(|index| {
+                        (
+                            index.index_id.0.clone(),
+                            index.clone(),
+                            AHashSet::with_capacity(live_rows.len()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                for (_, row_map) in &live_rows {
+                    for (_, index, entries) in &mut rebuilt {
+                        entries.insert(index_value_tuple(index, row_map));
+                    }
+                }
+
+                for (index_id, index, entries) in rebuilt {
+                    let state = self.index_mut(&index_id);
+                    state.rebuild(entries);
+                    state.index = Some(index);
+                }
+
+                bootstrapped_tables += 1;
+                bootstrapped_indexes += tracked_indexes.len();
+                bootstrapped_rows += live_rows.len();
+
                 log::debug!(
-                    "runtime index bootstrapped database={} table={} indexes={}",
+                    "runtime index bootstrapped database={} table={} indexes={} live_rows={}",
                     database_id,
                     table_id,
-                    table.indexes.len(),
+                    tracked_indexes.len(),
+                    live_rows.len(),
                 );
+
+                let table_elapsed_ms = table_started_at.elapsed().as_millis();
+                log::info!(
+                    "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} live_row_materialization_ms={} elapsed_ms={}",
+                    database_id,
+                    table_id,
+                    tracked_indexes.len(),
+                    live_rows.len(),
+                    live_rows_elapsed_ms,
+                    table_elapsed_ms,
+                );
+
+                if bootstrapped_tables % 10 == 0 {
+                    log::info!(
+                        "runtime index bootstrap progress tables={} indexes={} live_rows={} elapsed_ms={}",
+                        bootstrapped_tables,
+                        bootstrapped_indexes,
+                        bootstrapped_rows,
+                        bootstrap_started_at.elapsed().as_millis(),
+                    );
+                }
             
             }
         
         }
+
+        log::info!(
+            "runtime index bootstrap complete tables={} indexes={} live_rows={} elapsed_ms={}",
+            bootstrapped_tables,
+            bootstrapped_indexes,
+            bootstrapped_rows,
+            bootstrap_started_at.elapsed().as_millis(),
+        );
     
     }
 
@@ -280,6 +452,45 @@ impl RuntimeIndexStore {
 
 }
 
+impl Default for RuntimeIndexStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn runtime_index_materialize_non_primary() -> bool {
+    std::env::var("DISTDB_RUNTIME_INDEX_MATERIALIZE_NON_PRIMARY")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn runtime_index_non_primary_field_allowlist() -> AHashSet<String> {
+    parse_runtime_index_allowlist_env("DISTDB_RUNTIME_INDEX_NON_PRIMARY_FIELDS")
+}
+
+fn runtime_index_non_primary_index_allowlist() -> AHashSet<String> {
+    parse_runtime_index_allowlist_env("DISTDB_RUNTIME_INDEX_NON_PRIMARY_INDEX_IDS")
+}
+
+fn parse_runtime_index_allowlist_env(var_name: &str) -> AHashSet<String> {
+    let Some(value) = std::env::var(var_name).ok() else {
+        return AHashSet::new();
+    };
+
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| common::normalize_identifier!(entry))
+        .collect()
+}
+
 pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) -> Vec<Vec<u8>> {
     let mut values = Vec::with_capacity(if index.field_names.is_empty() { 1 } else { index.field_names.len() });
 
@@ -297,7 +508,16 @@ pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8
 }
 
 pub fn primary_key_index(table: &DatabaseTable) -> Option<&DatabaseIndex> {
-    table.indexes.values().find(|index| index.is_primary_key())
+    table
+        .indexes
+        .values()
+        .find(|index| index.is_primary_key())
+        .or_else(|| {
+            table
+                .indexes
+                .values()
+                .find(|index| index.index_id.0.to_ascii_lowercase().starts_with("pri:"))
+        })
 }
 
 

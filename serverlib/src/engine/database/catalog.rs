@@ -406,6 +406,51 @@ impl DatabaseCatalog {
         Ok(())
     }
 
+    pub fn begin_indexing(&mut self) -> DatabaseResult<()> {
+        if self.status == ObjectStatus::Indexing {
+            for entity in self.entities.values_mut() {
+                if let DatabaseEntity::Table(table) = entity {
+                    table.begin_indexing()?;
+                }
+            }
+
+            return Ok(());
+        }
+
+        self.transition_status(ObjectStatus::Indexing)?;
+
+        for entity in self.entities.values_mut() {
+            if let DatabaseEntity::Table(table) = entity {
+                table.begin_indexing()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn complete_indexing(&mut self) -> DatabaseResult<()> {
+        if self.status == ObjectStatus::Ready {
+            for entity in self.entities.values_mut() {
+                if let DatabaseEntity::Table(table) = entity {
+                    table.complete_indexing()?;
+                }
+            }
+
+            return Ok(());
+        }
+
+        self.transition_status(ObjectStatus::Ready)?;
+
+        for entity in self.entities.values_mut() {
+            if let DatabaseEntity::Table(table) = entity
+                && table.status() == ObjectStatus::Indexing {
+                    table.complete_indexing()?;
+                }
+        }
+
+        Ok(())
+    }
+
     pub fn table_schema(&self, table_id: &str) -> Option<&TableSchema> {
         self.table(table_id).map(DatabaseTable::schema)
     }

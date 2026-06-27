@@ -83,6 +83,32 @@ pub fn decode_row_payload(
     
 }
 
+pub fn decode_row_field_value(
+    schema: &TableSchema,
+    payload: &[u8],
+    field_name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+
+    let ordered_field_names = field_names_by_ordinal(schema);
+
+    if let Some(position) = ordered_field_names.iter().position(|name| name == field_name)
+        && let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
+            return Ok(ordinal_row.get(position).cloned().flatten());
+        }
+
+    if let Ok(legacy_row) = bincode::deserialize::<HashMap<String, Vec<u8>>>(payload) {
+        return Ok(legacy_row.get(field_name).cloned());
+    }
+
+    if let Some(position) = ordered_field_names.iter().position(|name| name == field_name)
+        && let Ok(legacy_ordinal_row) = bincode::deserialize::<Vec<Vec<u8>>>(payload) {
+            return Ok(legacy_ordinal_row.get(position).cloned());
+        }
+
+    Err("row payload decode failed".to_string())
+
+}
+
 
 #[cfg(test)]
 #[path = "row_payload_test.rs"]

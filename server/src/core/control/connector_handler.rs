@@ -21,20 +21,206 @@ use serverlib::p2p::protocol::{
     TransactionsSinceResponse,
 };
 use serverlib::{
-    AffinityProcessor, ServerP2pEvent, ServerP2pRuntime, encode_wal_frame,
+    AffinityProcessor, DatabaseId, ServerP2pEvent, ServerP2pRuntime, encode_wal_frame,
     import_p2p_ca_pem_if_missing, sign_tls_enrollment_csr,
 };
 use common::helpers::p2p::{
     decode_ca_bootstrap_request, encode_ca_bootstrap_response, is_ca_bootstrap_frame,
     CaBootstrapResponse,
 };
+use common::helpers::format::FileKind;
+use common::helpers::list_files;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::AsyncReadExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
+const SERVER_BOOTSTRAP_STATUS_SQL: &str = "__distdb_bootstrap_status__";
+const SERVER_SHOW_ENTITIES_SQL: &str = "__distdb_show_entities__";
+const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
+
+#[derive(Debug, Clone)]
+pub struct CatalogWorkerStats {
+    pub catalog_id: String,
+    pub queue_depth: usize,
+    pub active_requests: usize,
+    pub routed_sessions: usize,
+}
+
+#[derive(Clone)]
+struct CatalogWorkerHandle {
+    sender: mpsc::Sender<CatalogDispatchMessage>,
+    queue_depth: Arc<std::sync::atomic::AtomicUsize>,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct CatalogDispatchMessage {
+    request: ConnectorRequest,
+    session_id: String,
+    connection_id: usize,
+    response_tx: oneshot::Sender<ConnectorResponse>,
+}
+
+#[derive(Clone)]
+pub struct CatalogDispatcher {
+    app: Arc<Mutex<ServerApp>>,
+    workers: Arc<Mutex<HashMap<String, CatalogWorkerHandle>>>,
+    session_routes: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl CatalogDispatcher {
+    pub fn new(app: Arc<Mutex<ServerApp>>) -> Self {
+        Self {
+            app,
+            workers: Arc::new(Mutex::new(HashMap::new())),
+            session_routes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn worker_for_catalog(&self, catalog_id: &str) -> CatalogWorkerHandle {
+        let mut workers = self.workers.lock().await;
+        if let Some(worker) = workers.get(catalog_id) {
+            return worker.clone();
+        }
+
+        let (tx, mut rx) = mpsc::channel::<CatalogDispatchMessage>(512);
+        let queue_depth = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Arc::clone(&self.app);
+        let queue_depth_for_worker = Arc::clone(&queue_depth);
+        let active_for_worker = Arc::clone(&active);
+        let catalog_id_for_worker = catalog_id.to_string();
+
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                queue_depth_for_worker.fetch_sub(1, Ordering::SeqCst);
+                active_for_worker.fetch_add(1, Ordering::SeqCst);
+
+                let response = execute_app_request_for_session(
+                    &app,
+                    &message.request,
+                    &message.session_id,
+                    message.connection_id,
+                )
+                .await;
+
+                active_for_worker.fetch_sub(1, Ordering::SeqCst);
+
+                if message.response_tx.send(response).is_err() {
+                    log::debug!(
+                        "catalog worker dropped response for catalog={} because requester is gone",
+                        catalog_id_for_worker
+                    );
+                }
+            }
+        });
+
+        let worker = CatalogWorkerHandle {
+            sender: tx,
+            queue_depth,
+            active,
+        };
+
+        workers.insert(catalog_id.to_string(), worker.clone());
+        worker
+    }
+
+    pub async fn dispatch(
+        &self,
+        catalog_id: &str,
+        request: ConnectorRequest,
+        session_id: String,
+        connection_id: usize,
+    ) -> Result<ConnectorResponse, String> {
+        let worker = self.worker_for_catalog(catalog_id).await;
+        let (response_tx, response_rx) = oneshot::channel::<ConnectorResponse>();
+
+        {
+            let mut routes = self.session_routes.lock().await;
+            routes.insert(session_id.clone(), catalog_id.to_string());
+        }
+
+        worker.queue_depth.fetch_add(1, Ordering::SeqCst);
+
+        if worker
+            .sender
+            .send(CatalogDispatchMessage {
+                request,
+                session_id,
+                connection_id,
+                response_tx,
+            })
+            .await
+            .is_err()
+        {
+            worker.queue_depth.fetch_sub(1, Ordering::SeqCst);
+            return Err("catalog worker is unavailable".to_string());
+        }
+
+        response_rx
+            .await
+            .map_err(|_| "catalog worker failed to reply".to_string())
+    }
+
+    pub async fn worker_stats(&self) -> Vec<CatalogWorkerStats> {
+        let workers = self.workers.lock().await;
+        let routes = self.session_routes.lock().await;
+
+        let mut session_counts = HashMap::<String, usize>::new();
+        for catalog_id in routes.values() {
+            *session_counts.entry(catalog_id.clone()).or_insert(0) += 1;
+        }
+
+        let mut stats = workers
+            .iter()
+            .map(|(catalog_id, handle)| CatalogWorkerStats {
+                catalog_id: catalog_id.clone(),
+                queue_depth: handle.queue_depth.load(Ordering::SeqCst),
+                active_requests: handle.active.load(Ordering::SeqCst),
+                routed_sessions: *session_counts.get(catalog_id).unwrap_or(&0),
+            })
+            .collect::<Vec<_>>();
+
+        stats.sort_by(|lhs, rhs| lhs.catalog_id.cmp(&rhs.catalog_id));
+        stats
+    }
+}
+
+fn request_catalog_route_key(request: &ConnectorRequest) -> Option<String> {
+    let ConnectorCommand::Query { query } = &request.command else {
+        return None;
+    };
+
+    let database_id = common::normalize_identifier!(query.database_id.clone());
+    if database_id.is_empty() {
+        return None;
+    }
+
+    Some(database_id)
+}
+
+async fn execute_app_request_for_session(
+    app: &Arc<Mutex<ServerApp>>,
+    request: &ConnectorRequest,
+    session_id: &str,
+    connection_id: usize,
+) -> ConnectorResponse {
+    let mut app = app.lock().await;
+
+    if app.get_session(session_id).is_none() {
+        app.init_session(
+            session_id.to_string(),
+            connection_id,
+            "root".to_string(),
+        );
+    }
+
+    app.handle_connector_request_for_session(request, session_id)
+}
 
 pub fn node_announce_dedup_key(node: &NodeDescriptor) -> String {
     format!("{}|{}", node.id.0, node.addrs.join(","))
@@ -44,6 +230,619 @@ pub fn is_server_peer_discovery_query(sql: &str) -> bool {
     let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
 
     normalized == SERVER_PEER_DISCOVERY_SQL || normalized == "show server peers"
+}
+
+pub fn is_bootstrap_status_query(sql: &str) -> bool {
+    let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    normalized == SERVER_BOOTSTRAP_STATUS_SQL || normalized == "show bootstrap status"
+}
+
+pub fn is_show_entities_query(sql: &str) -> bool {
+    let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    normalized == SERVER_SHOW_ENTITIES_SQL || normalized == "show entities"
+}
+
+pub fn is_show_catalog_workers_query(sql: &str) -> bool {
+    let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    normalized == SERVER_SHOW_CATALOG_WORKERS_SQL || normalized == "show catalog workers"
+}
+
+pub fn maybe_bootstrap_status_response(
+    request: &ConnectorRequest,
+    bootstrap_ready: bool,
+) -> Option<ConnectorResponse> {
+    let ConnectorCommand::Query { query } = &request.command else {
+        return None;
+    };
+
+    if !is_bootstrap_status_query(&query.sql) {
+        return None;
+    }
+
+    let (mode, entities_state, indexes_state, message) = if bootstrap_ready {
+        (
+            "full",
+            "loaded",
+            "loaded",
+            "server bootstrap complete; full database command set is enabled",
+        )
+    } else {
+        (
+            "limited",
+            "loading",
+            "loading",
+            "server is bootstrapping; only connectivity and status/discovery commands are enabled",
+        )
+    };
+
+    let response = ConnectorResponse::applied(
+        request.request_id.clone(),
+        ConnectorResult::Query(QueryResult {
+            columns: vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "bootstrap_ready".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "session_mode".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "entities_state".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 4,
+                    field_name: "indexes_state".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 5,
+                    field_name: "database_commands_enabled".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 6,
+                    field_name: "message".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+            ],
+            rows: vec![vec![
+                if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
+                mode.as_bytes().to_vec(),
+                entities_state.as_bytes().to_vec(),
+                indexes_state.as_bytes().to_vec(),
+                if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
+                message.as_bytes().to_vec(),
+            ]],
+            timings: QueryTimings {
+                server_parse_ms: 0,
+                server_execute_ms: 0,
+                server_total_ms: 0,
+                network_round_trip_ms: None,
+                cache: None,
+            },
+        }),
+    );
+
+    Some(response)
+}
+
+fn request_allowed_during_bootstrap(request: &ConnectorRequest) -> bool {
+    match &request.command {
+        ConnectorCommand::Query { query } => {
+            is_server_peer_discovery_query(&query.sql)
+                || is_bootstrap_status_query(&query.sql)
+                || is_show_entities_query(&query.sql)
+                || is_show_catalog_workers_query(&query.sql)
+                || extract_auth_token(&query.sql).is_some()
+        }
+        _ => false,
+    }
+}
+
+pub async fn maybe_show_catalog_workers_response(
+    request: &ConnectorRequest,
+    catalog_dispatcher: &Arc<CatalogDispatcher>,
+    bootstrap_ready: bool,
+) -> Option<ConnectorResponse> {
+    let ConnectorCommand::Query { query } = &request.command else {
+        return None;
+    };
+
+    if !is_show_catalog_workers_query(&query.sql) {
+        return None;
+    }
+
+    let stats = catalog_dispatcher.worker_stats().await;
+    let mut rows = Vec::new();
+
+    if stats.is_empty() {
+        rows.push(vec![
+            b"*".to_vec(),
+            b"0".to_vec(),
+            b"0".to_vec(),
+            b"0".to_vec(),
+            b"idle".to_vec(),
+            if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
+        ]);
+    } else {
+        for stat in stats {
+            rows.push(vec![
+                stat.catalog_id.into_bytes(),
+                stat.queue_depth.to_string().into_bytes(),
+                stat.active_requests.to_string().into_bytes(),
+                stat.routed_sessions.to_string().into_bytes(),
+                b"running".to_vec(),
+                if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
+            ]);
+        }
+    }
+
+    Some(ConnectorResponse::applied(
+        request.request_id.clone(),
+        ConnectorResult::Query(QueryResult {
+            columns: vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "catalog_id".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "queue_depth".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "active_requests".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 4,
+                    field_name: "routed_sessions".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 5,
+                    field_name: "worker_state".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 6,
+                    field_name: "bootstrap_ready".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+            ],
+            rows,
+            timings: QueryTimings {
+                server_parse_ms: 0,
+                server_execute_ms: 0,
+                server_total_ms: 0,
+                network_round_trip_ms: None,
+                cache: None,
+            },
+        }),
+    ))
+}
+
+pub async fn maybe_show_entities_response(
+    request: &ConnectorRequest,
+    app: &Arc<Mutex<ServerApp>>,
+    node_data_dir: &Path,
+    bootstrap_ready: bool,
+) -> Option<ConnectorResponse> {
+    let ConnectorCommand::Query { query } = &request.command else {
+        return None;
+    };
+
+    if !is_show_entities_query(&query.sql) {
+        return None;
+    }
+
+    let normalized_sql = query
+        .sql
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_ascii_lowercase();
+    let database_filter = if normalized_sql == SERVER_SHOW_ENTITIES_SQL {
+        common::normalize_identifier!(query.database_id.clone())
+    } else {
+        String::new()
+    };
+
+    let mut rows = Vec::new();
+
+    let app_guard = if bootstrap_ready {
+        Some(app.lock().await)
+    } else {
+        app.try_lock().ok()
+    };
+
+    let Some(app) = app_guard else {
+        let discovered_catalog_ids = list_files(node_data_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|files| files.into_iter())
+            .filter(|file| {
+                file.extension()
+                    .and_then(|value| value.to_str())
+                    == Some(FileKind::Catalog.extension())
+            })
+            .filter_map(|file| file.file_stem().and_then(|value| value.to_str()).map(str::to_string))
+            .map(|catalog_id| common::normalize_identifier!(catalog_id))
+            .collect::<Vec<_>>();
+
+        let mut catalog_ids = discovered_catalog_ids;
+        catalog_ids.sort();
+        catalog_ids.dedup();
+
+        if database_filter.is_empty() {
+            if catalog_ids.is_empty() {
+                rows.push(vec![
+                    b"*".to_vec(),
+                    Vec::new(),
+                    b"system".to_vec(),
+                    b"bootstrap".to_vec(),
+                    b"busy".to_vec(),
+                    b"loading".to_vec(),
+                    b"n/a".to_vec(),
+                ]);
+            } else {
+                for catalog_id in catalog_ids {
+                    rows.push(vec![
+                        catalog_id.clone().into_bytes(),
+                        catalog_id.clone().into_bytes(),
+                        b"database".to_vec(),
+                        catalog_id.into_bytes(),
+                        b"load".to_vec(),
+                        b"loading".to_vec(),
+                        b"n/a".to_vec(),
+                    ]);
+                }
+            }
+        } else {
+            let matches_filter = if catalog_ids.iter().any(|id| id == &database_filter) {
+                true
+            } else {
+                DatabaseId::from_database_name(&database_filter)
+                    .ok()
+                    .map(|id| catalog_ids.iter().any(|catalog_id| catalog_id == &id.0))
+                    .unwrap_or(false)
+            };
+
+            if !matches_filter {
+                return Some(ConnectorResponse::rejected(
+                    request.request_id.clone(),
+                    format!("show entities failed: catalog/database '{}' is not loaded", database_filter),
+                ));
+            }
+
+            rows.push(vec![
+                database_filter.clone().into_bytes(),
+                database_filter.clone().into_bytes(),
+                b"database".to_vec(),
+                database_filter.clone().into_bytes(),
+                b"load".to_vec(),
+                b"loading".to_vec(),
+                b"n/a".to_vec(),
+            ]);
+        }
+
+        let response = ConnectorResponse::applied(
+            request.request_id.clone(),
+            ConnectorResult::Query(QueryResult {
+                columns: vec![
+                    FieldDef {
+                        seqno: 1,
+                        field_name: "database_id".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 2,
+                        field_name: "database_name".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 3,
+                        field_name: "entity_type".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 4,
+                        field_name: "entity_id".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 5,
+                        field_name: "status".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 6,
+                        field_name: "load_state".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    },
+                    FieldDef {
+                        seqno: 7,
+                        field_name: "index_count".to_string(),
+                        field_type: FieldType::Text,
+                        nullable: false,
+                        indexed: FieldIndex::None,
+                        default_value: None,
+                        metadata: None,
+                    },
+                ],
+                rows,
+                timings: QueryTimings {
+                    server_parse_ms: 0,
+                    server_execute_ms: 0,
+                    server_total_ms: 0,
+                    network_round_trip_ms: None,
+                    cache: None,
+                },
+            }),
+        );
+
+        return Some(response);
+    };
+
+    let target_database_ids = if database_filter.is_empty() {
+        let mut all = app.catalogs().keys().cloned().collect::<Vec<_>>();
+        all.sort();
+        all
+    } else {
+        let resolved_database_id = if app.catalogs().contains_key(&database_filter) {
+            database_filter.clone()
+        } else {
+            DatabaseId::from_database_name(&database_filter)
+                .ok()
+                .map(|id| id.0)
+                .filter(|id| app.catalogs().contains_key(id))
+                .unwrap_or_else(|| database_filter.clone())
+        };
+
+        if !app.catalogs().contains_key(&resolved_database_id) {
+            return Some(ConnectorResponse::rejected(
+                request.request_id.clone(),
+                format!("show entities failed: catalog/database '{}' is not loaded", database_filter),
+            ));
+        }
+
+        vec![resolved_database_id]
+    };
+
+    for resolved_database_id in target_database_ids {
+        let Some(catalog) = app.catalogs().get(&resolved_database_id) else {
+            continue;
+        };
+
+        rows.push(vec![
+            resolved_database_id.clone().into_bytes(),
+            catalog.database_name().as_bytes().to_vec(),
+            b"database".to_vec(),
+            resolved_database_id.clone().into_bytes(),
+            catalog.status().to_string().to_ascii_lowercase().into_bytes(),
+            if bootstrap_ready {
+                b"loaded".to_vec()
+            } else {
+                b"loading".to_vec()
+            },
+            b"n/a".to_vec(),
+        ]);
+
+        let mut table_ids = catalog.table_ids();
+        table_ids.sort();
+
+        for table_id in table_ids {
+            let Some(table) = catalog.table(&table_id) else {
+                continue;
+            };
+
+            let mut table_status = table.status().to_string().to_ascii_lowercase();
+            if bootstrap_ready && table_status == "load" {
+                table_status = "ready".to_string();
+            }
+
+            rows.push(vec![
+                resolved_database_id.clone().into_bytes(),
+                catalog.database_name().as_bytes().to_vec(),
+                b"table".to_vec(),
+                table_id.clone().into_bytes(),
+                table_status.into_bytes(),
+                if bootstrap_ready {
+                    b"loaded".to_vec()
+                } else {
+                    b"loading".to_vec()
+                },
+                table.indexes.len().to_string().into_bytes(),
+            ]);
+
+            let mut indexes = table
+                .indexes
+                .values()
+                .map(|index| index.index_id.0.clone())
+                .collect::<Vec<_>>();
+            indexes.sort();
+
+            for index_id in indexes {
+                rows.push(vec![
+                    resolved_database_id.clone().into_bytes(),
+                    catalog.database_name().as_bytes().to_vec(),
+                    b"index".to_vec(),
+                    index_id.into_bytes(),
+                    if bootstrap_ready {
+                        b"ready".to_vec()
+                    } else {
+                        b"load".to_vec()
+                    },
+                    if bootstrap_ready {
+                        b"loaded".to_vec()
+                    } else {
+                        b"loading".to_vec()
+                    },
+                    b"n/a".to_vec(),
+                ]);
+            }
+        }
+    }
+
+    let response = ConnectorResponse::applied(
+        request.request_id.clone(),
+        ConnectorResult::Query(QueryResult {
+            columns: vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "database_id".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "database_name".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "entity_type".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 4,
+                    field_name: "entity_id".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 5,
+                    field_name: "status".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 6,
+                    field_name: "load_state".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 7,
+                    field_name: "index_count".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+            ],
+            rows,
+            timings: QueryTimings {
+                server_parse_ms: 0,
+                server_execute_ms: 0,
+                server_total_ms: 0,
+                network_round_trip_ms: None,
+                cache: None,
+            },
+        }),
+    );
+
+    Some(response)
 }
 
 pub async fn maybe_server_peer_discovery_response(
@@ -159,7 +958,10 @@ pub fn is_valid_server_node(node: &NodeDescriptor) -> bool {
 #[expect(clippy::too_many_arguments, reason = "necessary for handling connector stream with access to app, p2p runtime, affinity processor, and connection context")]
 pub async fn handle_connector_stream(
     mut stream: BoxedConnectorStream,
+    bootstrap_ready: Arc<AtomicBool>,
     app: Arc<Mutex<ServerApp>>,
+    catalog_dispatcher: Arc<CatalogDispatcher>,
+    node_data_dir: std::path::PathBuf,
     p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
     seen_node_announces: Arc<Mutex<HashSet<String>>>,
@@ -441,9 +1243,13 @@ pub async fn handle_connector_stream(
                     });
                 }
 
-                let summaries = {
+                let summaries = if bootstrap_ready.load(Ordering::SeqCst) {
                     let app_guard = app.lock().await;
                     build_database_schema_summaries_from_app(&app_guard)
+                } else if let Ok(app_guard) = app.try_lock() {
+                    build_database_schema_summaries_from_app(&app_guard)
+                } else {
+                    Vec::new()
                 };
 
                 let processor_lock = affinity_processor.lock().await;
@@ -517,25 +1323,42 @@ pub async fn handle_connector_stream(
                     schema_req.database_id
                 );
 
-                let app_guard = app.lock().await;
-                let (ok, error, schema_definitions) =
-                    match build_schema_definitions_for_database(&app_guard, &schema_req.database_id)
-                    {
-                        Ok(definitions) => (true, None, definitions),
-                        Err(err) => (false, Some(err), Vec::new()),
+                let app_guard = if bootstrap_ready.load(Ordering::SeqCst) {
+                    Some(app.lock().await)
+                } else {
+                    app.try_lock().ok()
+                };
+
+                let (ok, error, schema_identifier, schema_hash, schema_definitions, database_name) =
+                    if let Some(app_guard) = app_guard {
+                        let (ok, error, schema_definitions) =
+                            match build_schema_definitions_for_database(&app_guard, &schema_req.database_id)
+                            {
+                                Ok(definitions) => (true, None, definitions),
+                                Err(err) => (false, Some(err), Vec::new()),
+                            };
+                        let (schema_identifier, schema_hash) = resolve_schema_catalog(
+                            &app_guard,
+                            &schema_req.database_id,
+                        )
+                        .map(schema_catalog_signature)
+                        .unwrap_or((0, None));
+                        
+                        let database_name = resolve_schema_catalog(&app_guard, &schema_req.database_id)
+                            .map(|cat| cat.database_name().to_string())
+                            .unwrap_or_default();
+
+                        (ok, error, schema_identifier, schema_hash, schema_definitions, database_name)
+                    } else {
+                        (
+                            false,
+                            Some("catalog bootstrap in progress; retry shortly".to_string()),
+                            0,
+                            None,
+                            Vec::new(),
+                            String::new(),
+                        )
                     };
-                let (schema_identifier, schema_hash) = resolve_schema_catalog(
-                    &app_guard,
-                    &schema_req.database_id,
-                )
-                .map(schema_catalog_signature)
-                .unwrap_or((0, None));
-                
-                let database_name = resolve_schema_catalog(&app_guard, &schema_req.database_id)
-                    .map(|cat| cat.database_name().to_string())
-                    .unwrap_or_default();
-                
-                drop(app_guard);
 
                 let response = SchemaCatalogResponse {
                     request_id: schema_req.request_id.clone(),
@@ -617,37 +1440,48 @@ pub async fn handle_connector_stream(
                     txn_req.from_transaction_id
                 );
 
-                let app_guard = app.lock().await;
+                let app_guard = if bootstrap_ready.load(Ordering::SeqCst) {
+                    Some(app.lock().await)
+                } else {
+                    app.try_lock().ok()
+                };
+
                 let stream_cursors = txn_req
                     .from_stream_transaction_ids
                     .iter()
                     .map(|(stream_id, tx_id)| (stream_id.clone(), *tx_id))
                     .collect::<HashMap<_, _>>();
-                let (ok, error, transactions) = match app_guard.export_wal_records_for_database(
-                    &txn_req.database_id,
-                    txn_req.from_transaction_id,
-                    Some(&stream_cursors),
-                ) {
-                    Ok(records) => {
-                        let encoded = records
-                            .into_iter()
-                            .filter_map(|frame| match encode_wal_frame(&frame) {
-                                Ok(encoded) => Some(encoded),
-                                Err(err) => {
-                                    log::warn!(
-                                        "failed encoding WAL frame for response: {}",
-                                        err
-                                    );
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        (true, None, encoded)
+                let (ok, error, transactions) = if let Some(app_guard) = app_guard {
+                    match app_guard.export_wal_records_for_database(
+                        &txn_req.database_id,
+                        txn_req.from_transaction_id,
+                        Some(&stream_cursors),
+                    ) {
+                        Ok(records) => {
+                            let encoded = records
+                                .into_iter()
+                                .filter_map(|frame| match encode_wal_frame(&frame) {
+                                    Ok(encoded) => Some(encoded),
+                                    Err(err) => {
+                                        log::warn!(
+                                            "failed encoding WAL frame for response: {}",
+                                            err
+                                        );
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            (true, None, encoded)
+                        }
+                        Err(err) => (false, Some(err), Vec::new()),
                     }
-                    Err(err) => (false, Some(err), Vec::new()),
+                } else {
+                    (
+                        false,
+                        Some("catalog bootstrap in progress; retry shortly".to_string()),
+                        Vec::new(),
+                    )
                 };
-
-                drop(app_guard);
 
                 let response = TransactionsSinceResponse {
                     request_id: txn_req.request_id.clone(),
@@ -767,6 +1601,46 @@ pub async fn handle_connector_stream(
             continue;
         }
 
+        if let Some(response) = maybe_bootstrap_status_response(
+            &request,
+            bootstrap_ready.load(Ordering::SeqCst),
+        ) {
+            if let Err(err) = write_response_frame(&mut stream, response).await {
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                return Err(err);
+            }
+            continue;
+        }
+
+        if let Some(response) = maybe_show_entities_response(
+            &request,
+            &app,
+            &node_data_dir,
+            bootstrap_ready.load(Ordering::SeqCst),
+        )
+        .await
+        {
+            if let Err(err) = write_response_frame(&mut stream, response).await {
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                return Err(err);
+            }
+            continue;
+        }
+
+        if let Some(response) = maybe_show_catalog_workers_response(
+            &request,
+            &catalog_dispatcher,
+            bootstrap_ready.load(Ordering::SeqCst),
+        )
+        .await
+        {
+            if let Err(err) = write_response_frame(&mut stream, response).await {
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                return Err(err);
+            }
+            continue;
+        }
+
         if !session.authenticated {
 
             let auth_outcome = match &request.command {
@@ -778,15 +1652,9 @@ pub async fn handle_connector_stream(
 
             let response = match auth_outcome {
                 Some(true) => {
-                    // Initialize session state in ServerApp
-                    let mut app = app.lock().await;
-                    app.init_session(
-                        session.session_id.clone(),
-                        connection_id,
-                        "root".to_string(),  // temporary user; will be from auth context
-                    );
-                    drop(app);
-                    
+                    // Auth success establishes transport-level session only.
+                    // Catalog-bound session state is initialized lazily on first
+                    // command that actually enters the application core.
                     ConnectorResponse::applied(
                         request.request_id,
                         ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
@@ -808,11 +1676,48 @@ pub async fn handle_connector_stream(
 
         }
 
+        if !bootstrap_ready.load(Ordering::SeqCst)
+            && !request_allowed_during_bootstrap(&request)
+        {
+            let response = ConnectorResponse::rejected(
+                request.request_id.clone(),
+                "server is bootstrapping; limited session mode allows only password setup, server peer discovery, entity status (`show entities;`), catalog worker status (`show catalog workers;`), and bootstrap status (`show bootstrap status;`)".to_string(),
+            );
+
+            if let Err(err) = write_response_frame(&mut stream, response).await {
+                rollback_active_session_transaction(&app, &session.session_id).await;
+                return Err(err);
+            }
+
+            log::info!(
+                "connector request limited while bootstrapping from {} request_id={}",
+                peer_addr,
+                request.request_id
+            );
+
+            continue;
+        }
+
         session.record_request(&request);
 
-        let response = {
-            let mut app = app.lock().await;
-            app.handle_connector_request_for_session(&request, &session.session_id)
+        let response = if let Some(catalog_id) = request_catalog_route_key(&request) {
+            match catalog_dispatcher
+                .dispatch(
+                    &catalog_id,
+                    request.clone(),
+                    session.session_id.clone(),
+                    connection_id,
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => ConnectorResponse::rejected(
+                    request.request_id.clone(),
+                    format!("catalog dispatch failed: {}", err),
+                ),
+            }
+        } else {
+            execute_app_request_for_session(&app, &request, &session.session_id, connection_id).await
         };
 
         if let Err(err) = write_response_frame(&mut stream, response).await {
@@ -877,5 +1782,29 @@ mod tests {
         assert!(is_server_peer_discovery_query("show server peers"));
         assert!(is_server_peer_discovery_query("SHOW SERVER PEERS;"));
         assert!(!is_server_peer_discovery_query("show peers"));
+    }
+
+    #[test]
+    fn is_bootstrap_status_query_detects_internal_and_alias() {
+        assert!(is_bootstrap_status_query("__distdb_bootstrap_status__"));
+        assert!(is_bootstrap_status_query("show bootstrap status"));
+        assert!(is_bootstrap_status_query("SHOW BOOTSTRAP STATUS;"));
+        assert!(!is_bootstrap_status_query("show bootstrap"));
+    }
+
+    #[test]
+    fn is_show_entities_query_detects_internal_and_alias() {
+        assert!(is_show_entities_query("__distdb_show_entities__"));
+        assert!(is_show_entities_query("show entities"));
+        assert!(is_show_entities_query("SHOW ENTITIES;"));
+        assert!(!is_show_entities_query("show entity"));
+    }
+
+    #[test]
+    fn is_show_catalog_workers_query_detects_internal_and_alias() {
+        assert!(is_show_catalog_workers_query("__distdb_show_catalog_workers__"));
+        assert!(is_show_catalog_workers_query("show catalog workers"));
+        assert!(is_show_catalog_workers_query("SHOW CATALOG WORKERS;"));
+        assert!(!is_show_catalog_workers_query("show catalog worker"));
     }
 }

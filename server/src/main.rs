@@ -36,7 +36,7 @@ use server::core::control::affinity::{
     execute_affinity_join_sequence, initialize_affinity_with_persistence,
     parse_affinity_startup_config, parse_server_list_from_args,
 };
-use server::core::control::connector_handler::handle_connector_stream;
+use server::core::control::connector_handler::{CatalogDispatcher, handle_connector_stream};
 use server::core::control::outbound_transport::{
     configure_outbound_tls_state, send_service_request_to_addr,
 };
@@ -60,7 +60,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -460,24 +460,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tls,
     };
 
-    let mut app = ServerApp::new(config)?;
-    app.bootstrap()?;
-
-    let result = app.run_wal_smoke_test()?;
-
-    log::info!(
-        "server runtime initialized for node={} with {} active WAL worker(s) and {} probe records",
-        app.node_id(),
-        result.active_workers,
-        result.records_in_primary_table
-    );
+    let app = Arc::new(Mutex::new(ServerApp::new(config)?));
+    let bootstrap_ready = Arc::new(AtomicBool::new(false));
 
     let tcp_bind_addr = format!("{}:{}", listen_addr, port);
     let listener = TcpListener::bind(&tcp_bind_addr).await?;
     log::info!("connector request listener bound at {}", tcp_bind_addr);
 
-    let app = Arc::new(Mutex::new(app));
     let app_for_listener = Arc::clone(&app);
+    let catalog_dispatcher_for_listener = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
+    let bootstrap_ready_for_listener = Arc::clone(&bootstrap_ready);
     let p2p_runtime_for_listener = Arc::clone(&p2p_runtime);
     let affinity_processor_for_listener = Arc::clone(&affinity_processor);
     let seen_node_announces = Arc::new(Mutex::new(HashSet::<String>::new()));
@@ -493,6 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_connections = Arc::new(AtomicUsize::new(0));
     let active_connections_for_listener = Arc::clone(&active_connections);
     let local_node_for_listener = local_node.clone();
+    let node_data_dir_for_listener = node_data_dir.clone();
     let tls_acceptor_for_listener = tls_acceptor.clone();
     let ca_root_enabled_for_listener = ca_root_enabled;
 
@@ -514,6 +507,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     
                     let app = Arc::clone(&app_for_listener);
+                    let bootstrap_ready = Arc::clone(&bootstrap_ready_for_listener);
+                    let catalog_dispatcher = Arc::clone(&catalog_dispatcher_for_listener);
                     let p2p_runtime = Arc::clone(&p2p_runtime_for_listener);
                     let affinity_processor = Arc::clone(&affinity_processor_for_listener);
                     let seen_node_announces = Arc::clone(&seen_node_announces_for_listener);
@@ -521,6 +516,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let active_connections = Arc::clone(&active_connections_for_listener);
                     let local_node = local_node_for_listener.clone();
                     let tls_acceptor = tls_acceptor_for_listener.clone();
+                    let node_data_dir = node_data_dir_for_listener.clone();
                     let tls_mode = tls_mode;
                     let ca_root_enabled = ca_root_enabled_for_listener;
 
@@ -553,7 +549,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if let Err(err) = handle_connector_stream(
                             stream,
+                            bootstrap_ready,
                             app,
+                            catalog_dispatcher,
+                            node_data_dir,
                             p2p_runtime,
                             affinity_processor,
                             seen_node_announces,
@@ -592,6 +591,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
     });
+
+    let app_for_bootstrap = Arc::clone(&app);
+    let bootstrap_result = tokio::task::spawn_blocking(move || {
+        let mut app_guard = app_for_bootstrap.blocking_lock();
+        app_guard.bootstrap()?;
+        let result = app_guard.run_wal_smoke_test()?;
+        Ok::<(String, _), server::helpers::ServerAppError>((app_guard.node_id().to_string(), result))
+    })
+    .await
+    .map_err(|err| format!("server bootstrap task failed to join: {err}"))?;
+
+    let (bootstrapped_node_id, result) = bootstrap_result?;
+
+    log::info!(
+        "server runtime initialized for node={} with {} active WAL worker(s) and {} probe records",
+        bootstrapped_node_id,
+        result.active_workers,
+        result.records_in_primary_table
+    );
+
+    bootstrap_ready.store(true, Ordering::SeqCst);
+    log::info!("connector bootstrap gate opened; server is ready to accept requests");
 
     if let Some(config) = &affinity_config {
         

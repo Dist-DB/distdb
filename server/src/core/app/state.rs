@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use common::helpers::create_dir;
 use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore};
@@ -87,15 +88,52 @@ impl ServerApp {
 
     pub fn bootstrap(&mut self) -> Result<(), ServerAppError> {
 
+        let bootstrap_started_at = Instant::now();
+
+        let load_started_at = Instant::now();
         self.load_catalogs_from_disk()?;
+        let load_elapsed_ms = load_started_at.elapsed().as_millis();
+
+        let replay_started_at = Instant::now();
         self.replay_catalog_state_from_wal()?;
+        let replay_elapsed_ms = replay_started_at.elapsed().as_millis();
+
+        let index_started_at = Instant::now();
+        for catalog in self.catalogs.values_mut() {
+            catalog
+                .begin_indexing()
+                .map_err(|err| ServerAppError::Runtime(format!("failed to enter indexing state: {}", err)))?;
+        }
+
         self.runtime_indexes
             .bootstrap_from_catalogs(&self.catalogs, &self.wal);
-        
+
+        for catalog in self.catalogs.values_mut() {
+            catalog
+                .complete_indexing()
+                .map_err(|err| ServerAppError::Runtime(format!("failed to complete indexing state: {}", err)))?;
+        }
+
+        let index_elapsed_ms = index_started_at.elapsed().as_millis();
+
+        let total_elapsed_ms = bootstrap_started_at.elapsed().as_millis();
+
+        let table_count = self
+            .catalogs
+            .values()
+            .map(|catalog| catalog.table_ids().len())
+            .sum::<usize>();
+
         log::info!(
-            "server bootstrap complete for node_id={} data_dir={}",
+            "server bootstrap complete for node_id={} data_dir={} catalogs={} tables={} load_catalogs_ms={} replay_catalog_wal_ms={} runtime_index_bootstrap_ms={} total_ms={}",
             self.config.node_id,
-            self.node_data_dir.display()
+            self.node_data_dir.display(),
+            self.catalogs.len(),
+            table_count,
+            load_elapsed_ms,
+            replay_elapsed_ms,
+            index_elapsed_ms,
+            total_elapsed_ms,
         );
 
         Ok(())
