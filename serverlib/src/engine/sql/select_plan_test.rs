@@ -100,6 +100,61 @@ fn select_read_plan_parses_in_subquery_condition() {
 }
 
 #[test]
+fn select_read_plan_parses_exists_predicates() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where exists (select uid from __person where is_deleted = 0) or not exists (select uid from __person where is_deleted = 1)",
+    )
+    .expect("exists condition should parse");
+
+    assert!(matches!(plan.where_condition, Some(SelectCondition::Or(_))));
+}
+
+#[test]
+fn select_read_plan_parses_scalar_subquery_comparison() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where id_person = (select uid from __person where uid = '1')",
+    )
+    .expect("scalar subquery comparison should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(
+            SelectPredicate::ScalarSubqueryComparison { .. }
+        ))
+    ));
+}
+
+#[test]
+fn select_read_plan_parses_any_subquery_comparison() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where id_person = any ((select uid from __person))",
+    )
+    .expect("any-subquery comparison should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(
+            SelectPredicate::AnySubqueryComparison { .. }
+        ))
+    ));
+}
+
+#[test]
+fn select_read_plan_parses_all_subquery_comparison() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where id_person = all ((select uid from __person))",
+    )
+    .expect("all-subquery comparison should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(
+            SelectPredicate::AllSubqueryComparison { .. }
+        ))
+    ));
+}
+
+#[test]
 fn select_read_plan_parses_inbuilt_function_literals() {
     let plan = parse_select_read_plan_from_statement(
         "select uid from __account where uid = CONCAT('user', '001')",
@@ -173,6 +228,27 @@ fn select_read_plan_parses_inbuilt_function_projection_without_from() {
         plan.projection_items[0],
         SelectProjectionItem::InbuiltFunction { .. }
     ));
+}
+
+#[test]
+fn select_read_plan_parses_not_predicate_forms() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where email not like 'sam%@example.com' and role not in ('guest') and date_created not between 10 and 20",
+    )
+    .expect("negated predicate forms should parse");
+
+    assert!(matches!(plan.where_condition, Some(SelectCondition::And(_))));
+}
+
+#[test]
+fn select_read_plan_parses_limit_and_offset() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account limit 10 offset 2",
+    )
+    .expect("limit and offset should parse");
+
+    assert_eq!(plan.limit, Some(10));
+    assert_eq!(plan.offset, Some(2));
 }
 
 #[test]
@@ -313,6 +389,36 @@ fn select_full_outer_join_parses_join_kind() {
 }
 
 #[test]
+fn select_cross_join_parses_join_kind() {
+    let plan = parse_select_read_plan_from_statement(
+        "select u.email, p.name from users u cross join profiles p",
+    )
+    .expect("cross join select should parse");
+
+    assert_eq!(plan.joins.len(), 1);
+    assert_eq!(plan.joins[0].kind, SelectJoinKind::Cross);
+}
+
+#[test]
+fn select_join_using_parses_equality_condition() {
+    let plan = parse_select_read_plan_from_statement(
+        "select u.email, p.name from users u inner join profiles p using (id)",
+    )
+    .expect("join using select should parse");
+
+    assert_eq!(plan.joins.len(), 1);
+    assert_eq!(plan.joins[0].kind, SelectJoinKind::Inner);
+    assert!(matches!(
+        &plan.joins[0].on_condition,
+        SelectCondition::Predicate(SelectPredicate::FieldComparison {
+            left_field_name,
+            op: SelectComparisonOp::Eq,
+            right_field_name,
+        }) if left_field_name == "u.id" && right_field_name == "p.id"
+    ));
+}
+
+#[test]
 fn select_multiple_joins_parse_in_order() {
     let plan = parse_select_read_plan_from_statement(
             "select u.email, p.name, t.label from users u inner join profiles p on u.id = p.user_id left join teams t on p.id = t.profile_id where u.id = 1",
@@ -337,4 +443,52 @@ fn explain_select_multiple_joins_sets_explain_flag() {
     assert!(plan.is_explain);
     assert_eq!(plan.relations.len(), 3);
     assert_eq!(plan.joins.len(), 2);
+}
+
+#[test]
+fn select_passthrough_derived_wrapper_parses() {
+    let plan = parse_select_read_plan_from_statement(
+        "select * from (select uid from __account where is_deleted = 0) d",
+    )
+    .expect("passthrough derived wrapper should parse");
+
+    assert_eq!(plan.table_id, "__account");
+    assert_eq!(plan.relations.len(), 1);
+    assert!(plan.where_condition.is_some());
+}
+
+#[test]
+fn select_passthrough_derived_wrapper_parses_qualified_wildcard() {
+    let plan = parse_select_read_plan_from_statement(
+        "select d.* from (select uid from __account where is_deleted = 0) d",
+    )
+    .expect("passthrough derived wrapper with qualified wildcard should parse");
+
+    assert_eq!(plan.table_id, "__account");
+    assert_eq!(plan.relations.len(), 1);
+    assert!(plan.where_condition.is_some());
+}
+
+#[test]
+fn select_passthrough_derived_wrapper_rewrites_outer_where() {
+    let plan = parse_select_read_plan_from_statement(
+        "select * from (select id, email from users) d where d.id = 1",
+    )
+    .expect("passthrough derived wrapper with outer where should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(SelectPredicate::Comparison { .. }))
+    ));
+}
+
+#[test]
+fn select_passthrough_derived_wrapper_composes_outer_limit_offset() {
+    let plan = parse_select_read_plan_from_statement(
+        "select * from (select uid from __account limit 5 offset 2) d limit 3 offset 1",
+    )
+    .expect("passthrough derived wrapper with outer limit/offset should parse");
+
+    assert_eq!(plan.limit, Some(3));
+    assert_eq!(plan.offset, Some(3));
 }

@@ -110,6 +110,7 @@ pub enum SelectJoinKind {
     Left,
     Right,
     Full,
+    Cross,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +168,25 @@ pub enum SelectPredicate {
         subquery: Box<SelectReadPlan>,
         negated: bool,
     },
+    ScalarSubqueryComparison {
+        field_name: String,
+        op: SelectComparisonOp,
+        subquery: Box<SelectReadPlan>,
+    },
+    AnySubqueryComparison {
+        field_name: String,
+        op: SelectComparisonOp,
+        subquery: Box<SelectReadPlan>,
+    },
+    AllSubqueryComparison {
+        field_name: String,
+        op: SelectComparisonOp,
+        subquery: Box<SelectReadPlan>,
+    },
+    Exists {
+        subquery: Box<SelectReadPlan>,
+        negated: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +223,8 @@ pub struct SelectReadPlan {
     pub projection: Option<Vec<String>>,
     pub projection_items: Vec<SelectProjectionItem>,
     pub projection_is_wildcard: bool,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
     pub where_condition: Option<SelectCondition>,
     pub is_explain: bool,
 }

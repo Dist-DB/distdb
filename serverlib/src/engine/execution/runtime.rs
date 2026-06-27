@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     SelectComparisonOp, SelectCondition, SelectJoin, SelectPredicate, SelectReadPlan,
@@ -35,10 +35,42 @@ pub struct JoinedRowCandidateProvider<'a> {
     pub right_row: &'a MaterializedRelationRow,
 }
 
+pub struct QualifiedRowMapProvider<'a> {
+    pub qualifier: &'a str,
+    pub row_map: &'a HashMap<String, Vec<u8>>,
+}
+
+pub struct ChainedConditionValueProvider<'a> {
+    pub primary: &'a dyn ConditionValueProvider,
+    pub fallback: &'a dyn ConditionValueProvider,
+}
+
+pub struct UnqualifiedFieldFallbackProvider<'a> {
+    pub provider: &'a dyn ConditionValueProvider,
+}
+
 impl ConditionValueProvider for HashMap<String, Vec<u8>> {
     fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
         self.get(field_name)
     }
+}
+
+impl ConditionValueProvider for QualifiedRowMapProvider<'_> {
+
+    fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
+
+        if let Some(value) = self.row_map.get(field_name) {
+            return Some(value);
+        }
+
+        let (qualifier, column_name) = field_name.split_once('.')?;
+        if qualifier != self.qualifier {
+            return None;
+        }
+
+        self.row_map.get(column_name)
+    }
+    
 }
 
 impl ConditionValueProvider for JoinedRowCandidateProvider<'_> {
@@ -57,6 +89,22 @@ impl ConditionValueProvider for JoinedRowCandidateProvider<'_> {
         self.right_row.row_map.get(column_name)
     }
 
+}
+
+impl ConditionValueProvider for ChainedConditionValueProvider<'_> {
+    fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
+        self.primary.value(field_name).or_else(|| self.fallback.value(field_name))
+    }
+}
+
+impl ConditionValueProvider for UnqualifiedFieldFallbackProvider<'_> {
+    fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
+        self.provider.value(field_name).or_else(|| {
+            field_name
+                .split_once('.')
+                .and_then(|(_, column_name)| self.provider.value(column_name))
+        })
+    }
 }
 
 impl JoinedRowTuple {
@@ -132,32 +180,80 @@ impl ConditionValueProvider for JoinedRowTuple {
     }
 }
 
-pub fn row_matches_condition_with<F>(
-    provider: &impl ConditionValueProvider,
+pub fn row_matches_condition_with(
+    provider: &dyn ConditionValueProvider,
     condition: Option<&SelectCondition>,
-    subquery_contains: &mut F,
-) -> bool
-where
-    F: FnMut(&[u8], &SelectReadPlan) -> bool,
-{
+    subquery_values: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> HashSet<Vec<u8>>,
+    subquery_exists: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> bool,
+    subquery_scalar: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Option<Vec<u8>>,
+) -> bool {
+
+    row_matches_condition_with_result(
+        provider,
+        condition,
+        &mut |provider, subquery| Ok(subquery_values(provider, subquery)),
+        &mut |provider, subquery| Ok(subquery_exists(provider, subquery)),
+        &mut |provider, subquery| Ok(subquery_scalar(provider, subquery)),
+    )
+    .unwrap_or(false)
+
+}
+
+pub fn row_matches_condition_with_result(
+    provider: &dyn ConditionValueProvider,
+    condition: Option<&SelectCondition>,
+    subquery_values: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Result<HashSet<Vec<u8>>, String>,
+    subquery_exists: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Result<bool, String>,
+    subquery_scalar: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Result<Option<Vec<u8>>, String>,
+) -> Result<bool, String> {
+
     let Some(condition) = condition else {
-        return true;
+        return Ok(true);
     };
 
     match condition {
-        SelectCondition::And(children) => children
-            .iter()
-            .all(|child| row_matches_condition_with(provider, Some(child), subquery_contains)),
+        SelectCondition::And(children) => {
+            for child in children {
+                if !row_matches_condition_with_result(
+                    provider,
+                    Some(child),
+                    subquery_values,
+                    subquery_exists,
+                    subquery_scalar,
+                )? {
+                    return Ok(false);
+                }
+            }
 
-        SelectCondition::Or(children) => children
-            .iter()
-            .any(|child| row_matches_condition_with(provider, Some(child), subquery_contains)),
-
-        SelectCondition::Not(child) => {
-            !row_matches_condition_with(provider, Some(child), subquery_contains)
+            Ok(true)
         }
 
-        SelectCondition::Predicate(predicate) => match predicate {
+        SelectCondition::Or(children) => {
+            for child in children {
+                if row_matches_condition_with_result(
+                    provider,
+                    Some(child),
+                    subquery_values,
+                    subquery_exists,
+                    subquery_scalar,
+                )? {
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
+        }
+
+        SelectCondition::Not(child) => row_matches_condition_with_result(
+                provider,
+                Some(child),
+                subquery_values,
+                subquery_exists,
+                subquery_scalar,
+            )
+            .map(|matched| !matched),
+
+        SelectCondition::Predicate(predicate) => Ok(match predicate {
 
             SelectPredicate::Comparison {
                 field_name,
@@ -184,7 +280,7 @@ where
                 } else {
                     found
                 }
-            }
+            },
 
             SelectPredicate::Regex {
                 field_name,
@@ -202,7 +298,7 @@ where
                 } else {
                     found
                 }
-            }
+            },
 
             SelectPredicate::FieldComparison {
                 left_field_name,
@@ -241,19 +337,72 @@ where
                 negated,
             } => {
                 let Some(actual) = provider.value(field_name) else {
-                    return false;
+                    return Ok(false);
                 };
 
-                let found = subquery_contains(actual, subquery);
+                let values = subquery_values(provider, subquery)?;
+                let found = values.contains(actual);
 
                 if *negated {
                     !found
                 } else {
                     found
                 }
-            }
+            },
 
-        },
+            SelectPredicate::AnySubqueryComparison {
+                field_name,
+                op,
+                subquery,
+            } => {
+                let Some(actual) = provider.value(field_name) else {
+                    return Ok(false);
+                };
+
+                let values = subquery_values(provider, subquery)?;
+                values.iter().any(|candidate| compare_row_value(actual, candidate, op))
+            },
+
+            SelectPredicate::AllSubqueryComparison {
+                field_name,
+                op,
+                subquery,
+            } => {
+                let Some(actual) = provider.value(field_name) else {
+                    return Ok(false);
+                };
+
+                let values = subquery_values(provider, subquery)?;
+                values.iter().all(|candidate| compare_row_value(actual, candidate, op))
+            },
+
+            SelectPredicate::Exists { subquery, negated } => {
+                let found = subquery_exists(provider, subquery)?;
+
+                if *negated {
+                    !found
+                } else {
+                    found
+                }
+            },
+
+            SelectPredicate::ScalarSubqueryComparison {
+                field_name,
+                op,
+                subquery,
+            } => {
+                let Some(actual) = provider.value(field_name) else {
+                    return Ok(false);
+                };
+
+                let Some(subquery_value) = subquery_scalar(provider, subquery)? else {
+                    return Ok(false);
+                };
+
+                compare_row_value(actual, &subquery_value, op)
+            },
+
+        }),
 
     }
 
@@ -267,33 +416,44 @@ pub fn join_condition_matches_provider(
     provider: &impl ConditionValueProvider,
     condition: &SelectCondition,
 ) -> bool {
+    
     match condition {
+
         SelectCondition::Predicate(SelectPredicate::FieldComparison {
             left_field_name,
             op,
             right_field_name,
         }) => compare_provider_fields(provider, left_field_name, right_field_name, op),
+        
         _ => false,
+
     }
+
 }
 
 pub fn join_condition_field_names(join: &SelectJoin) -> Option<(&str, &str)> {
+
     match &join.on_condition {
+        
         SelectCondition::Predicate(SelectPredicate::FieldComparison {
             left_field_name,
             op: SelectComparisonOp::Eq,
             right_field_name,
         }) => Some((left_field_name.as_str(), right_field_name.as_str())),
+
         _ => None,
+
     }
+
 }
 
 pub fn compare_provider_fields(
-    provider: &impl ConditionValueProvider,
+    provider: &dyn ConditionValueProvider,
     left_field_name: &str,
     right_field_name: &str,
     op: &SelectComparisonOp,
-) -> bool {
+) -> bool
+{
     let Some(left_value) = provider.value(left_field_name) else {
         return false;
     };

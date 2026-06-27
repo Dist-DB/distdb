@@ -6,7 +6,7 @@ use crate::{
 };
 
 use super::{
-    build_joined_row_tuples, row_matches_select_condition, JoinedRowTuple,
+    build_joined_row_tuples, row_matches_select_condition_result, JoinedRowTuple,
 };
 
 #[expect(clippy::too_many_arguments, reason="Necessary for the complex logic of selecting mutation target rows across multiple relations and conditions")]
@@ -21,7 +21,7 @@ pub fn select_mutation_target_rows<E>(
     row_matches: &mut E,
 ) -> Result<Vec<MaterializedRelationRow>, String>
 where
-    E: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> bool,
+    E: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
 {
     let joined_rows = build_joined_row_tuples(
         catalog,
@@ -33,7 +33,7 @@ where
         row_matches,
     )?;
 
-    Ok(deduplicate_target_rows(joined_rows, catalog, wal, runtime_indexes, where_condition))
+    deduplicate_target_rows(joined_rows, catalog, wal, runtime_indexes, where_condition)
 }
 
 fn deduplicate_target_rows(
@@ -42,19 +42,19 @@ fn deduplicate_target_rows(
     wal: &ConcurrentWalManager,
     runtime_indexes: &RuntimeIndexStore,
     where_condition: Option<&SelectCondition>,
-) -> Vec<MaterializedRelationRow> {
+) -> Result<Vec<MaterializedRelationRow>, String> {
 
     let mut selected_rows = Vec::new();
     let mut seen_row_ids = HashSet::new();
 
     for row_tuple in joined_rows {
-        if !row_matches_select_condition(
+        if !row_matches_select_condition_result(
             &row_tuple,
             where_condition,
             catalog,
             wal,
             runtime_indexes,
-        ) {
+        )? {
             continue;
         }
 
@@ -67,6 +67,6 @@ fn deduplicate_target_rows(
         }
     }
 
-    selected_rows
+    Ok(selected_rows)
 
 }

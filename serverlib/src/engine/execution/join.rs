@@ -12,7 +12,7 @@ use super::access::{
 };
 use super::{
     join_condition_field_names, join_condition_matches_provider, JoinedRowCandidateProvider,
-    JoinedRowTuple, MaterializedRelationRow,
+    JoinedRowTuple, MaterializedRelationRow, row_matches_condition_with,
 };
 
 pub fn build_joined_row_tuples<F>(
@@ -25,7 +25,7 @@ pub fn build_joined_row_tuples<F>(
     row_matches: &mut F,
 ) -> Result<Vec<JoinedRowTuple>, String>
 where
-    F: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> bool,
+    F: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
 {
 
     let Some(primary_relation) = relations.first() else {
@@ -67,14 +67,16 @@ where
         &primary_access_plan,
     )
     .into_iter()
-    .filter(|(_, row_map)| row_matches(row_map, primary_condition))
-    .map(|(row_id, row_map)| {
-        JoinedRowTuple::from_relation_row(
-            primary_relation,
-            MaterializedRelationRow { row_id, row_map },
-        )
-    })
-    .collect::<Vec<_>>();
+    .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+        if row_matches(&row_map, primary_condition)? {
+            acc.push(JoinedRowTuple::from_relation_row(
+                primary_relation,
+                MaterializedRelationRow { row_id, row_map },
+            ));
+        }
+
+        Ok::<_, String>(acc)
+    })?;
 
     for (join_index, join) in joins.iter().enumerate() {
 
@@ -92,12 +94,6 @@ where
             ));
         };
 
-        let Some((left_join_field_name, right_join_field_name)) = join_condition_field_names(join)
-        else {
-            return Err("select join failed: unsupported join ON condition".to_string());
-        };
-
-        let right_field_name = join_field_column_name(right_join_field_name);
         let right_condition = pushdown_conditions
             .get(join_index + 1)
             .and_then(|condition| condition.as_ref());
@@ -112,13 +108,6 @@ where
             right_allow_index_short_circuit,
             right_filter_map,
         );
-        let probe_source = right_access_plan.equality_probe_source().unwrap_or_else(|| {
-            if field_has_single_column_index(right_table, right_field_name) {
-                EqualityProbeSource::ExistingIndex
-            } else {
-                EqualityProbeSource::TemporaryIndex
-            }
-        });
 
         let right_rows = materialize_relation_rows(
             wal,
@@ -128,16 +117,50 @@ where
             &right_access_plan,
         )
         .into_iter()
-        .filter(|(_, row_map)| row_matches(row_map, right_condition))
-        .map(|(row_id, row_map)| MaterializedRelationRow { row_id, row_map })
-        .collect::<Vec<_>>();
+        .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+            if row_matches(&row_map, right_condition)? {
+                acc.push(MaterializedRelationRow { row_id, row_map });
+            }
 
-        let right_probe_index = build_relation_probe_index(&right_rows, right_field_name);
+            Ok::<_, String>(acc)
+        })?;
+
+        if matches!(join.kind, SelectJoinKind::Cross) {
+            let mut next_rows = Vec::new();
+
+            for left_row in joined_rows {
+                for right_row in &right_rows {
+                    next_rows.push(left_row.append(&join.relation, right_row));
+                }
+            }
+
+            joined_rows = next_rows;
+            continue;
+        }
+
+        let simple_join = join_condition_field_names(join);
+        let right_field_name = simple_join
+            .map(|(_, right_join_field_name)| join_field_column_name(right_join_field_name));
+        let probe_source = right_access_plan.equality_probe_source().unwrap_or_else(|| {
+            right_field_name
+                .as_deref()
+                .map(|field_name| {
+                    if field_has_single_column_index(right_table, field_name) {
+                        EqualityProbeSource::ExistingIndex
+                    } else {
+                        EqualityProbeSource::TemporaryIndex
+                    }
+                })
+                .unwrap_or(EqualityProbeSource::TemporaryIndex)
+        });
+        let right_probe_index = right_field_name
+            .as_deref()
+            .map(|right_field_name| build_relation_probe_index(&right_rows, right_field_name));
 
         log::debug!(
             "select join relation={} field={} strategy= {}",
             join.relation.table_id,
-            right_field_name,
+            right_field_name.as_deref().unwrap_or("<predicate>"),
             match probe_source {
                 EqualityProbeSource::ExistingIndex => "existing_index",
                 EqualityProbeSource::TemporaryIndex => "temporary_index",
@@ -149,25 +172,51 @@ where
         let mut next_rows = Vec::new();
 
         for left_row in joined_rows {
+            let mut matched_left = false;
 
-            let Some(left_value) = left_row.value(left_join_field_name) else {
-                continue;
-            };
+            if let Some((left_join_field_name, _right_join_field_name)) = simple_join {
+                let Some(left_value) = left_row.value(left_join_field_name) else {
+                    continue;
+                };
 
-            if let Some(matches) = right_probe_index.get(left_value) {
-                for right_row in matches {
+                if let Some(matches) = right_probe_index.as_ref().and_then(|index| index.get(left_value)) {
+                    for right_row in matches {
+                        let provider = JoinedRowCandidateProvider {
+                            left: &left_row,
+                            right_relation: &join.relation,
+                            right_row,
+                        };
+
+                        if join_condition_matches_provider(&provider, &join.on_condition) {
+                            matched_left = true;
+                            matched_right_ids.insert(right_row.row_id);
+                            next_rows.push(left_row.append(&join.relation, right_row));
+                        }
+                    }
+                }
+            } else {
+                for right_row in &right_rows {
                     let provider = JoinedRowCandidateProvider {
                         left: &left_row,
                         right_relation: &join.relation,
                         right_row,
                     };
 
-                    if join_condition_matches_provider(&provider, &join.on_condition) {
+                    if row_matches_condition_with(
+                        &provider,
+                        Some(&join.on_condition),
+                        &mut |_, _| HashSet::new(),
+                        &mut |_, _| false,
+                        &mut |_, _| None,
+                    ) {
+                        matched_left = true;
                         matched_right_ids.insert(right_row.row_id);
                         next_rows.push(left_row.append(&join.relation, right_row));
                     }
                 }
-            } else if matches!(join.kind, SelectJoinKind::Left | SelectJoinKind::Full) {
+            }
+
+            if !matched_left && matches!(join.kind, SelectJoinKind::Left | SelectJoinKind::Full) {
                 next_rows.push(left_row.append_missing_relation(&join.relation));
             }
 

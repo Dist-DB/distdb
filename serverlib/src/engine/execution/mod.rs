@@ -21,11 +21,13 @@ pub use select::{
     execute_joined_select_plan, execute_projection_only_select_plan,
     execute_relation_select_plan, explain_joined_select_plan_result,
     explain_select_plan_result, row_matches_select_condition,
+    row_matches_select_condition_result,
     SelectExecutionResult,
 };
 pub use runtime::{
     compare_provider_fields, join_condition_field_names, join_condition_matches_provider,
-    relation_qualifier, row_matches_condition_with, ConditionValueProvider,
+    relation_qualifier, row_matches_condition_with, row_matches_condition_with_result,
+    ConditionValueProvider,
     JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 };
 pub use crate::engine::sql::compare_row_value;

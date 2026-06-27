@@ -153,7 +153,7 @@ fn build_joined_row_tuples_supports_all_join_kinds() {
         &relations,
         &[None, None],
         std::slice::from_ref(&join),
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect("inner join should succeed");
 
@@ -172,7 +172,7 @@ fn build_joined_row_tuples_supports_all_join_kinds() {
             kind: SelectJoinKind::Left,
             ..join.clone()
         }],
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect("left join should succeed");
 
@@ -191,7 +191,7 @@ fn build_joined_row_tuples_supports_all_join_kinds() {
             kind: SelectJoinKind::Right,
             ..join.clone()
         }],
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect("right join should succeed");
 
@@ -210,7 +210,7 @@ fn build_joined_row_tuples_supports_all_join_kinds() {
             kind: SelectJoinKind::Full,
             ..join
         }],
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect("full join should succeed");
 
@@ -249,7 +249,7 @@ fn build_joined_row_tuples_rejects_unsupported_join_conditions() {
         &relations,
         &[None, None],
         &[join],
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect_err("unsupported join ON condition should be rejected");
 
@@ -270,9 +270,82 @@ fn build_joined_row_tuples_returns_empty_when_no_relations_exist() {
         &[],
         &[],
         &[],
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect("empty relation list should succeed");
 
     assert!(rows.is_empty());
+}
+
+#[test]
+fn build_joined_row_tuples_supports_cross_join() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+    let runtime_indexes = RuntimeIndexStore::new();
+
+    let relations = vec![relation("users", "u")];
+    let join = SelectJoin {
+        kind: SelectJoinKind::Cross,
+        relation: relation("profiles", "p"),
+        on_condition: SelectCondition::And(Vec::new()),
+    };
+
+    let rows = build_joined_row_tuples(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &relations,
+        &[None, None],
+        &[join],
+        &mut |_, _| Ok(true),
+    )
+    .expect("cross join should succeed");
+
+    assert_eq!(rows.len(), 6);
+    assert!(rows
+        .iter()
+        .all(|row| row.value("u.id").is_some() && row.value("p.id").is_some()));
+}
+
+#[test]
+fn build_joined_row_tuples_supports_and_field_comparison_join_conditions() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+    let runtime_indexes = RuntimeIndexStore::new();
+
+    let relations = vec![relation("users", "u")];
+    let join = SelectJoin {
+        kind: SelectJoinKind::Inner,
+        relation: relation("profiles", "p"),
+        on_condition: SelectCondition::And(vec![
+            SelectCondition::Predicate(SelectPredicate::FieldComparison {
+                left_field_name: "u.id".to_string(),
+                op: SelectComparisonOp::Eq,
+                right_field_name: "p.user_id".to_string(),
+            }),
+            SelectCondition::Predicate(SelectPredicate::FieldComparison {
+                left_field_name: "p.user_id".to_string(),
+                op: SelectComparisonOp::Eq,
+                right_field_name: "p.user_id".to_string(),
+            }),
+        ]),
+    };
+
+    let rows = build_joined_row_tuples(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &relations,
+        &[None, None],
+        &[join],
+        &mut |_, _| Ok(true),
+    )
+    .expect("and field comparison join condition should succeed");
+
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.value("u.id") == Some(&b"1".to_vec())));
 }

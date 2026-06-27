@@ -1,6 +1,7 @@
 use super::mutation::select_mutation_target_rows;
 
 use crate::{
+    parse_select_read_plan_from_statement,
     encode_row_payload, ConcurrentWalManager, DatabaseCatalog, FieldDef, FieldIndex, FieldType,
     RuntimeIndexStore, SelectComparisonOp, SelectCondition, SelectJoin, SelectJoinKind,
     SelectPredicate, SelectRelation, TableSchema, TransactionId, TransactionKind,
@@ -172,7 +173,7 @@ fn select_mutation_target_rows_deduplicates_join_matches_by_base_row_id() {
             op: SelectComparisonOp::Eq,
             value: b"1".to_vec(),
         })),
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect("mutation target selection should succeed");
 
@@ -221,9 +222,48 @@ fn select_mutation_target_rows_skips_right_join_rows_without_base_relation() {
             op: SelectComparisonOp::Eq,
             value: b"Ghost".to_vec(),
         })),
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
     )
     .expect("mutation target selection should succeed");
 
     assert!(rows.is_empty());
+}
+
+#[test]
+fn select_mutation_target_rows_propagates_scalar_subquery_errors() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let relations = vec![SelectRelation {
+        table_id: "users".to_string(),
+        alias: Some("u".to_string()),
+    }];
+
+    let subquery_plan = parse_select_read_plan_from_statement(
+        "select user_id from profiles",
+    )
+    .expect("scalar subquery plan should parse");
+
+    let where_condition = SelectCondition::Predicate(SelectPredicate::ScalarSubqueryComparison {
+        field_name: "u.id".to_string(),
+        op: SelectComparisonOp::Eq,
+        subquery: Box::new(subquery_plan),
+    });
+
+    let err = select_mutation_target_rows(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &relations,
+        &[None],
+        &[],
+        Some(&where_condition),
+        &mut |_, _| Ok(true),
+    )
+    .expect_err("multi-row scalar subquery in mutation filter should fail");
+
+    assert!(err.contains("scalar subquery returned more than one row"));
 }

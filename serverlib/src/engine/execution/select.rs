@@ -10,8 +10,12 @@ use crate::{
 
 use super::{
     build_joined_row_tuples, collect_indexable_equality_filters, materialize_relation_rows,
-    plan_relation_access, relation_qualifier, row_matches_condition_with,
+    plan_relation_access, relation_qualifier, row_matches_condition_with_result,
     ConditionValueProvider, JoinedRowTuple,
+};
+
+use super::runtime::{
+    ChainedConditionValueProvider, QualifiedRowMapProvider, UnqualifiedFieldFallbackProvider,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,52 +25,243 @@ pub struct SelectExecutionResult {
 }
 
 pub fn row_matches_select_condition(
-    provider: &impl ConditionValueProvider,
+    provider: &dyn ConditionValueProvider,
     condition: Option<&SelectCondition>,
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &RuntimeIndexStore,
 ) -> bool {
-    row_matches_condition_with(provider, condition, &mut |actual, subquery| {
-        let values = collect_subquery_projection_values(catalog, wal, runtime_indexes, subquery);
-        values.contains(actual)
-    })
+
+    row_matches_select_condition_result(provider, condition, catalog, wal, runtime_indexes)
+        .unwrap_or(false)
+
 }
 
-fn collect_subquery_projection_values(
+pub fn row_matches_select_condition_result(
+    provider: &dyn ConditionValueProvider,
+    condition: Option<&SelectCondition>,
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &RuntimeIndexStore,
+) -> Result<bool, String> {
+
+    row_matches_select_condition_with_outer_result(
+        provider,
+        provider,
+        condition,
+        catalog,
+        wal,
+        runtime_indexes,
+    )
+
+}
+
+fn row_matches_select_condition_with_outer_result(
+    provider: &dyn ConditionValueProvider,
+    outer_provider: &dyn ConditionValueProvider,
+    condition: Option<&SelectCondition>,
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+) -> Result<bool, String> {
+
+    let normalized_outer_provider = UnqualifiedFieldFallbackProvider {
+        provider: outer_provider,
+    };
+
+    let chained_provider = ChainedConditionValueProvider {
+        primary: provider,
+        fallback: &normalized_outer_provider,
+    };
+
+    row_matches_condition_with_result(
+        &chained_provider,
+        condition,
+        &mut |current_provider, subquery| {
+            collect_subquery_projection_values_with_outer(
+                catalog,
+                wal,
+                runtime_indexes,
+                current_provider,
+                subquery,
+            )
+        },
+        &mut |current_provider, subquery| {
+            collect_subquery_exists_with_outer(
+                catalog,
+                wal,
+                runtime_indexes,
+                current_provider,
+                subquery,
+            )
+        },
+        &mut |current_provider, subquery| {
+            collect_subquery_scalar_value_with_outer(
+                catalog,
+                wal,
+                runtime_indexes,
+                current_provider,
+                subquery,
+            )
+        },
+    )
+
+}
+
+fn collect_subquery_exists_with_outer(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    outer_provider: &dyn ConditionValueProvider,
     subquery: &SelectReadPlan,
-) -> HashSet<Vec<u8>> {
+) -> Result<bool, String> {
+
+    if subquery.is_explain {
+        return Ok(false);
+    }
+
+    if subquery.table_id.is_empty() {
+
+        return execute_projection_only_select_plan(subquery, &mut |_function| {
+            Err("select subquery projection does not support inbuilt functions".to_string())
+        })
+        .map(|result| !result.rows.is_empty());
+
+    }
+
+    if subquery.joins.is_empty() {
+
+        let Some(schema) = catalog.table_schema(&subquery.table_id) else {
+            return Ok(false);
+        };
+
+        let Some(table) = catalog.table(&subquery.table_id) else {
+            return Ok(false);
+        };
+
+        let mut index_filter_map = HashMap::new();
+        let allow_index_short_circuit = subquery
+            .where_condition
+            .as_ref()
+            .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+            .unwrap_or(true);
+
+        let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+        let qualifier = subquery
+            .relations
+            .first()
+            .map(relation_qualifier)
+            .unwrap_or(&subquery.table_id)
+            .to_string();
+
+        let result = execute_relation_select_plan(
+            wal,
+            table,
+            schema,
+            runtime_indexes,
+            subquery,
+            &access_plan,
+            &mut |_function| {
+                Err("select subquery projection does not support inbuilt functions".to_string())
+            },
+            &mut |row_map, nested_condition| {
+
+                let row_provider = QualifiedRowMapProvider {
+                    qualifier: &qualifier,
+                    row_map,
+                };
+
+                row_matches_select_condition_with_outer_result(
+                    &row_provider,
+                    outer_provider,
+                    nested_condition,
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                )
+
+            },
+        );
+
+        return result.map(|result| !result.rows.is_empty());
+
+    }
+
+    execute_joined_select_plan(
+        catalog,
+        wal,
+        runtime_indexes,
+        subquery,
+        &mut |_function| {
+            Err("select subquery projection does not support inbuilt functions".to_string())
+        },
+        &mut |row_map, nested_condition| {
+
+            row_matches_select_condition_with_outer_result(
+                row_map,
+                outer_provider,
+                nested_condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+
+        },
+        &mut |row_tuple, nested_condition| {
+
+            row_matches_select_condition_with_outer_result(
+                row_tuple,
+                outer_provider,
+                nested_condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+
+        },
+
+    )
+    .map(|result| !result.rows.is_empty())
+
+}
+
+fn collect_subquery_projection_values_with_outer(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    outer_provider: &dyn ConditionValueProvider,
+    subquery: &SelectReadPlan,
+) -> Result<HashSet<Vec<u8>>, String> {
+
     if subquery.is_explain
         || subquery
             .projection_items
             .iter()
             .any(|item| matches!(item, SelectProjectionItem::Wildcard { .. }))
     {
-        return HashSet::new();
+        return Ok(HashSet::new());
     }
 
     let Some(first_projection) = subquery.projection_items.first() else {
-        return HashSet::new();
+        return Ok(HashSet::new());
     };
 
     if !matches!(first_projection, SelectProjectionItem::Column { .. }) {
-        return HashSet::new();
+        return Ok(HashSet::new());
     }
 
     if subquery.table_id.is_empty() {
-        return HashSet::new();
+        return Ok(HashSet::new());
     }
 
     if subquery.joins.is_empty() {
+
         let Some(schema) = catalog.table_schema(&subquery.table_id) else {
-            return HashSet::new();
+            return Ok(HashSet::new());
         };
 
         let Some(table) = catalog.table(&subquery.table_id) else {
-            return HashSet::new();
+            return Ok(HashSet::new());
         };
 
         let mut index_filter_map = HashMap::new();
@@ -89,8 +284,9 @@ fn collect_subquery_projection_values(
                 Err("select subquery projection does not support inbuilt functions".to_string())
             },
             &mut |row_map, nested_condition| {
-                row_matches_select_condition(
+                row_matches_select_condition_with_outer_result(
                     row_map,
+                    outer_provider,
                     nested_condition,
                     catalog,
                     wal,
@@ -98,9 +294,8 @@ fn collect_subquery_projection_values(
                 )
             },
         )
-        .ok()
-        .map(first_column_values)
-        .unwrap_or_default();
+        .map(first_column_values);
+
     }
 
     execute_joined_select_plan(
@@ -112,29 +307,178 @@ fn collect_subquery_projection_values(
             Err("select subquery projection does not support inbuilt functions".to_string())
         },
         &mut |row_map, nested_condition| {
-            row_matches_select_condition(row_map, nested_condition, catalog, wal, runtime_indexes)
-        },
-        &mut |row_tuple, nested_condition| {
-            row_matches_select_condition(
-                row_tuple,
+
+            row_matches_select_condition_with_outer_result(
+                row_map,
+                outer_provider,
                 nested_condition,
                 catalog,
                 wal,
                 runtime_indexes,
             )
+
+        },
+        &mut |row_tuple, nested_condition| {
+
+            row_matches_select_condition_with_outer_result(
+                row_tuple,
+                outer_provider,
+                nested_condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+
         },
     )
-    .ok()
     .map(first_column_values)
-    .unwrap_or_default()
+
+}
+
+fn collect_subquery_scalar_value_with_outer(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    outer_provider: &dyn ConditionValueProvider,
+    subquery: &SelectReadPlan,
+) -> Result<Option<Vec<u8>>, String> {
+
+    if subquery.is_explain
+        || subquery
+            .projection_items
+            .iter()
+            .any(|item| matches!(item, SelectProjectionItem::Wildcard { .. }))
+    {
+        return Ok(None);
+    }
+
+    let Some(first_projection) = subquery.projection_items.first() else {
+        return Ok(None);
+    };
+
+    if !matches!(first_projection, SelectProjectionItem::Column { .. }) {
+        return Ok(None);
+    }
+
+    if subquery.table_id.is_empty() {
+        return execute_projection_only_select_plan(subquery, &mut |_function| {
+            Err("select subquery projection does not support inbuilt functions".to_string())
+        })
+        .and_then(single_scalar_value);
+    }
+
+    if subquery.joins.is_empty() {
+
+        let Some(schema) = catalog.table_schema(&subquery.table_id) else {
+            return Ok(None);
+        };
+        let Some(table) = catalog.table(&subquery.table_id) else {
+            return Ok(None);
+        };
+
+        let mut index_filter_map = HashMap::new();
+        let allow_index_short_circuit = subquery
+            .where_condition
+            .as_ref()
+            .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+            .unwrap_or(true);
+
+        let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+
+        return execute_relation_select_plan(
+            wal,
+            table,
+            schema,
+            runtime_indexes,
+            subquery,
+            &access_plan,
+            &mut |_function| {
+                Err("select subquery projection does not support inbuilt functions".to_string())
+            },
+            &mut |row_map, nested_condition| {
+                row_matches_select_condition_with_outer_result(
+                    row_map,
+                    outer_provider,
+                    nested_condition,
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                )
+            },
+        )
+        .and_then(single_scalar_value);
+
+    }
+
+    execute_joined_select_plan(
+        catalog,
+        wal,
+        runtime_indexes,
+        subquery,
+        &mut |_function| {
+            Err("select subquery projection does not support inbuilt functions".to_string())
+        },
+        &mut |row_map, nested_condition| {
+
+            row_matches_select_condition_with_outer_result(
+                row_map,
+                outer_provider,
+                nested_condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+
+        },
+        &mut |row_tuple, nested_condition| {
+
+            row_matches_select_condition_with_outer_result(
+                row_tuple,
+                outer_provider,
+                nested_condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+            
+        },
+    )
+    .and_then(single_scalar_value)
+
 }
 
 fn first_column_values(result: SelectExecutionResult) -> HashSet<Vec<u8>> {
+
     result
         .rows
         .into_iter()
         .filter_map(|row| row.into_iter().next())
         .collect()
+
+}
+
+fn single_scalar_value(result: SelectExecutionResult) -> Result<Option<Vec<u8>>, String> {
+
+    let mut rows = result.rows.into_iter();
+    let Some(row) = rows.next() else {
+        return Ok(None);
+    };
+
+    if rows.next().is_some() {
+        return Err("select failed: scalar subquery returned more than one row".to_string());
+    }
+
+    let mut columns = row.into_iter();
+    let Some(value) = columns.next() else {
+        return Ok(None);
+    };
+
+    if columns.next().is_some() {
+        return Err("select failed: scalar subquery returned more than one column".to_string());
+    }
+
+    Ok(Some(value))
+    
 }
 
 pub fn execute_projection_only_select_plan<E>(
@@ -144,11 +488,14 @@ pub fn execute_projection_only_select_plan<E>(
 where
     E: FnMut(&Function) -> Result<Option<Vec<u8>>, String>,
 {
+
     let mut columns = Vec::with_capacity(read_plan.projection_items.len());
     let mut row = Vec::with_capacity(read_plan.projection_items.len());
 
     for (seq, projection_item) in read_plan.projection_items.iter().enumerate() {
+        
         match projection_item {
+
             SelectProjectionItem::InbuiltFunction {
                 output_name,
                 function,
@@ -167,26 +514,29 @@ where
                 });
 
                 row.push(value.unwrap_or_else(|| b"NULL".to_vec()));
-            }
+            },
 
             SelectProjectionItem::Column { .. } => {
                 return Err(
                     "select without FROM only supports inbuilt projection functions".to_string(),
                 );
-            }
+            },
 
             SelectProjectionItem::Wildcard { .. } => {
                 return Err(
                     "select without FROM does not support wildcard projections".to_string(),
                 );
             }
+
         }
+
     }
 
     Ok(SelectExecutionResult {
         columns,
         rows: vec![row],
     })
+
 }
 
 pub fn explain_select_plan_result(
@@ -195,6 +545,7 @@ pub fn explain_select_plan_result(
     index_lookup: Option<(&DatabaseIndex, Vec<Vec<u8>>)>,
     runtime_indexes: &RuntimeIndexStore,
 ) -> SelectExecutionResult {
+
     let columns = vec![
         FieldDef {
             seqno: 1,
@@ -262,6 +613,7 @@ pub fn explain_select_plan_result(
     ];
 
     let (access_path, index_id, lookup_key, cardinality, lookup_hit) = if let Some((index, key)) = index_lookup {
+        
         let state = runtime_indexes.index(&index.index_id.0);
 
         let hit = state.map(|s| s.contains(&key)).unwrap_or(false);
@@ -286,7 +638,9 @@ pub fn explain_select_plan_result(
             card.to_string(),
             if hit { "true" } else { "false" }.to_string(),
         )
+
     } else {
+
         (
             "full_scan".to_string(),
             "".to_string(),
@@ -294,6 +648,7 @@ pub fn explain_select_plan_result(
             "0".to_string(),
             "".to_string(),
         )
+
     };
 
     let rows = vec![vec![
@@ -307,9 +662,11 @@ pub fn explain_select_plan_result(
     ]];
 
     SelectExecutionResult { columns, rows }
+
 }
 
 pub fn explain_joined_select_plan_result(read_plan: &SelectReadPlan) -> SelectExecutionResult {
+
     let columns = vec![
         FieldDef {
             seqno: 1,
@@ -389,31 +746,39 @@ pub fn explain_joined_select_plan_result(read_plan: &SelectReadPlan) -> SelectEx
     }
 
     SelectExecutionResult { columns, rows }
+
 }
 
 fn relation_label(relation: &SelectRelation) -> String {
+
     match relation.alias.as_deref() {
         Some(alias) if alias != relation.table_id => {
             format!("{} {}", relation.table_id, alias)
         }
         _ => relation.table_id.clone(),
     }
+
 }
 
 fn join_kind_label(kind: &SelectJoinKind) -> &'static str {
+
     match kind {
         SelectJoinKind::Inner => "inner",
         SelectJoinKind::Left => "left",
         SelectJoinKind::Right => "right",
         SelectJoinKind::Full => "full",
+        SelectJoinKind::Cross => "cross",
     }
+
 }
 
 fn pushdown_filter_text(condition: Option<&Option<SelectCondition>>) -> String {
+
     match condition.and_then(|entry| entry.as_ref()) {
         Some(condition) => format!("{:?}", condition),
         None => String::new(),
     }
+
 }
 
 #[expect(clippy::too_many_arguments, reason="Necessary for the complex logic of executing SELECT plans across multiple relations, conditions, and projection types")]
@@ -429,7 +794,7 @@ pub fn execute_relation_select_plan<E, R>(
 ) -> Result<SelectExecutionResult, String>
 where
     E: FnMut(&Function) -> Result<Option<Vec<u8>>, String>,
-    R: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> bool,
+    R: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
 {
     let projection_items = expand_relation_projection_items(schema, &read_plan.projection_items);
 
@@ -488,35 +853,41 @@ where
         }
     }
 
-    let rows = materialize_relation_rows(wal, table, schema, runtime_indexes, access_plan)
-        .into_iter()
-        .filter(|(_, row_map)| row_matches(row_map, read_plan.where_condition.as_ref()))
-        .map(|(_, row_map)| {
-            projection_items
-                .iter()
-                .enumerate()
-                .map(|(projection_idx, projection_item)| match projection_item {
-                    SelectProjectionItem::Column { field_name, .. } => match row_map.get(field_name) {
-                        Some(value) => value.clone(),
-                        None if columns[projection_idx].nullable => b"NULL".to_vec(),
-                        None => Vec::new(),
-                    },
-                    SelectProjectionItem::InbuiltFunction { .. } => {
-                        let static_value = static_projection_values
-                            .get(projection_idx)
-                            .and_then(|entry| entry.as_ref())
-                            .cloned()
-                            .flatten();
+    let mut rows = Vec::new();
+    for (_, row_map) in materialize_relation_rows(wal, table, schema, runtime_indexes, access_plan) {
+        if !row_matches(&row_map, read_plan.where_condition.as_ref())? {
+            continue;
+        }
 
-                        static_value.unwrap_or_else(|| b"NULL".to_vec())
-                    }
-                    SelectProjectionItem::Wildcard { .. } => Vec::new(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+        let projected_row = projection_items
+            .iter()
+            .enumerate()
+            .map(|(projection_idx, projection_item)| match projection_item {
+                SelectProjectionItem::Column { field_name, .. } => match row_map.get(field_name) {
+                    Some(value) => value.clone(),
+                    None if columns[projection_idx].nullable => b"NULL".to_vec(),
+                    None => Vec::new(),
+                },
+                SelectProjectionItem::InbuiltFunction { .. } => {
+                    let static_value = static_projection_values
+                        .get(projection_idx)
+                        .and_then(|entry| entry.as_ref())
+                        .cloned()
+                        .flatten();
 
-    Ok(SelectExecutionResult { columns, rows })
+                    static_value.unwrap_or_else(|| b"NULL".to_vec())
+                }
+                SelectProjectionItem::Wildcard { .. } => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        rows.push(projected_row);
+    }
+
+    Ok(SelectExecutionResult {
+        columns,
+        rows: apply_row_window(rows, read_plan.limit, read_plan.offset),
+    })
 }
 
 pub fn execute_joined_select_plan<E, RM, RJ>(
@@ -530,8 +901,8 @@ pub fn execute_joined_select_plan<E, RM, RJ>(
 ) -> Result<SelectExecutionResult, String>
 where
     E: FnMut(&Function) -> Result<Option<Vec<u8>>, String>,
-    RM: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> bool,
-    RJ: FnMut(&JoinedRowTuple, Option<&SelectCondition>) -> bool,
+    RM: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
+    RJ: FnMut(&JoinedRowTuple, Option<&SelectCondition>) -> Result<bool, String>,
 {
     if read_plan.is_explain {
         return Err("select join failed: EXPLAIN for JOIN is not supported yet".to_string());
@@ -605,37 +976,56 @@ where
         row_matches_relation,
     )?;
 
-    let rows = row_tuples
-        .into_iter()
-        .filter(|row_tuple| row_matches_joined(row_tuple, read_plan.where_condition.as_ref()))
-        .map(|row_tuple| {
-            projection_items
-                .iter()
-                .enumerate()
-                .map(|(projection_idx, projection_item)| match projection_item {
-                    SelectProjectionItem::Column { field_name, .. } => {
-                        match row_tuple.value(field_name) {
-                            Some(value) => value.clone(),
-                            None if columns[projection_idx].nullable => b"NULL".to_vec(),
-                            None => Vec::new(),
-                        }
-                    }
-                    SelectProjectionItem::InbuiltFunction { .. } => {
-                        let static_value = static_projection_values
-                            .get(projection_idx)
-                            .and_then(|entry| entry.as_ref())
-                            .cloned()
-                            .flatten();
+    let mut rows = Vec::new();
+    for row_tuple in row_tuples {
+        if !row_matches_joined(&row_tuple, read_plan.where_condition.as_ref())? {
+            continue;
+        }
 
-                        static_value.unwrap_or_else(|| b"NULL".to_vec())
+        let projected_row = projection_items
+            .iter()
+            .enumerate()
+            .map(|(projection_idx, projection_item)| match projection_item {
+                SelectProjectionItem::Column { field_name, .. } => {
+                    match row_tuple.value(field_name) {
+                        Some(value) => value.clone(),
+                        None if columns[projection_idx].nullable => b"NULL".to_vec(),
+                        None => Vec::new(),
                     }
-                    SelectProjectionItem::Wildcard { .. } => Vec::new(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+                }
+                SelectProjectionItem::InbuiltFunction { .. } => {
+                    let static_value = static_projection_values
+                        .get(projection_idx)
+                        .and_then(|entry| entry.as_ref())
+                        .cloned()
+                        .flatten();
 
-    Ok(SelectExecutionResult { columns, rows })
+                    static_value.unwrap_or_else(|| b"NULL".to_vec())
+                }
+                SelectProjectionItem::Wildcard { .. } => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        rows.push(projected_row);
+    }
+
+    Ok(SelectExecutionResult {
+        columns,
+        rows: apply_row_window(rows, read_plan.limit, read_plan.offset),
+    })
+}
+
+fn apply_row_window(
+    rows: Vec<Vec<Vec<u8>>>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Vec<Vec<Vec<u8>>> {
+    let start = offset.unwrap_or(0).min(rows.len());
+    let end = limit
+        .map(|limit| start.saturating_add(limit).min(rows.len()))
+        .unwrap_or(rows.len());
+
+    rows.into_iter().skip(start).take(end.saturating_sub(start)).collect()
 }
 
 fn join_field_can_be_null_extended(

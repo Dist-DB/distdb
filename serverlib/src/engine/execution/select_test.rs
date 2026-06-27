@@ -127,7 +127,7 @@ fn execute_joined_select_plan_projects_null_extended_rows() {
         &read_plan,
         &mut |function| evaluate_inbuilt_sql_function(function),
         &mut |row_map, nested_condition| {
-            row_matches_select_condition(
+            row_matches_select_condition_result(
                 row_map,
                 nested_condition,
                 &catalog,
@@ -136,7 +136,7 @@ fn execute_joined_select_plan_projects_null_extended_rows() {
             )
         },
         &mut |row_tuple, nested_condition| {
-            row_matches_select_condition(
+            row_matches_select_condition_result(
                 row_tuple,
                 nested_condition,
                 &catalog,
@@ -215,7 +215,7 @@ fn execute_joined_select_plan_supports_inbuilt_function_projection() {
         &read_plan,
         &mut |function| evaluate_inbuilt_sql_function(function),
         &mut |row_map, nested_condition| {
-            row_matches_select_condition(
+            row_matches_select_condition_result(
                 row_map,
                 nested_condition,
                 &catalog,
@@ -224,7 +224,7 @@ fn execute_joined_select_plan_supports_inbuilt_function_projection() {
             )
         },
         &mut |row_tuple, nested_condition| {
-            row_matches_select_condition(
+            row_matches_select_condition_result(
                 row_tuple,
                 nested_condition,
                 &catalog,
@@ -267,6 +267,348 @@ fn row_matches_select_condition_supports_simple_predicates() {
 }
 
 #[test]
+fn execute_relation_select_plan_applies_limit_and_offset() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement("select u.email from users u limit 1 offset 1")
+        .expect("limited relation select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("limited relation select should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "alex@example.com"
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_exists_predicates() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where exists (select id from users where id = 1)",
+    )
+    .expect("exists select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("exists select should succeed");
+
+    assert_eq!(result.rows.len(), 2);
+}
+
+#[test]
+fn execute_relation_select_plan_supports_not_exists_predicates() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where not exists (select uid from users where id = 999)",
+    )
+    .expect("not exists select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("not exists select should succeed");
+
+    assert_eq!(result.rows.len(), 2);
+}
+
+#[test]
+fn execute_relation_select_plan_supports_correlated_exists_predicates() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where exists (select id from profiles p where p.user_id = u.id)",
+    )
+    .expect("correlated exists select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("correlated exists select should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "sam@example.com"
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_correlated_in_predicates() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where u.id in (select user_id from profiles p where p.user_id = u.id)",
+    )
+    .expect("correlated in select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("correlated in select should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "sam@example.com"
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_scalar_subquery_comparisons() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where u.id = (select id from users where email = 'sam@example.com')",
+    )
+    .expect("scalar subquery select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("scalar subquery select should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "sam@example.com"
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_rejects_multi_row_scalar_subqueries() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where u.id = (select id from users)",
+    )
+    .expect("scalar subquery select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let err = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect_err("multi-row scalar subquery should fail");
+
+    assert!(err.contains("scalar subquery returned more than one row"));
+}
+
+#[test]
+fn execute_relation_select_plan_supports_any_subquery_predicates() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where u.id = any ((select user_id from profiles p where p.user_id = u.id))",
+    )
+    .expect("any-subquery select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("any-subquery select should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "sam@example.com"
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_all_subquery_predicates() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where u.id > all ((select user_id from profiles where user_id = 99))",
+    )
+    .expect("all-subquery select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("all-subquery select should succeed");
+
+    assert_eq!(result.rows.len(), 2);
+}
+
+#[test]
 fn execute_joined_select_plan_expands_qualified_wildcard_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
@@ -304,6 +646,8 @@ fn execute_joined_select_plan_expands_qualified_wildcard_projection() {
             relation: Some("u".to_string()),
         }],
         projection_is_wildcard: false,
+        limit: None,
+        offset: None,
         where_condition: None,
         is_explain: false,
     };
@@ -314,8 +658,8 @@ fn execute_joined_select_plan_expands_qualified_wildcard_projection() {
         &runtime_indexes,
         &read_plan,
         &mut |_function| Ok(None),
-        &mut |_, _| true,
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
+        &mut |_, _| Ok(true),
     )
     .expect("wildcard join projection should expand");
 
@@ -362,6 +706,8 @@ fn execute_joined_select_plan_expands_unqualified_wildcard_projection() {
         projection: None,
         projection_items: vec![SelectProjectionItem::Wildcard { relation: None }],
         projection_is_wildcard: true,
+        limit: None,
+        offset: None,
         where_condition: None,
         is_explain: false,
     };
@@ -372,8 +718,8 @@ fn execute_joined_select_plan_expands_unqualified_wildcard_projection() {
         &runtime_indexes,
         &read_plan,
         &mut |_function| Ok(None),
-        &mut |_, _| true,
-        &mut |_, _| true,
+        &mut |_, _| Ok(true),
+        &mut |_, _| Ok(true),
     )
     .expect("unqualified wildcard join projection should expand");
 
@@ -394,5 +740,93 @@ fn execute_joined_select_plan_expands_unqualified_wildcard_projection() {
             .map(|value| String::from_utf8(value.clone()).expect("utf8"))
             .collect::<Vec<_>>(),
         vec!["1", "sam@example.com", "10", "1", "Sam"]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_passthrough_derived_wrapper() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select * from (select email from users where id = 1) d",
+    )
+    .expect("passthrough derived wrapper select should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("passthrough derived wrapper select should execute");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "sam@example.com"
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_passthrough_derived_wrapper_with_outer_where_and_window() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select * from (select id, email from users) d where d.id > 0 limit 1 offset 1",
+    )
+    .expect("passthrough derived wrapper with outer where/window should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("passthrough derived wrapper with outer where/window should execute");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][1].clone()).expect("utf8"),
+        "alex@example.com"
     );
 }
