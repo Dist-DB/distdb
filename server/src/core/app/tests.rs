@@ -3979,6 +3979,105 @@ fn create_and_drop_sql_backed_objects_are_wired() {
 }
 
 #[test]
+fn select_from_view_uses_scoped_materialization_without_catalog_residue() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-select-view-scoped-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "email".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("users table should register");
+
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let insert_row = ConnectorRequest::new(
+        "req-insert-users",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id, email) values (1, 'sam@example.com')".to_string(),
+            },
+        },
+    );
+
+    let create_view = ConnectorRequest::new(
+        "req-create-view-select",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create view users_v as select id, email from users".to_string(),
+            },
+        },
+    );
+
+    let select_view = ConnectorRequest::new(
+        "req-select-view",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select id, email from users_v where id = 1".to_string(),
+            },
+        },
+    );
+
+    let insert_response = app.handle_connector_request(&insert_row);
+    let create_view_response = app.handle_connector_request(&create_view);
+    let select_response = app.handle_connector_request(&select_view);
+
+    assert_eq!(insert_response.status, ResponseStatus::Applied);
+    assert_eq!(create_view_response.status, ResponseStatus::Applied);
+    assert_eq!(select_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(query_result) = select_response.result else {
+        panic!("select response should be a query result");
+    };
+
+    assert_eq!(query_result.rows.len(), 1);
+    assert_eq!(query_result.rows[0][0], b"1".to_vec());
+    assert_eq!(query_result.rows[0][1], b"sam@example.com".to_vec());
+
+    let catalog = app.catalogs.get("main").expect("main catalog should exist");
+    assert!(
+        catalog
+            .table_ids()
+            .iter()
+            .all(|table_id| !table_id.starts_with("__scoped_view_"))
+    );
+}
+
+#[test]
 fn connector_client_path_can_query_show_tables_without_simulation() {
     let unique_suffix = common::epoch_nanos!();
 

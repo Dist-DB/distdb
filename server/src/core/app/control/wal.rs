@@ -1,6 +1,7 @@
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
-    ConcurrentWalManager, TransactionId, TransactionKind, TransactionRecord, UserId,
+    ConcurrentWalManager, TransactionId, TransactionKind, TransactionRecord,
+    UserId, WalStreamMode,
 };
 
 use crate::core::app::ServerApp;
@@ -21,6 +22,10 @@ impl ServerApp {
     }
 
     fn copy_wal_stream(&self, wal_id: &str, sandbox_wal: &ConcurrentWalManager) -> Result<(), String> {
+        if !self.wal.is_stream_replicable(wal_id) {
+            return Ok(());
+        }
+
         for record in self.wal.since(wal_id, None) {
             sandbox_wal
                 .append(wal_id, record)
@@ -49,6 +54,10 @@ impl ServerApp {
 
         let mut frames = Vec::new();
         for stream_id in stream_ids {
+            if !self.wal.is_stream_replicable(&stream_id) {
+                continue;
+            }
+
             let stream_from = match from_stream_transaction_ids {
                 Some(map) => map.get(&stream_id).copied(),
                 None => from,
@@ -175,6 +184,10 @@ impl ServerApp {
         let next_id = TransactionId(records.last().map(|record| record.id.0 + 1).unwrap_or(1));
         let refid = records.last().map(|record| record.id);
         let timestamp_epoch_ms = common::epoch_nanos!();
+
+        self.wal
+            .set_stream_mode(&wal_id, WalStreamMode::Ephemeral)
+            .map_err(|err| format!("failed to mark session marker stream mode: {}", err))?;
 
         let encoded = format!(
             "session_id={} request_id={} marker={} staged_count={} ts={}",

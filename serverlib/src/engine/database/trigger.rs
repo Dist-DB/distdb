@@ -4,6 +4,10 @@ use super::entity_aspect::DatabaseEntityAspect;
 use super::entity_kind::DatabaseEntityKind;
 use super::entity_metadata::EntityMetadata;
 use super::table_schema::TableSchema;
+use crate::engine::sql::{
+    parse_trigger_invocation_binding_from_create_trigger_statement,
+    TriggerInvocationBinding,
+};
 
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14,18 +18,40 @@ pub struct DatabaseTrigger {
     pub sql: String,
     pub dependencies: Vec<String>,
     pub metadata: EntityMetadata,
+    #[serde(skip)]
+    pub invocation_binding: Option<TriggerInvocationBinding>,
 }
 
 impl DatabaseTrigger {
 
     pub fn new(trigger_id: String, sql: String, dependencies: Vec<String>) -> Self {
-        Self {
+        let mut trigger = Self {
             entity_id: common::helpers::utils::unique_id(),
             trigger_id,
             sql,
             dependencies,
             metadata: EntityMetadata::default(),
-        }
+            invocation_binding: None,
+        };
+
+        trigger.refresh_invocation_binding_cache();
+        trigger
+    }
+
+    pub fn set_sql(&mut self, sql: String) {
+        self.sql = sql;
+        self.refresh_invocation_binding_cache();
+    }
+
+    pub fn refresh_invocation_binding_cache(&mut self) {
+        self.invocation_binding =
+            parse_trigger_invocation_binding_from_create_trigger_statement(&self.sql)
+                .ok()
+                .flatten();
+    }
+
+    pub fn invocation_binding(&self) -> Option<&TriggerInvocationBinding> {
+        self.invocation_binding.as_ref()
     }
 
 }
@@ -75,6 +101,7 @@ impl DatabaseEntityAspect for DatabaseTrigger {
             .iter()
             .map(|dep| common::normalize_identifier!(dep))
             .collect();
+        self.refresh_invocation_binding_cache();
     }
     
 }

@@ -7,9 +7,11 @@ use sqlparser::ast::{
 
 use super::literals::parse_default_value;
 use super::{
-    evaluate_sql_function, is_supported_sql_function, parse_mysql_statements,
-    validate_regex_pattern, SelectComparisonOp, SelectCondition, SelectJoin, SelectJoinKind,
-    SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation, SqlParseError,
+    dialect_capabilities_for_target, evaluate_sql_function, is_supported_sql_function,
+    parse_mysql_statements,
+    validate_regex_pattern, SelectCaseWhen, SelectComparisonOp, SelectCondition, SelectJoin, SelectJoinKind,
+    SelectExpression, SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation,
+    SqlParseError, DEFAULT_SQL_COMPATIBILITY_TARGET,
 };
 
 type SelectRelationBinding = SelectRelation;
@@ -117,7 +119,10 @@ fn parse_select_read_plan_from_query(
                 });
             }
 
-            if projection_items.iter().all(is_inbuilt_projection_item) {
+            if projection_items
+                .iter()
+                .all(is_projection_only_without_from_item)
+            {
                 String::new()
             } else {
                 return Err(SqlParseError::MissingIdentifier {
@@ -196,11 +201,38 @@ fn parse_passthrough_derived_select_plan(
         _ => false,
     };
 
-    if !is_wildcard_passthrough {
-        return Ok(None);
-    }
-
     let mut inner_plan = parse_select_read_plan_from_query(subquery.as_ref(), false)?;
+    let projection_map = passthrough_projection_map(&inner_plan)?;
+
+    if !is_wildcard_passthrough {
+        let derived_binding = SelectRelationBinding {
+            table_id: alias_name
+                .clone()
+                .unwrap_or_else(|| "__derived".to_string()),
+            alias: alias_name.clone(),
+        };
+
+        let rewritten_projection_items = rewrite_passthrough_outer_projection_items(
+            &select.projection,
+            std::slice::from_ref(&derived_binding),
+            &projection_map,
+        )?;
+
+        inner_plan.projection = Some(
+            rewritten_projection_items
+                .iter()
+                .map(|item| match item {
+                    SelectProjectionItem::Column { field_name, .. } => Ok(field_name.clone()),
+                    _ => Err(SqlParseError::UnsupportedStatement(
+                        "derived wrapper projection currently supports only direct outer column projections"
+                            .to_string(),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        inner_plan.projection_items = rewritten_projection_items;
+        inner_plan.projection_is_wildcard = false;
+    }
 
     if let Some(selection) = select.selection.as_ref() {
         let derived_binding = SelectRelationBinding {
@@ -220,7 +252,6 @@ fn parse_passthrough_derived_select_plan(
             )
         })?;
 
-        let projection_map = passthrough_projection_map(&inner_plan)?;
         let rewritten_outer_condition = rewrite_passthrough_outer_condition(
             &outer_condition,
             &projection_map,
@@ -255,6 +286,33 @@ fn parse_passthrough_derived_select_plan(
     }
 
     Ok(Some(inner_plan))
+}
+
+fn rewrite_passthrough_outer_projection_items(
+    projection_items: &[SelectItem],
+    relation_bindings: &[SelectRelationBinding],
+    projection_map: &HashMap<String, String>,
+) -> Result<Vec<SelectProjectionItem>, SqlParseError> {
+    projection_items
+        .iter()
+        .map(|item| {
+            let projection_item = parse_select_projection_item(item, relation_bindings)?;
+
+            match projection_item {
+                SelectProjectionItem::Column {
+                    field_name,
+                    output_name,
+                } => Ok(SelectProjectionItem::Column {
+                    field_name: rewrite_passthrough_field_name(&field_name, projection_map)?,
+                    output_name,
+                }),
+                _ => Err(SqlParseError::UnsupportedStatement(
+                    "derived wrapper projection currently supports only direct outer column projections"
+                        .to_string(),
+                )),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn passthrough_projection_map(
@@ -336,11 +394,13 @@ fn rewrite_passthrough_outer_predicate(
             pattern,
             negated,
             case_insensitive,
+            escape_char,
         } => Ok(SelectPredicate::Like {
             field_name: rewrite_passthrough_field_name(field_name, projection_map)?,
             pattern: pattern.clone(),
             negated: *negated,
             case_insensitive: *case_insensitive,
+            escape_char: *escape_char,
         }),
 
         SelectPredicate::Regex {
@@ -476,6 +536,7 @@ fn parse_select_projection_item(
     item: &SelectItem,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<SelectProjectionItem, SqlParseError> {
+    let dialect_capabilities = dialect_capabilities_for_target(DEFAULT_SQL_COMPATIBILITY_TARGET);
 
     match item {
 
@@ -514,6 +575,21 @@ fn parse_select_projection_item(
                 function: function.clone(),
             })
         },
+
+        SelectItem::UnnamedExpr(Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        }) => parse_case_projection_item(
+            "case".to_string(),
+            operand.as_deref(),
+            conditions,
+            results,
+            else_result.as_deref(),
+            relation_bindings,
+            dialect_capabilities,
+        ),
 
         SelectItem::Wildcard(_) => Ok(SelectProjectionItem::Wildcard { relation: None }),
 
@@ -562,6 +638,21 @@ fn parse_select_projection_item(
                 })
             },
 
+            Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => parse_case_projection_item(
+                common::normalize_identifier!(&alias.value),
+                operand.as_deref(),
+                conditions,
+                results,
+                else_result.as_deref(),
+                relation_bindings,
+                dialect_capabilities,
+            ),
+
             _ => Err(SqlParseError::UnsupportedStatement(
                 "only direct column and inbuilt function projection is currently supported"
                     .to_string(),
@@ -578,8 +669,154 @@ fn parse_select_projection_item(
 
 }
 
+fn parse_case_projection_item(
+    output_name: String,
+    operand: Option<&Expr>,
+    conditions: &[Expr],
+    results: &[Expr],
+    else_result: Option<&Expr>,
+    relation_bindings: &[SelectRelationBinding],
+    dialect_capabilities: super::SqlDialectCapabilities,
+) -> Result<SelectProjectionItem, SqlParseError> {
+    if !dialect_capabilities.supports_searched_case_expressions {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE expressions are not supported for this SQL compatibility target".to_string(),
+        ));
+    }
+
+    let parsed_operand = if let Some(operand) = operand {
+        if !dialect_capabilities.supports_simple_case_expressions {
+            return Err(SqlParseError::UnsupportedStatement(
+                "simple CASE projections are not supported for this SQL compatibility target"
+                    .to_string(),
+            ));
+        }
+
+        Some(parse_case_projection_value(operand, relation_bindings)?)
+    } else {
+        None
+    };
+
+    if conditions.len() != results.len() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE projection has mismatched WHEN/THEN clauses".to_string(),
+        ));
+    }
+
+    let mut branches = Vec::with_capacity(conditions.len());
+    for (condition_expr, result_expr) in conditions.iter().zip(results.iter()) {
+        if parsed_operand.is_some() {
+            branches.push((
+                SelectCaseWhen::Equals(parse_case_projection_value(
+                    condition_expr,
+                    relation_bindings,
+                )?),
+                parse_case_projection_value(result_expr, relation_bindings)?,
+            ));
+        } else {
+            let condition = parse_select_condition_expression(condition_expr, relation_bindings)?;
+            ensure_condition_has_no_subqueries(&condition, "CASE WHEN")?;
+
+            branches.push((
+                SelectCaseWhen::Condition(condition),
+                parse_case_projection_value(result_expr, relation_bindings)?,
+            ));
+        }
+    }
+
+    let else_value = else_result
+        .map(|expr| parse_case_projection_value(expr, relation_bindings))
+        .transpose()?;
+
+    Ok(SelectProjectionItem::Case {
+        output_name,
+        operand: parsed_operand,
+        branches,
+        else_value,
+    })
+}
+
+fn parse_case_projection_value(
+    expression: &Expr,
+    relation_bindings: &[SelectRelationBinding],
+) -> Result<SelectExpression, SqlParseError> {
+    match expression {
+        Expr::Value(value) => Ok(match parse_default_value(value.to_string()) {
+            Some(value) => SelectExpression::Literal(value),
+            None => SelectExpression::Null,
+        }),
+
+        Expr::Identifier(ident) => {
+            ensure_unqualified_allowed(relation_bindings, &ident.value, "CASE THEN/ELSE")?;
+
+            Ok(SelectExpression::Column {
+                field_name: common::normalize_identifier!(&ident.value),
+            })
+        }
+
+        Expr::CompoundIdentifier(parts) => Ok(SelectExpression::Column {
+            field_name: parse_qualified_field_name(parts, relation_bindings, "CASE THEN/ELSE")?,
+        }),
+
+        Expr::Function(function) => {
+            let function_name = function.name.to_string();
+
+            if !is_supported_sql_function(&function_name) {
+                return Err(SqlParseError::UnsupportedStatement(format!(
+                    "CASE expression function '{}' is not supported",
+                    function_name
+                )));
+            }
+
+            Ok(SelectExpression::InbuiltFunction {
+                function: function.clone(),
+            })
+        }
+
+        _ => Err(SqlParseError::UnsupportedStatement(
+            "CASE expressions currently support only literals, direct columns, and inbuilt functions".to_string(),
+        )),
+    }
+}
+
+fn ensure_condition_has_no_subqueries(
+    condition: &SelectCondition,
+    location: &str,
+) -> Result<(), SqlParseError> {
+    match condition {
+        SelectCondition::And(children) | SelectCondition::Or(children) => {
+            for child in children {
+                ensure_condition_has_no_subqueries(child, location)?;
+            }
+
+            Ok(())
+        }
+
+        SelectCondition::Not(child) => ensure_condition_has_no_subqueries(child, location),
+
+        SelectCondition::Predicate(predicate) => match predicate {
+            SelectPredicate::InSubquery { .. }
+            | SelectPredicate::ScalarSubqueryComparison { .. }
+            | SelectPredicate::AnySubqueryComparison { .. }
+            | SelectPredicate::AllSubqueryComparison { .. }
+            | SelectPredicate::Exists { .. } => Err(SqlParseError::UnsupportedStatement(
+                format!("{location} subqueries are not supported yet"),
+            )),
+
+            _ => Ok(()),
+        },
+    }
+}
+
 fn is_inbuilt_projection_item(item: &SelectProjectionItem) -> bool {
     matches!(item, SelectProjectionItem::InbuiltFunction { .. })
+}
+
+fn is_projection_only_without_from_item(item: &SelectProjectionItem) -> bool {
+    matches!(
+        item,
+        SelectProjectionItem::InbuiltFunction { .. } | SelectProjectionItem::Case { .. }
+    )
 }
 
 pub fn parse_select_condition_from_expr(
@@ -703,11 +940,13 @@ fn localize_condition_for_relation(condition: &SelectCondition) -> Option<Select
             pattern,
             negated,
             case_insensitive,
+            escape_char,
         }) => Some(SelectCondition::Predicate(SelectPredicate::Like {
             field_name: unqualify_field_name(field_name)?,
             pattern: pattern.clone(),
             negated: *negated,
             case_insensitive: *case_insensitive,
+            escape_char: *escape_char,
         })),
 
         SelectCondition::Predicate(SelectPredicate::Regex {
@@ -1003,14 +1242,7 @@ fn parse_select_condition_expression(
             let field_name = parse_condition_column_name(expr, relation_bindings)?;
             let subquery_plan = parse_select_read_plan_from_query(subquery.as_ref(), false)?;
 
-            let Some(projection) = &subquery_plan.projection else {
-                return Err(SqlParseError::UnsupportedStatement(
-                    "WHERE subquery membership requires selecting exactly one explicit column"
-                        .to_string(),
-                ));
-            };
-
-            if projection.len() != 1 {
+            if !supports_single_column_subquery(&subquery_plan) {
                 return Err(SqlParseError::UnsupportedStatement(
                     "WHERE subquery membership requires selecting exactly one column".to_string(),
                 ));
@@ -1128,13 +1360,8 @@ fn parse_single_column_subquery_plan(
     };
 
     let subquery_plan = parse_select_read_plan_from_query(subquery.as_ref(), false)?;
-    let Some(projection) = &subquery_plan.projection else {
-        return Err(SqlParseError::UnsupportedStatement(
-            message.to_string(),
-        ));
-    };
 
-    if projection.len() != 1 {
+    if !supports_single_column_subquery(&subquery_plan) {
         return Err(SqlParseError::UnsupportedStatement(
             message.to_string(),
         ));
@@ -1176,12 +1403,8 @@ fn parse_like_condition_expression(
     escape_char: Option<&str>,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<SelectCondition, SqlParseError> {
-    
-    if escape_char.is_some() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "LIKE ESCAPE is not supported yet".to_string(),
-        ));
-    }
+
+    let escape_char = parse_like_escape_character(escape_char)?;
 
     let field_name = parse_condition_column_name(expr, relation_bindings)?;
     let pattern = parse_condition_literal_value(pattern)?;
@@ -1191,8 +1414,57 @@ fn parse_like_condition_expression(
         pattern,
         negated,
         case_insensitive,
+        escape_char,
     }))
 
+}
+
+fn parse_like_escape_character(escape_char: Option<&str>) -> Result<Option<char>, SqlParseError> {
+    let Some(raw_escape) = escape_char else {
+        return Ok(None);
+    };
+
+    let Some(parsed_escape) = parse_default_value(raw_escape.to_string()) else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "LIKE ESCAPE must be a single character literal".to_string(),
+        ));
+    };
+
+    let escape_text = String::from_utf8(parsed_escape).map_err(|_| {
+        SqlParseError::UnsupportedStatement(
+            "LIKE ESCAPE must be a valid UTF-8 single character literal".to_string(),
+        )
+    })?;
+
+    let mut chars = escape_text.chars();
+    let Some(escape) = chars.next() else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "LIKE ESCAPE must not be empty".to_string(),
+        ));
+    };
+
+    if chars.next().is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "LIKE ESCAPE currently supports only a single character".to_string(),
+        ));
+    }
+
+    Ok(Some(escape))
+}
+
+fn supports_single_column_subquery(subquery_plan: &SelectReadPlan) -> bool {
+    if subquery_plan.projection_items.len() != 1 {
+        return false;
+    }
+
+    matches!(
+        subquery_plan.projection_items.first(),
+        Some(
+            SelectProjectionItem::Column { .. }
+                | SelectProjectionItem::InbuiltFunction { .. }
+                | SelectProjectionItem::Case { .. }
+        )
+    )
 }
 
 fn parse_query_limit(limit: Option<&Expr>) -> Result<Option<usize>, SqlParseError> {
@@ -1385,29 +1657,11 @@ fn parse_join_on_expression(
     left_relations: &[SelectRelationBinding],
     right_relation: &SelectRelationBinding,
 ) -> Result<SelectCondition, SqlParseError> {
-    let Expr::BinaryOp {
-        left,
-        op: BinaryOperator::Eq,
-        right,
-    } = unwrap_nested_expression(expression)
-    else {
-        return Err(SqlParseError::UnsupportedStatement(
-            "JOIN ON currently supports only equality between qualified columns".to_string(),
-        ));
-    };
+    let mut relation_bindings = Vec::with_capacity(left_relations.len() + 1);
+    relation_bindings.extend_from_slice(left_relations);
+    relation_bindings.push(right_relation.clone());
 
-    let left_field_name = parse_join_field_name(left, left_relations, "JOIN left operand")?;
-    let right_field_name = parse_join_field_name(
-        right,
-        std::slice::from_ref(right_relation),
-        "JOIN right operand",
-    )?;
-
-    Ok(SelectCondition::Predicate(SelectPredicate::FieldComparison {
-        left_field_name,
-        op: SelectComparisonOp::Eq,
-        right_field_name,
-    }))
+    parse_select_condition_expression(expression, &relation_bindings)
 }
 
 fn parse_join_using_expression(

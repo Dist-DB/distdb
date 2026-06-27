@@ -27,6 +27,7 @@ use super::transaction::{
     SqlObjectKind, TransactionKind, TransactionLog,
 };
 use super::view::DatabaseView;
+use crate::engine::sql::{TriggerEventKind, TriggerTiming};
 
 
 
@@ -731,7 +732,7 @@ impl DatabaseCatalog {
                             .trigger_mut(&object_id)
                             .ok_or(DatabaseError::TriggerNotFound)?;
 
-                        trigger.sql = payload.sql;
+                        trigger.set_sql(payload.sql);
                         trigger.dependencies = normalized_dependencies;
 
                         if existed_before {
@@ -755,7 +756,7 @@ impl DatabaseCatalog {
                         let procedure = self
                             .stored_procedure_mut(&object_id)
                             .ok_or(DatabaseError::StoredProcedureNotFound)?;
-                        procedure.sql = payload.sql;
+                        procedure.set_sql(payload.sql);
                         procedure.dependencies = normalized_dependencies;
 
                         if existed_before {
@@ -1022,6 +1023,30 @@ impl DatabaseCatalog {
             .filter_map(|(_, entity)| match entity {
                 DatabaseEntity::Trigger(trigger) => Some(trigger.name().to_string()),
                 _ => None,
+            })
+            .collect()
+    }
+
+    pub fn triggers_for_event(
+        &self,
+        table_id: &str,
+        timing: TriggerTiming,
+        event: TriggerEventKind,
+    ) -> Vec<&DatabaseTrigger> {
+        let normalized_table_id = common::normalize_identifier!(table_id);
+
+        self.entities
+            .iter()
+            .filter_map(|(_, entity)| match entity {
+                DatabaseEntity::Trigger(trigger) => Some(trigger),
+                _ => None,
+            })
+            .filter(|trigger| {
+                trigger.invocation_binding().is_some_and(|binding| {
+                    binding.table_id == normalized_table_id
+                        && binding.timing == timing
+                        && binding.event == event
+                })
             })
             .collect()
     }

@@ -154,6 +154,7 @@ fn inbuilt_runtime_context_for_query(
         connection_id: Some(connection_id as i64),
         last_insert_id: None,
         version: None,
+        argument_bindings: HashMap::new(),
     }
     
 }
@@ -1561,22 +1562,22 @@ fn materialize_insert_source_rows(
                     read_plan,
                     &mut |function| evaluate_inbuilt_sql_function(function),
                     &mut |row_map, condition| {
-                        serverlib::row_matches_select_condition(
+                        Ok(serverlib::row_matches_select_condition(
                             row_map,
                             condition,
                             catalog,
                             wal,
                             runtime_indexes,
-                        )
+                        ))
                     },
                     &mut |row_tuple, condition| {
-                        serverlib::row_matches_select_condition(
+                        Ok(serverlib::row_matches_select_condition(
                             row_tuple,
                             condition,
                             catalog,
                             wal,
                             runtime_indexes,
-                        )
+                        ))
                     },
                 )
 
@@ -1620,13 +1621,13 @@ fn materialize_insert_source_rows(
                     &access_plan,
                     &mut |function| evaluate_inbuilt_sql_function(function),
                     &mut |row_map, condition| {
-                        serverlib::row_matches_select_condition(
+                        Ok(serverlib::row_matches_select_condition(
                             row_map,
                             condition,
                             catalog,
                             wal,
                             runtime_indexes,
-                        )
+                        ))
                     },
                 )
 
@@ -2185,13 +2186,13 @@ fn load_mutation_rows(
         joins,
         where_condition,
         &mut |row_map, condition| {
-            serverlib::row_matches_select_condition(
+            Ok(serverlib::row_matches_select_condition(
                 row_map,
                 condition,
                 catalog,
                 wal,
                 runtime_indexes,
-            )
+            ))
         },
     )
     .map(|rows| {
@@ -2202,13 +2203,110 @@ fn load_mutation_rows(
 
 }
 
+fn execute_select_plan_result(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    read_plan: &serverlib::SelectReadPlan,
+) -> Result<serverlib::SelectExecutionResult, String> {
+    if !read_plan.joins.is_empty() {
+        return serverlib::execute_joined_select_plan(
+            catalog,
+            wal,
+            runtime_indexes,
+            read_plan,
+            &mut |function| evaluate_inbuilt_sql_function(function),
+            &mut |row_map, condition| {
+                Ok(serverlib::row_matches_select_condition(
+                    row_map,
+                    condition,
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                ))
+            },
+            &mut |row_tuple, condition| {
+                Ok(serverlib::row_matches_select_condition(
+                    row_tuple,
+                    condition,
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                ))
+            },
+        );
+    }
+
+    if read_plan.table_id.is_empty() {
+        return serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
+            evaluate_inbuilt_sql_function(function)
+        });
+    }
+
+    let table_id = read_plan.table_id.as_str();
+
+    let schema = catalog
+        .table_schema(table_id)
+        .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
+
+    let table = catalog
+        .table(table_id)
+        .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
+
+    let mut index_filter_map = HashMap::new();
+    let allow_index_short_circuit = read_plan
+        .where_condition
+        .as_ref()
+        .map(|condition| collect_indexable_equality_filters(condition, &mut index_filter_map))
+        .unwrap_or(true);
+
+    let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+
+    serverlib::execute_relation_select_plan(
+        wal,
+        table,
+        schema,
+        runtime_indexes,
+        read_plan,
+        &access_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, condition| {
+            Ok(serverlib::row_matches_select_condition(
+                row_map,
+                condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            ))
+        },
+    )
+}
+
+fn extract_view_select_sql(view_sql: &str) -> Result<String, String> {
+    let trimmed = view_sql.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if lowered.starts_with("select ") {
+        return Ok(trimmed.to_string());
+    }
+
+    if let Some(as_index) = lowered.find(" as ") {
+        let select_sql = trimmed[(as_index + 4)..].trim();
+        if select_sql.to_ascii_lowercase().starts_with("select ") {
+            return Ok(select_sql.to_string());
+        }
+    }
+
+    Err("view execution failed: could not extract SELECT body from view definition".to_string())
+}
+
 fn execute_select_impl(
     request_id: &str,
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
-    runtime_indexes: &RuntimeIndexStore,
+    runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -2264,17 +2362,17 @@ fn execute_select_impl(
 
     }
 
-    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
-
     if statement_sql_lower.starts_with("describe ")
         || statement_sql_lower.starts_with("desc ")
         || statement_sql_lower.starts_with("show columns")
     {
+
+        let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", query.database_id),
+            );
+        };
 
         let Some(object_name) = statement.object_name.as_deref() else {
             return ConnectorResponse::rejected(
@@ -2321,6 +2419,12 @@ fn execute_select_impl(
     };
 
     if !read_plan.joins.is_empty() {
+        let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", query.database_id),
+            );
+        };
         return execute_joined_select(request_id, query, catalog, wal, runtime_indexes, &read_plan);
     }
 
@@ -2364,6 +2468,158 @@ fn execute_select_impl(
         );
 
     }
+
+    let view_sql = resolve_catalog(catalogs, &query.database_id)
+        .and_then(|catalog| catalog.view(table_id))
+        .map(|view| view.sql.clone());
+
+    if let Some(view_sql) = view_sql {
+        let view_select_sql = match extract_view_select_sql(&view_sql) {
+            Ok(sql) => sql,
+            Err(message) => {
+                return ConnectorResponse::rejected(request_id.to_string(), message);
+            }
+        };
+
+        let view_read_plan = match serverlib::parse_select_read_plan_from_statement(&view_select_sql) {
+            Ok(plan) => plan,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("view execution failed: {err}"),
+                );
+            }
+        };
+
+        let view_result = match resolve_catalog(catalogs, &query.database_id) {
+            Some(catalog) => {
+                match execute_select_plan_result(catalog, wal, runtime_indexes, &view_read_plan) {
+                    Ok(result) => result,
+                    Err(message) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("view execution failed: {message}"),
+                        );
+                    }
+                }
+            }
+            None => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("database '{}' not found", query.database_id),
+                );
+            }
+        };
+
+        let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", query.database_id),
+            );
+        };
+
+        let scoped_table_id = format!(
+            "__scoped_view_{}_{}",
+            table_id,
+            common::epoch_nanos!(),
+        );
+
+        let mut scoped_handle = match serverlib::create_scoped_ephemeral_table(
+            catalog,
+            wal,
+            scoped_table_id,
+            TableSchema::new(view_result.columns.clone()),
+        ) {
+            Ok(handle) => handle,
+            Err(message) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("view execution failed: {message}"),
+                );
+            }
+        };
+
+        let scoped_query_result = (|| -> Result<serverlib::SelectExecutionResult, String> {
+            let scoped_table_id = scoped_handle.table_id().to_string();
+
+            let scoped_table = catalog
+                .table(&scoped_table_id)
+                .ok_or_else(|| "view execution failed: scoped table not found".to_string())?;
+
+            let scoped_schema = scoped_table.schema().clone();
+
+            for row in &view_result.rows {
+                let mut row_map = HashMap::with_capacity(view_result.columns.len());
+
+                for (column_index, column) in view_result.columns.iter().enumerate() {
+                    let value = row.get(column_index).cloned().unwrap_or_else(|| b"NULL".to_vec());
+                    row_map.insert(column.field_name.clone(), value);
+                }
+
+                let encoded = encode_row_payload(&scoped_schema, &row_map)
+                    .map_err(|err| format!("view execution failed: scoped row encode failed: {err}"))?;
+
+                append_row_payload_record(
+                    wal,
+                    &scoped_table_id,
+                    scoped_table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    encoded,
+                    common::epoch_nanos!(),
+                    None,
+                    None,
+                )
+                .map_err(|err| format!("view execution failed: scoped row append failed: {err}"))?;
+            }
+
+            let mut scoped_read_plan = read_plan.clone();
+            let original_table_id = scoped_read_plan.table_id.clone();
+            scoped_read_plan.table_id = scoped_table_id.clone();
+
+            for relation in &mut scoped_read_plan.relations {
+                if relation.table_id == original_table_id {
+                    relation.table_id = scoped_table_id.clone();
+                }
+            }
+
+            execute_select_plan_result(catalog, wal, runtime_indexes, &scoped_read_plan)
+                .map_err(|message| format!("view execution failed: {message}"))
+        })();
+
+        let scoped_release =
+            serverlib::release_scoped_ephemeral_table(catalog, wal, &mut scoped_handle);
+
+        if let Err(err) = scoped_release {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("view execution failed: scoped release failed: {err}"),
+            );
+        }
+
+        let result = match scoped_query_result {
+            Ok(result) => result,
+            Err(message) => {
+                return ConnectorResponse::rejected(request_id.to_string(), message);
+            }
+        };
+
+        return ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Query(QueryResult {
+                columns: connector_field_defs(result.columns),
+                rows: result.rows,
+                timings: empty_query_timings(),
+            }),
+        );
+    }
+
+    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
 
     let Some(schema) = catalog.table_schema(table_id) else {
         return ConnectorResponse::rejected(
@@ -2420,13 +2676,13 @@ fn execute_select_impl(
         &access_plan,
         &mut |function| evaluate_inbuilt_sql_function(function),
         &mut |row_map, condition| {
-            serverlib::row_matches_select_condition(
+            Ok(serverlib::row_matches_select_condition(
                 row_map,
                 condition,
                 catalog,
                 wal,
                 runtime_indexes,
-            )
+            ))
         },
     ) {
         Ok(result) => result,
@@ -2467,22 +2723,22 @@ fn execute_joined_select(
         read_plan,
         &mut |function| evaluate_inbuilt_sql_function(function),
         &mut |row_map, condition| {
-            serverlib::row_matches_select_condition(
+            Ok(serverlib::row_matches_select_condition(
                 row_map,
                 condition,
                 catalog,
                 wal,
                 runtime_indexes,
-            )
+            ))
         },
         &mut |row_tuple, condition| {
-            serverlib::row_matches_select_condition(
+            Ok(serverlib::row_matches_select_condition(
                 row_tuple,
                 condition,
                 catalog,
                 wal,
                 runtime_indexes,
-            )
+            ))
         },
     ) {
         Ok(result) => result,

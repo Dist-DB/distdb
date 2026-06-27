@@ -2,43 +2,106 @@ use regex::RegexBuilder;
 
 use super::SelectComparisonOp;
 
-pub fn compare_like_value(actual: &[u8], pattern: &[u8], case_insensitive: bool) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LikeToken {
+    AnySingle,
+    AnyMany,
+    Literal(char),
+}
+
+pub fn compare_like_value(
+    actual: &[u8],
+    pattern: &[u8],
+    case_insensitive: bool,
+    escape_char: Option<char>,
+) -> bool {
     let actual_text = String::from_utf8_lossy(actual);
     let pattern_text = String::from_utf8_lossy(pattern);
 
     let actual_chars = actual_text.chars().collect::<Vec<_>>();
     let pattern_chars = pattern_text.chars().collect::<Vec<_>>();
+    let tokens = compile_like_tokens(&pattern_chars, escape_char);
 
-    like_matches(&actual_chars, &pattern_chars, case_insensitive)
+    like_matches(&actual_chars, &tokens, case_insensitive)
 }
 
-fn like_matches(actual: &[char], pattern: &[char], case_insensitive: bool) -> bool {
+fn compile_like_tokens(pattern: &[char], escape_char: Option<char>) -> Vec<LikeToken> {
+    let mut tokens = Vec::with_capacity(pattern.len());
+    let mut index = 0usize;
+
+    while index < pattern.len() {
+        let current = pattern[index];
+
+        if escape_char.is_some_and(|escape| current == escape) {
+            if index + 1 < pattern.len() {
+                tokens.push(LikeToken::Literal(pattern[index + 1]));
+                index += 2;
+                continue;
+            }
+
+            tokens.push(LikeToken::Literal(current));
+            index += 1;
+            continue;
+        }
+
+        match current {
+            '_' => tokens.push(LikeToken::AnySingle),
+            '%' => tokens.push(LikeToken::AnyMany),
+            literal => tokens.push(LikeToken::Literal(literal)),
+        }
+
+        index += 1;
+    }
+
+    tokens
+}
+
+fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) -> bool {
+
     let mut actual_index = 0usize;
     let mut pattern_index = 0usize;
     let mut last_percent_index: Option<usize> = None;
     let mut retry_index = 0usize;
 
     while actual_index < actual.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == '_'
-                || like_char_eq(actual[actual_index], pattern[pattern_index], case_insensitive))
-        {
-            actual_index += 1;
-            pattern_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == '%' {
-            last_percent_index = Some(pattern_index);
-            pattern_index += 1;
-            retry_index = actual_index;
-        } else if let Some(percent_index) = last_percent_index {
+        if pattern_index < pattern.len() {
+            match pattern[pattern_index] {
+                LikeToken::AnySingle => {
+                    actual_index += 1;
+                    pattern_index += 1;
+                    continue;
+                }
+
+                LikeToken::Literal(expected) => {
+                    if like_char_eq(actual[actual_index], expected, case_insensitive) {
+                        actual_index += 1;
+                        pattern_index += 1;
+                        continue;
+                    }
+                }
+
+                LikeToken::AnyMany => {
+                    last_percent_index = Some(pattern_index);
+                    pattern_index += 1;
+                    retry_index = actual_index;
+                    continue;
+                }
+            }
+        }
+
+        if let Some(percent_index) = last_percent_index {
             pattern_index = percent_index + 1;
             retry_index += 1;
             actual_index = retry_index;
-        } else {
-            return false;
+            continue;
         }
+
+        return false;
     }
 
-    while pattern_index < pattern.len() && pattern[pattern_index] == '%' {
+    while pattern_index < pattern.len()
+        && matches!(pattern[pattern_index], LikeToken::AnyMany)
+    {
         pattern_index += 1;
     }
 
@@ -104,4 +167,29 @@ fn compare_scalar_bytes(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
         _ => left_text.cmp(&right_text),
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_like_value;
+
+    #[test]
+    fn compare_like_value_supports_escape_character() {
+        assert!(compare_like_value(
+            b"foo_1",
+            b"foo\\_1",
+            false,
+            Some('\\'),
+        ));
+    }
+
+    #[test]
+    fn compare_like_value_escape_can_be_custom_character() {
+        assert!(compare_like_value(
+            b"100%",
+            b"100!%",
+            false,
+            Some('!'),
+        ));
+    }
 }

@@ -196,6 +196,24 @@ fn execute_projection_only_select_plan_returns_inbuilt_row() {
 }
 
 #[test]
+fn execute_projection_only_select_plan_supports_row_independent_case_projection() {
+    let read_plan = parse_select_read_plan_from_statement(
+        "select case 1 when abs(-1) then upper('yes') else lower('NO') end as state",
+    )
+    .expect("projection-only CASE plan should parse");
+
+    let result = execute_projection_only_select_plan(
+        &read_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+    )
+    .expect("projection-only CASE select should succeed");
+
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].field_name, "state");
+    assert_eq!(result.rows, vec![vec![b"YES".to_vec()]]);
+}
+
+#[test]
 fn execute_joined_select_plan_supports_inbuilt_function_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
@@ -237,6 +255,337 @@ fn execute_joined_select_plan_supports_inbuilt_function_projection() {
 
     assert_eq!(result.columns.len(), 2);
     assert_eq!(result.rows.len(), 1);
+}
+
+#[test]
+fn execute_joined_select_plan_supports_row_dependent_inbuilt_function_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email, concat(u.email, '!') as tagged from users u",
+    )
+    .expect("relation function projection plan should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("row-dependent function projection should succeed");
+
+    let mut rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("email utf8"),
+                String::from_utf8(row[1].clone()).expect("tag utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "alex@example.com".to_string(),
+                "alex@example.com!".to_string(),
+            ),
+            (
+                "sam@example.com".to_string(),
+                "sam@example.com!".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn execute_joined_select_plan_supports_complex_join_on_conditions() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email, p.name from users u inner join profiles p on u.id = p.user_id and p.name = 'Sam'",
+    )
+    .expect("complex join ON plan should parse");
+
+    let result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &read_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+        &mut |row_tuple, nested_condition| {
+            row_matches_select_condition_result(
+                row_tuple,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("joined select with complex ON should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "sam@example.com"
+    );
+    assert_eq!(
+        String::from_utf8(result.rows[0][1].clone()).expect("utf8"),
+        "Sam"
+    );
+}
+
+#[test]
+fn execute_joined_select_plan_supports_case_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email, case when p.name = 'Sam' then 'known' else 'unknown' end as bucket from users u left join profiles p on u.id = p.user_id",
+    )
+    .expect("join CASE projection plan should parse");
+
+    let result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &read_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+        &mut |row_tuple, nested_condition| {
+            row_matches_select_condition_result(
+                row_tuple,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("joined select with CASE projection should succeed");
+
+    assert_eq!(result.columns.len(), 2);
+    assert_eq!(result.columns[1].field_name, "bucket");
+
+    let mut rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("email utf8"),
+                String::from_utf8(row[1].clone()).expect("bucket utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("alex@example.com".to_string(), "unknown".to_string()),
+            ("sam@example.com".to_string(), "known".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_joined_select_plan_supports_case_projection_function_values() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email, case when p.name = 'Sam' then upper('known') else lower('UNKNOWN') end as bucket from users u left join profiles p on u.id = p.user_id",
+    )
+    .expect("join CASE projection with function values should parse");
+
+    let result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &read_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+        &mut |row_tuple, nested_condition| {
+            row_matches_select_condition_result(
+                row_tuple,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("joined select with function-valued CASE projection should succeed");
+
+    let mut rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("email utf8"),
+                String::from_utf8(row[1].clone()).expect("bucket utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("alex@example.com".to_string(), "unknown".to_string()),
+            ("sam@example.com".to_string(), "KNOWN".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_joined_select_plan_supports_case_projection_function_values_with_columns() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email, case when p.name = 'Sam' then concat(p.name, '!') else lower('UNKNOWN') end as bucket from users u left join profiles p on u.id = p.user_id",
+    )
+    .expect("join CASE projection with column-arg function values should parse");
+
+    let result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &read_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+        &mut |row_tuple, nested_condition| {
+            row_matches_select_condition_result(
+                row_tuple,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("joined select with column-arg function-valued CASE projection should succeed");
+
+    let mut rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("email utf8"),
+                String::from_utf8(row[1].clone()).expect("bucket utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("alex@example.com".to_string(), "unknown".to_string()),
+            ("sam@example.com".to_string(), "Sam!".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_joined_select_plan_returns_explain_rows_when_requested() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "explain select u.email from users u inner join profiles p on u.id = p.user_id",
+    )
+    .expect("explain join plan should parse");
+
+    let result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &read_plan,
+        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |_, _| Ok(true),
+        &mut |_, _| Ok(true),
+    )
+    .expect("explain join should succeed");
+
+    assert_eq!(result.columns.len(), 5);
+    assert_eq!(result.rows.len(), 2);
 }
 
 #[test]
@@ -349,7 +698,7 @@ fn execute_relation_select_plan_supports_not_exists_predicates() {
     seed_rows(&mut catalog, &wal);
 
     let read_plan = parse_select_read_plan_from_statement(
-        "select u.email from users u where not exists (select uid from users where id = 999)",
+        "select u.email from users u where not exists (select id from users where id = 999)",
     )
     .expect("not exists select should parse");
 
@@ -374,6 +723,116 @@ fn execute_relation_select_plan_supports_not_exists_predicates() {
     .expect("not exists select should succeed");
 
     assert_eq!(result.rows.len(), 2);
+}
+
+#[test]
+fn execute_relation_select_plan_supports_exists_predicates_with_inbuilt_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where exists (select concat('x', 'y') from users where id = 1)",
+    )
+    .expect("exists select with inbuilt projection should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("exists select with inbuilt projection should succeed");
+
+    assert_eq!(result.rows.len(), 2);
+}
+
+#[test]
+fn execute_relation_select_plan_supports_in_subquery_with_inbuilt_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where u.id in (select abs(-1))",
+    )
+    .expect("in-subquery with inbuilt projection should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("in-subquery with inbuilt projection should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], b"sam@example.com".to_vec());
+}
+
+#[test]
+fn execute_relation_select_plan_supports_scalar_subquery_with_inbuilt_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where u.id = (select abs(-1))",
+    )
+    .expect("scalar subquery with inbuilt projection should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("scalar subquery with inbuilt projection should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], b"sam@example.com".to_vec());
 }
 
 #[test]
@@ -828,5 +1287,57 @@ fn execute_relation_select_plan_supports_passthrough_derived_wrapper_with_outer_
     assert_eq!(
         String::from_utf8(result.rows[0][1].clone()).expect("utf8"),
         "alex@example.com"
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_passthrough_derived_wrapper_with_outer_projection_aliases() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select d.email as contact from (select id, email from users) d where d.id = 1",
+    )
+    .expect("passthrough derived wrapper with outer projection aliases should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut |_function| Ok(None),
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("passthrough derived wrapper with outer projection aliases should execute");
+
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].field_name, "contact");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
+        "sam@example.com"
     );
 }

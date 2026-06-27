@@ -12,7 +12,7 @@ use super::access::{
 };
 use super::{
     join_condition_field_names, join_condition_matches_provider, JoinedRowCandidateProvider,
-    JoinedRowTuple, MaterializedRelationRow, row_matches_condition_with,
+    JoinedRowTuple, MaterializedRelationRow, row_matches_condition_with_result,
 };
 
 pub fn build_joined_row_tuples<F>(
@@ -202,13 +202,13 @@ where
                         right_row,
                     };
 
-                    if row_matches_condition_with(
+                    if row_matches_condition_with_result(
                         &provider,
                         Some(&join.on_condition),
-                        &mut |_, _| HashSet::new(),
-                        &mut |_, _| false,
-                        &mut |_, _| None,
-                    ) {
+                        &mut |_, _| Ok(HashSet::new()),
+                        &mut |_, _| Ok(false),
+                        &mut |_, _| Ok(None),
+                    )? {
                         matched_left = true;
                         matched_right_ids.insert(right_row.row_id);
                         next_rows.push(left_row.append(&join.relation, right_row));

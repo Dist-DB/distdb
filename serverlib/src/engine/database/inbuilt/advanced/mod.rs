@@ -68,6 +68,7 @@ mod tests {
 			connection_id: Some(42),
 			last_insert_id: Some(1234),
 			version: Some("distdb-test".to_string()),
+			argument_bindings: std::collections::HashMap::new(),
 		}
 
 	}

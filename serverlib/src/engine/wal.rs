@@ -13,6 +13,12 @@ use crate::core::identity::UserId;
 use crate::engine::database::transaction::{TransactionId, TransactionLog, TransactionRecord};
 use crate::TransactionKind;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalStreamMode {
+    Durable,
+    Ephemeral,
+}
+
 #[derive(Debug)]
 enum WalCommand {
 
@@ -35,6 +41,7 @@ enum WalCommand {
 pub struct ConcurrentWalManager {
     workers: Mutex<HashMap<String, Sender<WalCommand>>>,
     storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
+    stream_modes: Mutex<HashMap<String, WalStreamMode>>,
     data_dir: Option<Arc<PathBuf>>,
 }
 
@@ -44,6 +51,7 @@ impl Default for ConcurrentWalManager {
         Self {
             workers: Mutex::new(HashMap::new()),
             storage: Arc::new(Mutex::new(HashMap::new())),
+            stream_modes: Mutex::new(HashMap::new()),
             data_dir: None,
         }
     }
@@ -72,8 +80,45 @@ impl ConcurrentWalManager {
         Self {
             workers: Mutex::new(HashMap::new()),
             storage: Arc::new(Mutex::new(HashMap::new())),
+            stream_modes: Mutex::new(HashMap::new()),
             data_dir: Some(Arc::new(data_dir)),
         }
+    }
+
+    pub fn set_stream_mode(
+        &self,
+        wal_id: &str,
+        mode: WalStreamMode,
+    ) -> Result<(), &'static str> {
+        let stream_key = obfuscated_stream_key(wal_id)?;
+
+        let mut modes = self
+            .stream_modes
+            .lock()
+            .map_err(|_| "failed to lock WAL stream mode registry")?;
+
+        modes.insert(stream_key, mode);
+
+        Ok(())
+    }
+
+    pub fn stream_mode(&self, wal_id: &str) -> WalStreamMode {
+        let Ok(stream_key) = obfuscated_stream_key(wal_id) else {
+            return WalStreamMode::Durable;
+        };
+
+        let Ok(modes) = self.stream_modes.lock() else {
+            return WalStreamMode::Durable;
+        };
+
+        modes
+            .get(&stream_key)
+            .copied()
+            .unwrap_or(WalStreamMode::Durable)
+    }
+
+    pub fn is_stream_replicable(&self, wal_id: &str) -> bool {
+        matches!(self.stream_mode(wal_id), WalStreamMode::Durable)
     }
 
     pub fn active_worker_count(&self) -> usize {
@@ -148,6 +193,14 @@ impl ConcurrentWalManager {
             storage.remove(&stream_key);
         }
 
+        {
+            let mut modes = self
+                .stream_modes
+                .lock()
+                .map_err(|_| "failed to lock WAL stream mode registry")?;
+            modes.remove(&stream_key);
+        }
+
         if let Some(data_dir) = &self.data_dir {
             let wal_path = data_dir.join(FileKind::Data.file_name(&stream_key));
             if let Err(err) = fs::remove_file(wal_path)
@@ -173,10 +226,20 @@ impl ConcurrentWalManager {
             return Ok(existing.clone());
         }
 
-        let wal_path = self
-            .data_dir
-            .as_ref()
-            .map(|dir| dir.join(FileKind::Data.file_name(&stream_key)));
+        let stream_mode = self
+            .stream_modes
+            .lock()
+            .ok()
+            .and_then(|modes| modes.get(&stream_key).copied())
+            .unwrap_or(WalStreamMode::Durable);
+
+        let wal_path = match stream_mode {
+            WalStreamMode::Durable => self
+                .data_dir
+                .as_ref()
+                .map(|dir| dir.join(FileKind::Data.file_name(&stream_key))),
+            WalStreamMode::Ephemeral => None,
+        };
 
         let (sender, ready_rx) = spawn_worker(stream_key.clone(), Arc::clone(&self.storage), wal_path);
 
@@ -219,7 +282,8 @@ impl TransactionLog for ConcurrentWalManager {
             Err(_) => return Vec::new(),
         };
 
-        if let Some(data_dir) = &self.data_dir {
+        if matches!(self.stream_mode(wal_id), WalStreamMode::Durable)
+            && let Some(data_dir) = &self.data_dir {
 
             let needs_hydration = match self.storage.lock() {
                 Ok(store) => !store.contains_key(&stream_key),

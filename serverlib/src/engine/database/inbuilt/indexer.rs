@@ -1,6 +1,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use sqlparser::ast::{BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value};
 
@@ -21,6 +22,7 @@ pub struct InbuiltSqlRuntimeContext {
     pub connection_id: Option<i64>,
     pub last_insert_id: Option<i64>,
     pub version: Option<String>,
+    pub argument_bindings: HashMap<String, Vec<u8>>,
 }
 
 thread_local! {
@@ -88,6 +90,39 @@ pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<V
 
         Expr::Value(value) => value_to_bytes(value),
 
+        Expr::Identifier(identifier) => {
+            let field_name = common::normalize_identifier!(&identifier.value);
+            let context = inbuilt_sql_runtime_context();
+
+            Ok(context.argument_bindings.get(&field_name).cloned())
+        }
+
+        Expr::CompoundIdentifier(parts) => {
+            if parts.len() != 2 {
+                return Err(
+                    "inbuilt command compound identifiers currently support only qualifier.column"
+                        .to_string(),
+                );
+            }
+
+            let qualified_name = format!(
+                "{}.{}",
+                common::normalize_identifier!(&parts[0].value),
+                common::normalize_identifier!(&parts[1].value)
+            );
+
+            let context = inbuilt_sql_runtime_context();
+
+            if let Some(value) = context.argument_bindings.get(&qualified_name) {
+                return Ok(Some(value.clone()));
+            }
+
+            Ok(context
+                .argument_bindings
+                .get(&common::normalize_identifier!(&parts[1].value))
+                .cloned())
+        }
+
         Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
 
             (UnaryOperator::Plus, Expr::Value(Value::Number(value, _))) => {
@@ -150,7 +185,7 @@ pub(super) fn evaluate_argument_expression(expression: &Expr) -> Result<Option<V
 
         Expr::Function(function) => evaluate_inbuilt_sql_function(function),
 
-        _ => Err("inbuilt command arguments currently support only literals and inbuilt nested calls".to_string()),
+        _ => Err("inbuilt command arguments currently support literals, column references, and inbuilt nested calls".to_string()),
         
     }
 

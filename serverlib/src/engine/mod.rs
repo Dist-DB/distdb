@@ -28,4 +28,4 @@ pub use database::transaction::{
 	EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
 	SqlObjectKind, TableLifecycleAction, TableLifecyclePayload,
 };
-pub use wal::ConcurrentWalManager;
+pub use wal::{ConcurrentWalManager, WalStreamMode};

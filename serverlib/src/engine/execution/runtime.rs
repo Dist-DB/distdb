@@ -269,10 +269,13 @@ pub fn row_matches_condition_with_result(
                 pattern,
                 negated,
                 case_insensitive,
+                escape_char,
             } => {
                 let found = provider
                     .value(field_name)
-                    .map(|actual| compare_like_value(actual, pattern, *case_insensitive))
+                    .map(|actual| {
+                        compare_like_value(actual, pattern, *case_insensitive, *escape_char)
+                    })
                     .unwrap_or(false);
 
                 if *negated {

@@ -100,6 +100,19 @@ fn select_read_plan_parses_in_subquery_condition() {
 }
 
 #[test]
+fn select_read_plan_parses_in_subquery_with_inbuilt_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where id_person in (select lower('UID'))",
+    )
+    .expect("in-subquery with inbuilt projection should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(SelectPredicate::InSubquery { .. }))
+    ));
+}
+
+#[test]
 fn select_read_plan_parses_exists_predicates() {
     let plan = parse_select_read_plan_from_statement(
         "select uid from __account where exists (select uid from __person where is_deleted = 0) or not exists (select uid from __person where is_deleted = 1)",
@@ -181,6 +194,25 @@ fn select_read_plan_parses_like_predicates() {
         Some(SelectCondition::Predicate(SelectPredicate::Like {
             negated: false,
             case_insensitive: false,
+            escape_char: None,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn select_read_plan_parses_like_predicates_with_escape() {
+    let plan = parse_select_read_plan_from_statement(
+        "select uid from __account where email like 'sam\\_%@example.com' escape '\\\\'",
+    )
+    .expect("like condition with escape should parse");
+
+    assert!(matches!(
+        plan.where_condition,
+        Some(SelectCondition::Predicate(SelectPredicate::Like {
+            negated: false,
+            case_insensitive: false,
+            escape_char: Some('\\'),
             ..
         }))
     ));
@@ -419,6 +451,66 @@ fn select_join_using_parses_equality_condition() {
 }
 
 #[test]
+fn select_join_on_supports_complex_conditions() {
+    let plan = parse_select_read_plan_from_statement(
+        "select u.email, p.name from users u inner join profiles p on u.id = p.user_id and p.name = 'Sam'",
+    )
+    .expect("join select with complex ON should parse");
+
+    assert_eq!(plan.joins.len(), 1);
+    assert!(matches!(
+        plan.joins[0].on_condition,
+        SelectCondition::And(_)
+    ));
+}
+
+#[test]
+fn select_case_projection_parses_with_alias() {
+    let plan = parse_select_read_plan_from_statement(
+        "select case when active = 1 then 'yes' else 'no' end as state from users",
+    )
+    .expect("searched CASE projection should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::Case { output_name, .. }] if output_name == "state"
+    ));
+}
+
+#[test]
+fn select_simple_case_projection_parses_with_operand() {
+    let plan = parse_select_read_plan_from_statement(
+        "select case active when 1 then 'yes' else 'no' end as state from users",
+    )
+    .expect("simple CASE projection should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::Case {
+            output_name,
+            operand: Some(_),
+            branches,
+            ..
+        }] if output_name == "state" && matches!(branches.first(), Some((SelectCaseWhen::Equals(_), _)))
+    ));
+}
+
+#[test]
+fn select_case_projection_parses_inbuilt_function_values() {
+    let plan = parse_select_read_plan_from_statement(
+        "select case when active = 1 then upper('yes') else lower('NO') end as state from users",
+    )
+    .expect("CASE projection with inbuilt function values should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::Case { branches, else_value, .. }]
+            if matches!(branches.first(), Some((_, SelectExpression::InbuiltFunction { .. })))
+                && matches!(else_value, Some(SelectExpression::InbuiltFunction { .. }))
+    ));
+}
+
+#[test]
 fn select_multiple_joins_parse_in_order() {
     let plan = parse_select_read_plan_from_statement(
             "select u.email, p.name, t.label from users u inner join profiles p on u.id = p.user_id left join teams t on p.id = t.profile_id where u.id = 1",
@@ -491,4 +583,42 @@ fn select_passthrough_derived_wrapper_composes_outer_limit_offset() {
 
     assert_eq!(plan.limit, Some(3));
     assert_eq!(plan.offset, Some(3));
+}
+
+#[test]
+fn select_passthrough_derived_wrapper_rewrites_outer_projection_with_aliases() {
+    let plan = parse_select_read_plan_from_statement(
+        "select d.id as user_id, d.email from (select id, email from users) d",
+    )
+    .expect("passthrough derived wrapper with outer projection aliases should parse");
+
+    assert_eq!(plan.projection_is_wildcard, false);
+    assert_eq!(plan.projection, Some(vec!["id".to_string(), "email".to_string()]));
+    assert_eq!(
+        plan.projection_items,
+        vec![
+            SelectProjectionItem::Column {
+                field_name: "id".to_string(),
+                output_name: "user_id".to_string(),
+            },
+            SelectProjectionItem::Column {
+                field_name: "email".to_string(),
+                output_name: "email".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn select_passthrough_derived_wrapper_rejects_unknown_outer_projection_column() {
+    let err = parse_select_read_plan_from_statement(
+        "select d.missing from (select id, email from users) d",
+    )
+    .expect_err("unknown outer projection column should fail");
+
+    assert!(matches!(
+        err,
+        SqlParseError::UnsupportedStatement(message)
+            if message.contains("references unknown projected column 'missing'")
+    ));
 }

@@ -114,6 +114,7 @@ pub(super) fn explain_join_mutation_plan(
             serverlib::SelectJoinKind::Left => "left",
             serverlib::SelectJoinKind::Right => "right",
             serverlib::SelectJoinKind::Full => "full",
+            serverlib::SelectJoinKind::Cross => "cross",
         };
 
         let on = if let Some((left_field_name, right_field_name)) =

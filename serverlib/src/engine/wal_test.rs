@@ -164,3 +164,48 @@ fn in_memory_mode_appends_without_filesystem_backing() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].kind, TransactionKind::Insert);
 }
+
+#[test]
+fn stream_mode_defaults_to_durable_and_can_be_set_ephemeral() {
+    let wal = ConcurrentWalManager::new();
+
+    assert_eq!(wal.stream_mode("users"), WalStreamMode::Durable);
+    assert!(wal.is_stream_replicable("users"));
+
+    wal.set_stream_mode("users", WalStreamMode::Ephemeral)
+        .expect("setting stream mode should succeed");
+
+    assert_eq!(wal.stream_mode("users"), WalStreamMode::Ephemeral);
+    assert!(!wal.is_stream_replicable("users"));
+}
+
+#[test]
+fn ephemeral_stream_in_file_mode_keeps_data_in_memory_only() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-wal-ephemeral-stream-{}-{}",
+        std::process::id(),
+        common::epoch_nanos!()
+    ));
+
+    std::fs::create_dir_all(&temp_root).expect("temp wal dir should be created");
+
+    let wal = ConcurrentWalManager::with_data_dir(temp_root.clone());
+    let actor = UserId::from_username("tester");
+
+    wal.set_stream_mode("temp_users", WalStreamMode::Ephemeral)
+        .expect("setting stream mode should succeed");
+
+    wal.append("temp_users", make_record(1, TransactionKind::Insert, &actor))
+        .expect("append should succeed");
+
+    let stream_key = super::obfuscated_stream_key("temp_users")
+        .expect("stream key should resolve");
+    let wal_file = temp_root.join(FileKind::Data.file_name(&stream_key));
+
+    assert!(!wal_file.exists());
+    assert_eq!(wal.stream_mode("temp_users"), WalStreamMode::Ephemeral);
+    assert!(!wal.is_stream_replicable("temp_users"));
+    assert_eq!(wal.since("temp_users", None).len(), 1);
+
+    let _ = std::fs::remove_dir_all(temp_root);
+}

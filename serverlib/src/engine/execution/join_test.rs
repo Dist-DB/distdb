@@ -224,7 +224,7 @@ fn build_joined_row_tuples_supports_all_join_kinds() {
 }
 
 #[test]
-fn build_joined_row_tuples_rejects_unsupported_join_conditions() {
+fn build_joined_row_tuples_supports_non_field_comparison_join_conditions() {
     let wal = ConcurrentWalManager::in_memory();
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
@@ -242,7 +242,7 @@ fn build_joined_row_tuples_rejects_unsupported_join_conditions() {
         }),
     };
 
-    let err = build_joined_row_tuples(
+    let rows = build_joined_row_tuples(
         &catalog,
         &wal,
         &runtime_indexes,
@@ -251,9 +251,10 @@ fn build_joined_row_tuples_rejects_unsupported_join_conditions() {
         &[join],
         &mut |_, _| Ok(true),
     )
-    .expect_err("unsupported join ON condition should be rejected");
+    .expect("non-field-comparison join ON condition should be supported");
 
-    assert!(err.contains("unsupported join ON condition"));
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.value("u.id") == Some(&b"1".to_vec())));
 }
 
 #[test]

@@ -858,6 +858,39 @@ fn trigger_and_procedure_registration_and_updates_work() {
 }
 
 #[test]
+fn stored_procedure_caches_if_else_end_plan_on_register_and_update() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    catalog
+        .register_stored_procedure(
+            "refresh_accounts",
+            "create procedure refresh_accounts() begin if active = 1 then select 'on'; else select 'off'; end if; end",
+            vec!["accounts".to_string()],
+        )
+        .expect("procedure register should succeed");
+
+    let procedure = catalog
+        .stored_procedure("refresh_accounts")
+        .expect("procedure should exist");
+    assert!(procedure.if_else_end_plan().is_some());
+
+    catalog
+        .set_sql_definition(
+            "refresh_accounts",
+            SqlObjectKind::StoredProcedure,
+            "create procedure refresh_accounts() begin select 1; end",
+            vec!["accounts".to_string()],
+        )
+        .expect("procedure sql update should succeed");
+
+    let procedure = catalog
+        .stored_procedure("refresh_accounts")
+        .expect("procedure should exist after update");
+    assert!(procedure.if_else_end_plan().is_none());
+}
+
+#[test]
 fn drop_helpers_remove_sql_backed_entities() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");

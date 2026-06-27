@@ -1,4 +1,5 @@
 use super::*;
+use crate::SelectCondition;
 
 #[test]
 fn update_rows_helper_extracts_assignments_and_where() {
@@ -54,4 +55,15 @@ fn update_rows_helper_parses_multiple_joins() {
     assert_eq!(plan.relations.len(), 3);
     assert_eq!(plan.joins.len(), 2);
     assert!(plan.where_condition.is_some());
+}
+
+#[test]
+fn update_rows_helper_parses_complex_join_on_condition() {
+    let plan = parse_update_rows_from_statement(
+        "update users u join profiles p on u.id = p.user_id and p.name = 'Sam' set u.email = 'sam@example.com'",
+    )
+    .expect("update with complex join ON should parse");
+
+    assert_eq!(plan.joins.len(), 1);
+    assert!(matches!(plan.joins[0].on_condition, SelectCondition::And(_)));
 }

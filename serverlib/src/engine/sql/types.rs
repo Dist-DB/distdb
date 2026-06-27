@@ -1,6 +1,7 @@
 use sqlparser::ast::{Function, Statement};
 
 use crate::{FieldDef, FieldType};
+use super::SelectExpression;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlCompatibilityTarget {
@@ -98,6 +99,38 @@ pub struct DeleteRowsPlan {
     pub where_condition: Option<SelectCondition>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerTiming {
+    Before,
+    After,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerEventKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerInvocationBinding {
+    pub table_id: String,
+    pub timing: TriggerTiming,
+    pub event: TriggerEventKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfElseEndBranchPlan {
+    pub condition: SelectCondition,
+    pub action_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfElseEndPlan {
+    pub branches: Vec<IfElseEndBranchPlan>,
+    pub else_action_sql: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectRelation {
     pub table_id: String,
@@ -142,6 +175,7 @@ pub enum SelectPredicate {
         pattern: Vec<u8>,
         negated: bool,
         case_insensitive: bool,
+        escape_char: Option<char>,
     },
     Regex {
         field_name: String,
@@ -199,10 +233,23 @@ pub enum SelectCondition {
 
 #[expect(clippy::large_enum_variant, reason="the variants are sufficiently distinct in their usage and the enum is not expected to be used in performance-critical code paths where the size difference would be a concern")]
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectCaseWhen {
+    Condition(SelectCondition),
+    Equals(SelectExpression),
+}
+
+#[expect(clippy::large_enum_variant, reason="the variants are sufficiently distinct in their usage and the enum is not expected to be used in performance-critical code paths where the size difference would be a concern")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectProjectionItem {
     Column {
         field_name: String,
         output_name: String,
+    },
+    Case {
+        output_name: String,
+        operand: Option<SelectExpression>,
+        branches: Vec<(SelectCaseWhen, SelectExpression)>,
+        else_value: Option<SelectExpression>,
     },
     Wildcard {
         relation: Option<String>,
