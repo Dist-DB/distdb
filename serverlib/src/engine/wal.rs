@@ -68,6 +68,10 @@ impl Default for ConcurrentWalManager {
 
 impl ConcurrentWalManager {
 
+    pub fn cache_scope_id(&self) -> usize {
+        Arc::as_ptr(&self.storage) as usize
+    }
+
     fn hydrate_stream_if_needed(&self, wal_id: &str, stream_key: &str) {
         if !matches!(self.stream_mode(wal_id), WalStreamMode::Durable) {
             return;

@@ -334,6 +334,7 @@ impl RuntimeIndexStore {
                 warm_fields.dedup();
 
                 warm_equality_cache_from_live_rows(
+                    wal.cache_scope_id(),
                     &table_id,
                     latest_tx_id,
                     &live_rows,

@@ -11,7 +11,8 @@ use crate::{
 
 use super::MaterializedRelationRow;
 
-static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<HashMap<String, (u64, usize)>>> = OnceLock::new();
+static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<HashMap<(usize, String), (u64, usize)>>> =
+    OnceLock::new();
 
 #[derive(Debug, Default)]
 struct EqualityTableCacheEntry {
@@ -20,7 +21,7 @@ struct EqualityTableCacheEntry {
     row_ids_by_field_value: HashMap<String, HashMap<Vec<u8>, Vec<u64>>>,
 }
 
-static EQUALITY_TABLE_CACHE: OnceLock<Mutex<HashMap<String, EqualityTableCacheEntry>>> =
+static EQUALITY_TABLE_CACHE: OnceLock<Mutex<HashMap<(usize, String), EqualityTableCacheEntry>>> =
     OnceLock::new();
 
 fn build_postings_for_field(
@@ -60,6 +61,7 @@ fn rows_for_field_value(
 }
 
 pub fn warm_equality_cache_from_live_rows(
+    cache_scope_id: usize,
     table_id: &str,
     latest_tx_id: u64,
     live_rows: &[(u64, HashMap<String, Vec<u8>>) ],
@@ -88,7 +90,7 @@ pub fn warm_equality_cache_from_live_rows(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut cache_guard) = cache.lock() {
         cache_guard.insert(
-            table_id.to_string(),
+            (cache_scope_id, table_id.to_string()),
             EqualityTableCacheEntry {
                 latest_tx_id,
                 rows_by_id,
@@ -306,13 +308,14 @@ pub fn load_live_rows_by_equality(
     lookup_value: &[u8],
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
+    let cache_scope_id = wal.cache_scope_id();
     let latest_tx_id = wal
         .latest_transaction_id(table_id)
         .map(|tx| tx.0)
         .unwrap_or(0);
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = cache_guard.get_mut(table_id)
+        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
         && entry.latest_tx_id == latest_tx_id {
             if !entry.row_ids_by_field_value.contains_key(field_name) {
                 entry.row_ids_by_field_value.insert(
@@ -345,7 +348,7 @@ pub fn load_live_rows_by_equality(
     let result = rows_for_field_value(&entry, field_name, lookup_value);
 
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert(table_id.to_string(), entry);
+        cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
     }
 
     result
@@ -357,6 +360,7 @@ pub fn load_live_row_count(
     table_id: &str,
 ) -> usize {
 
+    let cache_scope_id = wal.cache_scope_id();
     let latest_tx_id = wal
         .latest_transaction_id(table_id)
         .map(|tx| tx.0)
@@ -364,7 +368,7 @@ pub fn load_live_row_count(
 
     let cache = LIVE_ROW_COUNT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(cache_guard) = cache.lock()
-        && let Some((cached_latest_tx_id, cached_count)) = cache_guard.get(table_id)
+        && let Some((cached_latest_tx_id, cached_count)) = cache_guard.get(&(cache_scope_id, table_id.to_string()))
         && *cached_latest_tx_id == latest_tx_id {
             return *cached_count;
         }
@@ -435,7 +439,7 @@ pub fn load_live_row_count(
     let count = live_row_ids.len();
 
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert(table_id.to_string(), (latest_tx_id, count));
+        cache_guard.insert((cache_scope_id, table_id.to_string()), (latest_tx_id, count));
     }
 
     count
