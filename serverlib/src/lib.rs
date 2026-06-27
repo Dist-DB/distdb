@@ -80,6 +80,7 @@ pub use engine::execution::{
 	select_mutation_target_rows,
 	execute_joined_select_plan, execute_projection_only_select_plan,
 	execute_relation_select_plan, explain_joined_select_plan_result, explain_select_plan_result,
+	advise_select_execution, SelectExecutionAdvice,
 	field_has_single_column_index, join_condition_field_names, join_condition_matches_provider,
 	load_live_rows, materialize_relation_rows, plan_relation_access, relation_qualifier,
 	row_matches_condition_with, row_matches_select_condition, ConditionValueProvider,

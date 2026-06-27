@@ -584,8 +584,13 @@ fn execute_joined_select_plan_returns_explain_rows_when_requested() {
     )
     .expect("explain join should succeed");
 
-    assert_eq!(result.columns.len(), 5);
+    assert_eq!(result.columns.len(), 8);
     assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.columns[5].field_name, "complexity_score");
+    assert_eq!(result.columns[6].field_name, "execution_mode");
+    assert_eq!(result.columns[7].field_name, "complexity_reasons");
+    assert_eq!(result.rows[0][6], b"adaptive_materialize".to_vec());
+    assert_eq!(result.rows[0][7], b"joins".to_vec());
 }
 
 #[test]

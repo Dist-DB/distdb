@@ -11,7 +11,8 @@ pub use select_execute::{
 };
 
 pub use select_explain::{
-	explain_joined_select_plan_result, explain_select_plan_result,
+	advise_select_execution, explain_joined_select_plan_result,
+	explain_select_plan_result, SelectExecutionAdvice,
 };
 
 pub use mutation_select::select_mutation_target_rows;

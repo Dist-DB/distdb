@@ -2444,6 +2444,7 @@ fn execute_select_impl(
                         .unwrap_or(0),
                     None,
                     runtime_indexes,
+                    &read_plan,
                 ),
             );
         }
@@ -2518,86 +2519,14 @@ fn execute_select_impl(
             );
         };
 
-        let scoped_table_id = format!(
-            "__scoped_view_{}_{}",
-            table_id,
-            common::epoch_nanos!(),
-        );
-
-        let mut scoped_handle = match serverlib::create_scoped_ephemeral_table(
+        let result = match execute_view_over_scoped_materialization(
             catalog,
             wal,
-            scoped_table_id,
-            TableSchema::new(view_result.columns.clone()),
+            runtime_indexes,
+            table_id,
+            &read_plan,
+            view_result,
         ) {
-            Ok(handle) => handle,
-            Err(message) => {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("view execution failed: {message}"),
-                );
-            }
-        };
-
-        let scoped_query_result = (|| -> Result<serverlib::SelectExecutionResult, String> {
-            let scoped_table_id = scoped_handle.table_id().to_string();
-
-            let scoped_table = catalog
-                .table(&scoped_table_id)
-                .ok_or_else(|| "view execution failed: scoped table not found".to_string())?;
-
-            let scoped_schema = scoped_table.schema().clone();
-
-            for row in &view_result.rows {
-                let mut row_map = HashMap::with_capacity(view_result.columns.len());
-
-                for (column_index, column) in view_result.columns.iter().enumerate() {
-                    let value = row.get(column_index).cloned().unwrap_or_else(|| b"NULL".to_vec());
-                    row_map.insert(column.field_name.clone(), value);
-                }
-
-                let encoded = encode_row_payload(&scoped_schema, &row_map)
-                    .map_err(|err| format!("view execution failed: scoped row encode failed: {err}"))?;
-
-                append_row_payload_record(
-                    wal,
-                    &scoped_table_id,
-                    scoped_table,
-                    runtime_indexes,
-                    TransactionKind::Insert,
-                    encoded,
-                    common::epoch_nanos!(),
-                    None,
-                    None,
-                )
-                .map_err(|err| format!("view execution failed: scoped row append failed: {err}"))?;
-            }
-
-            let mut scoped_read_plan = read_plan.clone();
-            let original_table_id = scoped_read_plan.table_id.clone();
-            scoped_read_plan.table_id = scoped_table_id.clone();
-
-            for relation in &mut scoped_read_plan.relations {
-                if relation.table_id == original_table_id {
-                    relation.table_id = scoped_table_id.clone();
-                }
-            }
-
-            execute_select_plan_result(catalog, wal, runtime_indexes, &scoped_read_plan)
-                .map_err(|message| format!("view execution failed: {message}"))
-        })();
-
-        let scoped_release =
-            serverlib::release_scoped_ephemeral_table(catalog, wal, &mut scoped_handle);
-
-        if let Err(err) = scoped_release {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("view execution failed: scoped release failed: {err}"),
-            );
-        }
-
-        let result = match scoped_query_result {
             Ok(result) => result,
             Err(message) => {
                 return ConnectorResponse::rejected(request_id.to_string(), message);
@@ -2663,6 +2592,7 @@ fn execute_select_impl(
                     .unwrap_or(0),
                 index_lookup,
                 runtime_indexes,
+                &read_plan,
             ),
         );
     }
@@ -2698,6 +2628,105 @@ fn execute_select_impl(
         }),
     )
 
+}
+
+fn execute_view_over_scoped_materialization(
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    view_table_id: &str,
+    read_plan: &serverlib::SelectReadPlan,
+    view_result: serverlib::SelectExecutionResult,
+) -> Result<serverlib::SelectExecutionResult, String> {
+    let scoped_table_id = format!("__scoped_view_{}_{}", view_table_id, common::epoch_nanos!());
+
+    let mut scoped_handle = serverlib::create_scoped_ephemeral_table(
+        catalog,
+        wal,
+        scoped_table_id,
+        TableSchema::new(view_result.columns.clone()),
+    )
+    .map_err(|message| format!("view execution failed: {message}"))?;
+
+    let scoped_result = (|| -> Result<serverlib::SelectExecutionResult, String> {
+        let scoped_table_id = scoped_handle.table_id().to_string();
+
+        materialize_select_result_into_scoped_table(
+            catalog,
+            wal,
+            runtime_indexes,
+            &scoped_table_id,
+            &view_result,
+        )?;
+
+        let scoped_read_plan = remap_select_read_plan_table(read_plan, &scoped_table_id);
+
+        execute_select_plan_result(catalog, wal, runtime_indexes, &scoped_read_plan)
+            .map_err(|message| format!("view execution failed: {message}"))
+    })();
+
+    serverlib::release_scoped_ephemeral_table(catalog, wal, &mut scoped_handle)
+        .map_err(|err| format!("view execution failed: scoped release failed: {err}"))?;
+
+    scoped_result
+}
+
+fn materialize_select_result_into_scoped_table(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    scoped_table_id: &str,
+    view_result: &serverlib::SelectExecutionResult,
+) -> Result<(), String> {
+    let scoped_table = catalog
+        .table(scoped_table_id)
+        .ok_or_else(|| "view execution failed: scoped table not found".to_string())?;
+
+    let scoped_schema = scoped_table.schema().clone();
+
+    for row in &view_result.rows {
+        let mut row_map = HashMap::with_capacity(view_result.columns.len());
+
+        for (column_index, column) in view_result.columns.iter().enumerate() {
+            let value = row.get(column_index).cloned().unwrap_or_else(|| b"NULL".to_vec());
+            row_map.insert(column.field_name.clone(), value);
+        }
+
+        let encoded = encode_row_payload(&scoped_schema, &row_map)
+            .map_err(|err| format!("view execution failed: scoped row encode failed: {err}"))?;
+
+        append_row_payload_record(
+            wal,
+            scoped_table_id,
+            scoped_table,
+            runtime_indexes,
+            TransactionKind::Insert,
+            encoded,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .map_err(|err| format!("view execution failed: scoped row append failed: {err}"))?;
+    }
+
+    Ok(())
+}
+
+fn remap_select_read_plan_table(
+    read_plan: &serverlib::SelectReadPlan,
+    scoped_table_id: &str,
+) -> serverlib::SelectReadPlan {
+    let mut scoped_read_plan = read_plan.clone();
+    let original_table_id = scoped_read_plan.table_id.clone();
+    scoped_read_plan.table_id = scoped_table_id.to_string();
+
+    for relation in &mut scoped_read_plan.relations {
+        if relation.table_id == original_table_id {
+            relation.table_id = scoped_table_id.to_string();
+        }
+    }
+
+    scoped_read_plan
 }
 
 fn execute_joined_select(

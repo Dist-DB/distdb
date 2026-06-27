@@ -21,6 +21,7 @@ pub use join::build_joined_row_tuples;
 pub use introspection::{describe_table_result, show_databases_result, show_tables_result};
 pub use mutation::select_mutation_target_rows;
 pub use commands::{
+    advise_select_execution,
     condition_matches_provider, evaluate_case_projection, execute_if_else_end_block,
     execute_if_else_end_from_create_procedure_sql, execute_if_else_end_plan,
     execute_sql_cursor,
@@ -29,6 +30,7 @@ pub use commands::{
     create_scoped_ephemeral_table, release_scoped_ephemeral_table,
     execute_trigger_invocation, EntityInvocationSource, ControlFlowBranch,
     CursorDiagnostics, CursorDirective, IfElseEndBlock,
+    SelectExecutionAdvice,
     ScopedEphemeralTableHandle,
     SelectReadPlanCursorSource,
     SqlCursorFrame, SqlCursorSource, VecSqlCursorSource,
