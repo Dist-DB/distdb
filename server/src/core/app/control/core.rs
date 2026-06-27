@@ -1,3 +1,6 @@
+use std::time::Instant;
+use std::collections::HashSet;
+
 use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
 use serverlib::{ConcurrentWalManager, DatabaseCatalog, TransactionId};
 
@@ -13,6 +16,38 @@ use crate::core::mappings::query::{
 use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
+
+    fn staged_query_validation_plan(
+        staged_queries: &[connector::DataQuery],
+    ) -> Option<(HashSet<String>, bool)> {
+        let mut table_ids = HashSet::new();
+        let mut insert_only = true;
+
+        for query in staged_queries {
+            let parsed = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id).ok()?;
+            if parsed.is_empty() {
+                return None;
+            }
+
+            for statement in parsed {
+                let table_id = statement.object_name?;
+                table_ids.insert(table_id);
+
+                if !matches!(statement.operation, serverlib::SqlOperation::Insert) {
+                    insert_only = false;
+                }
+            }
+        }
+
+        if table_ids.is_empty() {
+            return None;
+        }
+
+        // For pure INSERT dry-runs, runtime index state is sufficient for duplicate checks.
+        // Skipping WAL seed avoids replaying full table snapshots into the sandbox.
+        Some((table_ids, insert_only))
+    }
+    
     pub fn handle_connector_request(&mut self, request: &ConnectorRequest) -> ConnectorResponse {
         self.handle_connector_request_for_session(request, &request.request_id)
     }
@@ -22,13 +57,15 @@ impl ServerApp {
         request: &ConnectorRequest,
         session_id: &str,
     ) -> ConnectorResponse {
+
         let command_info = command_info(&request.command);
         let command_path = command_info.path;
-        log::info!(
-            "connector request dispatch request_id={} path={}",
-            request.request_id,
-            command_path
-        );
+
+        // log::info!(
+        //     "connector request dispatch request_id={} path={}",
+        //     request.request_id,
+        //     command_path
+        // );
 
         let response = match command_info.kind {
             CommandKind::CreateDatabase => {
@@ -138,12 +175,12 @@ impl ServerApp {
             }
 
             _ => {
-                log::info!(
-                    "connector request completed request_id={} path={} status={:?}",
-                    request.request_id,
-                    command_path,
-                    response.status
-                );
+                // log::info!(
+                //     "connector request completed request_id={} path={} status={:?}",
+                //     request.request_id,
+                //     command_path,
+                //     response.status
+                // );
             }
         }
 
@@ -171,26 +208,30 @@ impl ServerApp {
             self.tx_begin_epoch_ms_by_session
                 .insert(session_id.to_string(), common::epoch_nanos!());
 
-            let snapshot_wal = ConcurrentWalManager::new();
-            if let Err(err) = self.seed_sandbox_wal(&snapshot_wal) {
-                let _ = self.transaction_coordinator.rollback(session_id);
-                self.tx_begin_epoch_ms_by_session.remove(session_id);
-                return Some(ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("failed to capture transaction snapshot: {}", err),
-                ));
-            }
+            let is_lightweight_import_begin = normalized.contains("distdb_import");
 
-            self.tx_snapshot_by_session.insert(
-                session_id.to_string(),
-                SessionSnapshot {
-                    catalogs: self.catalogs.clone(),
-                    runtime_indexes: self.runtime_indexes.clone(),
-                    wal: snapshot_wal,
-                },
-            );
-            self.tx_read_observations_by_session
-                .insert(session_id.to_string(), Vec::new());
+            if !is_lightweight_import_begin {
+                let snapshot_wal = ConcurrentWalManager::new();
+                if let Err(err) = self.seed_sandbox_wal(&snapshot_wal) {
+                    let _ = self.transaction_coordinator.rollback(session_id);
+                    self.tx_begin_epoch_ms_by_session.remove(session_id);
+                    return Some(ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("failed to capture transaction snapshot: {}", err),
+                    ));
+                }
+
+                self.tx_snapshot_by_session.insert(
+                    session_id.to_string(),
+                    SessionSnapshot {
+                        catalogs: self.catalogs.clone(),
+                        runtime_indexes: self.runtime_indexes.clone(),
+                        wal: snapshot_wal,
+                    },
+                );
+                self.tx_read_observations_by_session
+                    .insert(session_id.to_string(), Vec::new());
+            }
 
             if let Err(err) = self.append_session_tx_marker(
                 session_id,
@@ -318,6 +359,9 @@ impl ServerApp {
         staged_queries: &[connector::DataQuery],
         snapshot_epoch_ms: u64,
     ) -> Result<u64, String> {
+        let commit_start = Instant::now();
+        let validation_start = Instant::now();
+
         if snapshot_epoch_ms > 0 {
             if let Some(conflict) = self.detect_write_write_conflict(snapshot_epoch_ms, staged_queries) {
                 return Err(conflict);
@@ -329,6 +373,8 @@ impl ServerApp {
         }
 
         self.validate_staged_queries(request_id, session_id, staged_queries)?;
+        let validation_ms = validation_start.elapsed().as_millis() as u64;
+        let apply_start = Instant::now();
 
         let session_state = self.get_session(session_id);
         let (connection_id, session_user) = session_state
@@ -385,6 +431,9 @@ impl ServerApp {
                 total_affected_rows = total_affected_rows.saturating_add(mutation.affected_rows);
             }
         }
+        let apply_ms = apply_start.elapsed().as_millis() as u64;
+
+        let commit_marker_start = Instant::now();
 
         if let Err(err) = commit_external_write_group(&self.wal, &touched_tables, write_group_id) {
             abort_external_write_group(
@@ -394,8 +443,33 @@ impl ServerApp {
                 &touched_tables,
                 write_group_id,
             );
+            let total_ms = commit_start.elapsed().as_millis() as u64;
+            log::info!(
+                "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=failed",
+                request_id,
+                session_id,
+                staged_queries.len(),
+                total_affected_rows,
+                validation_ms,
+                apply_ms,
+                commit_marker_start.elapsed().as_millis() as u64,
+                total_ms,
+            );
             return Err(format!("transaction commit marker append failed: {err}"));
         }
+
+        let total_ms = commit_start.elapsed().as_millis() as u64;
+        log::info!(
+            "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=ok",
+            request_id,
+            session_id,
+            staged_queries.len(),
+            total_affected_rows,
+            validation_ms,
+            apply_ms,
+            commit_marker_start.elapsed().as_millis() as u64,
+            total_ms,
+        );
 
         Ok(total_affected_rows)
     }
@@ -406,18 +480,102 @@ impl ServerApp {
         session_id: &str,
         staged_queries: &[connector::DataQuery],
     ) -> Result<(), String> {
-        let mut sandbox_catalogs = self.catalogs.clone();
-        let mut sandbox_indexes = self.runtime_indexes.clone();
+        let validation_start = Instant::now();
+
+        if let Some((table_ids, insert_only)) = Self::staged_query_validation_plan(staged_queries)
+            && insert_only {
+                let total_ms = validation_start.elapsed().as_millis() as u64;
+                log::info!(
+                    "transaction validation setup request_id={} session_id={} mode=insert_only_skip_dry_run tables={} index_clone_ms=0 wal_seed_ms=0 snapshot_setup_ms=0",
+                    request_id,
+                    session_id,
+                    table_ids.len(),
+                );
+                log::info!(
+                    "transaction validation timing request_id={} session_id={} staged_queries={} snapshot_setup_ms=0 dry_run_ms=0 total_ms={}",
+                    request_id,
+                    session_id,
+                    staged_queries.len(),
+                    total_ms,
+                );
+                return Ok(());
+            }
+
+        let snapshot_start = Instant::now();
+
+        let Some(snapshot) = self.tx_snapshot_by_session.get(session_id) else {
+            return Err("missing transaction snapshot for validation".to_string());
+        };
+
+        let mut sandbox_catalogs = snapshot.catalogs.clone();
         let sandbox_wal = ConcurrentWalManager::new();
+
+        let mut setup_mode = "fallback_full";
+        let mut setup_table_count = 0usize;
+        let index_clone_ms;
+        let wal_seed_ms;
+
+        let mut sandbox_indexes = if let Some((table_ids, skip_wal_seed)) = Self::staged_query_validation_plan(staged_queries) {
+            setup_table_count = table_ids.len();
+
+            let index_clone_start = Instant::now();
+            let scoped_indexes = snapshot
+                .runtime_indexes
+                .clone_for_tables(&snapshot.catalogs, &table_ids);
+            index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
+
+            if skip_wal_seed {
+                setup_mode = "table_scoped_insert_only";
+                wal_seed_ms = 0;
+            } else {
+                setup_mode = "table_scoped";
+                let wal_seed_start = Instant::now();
+                self.seed_sandbox_wal_from_source_for_tables(
+                    &sandbox_catalogs,
+                    &snapshot.wal,
+                    &sandbox_wal,
+                    &table_ids,
+                )
+                .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
+                wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
+            }
+
+            scoped_indexes
+        } else {
+            let wal_seed_start = Instant::now();
+            self.seed_sandbox_wal_from_source(&sandbox_catalogs, &snapshot.wal, &sandbox_wal)
+                .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
+            wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
+
+            let index_clone_start = Instant::now();
+            let cloned = snapshot.runtime_indexes.clone();
+            index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
+
+            cloned
+        };
+
+        let snapshot_setup_ms = snapshot_start.elapsed().as_millis() as u64;
+
+        log::info!(
+            "transaction validation setup request_id={} session_id={} mode={} tables={} index_clone_ms={} wal_seed_ms={} snapshot_setup_ms={}",
+            request_id,
+            session_id,
+            setup_mode,
+            setup_table_count,
+            index_clone_ms,
+            wal_seed_ms,
+            snapshot_setup_ms,
+        );
 
         let session_state = self.get_session(session_id);
         let (connection_id, session_user) = session_state
             .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
             .unwrap_or((0, None));
 
-        self.seed_sandbox_wal(&sandbox_wal)?;
+        let mut dry_run_total_ms = 0u64;
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
+            let staged_query_start = Instant::now();
             let dry_run_request_id = format!("{}::dryrun{}", request_id, idx + 1);
             let response = handle_query_command(
                 &dry_run_request_id,
@@ -443,8 +601,24 @@ impl ServerApp {
                     error
                 ));
             }
+
+            dry_run_total_ms = dry_run_total_ms.saturating_add(staged_query_start.elapsed().as_millis() as u64);
         }
 
+        let total_ms = validation_start.elapsed().as_millis() as u64;
+
+        log::info!(
+            "transaction validation timing request_id={} session_id={} staged_queries={} snapshot_setup_ms={} dry_run_ms={} total_ms={}",
+            request_id,
+            session_id,
+            staged_queries.len(),
+            snapshot_setup_ms,
+            dry_run_total_ms,
+            total_ms,
+        );
+
         Ok(())
+
     }
+    
 }

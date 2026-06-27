@@ -13,3 +13,4 @@ sqlparser = "0.51"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 chrono = "*"
 regex = "1"
+ahash = "0.8"

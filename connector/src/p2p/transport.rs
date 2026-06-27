@@ -21,6 +21,7 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
+const CONNECTOR_STREAM_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConnectorTlsConfig {
@@ -400,6 +401,8 @@ impl ConnectorTransport for ConnectorP2pTransport {
             );
         }
 
+        let mut network_request_error: Option<ConnectorError> = None;
+
         if has_live_connection
             && let Some(peer) = self.active_peer() {
 
@@ -420,10 +423,15 @@ impl ConnectorTransport for ConnectorP2pTransport {
                         request.request_id,
                         err
                     );
+                    network_request_error = Some(err);
                 }
 
             }
 
+        }
+
+        if let Some(err) = network_request_error {
+            return Err(err);
         }
 
         self.queued_responses
@@ -606,6 +614,10 @@ fn send_request_frame(
         .and_then(|_| stream.write_all(&payload))
         .map_err(|e| ConnectorError::Transport(format!("failed to write request: {e}")))?;
 
+    stream
+        .flush()
+        .map_err(|e| ConnectorError::Transport(format!("failed to flush request: {e}")))?;
+
     read_response_frame(stream)
 
 }
@@ -730,10 +742,12 @@ fn connect_tls_stream(
         ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}"))
     })?;
 
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(5)))
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+    tcp.set_nodelay(true)
+        .map_err(|e| ConnectorError::Transport(format!("failed to set TCP_NODELAY: {e}")))?;
 
     let server_name = server_name_from_socket_addr(socket_addr)?;
     let mut connection = ClientConnection::new(Arc::new(client_config), server_name).map_err(|e| {
@@ -753,6 +767,14 @@ fn connect_tls_stream(
 fn connect_plain_stream(socket_addr: &str) -> Result<ConnectorWireStream, ConnectorError> {
     let tcp = TcpStream::connect(socket_addr)
         .map_err(|e| ConnectorError::Transport(format!("failed to connect to {socket_addr}: {e}")))?;
+
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+        .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+        .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+    tcp.set_nodelay(true)
+        .map_err(|e| ConnectorError::Transport(format!("failed to set TCP_NODELAY: {e}")))?;
+
     Ok(ConnectorWireStream::Plain(tcp))
 }
 
@@ -789,10 +811,12 @@ fn fetch_ca_pem_from_peer(
         ConnectorError::Transport(format!("CA bootstrap connect to {socket_addr} failed: {err}"))
     })?;
 
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
         .map_err(|err| ConnectorError::Transport(format!("set read timeout failed: {err}")))?;
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(5)))
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
         .map_err(|err| ConnectorError::Transport(format!("set write timeout failed: {err}")))?;
+    tcp.set_nodelay(true)
+        .map_err(|err| ConnectorError::Transport(format!("set TCP_NODELAY failed: {err}")))?;
 
     let request = CaBootstrapRequest {
         node_id: node_id.to_string(),
@@ -810,6 +834,9 @@ fn fetch_ca_pem_from_peer(
         .map_err(|err| {
             ConnectorError::Transport(format!("failed to write CA bootstrap request: {err}"))
         })?;
+    tcp.flush().map_err(|err| {
+        ConnectorError::Transport(format!("failed to flush CA bootstrap request: {err}"))
+    })?;
 
     // Server first sends a password challenge frame; skip it.
     let mut header = [0u8; 4];

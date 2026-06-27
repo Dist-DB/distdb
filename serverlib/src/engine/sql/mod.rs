@@ -17,7 +17,7 @@ mod insert_plan;
 mod update_plan;
 mod delete_plan;
 
-pub use insert_plan::parse_insert_rows_from_statement;
+pub use insert_plan::{parse_insert_rows_from_parsed_statement, parse_insert_rows_from_statement};
 pub use update_plan::parse_update_rows_from_statement;
 pub use delete_plan::parse_delete_rows_from_statement;
 

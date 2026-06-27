@@ -1,7 +1,7 @@
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
     ConcurrentWalManager, TransactionId, TransactionKind, TransactionRecord,
-    UserId, WalStreamMode,
+    UserId,
 };
 
 use crate::core::app::ServerApp;
@@ -10,15 +10,58 @@ use crate::core::app::helpers::SessionTxMarkerType;
 impl ServerApp {
     pub(super) fn seed_sandbox_wal(&self, sandbox_wal: &ConcurrentWalManager) -> Result<(), String> {
         for catalog in self.catalogs.values() {
-            let database_wal_id = catalog.database_id.0.clone();
-            self.copy_wal_stream(&database_wal_id, sandbox_wal)?;
-
             for table_id in catalog.table_ids() {
-                self.copy_wal_stream(&table_id, sandbox_wal)?;
+                let Some(table) = catalog.table(&table_id) else {
+                    continue;
+                };
+
+                self.seed_table_stream_from_live_rows(
+                    &table.table_id,
+                    table.schema(),
+                    sandbox_wal,
+                )?;
             }
         }
 
         Ok(())
+    }
+
+    fn seed_table_stream_from_live_rows(
+        &self,
+        table_id: &str,
+        schema: &serverlib::TableSchema,
+        sandbox_wal: &ConcurrentWalManager,
+    ) -> Result<(), String> {
+        if !self.wal.is_stream_replicable(table_id) {
+            return Ok(());
+        }
+
+        let live_rows = serverlib::load_live_rows(&self.wal, table_id, schema);
+        if live_rows.is_empty() {
+            return Ok(());
+        }
+
+        let timestamp_epoch_ms = common::epoch_nanos!();
+        let mut records = Vec::with_capacity(live_rows.len());
+
+        for (idx, (_, row_map)) in live_rows.into_iter().enumerate() {
+            let payload = serverlib::encode_row_payload(schema, &row_map)
+                .map_err(|err| format!("failed to encode snapshot row for table '{}': {}", table_id, err))?;
+
+            records.push(TransactionRecord {
+                id: TransactionId((idx as u64) + 1),
+                groupid: None,
+                refid: None,
+                timestamp_epoch_ms,
+                actor: UserId::from_username("snapshot"),
+                kind: TransactionKind::Insert,
+                payload,
+            });
+        }
+
+        sandbox_wal
+            .append_batch(table_id, records)
+            .map_err(|err| format!("failed to seed snapshot live rows for stream '{}': {}", table_id, err))
     }
 
     fn copy_wal_stream(&self, wal_id: &str, sandbox_wal: &ConcurrentWalManager) -> Result<(), String> {
@@ -26,11 +69,10 @@ impl ServerApp {
             return Ok(());
         }
 
-        for record in self.wal.since(wal_id, None) {
-            sandbox_wal
-                .append(wal_id, record)
-                .map_err(|err| format!("failed to seed sandbox WAL for stream '{}': {}", wal_id, err))?;
-        }
+        let records = self.wal.since(wal_id, None);
+        sandbox_wal
+            .append_batch(wal_id, records)
+            .map_err(|err| format!("failed to seed sandbox WAL for stream '{}': {}", wal_id, err))?;
 
         Ok(())
     }
@@ -179,39 +221,14 @@ impl ServerApp {
         staged_count: usize,
     ) -> Result<(), String> {
 
-        let wal_id = format!("__session_tx__:{}", session_id);
-        let records = self.wal.since(&wal_id, None);
-        let next_id = TransactionId(records.last().map(|record| record.id.0 + 1).unwrap_or(1));
-        let refid = records.last().map(|record| record.id);
-        let timestamp_epoch_ms = common::epoch_nanos!();
-
-        self.wal
-            .set_stream_mode(&wal_id, WalStreamMode::Ephemeral)
-            .map_err(|err| format!("failed to mark session marker stream mode: {}", err))?;
-
-        let encoded = format!(
-            "session_id={} request_id={} marker={} staged_count={} ts={}",
+        log::debug!(
+            "session tx marker session_id={} request_id={} marker={} staged_count={}",
             session_id,
             request_id,
             marker_type.as_str(),
-            staged_count,
-            timestamp_epoch_ms
-        )
-        .into_bytes();
+            staged_count
+        );
 
-        self.wal
-            .append(
-                &wal_id,
-                TransactionRecord {
-                    id: next_id,
-                    groupid: None,
-                    refid,
-                    timestamp_epoch_ms,
-                    actor: UserId::from_username("server"),
-                    kind: TransactionKind::MetadataChange,
-                    payload: encoded,
-                },
-            )
-            .map_err(|err| format!("failed to append session tx marker: {}", err))
+        Ok(())
     }
 }

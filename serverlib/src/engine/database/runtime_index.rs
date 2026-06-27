@@ -1,4 +1,6 @@
+use ahash::{AHashMap, AHashSet};
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
 
 use super::table::DatabaseTable;
 use crate::{
@@ -11,7 +13,7 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
-    entries: HashSet<Vec<Vec<u8>>>,
+    entries: AHashSet<Vec<Vec<u8>>>,
 }
 
 impl RuntimeIndexState {
@@ -36,8 +38,32 @@ impl RuntimeIndexState {
         self.entries.len()
     }
 
-    pub fn rebuild(&mut self, entries: HashSet<Vec<Vec<u8>>>) {
+    pub fn capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+
+    pub fn rebuild(&mut self, entries: AHashSet<Vec<Vec<u8>>>) {
         self.entries = entries;
+    }
+
+    pub fn reserve_entries(&mut self, additional: usize) {
+        if additional == 0 {
+            return;
+        }
+
+        // Keep a meaningful free-capacity runway so sustained ingest does not
+        // repeatedly hit expensive resize/rehash cliffs.
+        let len = self.entries.len();
+        let required = len.saturating_add(additional);
+        let capacity = self.entries.capacity();
+        let spare = capacity.saturating_sub(len);
+
+        if capacity < required || spare < additional {
+            let geometric_target = required.saturating_mul(2);
+            let runway_target = required.saturating_add(8_192);
+            let target = geometric_target.max(runway_target);
+            self.entries.reserve(target.saturating_sub(len));
+        }
     }
 
 }
@@ -45,7 +71,7 @@ impl RuntimeIndexState {
 /// Runtime indexes for all tables across all databases.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexStore {
-    indexes: HashMap<String, RuntimeIndexState>,
+    indexes: AHashMap<String, RuntimeIndexState>,
 }
 
 impl RuntimeIndexStore {
@@ -54,28 +80,32 @@ impl RuntimeIndexStore {
         Self::default()
     }
 
-    fn key(index_id: &str) -> String {
-        index_id.to_string()
-    }
-
     pub fn index(&self, index_id: &str) -> Option<&RuntimeIndexState> {
-        self.indexes.get(&Self::key(index_id))
+        self.indexes.get(index_id)
     }
 
     #[expect(clippy::should_implement_trait, reason="Index access by string ID, not by reference")]
     pub fn index_mut(&mut self, index_id: &str) -> &mut RuntimeIndexState {
-        self.indexes.entry(Self::key(index_id)).or_default()
+        match self.indexes.entry(index_id.to_string()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(RuntimeIndexState::default()),
+        }
     }
 
     pub fn cardinality(&self, index_id: &str) -> Option<usize> {
         self.index(index_id).map(|state| state.cardinality())
     }
 
+    pub fn stats(&self, index_id: &str) -> Option<(usize, usize)> {
+        self.index(index_id)
+            .map(|state| (state.cardinality(), state.capacity()))
+    }
+
     pub fn register_index(&mut self, index: DatabaseIndex) {
         let index_id = index.index_id.0.clone();
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index),
-            entries: HashSet::new(),
+            entries: AHashSet::new(),
         });
     }
 
@@ -100,6 +130,53 @@ impl RuntimeIndexStore {
         for index in indexes {
             let key = index_value_tuple(index, row_map);
             self.index_mut(&index.index_id.0).remove(&key);
+        }
+    }
+
+    pub fn record_table_rows_batch(
+        &mut self,
+        indexes: &[&DatabaseIndex],
+        row_maps: &[HashMap<String, Vec<u8>>],
+    ) {
+        if row_maps.is_empty() {
+            return;
+        }
+
+        for index in indexes {
+            let state = self.index_mut(&index.index_id.0);
+            state.reserve_entries(row_maps.len());
+
+            for row_map in row_maps {
+                let key = index_value_tuple(index, row_map);
+                state.insert(key);
+            }
+        }
+    }
+
+    pub fn remove_table_rows_batch(
+        &mut self,
+        indexes: &[&DatabaseIndex],
+        row_maps: &[HashMap<String, Vec<u8>>],
+    ) {
+        if row_maps.is_empty() {
+            return;
+        }
+
+        for index in indexes {
+            let state = self.index_mut(&index.index_id.0);
+            for row_map in row_maps {
+                let key = index_value_tuple(index, row_map);
+                state.remove(&key);
+            }
+        }
+    }
+
+    pub fn reserve_table_indexes<'a, I>(&mut self, indexes: I, additional: usize)
+    where
+        I: IntoIterator<Item = &'a DatabaseIndex>,
+    {
+        for index in indexes {
+            self.index_mut(&index.index_id.0).reserve_entries(additional);
         }
     }
 
@@ -171,20 +248,51 @@ impl RuntimeIndexStore {
     
     }
 
+    pub fn clone_for_tables(
+        &self,
+        catalogs: &HashMap<String, DatabaseCatalog>,
+        table_ids: &HashSet<String>,
+    ) -> Self {
+
+        let mut scoped = Self::new();
+
+        for catalog in catalogs.values() {
+            for table_id in catalog.table_ids() {
+                if !table_ids.contains(&table_id) {
+                    continue;
+                }
+
+                let Some(table) = catalog.table(&table_id) else {
+                    continue;
+                };
+
+                for index in table.indexes.values() {
+                    if let Some(state) = self.index(&index.index_id.0) {
+                        scoped.indexes.insert(index.index_id.0.clone(), state.clone());
+                    }
+                }
+            }
+        }
+
+        scoped
+        
+    }
+
 }
 
 pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut values = Vec::with_capacity(if index.field_names.is_empty() { 1 } else { index.field_names.len() });
 
-    let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
-        vec![index.field_name.clone()]
-    } else {
-        index.field_names.clone()
-    };
+    if index.field_names.is_empty() && !index.field_name.is_empty() {
+        values.push(row_map.get(&index.field_name).cloned().unwrap_or_default());
+        return values;
+    }
 
-    field_names
-        .into_iter()
-        .map(|field_name| row_map.get(&field_name).cloned().unwrap_or_default())
-        .collect()
+    for field_name in &index.field_names {
+        values.push(row_map.get(field_name).cloned().unwrap_or_default());
+    }
+
+    values
 
 }
 

@@ -49,6 +49,8 @@ pub enum SqlOperation {
 pub struct SqlRequest {
     pub database_id: String,
     pub sql: String,
+    pub parsed_statement: Option<Statement>,
+    pub parsed_insert_plan: Option<InsertRowsPlan>,
     pub directive: SqlDirective,
     pub operation: SqlOperation,
     pub object_name: Option<String>,

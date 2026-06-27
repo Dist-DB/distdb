@@ -3,3 +3,5 @@ target/
 */.vscode
 *.o
 /server/data/
+/console/data/
+*.script

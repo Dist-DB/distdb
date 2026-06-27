@@ -1,4 +1,4 @@
-use sqlparser::ast::{Expr, SetExpr, Statement, Value};
+use sqlparser::ast::{Expr, SetExpr, Statement, UnaryOperator, Value};
 
 use super::{
     evaluate_sql_function, parse_mysql_statements, parse_select_read_plan_from_statement,
@@ -12,7 +12,15 @@ pub fn parse_insert_rows_from_statement(
     let parsed = parse_mysql_statements(statement)?;
     let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
 
-    let Statement::Insert(insert) = single else {
+    parse_insert_rows_from_parsed_statement(single)
+
+}
+
+pub fn parse_insert_rows_from_parsed_statement(
+    statement: &Statement,
+) -> Result<InsertRowsPlan, SqlParseError> {
+
+    let Statement::Insert(insert) = statement else {
         return Err(SqlParseError::UnsupportedStatement(
             "statement is not INSERT".to_string(),
         ));
@@ -89,6 +97,27 @@ fn parse_insert_literal(expr: &Expr) -> Result<Option<Vec<u8>>, SqlParseError> {
     match expr {
         
         Expr::Value(value) => parse_insert_value(value),
+
+        Expr::UnaryOp { op, expr } => {
+
+            let Expr::Value(Value::Number(number, _)) = expr.as_ref() else {
+                return Err(SqlParseError::UnsupportedStatement(format!(
+                    "INSERT literal '{expr}' is not supported"
+                )));
+            };
+
+            match op {
+                
+                UnaryOperator::Minus => Ok(Some(format!("-{number}").into_bytes())),
+
+                UnaryOperator::Plus => Ok(Some(number.clone().into_bytes())),
+                _ => Err(SqlParseError::UnsupportedStatement(format!(
+                    "INSERT literal '{expr}' is not supported"
+                ))),
+                
+            }
+
+        },
         
         Expr::Function(function) => evaluate_sql_function(function),
         

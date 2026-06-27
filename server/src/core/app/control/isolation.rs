@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use connector::ConnectorResponse;
 use serverlib::engine::database::transaction::TransactionLog;
-use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, TransactionId, TransactionKind};
+use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, TransactionId};
 
 use crate::core::app::state::ReadObservation;
 use crate::core::app::ServerApp;
@@ -42,13 +42,7 @@ impl ServerApp {
         }
 
         for table_id in touched_tables {
-            let has_late_write = self.wal.since(&table_id, None).iter().any(|record| {
-                record.timestamp_epoch_ms > snapshot_epoch_ms
-                    && matches!(
-                        record.kind,
-                        TransactionKind::Insert | TransactionKind::Update | TransactionKind::Delete
-                    )
-            });
+            let has_late_write = self.wal.has_write_after(&table_id, snapshot_epoch_ms);
 
             if has_late_write {
                 return Some(format!(
@@ -71,13 +65,9 @@ impl ServerApp {
         let observations = self.tx_read_observations_by_session.get(session_id)?;
 
         for observation in observations {
-            let has_conflict = self.wal.since(&observation.table_id, None).iter().any(|record| {
-                record.timestamp_epoch_ms > snapshot_epoch_ms
-                    && matches!(
-                        record.kind,
-                        TransactionKind::Insert | TransactionKind::Update | TransactionKind::Delete
-                    )
-            });
+            let has_conflict = self
+                .wal
+                .has_write_after(&observation.table_id, snapshot_epoch_ms);
 
             if has_conflict {
                 return Some(format!(
@@ -214,7 +204,7 @@ impl ServerApp {
 
     }
 
-    fn seed_sandbox_wal_from_source(
+    pub(super) fn seed_sandbox_wal_from_source(
         &self,
         catalogs: &HashMap<String, DatabaseCatalog>,
         source_wal: &ConcurrentWalManager,
@@ -223,30 +213,46 @@ impl ServerApp {
 
         for catalog in catalogs.values() {
 
-            let database_wal_id = catalog.database_id.0.clone();
-            
-            for record in source_wal.since(&database_wal_id, None) {
+            for table_id in catalog.table_ids() {
+                let records = source_wal.since(&table_id, None);
                 target_wal
-                    .append(&database_wal_id, record)
+                    .append_batch(&table_id, records)
                     .map_err(|err| {
                         format!(
                             "failed to seed sandbox WAL for stream '{}': {}",
-                            database_wal_id, err
+                            table_id, err
                         )
                     })?;
             }
+        }
 
+        Ok(())
+
+    }
+
+    pub(super) fn seed_sandbox_wal_from_source_for_tables(
+        &self,
+        catalogs: &HashMap<String, DatabaseCatalog>,
+        source_wal: &ConcurrentWalManager,
+        target_wal: &ConcurrentWalManager,
+        table_ids: &HashSet<String>,
+    ) -> Result<(), String> {
+
+        for catalog in catalogs.values() {
             for table_id in catalog.table_ids() {
-                for record in source_wal.since(&table_id, None) {
-                    target_wal
-                        .append(&table_id, record)
-                        .map_err(|err| {
-                            format!(
-                                "failed to seed sandbox WAL for stream '{}': {}",
-                                table_id, err
-                            )
-                        })?;
+                if !table_ids.contains(&table_id) {
+                    continue;
                 }
+
+                let records = source_wal.since(&table_id, None);
+                target_wal
+                    .append_batch(&table_id, records)
+                    .map_err(|err| {
+                        format!(
+                            "failed to seed sandbox WAL for stream '{}': {}",
+                            table_id, err
+                        )
+                    })?;
             }
         }
 

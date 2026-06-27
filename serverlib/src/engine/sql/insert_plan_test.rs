@@ -67,3 +67,20 @@ fn insert_select_join_helper_extracts_join_plan() {
     assert_eq!(select_plan.relations.len(), 2);
     assert_eq!(select_plan.joins.len(), 1);
 }
+
+#[test]
+fn insert_values_supports_unary_signed_numbers() {
+    let plan = parse_insert_rows_from_statement(
+        "insert into geo (lat, lon, z) values (-1307825, +4512, -3)",
+    )
+    .expect("insert values with signed numeric literals should parse");
+
+    let InsertRowsSource::Values(rows) = plan.source else {
+        panic!("expected VALUES source");
+    };
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Some(b"-1307825".to_vec()));
+    assert_eq!(rows[0][1], Some(b"4512".to_vec()));
+    assert_eq!(rows[0][2], Some(b"-3".to_vec()));
+}

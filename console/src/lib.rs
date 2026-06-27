@@ -7,11 +7,23 @@ use connector::{
 };
 use common::DEFAULT_SERVER_PORT;
 use common::helpers::utils::md5_hash;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::{collections::HashSet, net::Ipv4Addr};
+use std::time::Duration;
 
 pub const TEMP_CONNECT_USER: &str = "root";
 const AUTH_FALLBACK_DATABASE: &str = "main";
 const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
+const IMPORT_TRANSPORT_RETRY_LIMIT: usize = 3;
+const IMPORT_TRANSACTION_BATCH_SIZE: usize = 500;
+const IMPORT_TRANSACTION_BATCH_MAX_AGE_MS: u128 = 500;
+const IMPORT_PROGRESS_EVERY_STATEMENTS: usize = 5_000;
+const IMPORT_PROGRESS_EVERY_MS: u128 = 2_000;
+const IMPORT_BEGIN_STATEMENT: &str = "begin /*distdb_import*/";
+const IMPORT_LARGE_STATEMENT_BYTES: usize = 256_000;
+const IMPORT_INSERT_CHUNK_TARGET_BYTES: usize = 256_000;
+const IMPORT_INSERT_CHUNK_MAX_TUPLES: usize = 512;
 
 pub enum ConsoleCommand {
     Help,
@@ -22,7 +34,40 @@ pub enum ConsoleCommand {
     ConnectPeer { user: String, peer_id: String },
     Disconnect,
     UseDatabase(String),
+    ImportFile(String),
     Sql(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImportStats {
+    executed_statements: usize,
+    skipped_use_statements: usize,
+    skipped_dump_directives: usize,
+    skipped_non_fatal_errors: usize,
+    committed_batches: usize,
+    source_statements: usize,
+    emitted_statement_chunks: usize,
+    local_overhead_ms: u128,
+    parser_scan_ms: u128,
+    max_pending_bytes: usize,
+    max_source_statement_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImportTransactionState {
+    enabled: bool,
+    active: bool,
+    dml_statements_in_batch: usize,
+    committed_batches: usize,
+    batch_started_at: Option<std::time::Instant>,
+    statement_calls: usize,
+    execute_statement_ms: u128,
+    begin_statement_ms: u128,
+    commit_statement_ms: u128,
+    query_statement_ms: u128,
+    max_statement_ms: u128,
+    max_statement_kind: Option<ImportStatementKind>,
+    max_statement_bytes: usize,
 }
 
 struct ConsoleLogEntry {
@@ -224,6 +269,11 @@ impl ConsoleSession {
                 Ok(true)
             },
 
+            ConsoleCommand::ImportFile(file_name) => {
+                self.execute_import_file(&file_name)?;
+                Ok(true)
+            }
+
             ConsoleCommand::Sql(sql) => self.execute_sql(sql),
 
         }
@@ -286,6 +336,283 @@ impl ConsoleSession {
 
         Ok(true)
 
+    }
+
+    fn execute_import_file(&mut self, file_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+
+        let Some(database_id) = self.current_database.clone() else {
+            return Err("no active database selected; run `use <database>;` first".into());
+        };
+
+        let path = Path::new(file_name);
+        let file = std::fs::File::open(path)
+            .map_err(|err| format!("failed to open import file '{}': {}", path.display(), err))?;
+
+        println!(
+            "import started: file={} target_database={}",
+            path.display(),
+            database_id
+        );
+
+        let mut transaction_state = ImportTransactionState {
+            enabled: true,
+            active: false,
+            dml_statements_in_batch: 0,
+            committed_batches: 0,
+            batch_started_at: None,
+            statement_calls: 0,
+            execute_statement_ms: 0,
+            begin_statement_ms: 0,
+            commit_statement_ms: 0,
+            query_statement_ms: 0,
+            max_statement_ms: 0,
+            max_statement_kind: None,
+            max_statement_bytes: 0,
+        };
+
+        let mut stats = execute_import_from_reader(
+            BufReader::new(file),
+            &database_id,
+            &mut transaction_state,
+            |database_id, statement, transaction_state| {
+                self.execute_import_with_batching(database_id, statement, transaction_state)
+            },
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+
+        self
+            .finalize_import_batching(&database_id, &mut transaction_state)
+            .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+
+        stats.committed_batches = transaction_state.committed_batches;
+
+        println!(
+            "import completed: executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={} max_stmt_kind={} max_stmt_bytes={}",
+            stats.executed_statements,
+            stats.skipped_use_statements
+            ,stats.skipped_dump_directives
+            ,stats.skipped_non_fatal_errors
+            ,stats.committed_batches
+            ,stats.source_statements
+            ,stats.emitted_statement_chunks
+            ,stats.local_overhead_ms
+            ,stats.parser_scan_ms
+            ,stats.max_pending_bytes
+            ,stats.max_source_statement_bytes
+            ,transaction_state.execute_statement_ms
+            ,transaction_state.begin_statement_ms
+            ,transaction_state.commit_statement_ms
+            ,transaction_state.query_statement_ms
+            ,transaction_state.statement_calls
+            ,transaction_state.max_statement_ms
+            ,transaction_state.max_statement_kind.map(|kind| kind.as_str()).unwrap_or("<none>")
+            ,transaction_state.max_statement_bytes
+        );
+
+        self.push_log(format!(
+            "import file={} db={} executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={} max_stmt_kind={} max_stmt_bytes={}",
+            path.display(),
+            database_id,
+            stats.executed_statements,
+            stats.skipped_use_statements,
+            stats.skipped_dump_directives,
+            stats.skipped_non_fatal_errors,
+            stats.committed_batches,
+            stats.source_statements,
+            stats.emitted_statement_chunks,
+            stats.local_overhead_ms,
+            stats.parser_scan_ms,
+            stats.max_pending_bytes,
+            stats.max_source_statement_bytes,
+            transaction_state.execute_statement_ms,
+            transaction_state.begin_statement_ms,
+            transaction_state.commit_statement_ms,
+            transaction_state.query_statement_ms,
+            transaction_state.statement_calls,
+            transaction_state.max_statement_ms,
+            transaction_state.max_statement_kind.map(|kind| kind.as_str()).unwrap_or("<none>"),
+            transaction_state.max_statement_bytes,
+        ));
+
+        Ok(())
+
+    }
+
+    fn execute_import_statement(
+        &mut self,
+        database_id: &str,
+        statement: &str,
+        transaction_state: &mut ImportTransactionState,
+    ) -> Result<(), String> {
+
+        let statement_kind = classify_import_statement(statement);
+
+        for attempt in 0..=IMPORT_TRANSPORT_RETRY_LIMIT {
+            let request_id = self.next_request_id();
+
+            let request = ConnectorRequest::new(
+                request_id,
+                ConnectorCommand::Query {
+                    query: DataQuery {
+                        database_id: database_id.to_string(),
+                        sql: statement.to_string(),
+                    },
+                },
+            );
+
+            let client = ConnectorClient::new(self.runtime.transport().clone());
+            let execute_started_at = std::time::Instant::now();
+            match client.execute(&request) {
+                Ok(response) => {
+                    let elapsed_ms = execute_started_at.elapsed().as_millis();
+                    record_import_statement_timing(transaction_state, statement_kind, statement.len(), elapsed_ms);
+                    return match response.result {
+                        ConnectorResult::Error(message) => Err(message),
+                        _ => Ok(()),
+                    };
+                }
+
+                Err(err) => {
+                    let elapsed_ms = execute_started_at.elapsed().as_millis();
+                    record_import_statement_timing(transaction_state, statement_kind, statement.len(), elapsed_ms);
+                    let message = err.to_string();
+                    let is_retryable = import_transport_error_is_retryable(&message);
+
+                    if !is_retryable || attempt >= IMPORT_TRANSPORT_RETRY_LIMIT {
+                        return Err(message);
+                    }
+
+                    self.recover_import_transport()?
+                }
+            }
+        }
+
+        Err("import transport retry loop exhausted".to_string())
+
+    }
+
+    fn execute_import_with_batching(
+        &mut self,
+        database_id: &str,
+        statement: &str,
+        transaction_state: &mut ImportTransactionState,
+    ) -> Result<(), String> {
+
+        let is_dml = statement_is_import_batchable_dml(statement);
+
+        if transaction_state.enabled && is_dml {
+            if !transaction_state.active {
+                match self.execute_import_statement(database_id, IMPORT_BEGIN_STATEMENT, transaction_state) {
+                    Ok(()) => {
+                        transaction_state.active = true;
+                        transaction_state.batch_started_at = Some(std::time::Instant::now());
+                    }
+                    Err(err) => {
+                        transaction_state.enabled = false;
+                        log::warn!(
+                            "import transactional batching disabled: failed to begin transaction: {}",
+                            err
+                        );
+                    }
+                }
+            }
+
+            self.execute_import_statement(database_id, statement, transaction_state)?;
+
+            if transaction_state.active {
+                transaction_state.dml_statements_in_batch += 1;
+
+                let should_commit_by_size =
+                    transaction_state.dml_statements_in_batch >= import_transaction_batch_size();
+                let should_commit_by_age = transaction_state
+                    .batch_started_at
+                    .map(|started_at| {
+                        started_at.elapsed().as_millis() >= import_transaction_batch_max_age_ms()
+                    })
+                    .unwrap_or(false);
+
+                if should_commit_by_size || should_commit_by_age {
+                    match self.execute_import_statement(database_id, "commit", transaction_state) {
+                        Ok(()) => {
+                            transaction_state.committed_batches += 1;
+                            transaction_state.active = false;
+                            transaction_state.dml_statements_in_batch = 0;
+                            transaction_state.batch_started_at = None;
+                        }
+                        Err(err) => {
+                            if import_duplicate_key_error_is_skippable(&err) {
+                                let _ = self.execute_import_statement(database_id, "rollback", transaction_state);
+                                transaction_state.active = false;
+                                transaction_state.dml_statements_in_batch = 0;
+                                transaction_state.batch_started_at = None;
+                                return Err(err);
+                            }
+
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+
+            return Ok(());
+        }
+
+        if transaction_state.active {
+            self.execute_import_statement(database_id, "commit", transaction_state)?;
+            transaction_state.committed_batches += 1;
+            transaction_state.active = false;
+            transaction_state.dml_statements_in_batch = 0;
+            transaction_state.batch_started_at = None;
+        }
+
+        self.execute_import_statement(database_id, statement, transaction_state)
+    }
+
+    fn finalize_import_batching(
+        &mut self,
+        database_id: &str,
+        transaction_state: &mut ImportTransactionState,
+    ) -> Result<(), String> {
+        if !transaction_state.active {
+            return Ok(());
+        }
+
+        match self.execute_import_statement(database_id, "commit", transaction_state) {
+            Ok(()) => {
+                transaction_state.committed_batches += 1;
+                transaction_state.active = false;
+                transaction_state.dml_statements_in_batch = 0;
+                transaction_state.batch_started_at = None;
+                Ok(())
+            }
+            Err(err) => {
+                if import_duplicate_key_error_is_skippable(&err) {
+                    let _ = self.execute_import_statement(database_id, "rollback", transaction_state);
+                    transaction_state.active = false;
+                    transaction_state.dml_statements_in_batch = 0;
+                    transaction_state.batch_started_at = None;
+                    log::warn!(
+                        "import finalize skipped duplicate-key batch after rollback: {}",
+                        err
+                    );
+                    Ok(())
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    fn recover_import_transport(&mut self) -> Result<(), String> {
+        self.runtime.transport().disconnect_active_peer();
+
+        self.runtime
+            .transport_mut()
+            .connect_active_peer()
+            .map_err(|err| format!("transport reconnect failed: {err}"))?;
+
+        std::thread::sleep(Duration::from_millis(25));
+        Ok(())
     }
 
     fn refresh_discovered_peers_from_server(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -486,6 +813,66 @@ impl ConsoleSession {
 
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportStatementKind {
+    Begin,
+    Commit,
+    Query,
+}
+
+impl ImportStatementKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Begin => "begin",
+            Self::Commit => "commit",
+            Self::Query => "query",
+        }
+    }
+}
+
+fn classify_import_statement(statement: &str) -> ImportStatementKind {
+    let trimmed = statement.trim_start();
+
+    if starts_with_ascii_case_insensitive(trimmed, "begin") {
+        return ImportStatementKind::Begin;
+    }
+
+    if starts_with_ascii_case_insensitive(trimmed, "commit") {
+        return ImportStatementKind::Commit;
+    }
+
+    ImportStatementKind::Query
+}
+
+fn record_import_statement_timing(
+    transaction_state: &mut ImportTransactionState,
+    kind: ImportStatementKind,
+    statement_bytes: usize,
+    elapsed_ms: u128,
+) {
+    transaction_state.statement_calls += 1;
+    transaction_state.execute_statement_ms += elapsed_ms;
+
+    if elapsed_ms > transaction_state.max_statement_ms {
+        transaction_state.max_statement_ms = elapsed_ms;
+        transaction_state.max_statement_kind = Some(kind);
+        transaction_state.max_statement_bytes = statement_bytes;
+
+        println!(
+            "import new max statement: kind={} bytes={} elapsed_ms={}",
+            kind.as_str(),
+            statement_bytes,
+            elapsed_ms,
+        );
+    }
+
+    match kind {
+        ImportStatementKind::Begin => transaction_state.begin_statement_ms += elapsed_ms,
+        ImportStatementKind::Commit => transaction_state.commit_statement_ms += elapsed_ms,
+        ImportStatementKind::Query => transaction_state.query_statement_ms += elapsed_ms,
+    }
+}
+
 pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {
     
     let trimmed = raw.trim();
@@ -677,6 +1064,792 @@ fn is_global_sql_without_database(sql: &str) -> bool {
     
 }
 
+fn execute_import_from_reader<R, F>(
+    mut reader: R,
+    database_id: &str,
+    transaction_state: &mut ImportTransactionState,
+    mut execute_statement: F,
+) -> Result<ImportStats, String>
+where
+    R: BufRead,
+    F: FnMut(&str, &str, &mut ImportTransactionState) -> Result<(), String>,
+{
+
+    let mut parser = SqlStatementParser::default();
+    let mut import_stats = ImportStats {
+        executed_statements: 0,
+        skipped_use_statements: 0,
+        skipped_dump_directives: 0,
+        skipped_non_fatal_errors: 0,
+        committed_batches: 0,
+        source_statements: 0,
+        emitted_statement_chunks: 0,
+        local_overhead_ms: 0,
+        parser_scan_ms: 0,
+        max_pending_bytes: 0,
+        max_source_statement_bytes: 0,
+    };
+
+    let import_started_at = std::time::Instant::now();
+    let mut last_progress_output_at = std::time::Instant::now();
+    let mut pending_bytes = Vec::<u8>::new();
+
+    let mut emit_progress_if_due = |force: bool, stats: &ImportStats, tx: &ImportTransactionState| {
+        let elapsed_ms = import_started_at.elapsed().as_millis();
+        let due = elapsed_ms > 0
+            && elapsed_ms % IMPORT_PROGRESS_EVERY_MS == 0;
+
+        if !force && !due && last_progress_output_at.elapsed().as_millis() < IMPORT_PROGRESS_EVERY_MS {
+            return;
+        }
+
+        println!(
+            "import progress: executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} elapsed_s={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={}",
+            stats.executed_statements,
+            stats.skipped_use_statements,
+            stats.skipped_dump_directives,
+            stats.skipped_non_fatal_errors,
+            tx.committed_batches,
+            stats.source_statements,
+            stats.emitted_statement_chunks,
+            import_started_at.elapsed().as_secs(),
+            stats.local_overhead_ms,
+            stats.parser_scan_ms,
+            stats.max_pending_bytes,
+            stats.max_source_statement_bytes,
+            tx.execute_statement_ms,
+            tx.begin_statement_ms,
+            tx.commit_statement_ms,
+            tx.query_statement_ms,
+            tx.statement_calls,
+            tx.max_statement_ms,
+        );
+
+        last_progress_output_at = std::time::Instant::now();
+    };
+
+    loop {
+        let chunk_len = {
+            let buffer = reader.fill_buf().map_err(|err| err.to_string())?;
+
+            if buffer.is_empty() {
+                break;
+            }
+
+            pending_bytes.extend_from_slice(buffer);
+            import_stats.max_pending_bytes = import_stats.max_pending_bytes.max(pending_bytes.len());
+            buffer.len()
+        };
+
+        if chunk_len == 0 {
+            break;
+        }
+
+        reader.consume(chunk_len);
+
+        loop {
+            if pending_bytes.is_empty() {
+                break;
+            }
+
+            let chunk_len = match std::str::from_utf8(&pending_bytes) {
+                Ok(valid) => {
+                    let parser_started_at = std::time::Instant::now();
+                    let mut callback_wall_ms = 0u128;
+                    parser.push_chunk(valid, &mut |statement| {
+                        let callback_started_at = std::time::Instant::now();
+                        if statement_starts_with_use(statement) {
+                            callback_wall_ms += callback_started_at.elapsed().as_millis();
+                            import_stats.skipped_use_statements += 1;
+                            return Ok(());
+                        }
+
+                        let normalized_statement = normalize_import_statement(statement);
+                        import_stats.max_source_statement_bytes = import_stats
+                            .max_source_statement_bytes
+                            .max(normalized_statement.len());
+                        if statement_is_import_dump_directive(&normalized_statement) {
+                            callback_wall_ms += callback_started_at.elapsed().as_millis();
+                            import_stats.skipped_dump_directives += 1;
+                            emit_progress_if_due(false, &import_stats, transaction_state);
+                            return Ok(());
+                        }
+
+                        if normalized_statement.len() >= IMPORT_LARGE_STATEMENT_BYTES {
+                            println!(
+                                "import executing large statement: bytes={} head='{}'",
+                                normalized_statement.len(),
+                                statement_head_token(&normalized_statement)
+                            );
+                        }
+
+                        import_stats.source_statements += 1;
+                        let statement_started_at = std::time::Instant::now();
+                        let execute_ms_before = transaction_state.execute_statement_ms;
+                        let mut emitted_chunks = 0usize;
+
+                        stream_import_insert_values_statements(
+                            &normalized_statement,
+                            import_insert_chunk_target_bytes(),
+                            import_insert_chunk_max_tuples(),
+                            |import_statement| {
+                                emitted_chunks += 1;
+                                if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
+                                    if should_skip_import_error(&import_statement, &err) {
+                                        import_stats.skipped_non_fatal_errors += 1;
+                                        return Ok(());
+                                    }
+
+                                    return Err(err);
+                                }
+
+                                import_stats.executed_statements += 1;
+
+                                if import_stats.executed_statements % IMPORT_PROGRESS_EVERY_STATEMENTS == 0 {
+                                    emit_progress_if_due(true, &import_stats, transaction_state);
+                                }
+
+                                emit_progress_if_due(false, &import_stats, transaction_state);
+                                Ok(())
+                            },
+                        )?;
+
+                        import_stats.emitted_statement_chunks += emitted_chunks;
+                        let wall_ms = statement_started_at.elapsed().as_millis();
+                        let execute_ms = transaction_state.execute_statement_ms.saturating_sub(execute_ms_before);
+                        import_stats.local_overhead_ms += wall_ms.saturating_sub(execute_ms);
+                        callback_wall_ms += callback_started_at.elapsed().as_millis();
+
+                        Ok(())
+                    })?;
+                    import_stats.parser_scan_ms += parser_started_at
+                        .elapsed()
+                        .as_millis()
+                        .saturating_sub(callback_wall_ms);
+
+                    pending_bytes.clear();
+                    break;
+                }
+
+                Err(err) if err.error_len().is_none() => err.valid_up_to(),
+
+                Err(err) => return Err(err.to_string()),
+            };
+
+            if chunk_len == 0 {
+                break;
+            }
+
+            let valid_chunk = std::str::from_utf8(&pending_bytes[..chunk_len])
+                .map_err(|err| err.to_string())?;
+
+            let parser_started_at = std::time::Instant::now();
+            let mut callback_wall_ms = 0u128;
+            parser.push_chunk(valid_chunk, &mut |statement| {
+                let callback_started_at = std::time::Instant::now();
+                if statement_starts_with_use(statement) {
+                    callback_wall_ms += callback_started_at.elapsed().as_millis();
+                    import_stats.skipped_use_statements += 1;
+                    return Ok(());
+                }
+
+                let normalized_statement = normalize_import_statement(statement);
+                import_stats.max_source_statement_bytes = import_stats
+                    .max_source_statement_bytes
+                    .max(normalized_statement.len());
+                if statement_is_import_dump_directive(&normalized_statement) {
+                    callback_wall_ms += callback_started_at.elapsed().as_millis();
+                    import_stats.skipped_dump_directives += 1;
+                    emit_progress_if_due(false, &import_stats, transaction_state);
+                    return Ok(());
+                }
+
+                if normalized_statement.len() >= IMPORT_LARGE_STATEMENT_BYTES {
+                    println!(
+                        "import executing large statement: bytes={} head='{}'",
+                        normalized_statement.len(),
+                        statement_head_token(&normalized_statement)
+                    );
+                }
+
+                import_stats.source_statements += 1;
+                let statement_started_at = std::time::Instant::now();
+                let execute_ms_before = transaction_state.execute_statement_ms;
+                let mut emitted_chunks = 0usize;
+
+                stream_import_insert_values_statements(
+                    &normalized_statement,
+                    import_insert_chunk_target_bytes(),
+                    import_insert_chunk_max_tuples(),
+                    |import_statement| {
+                        emitted_chunks += 1;
+                        if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
+                            if should_skip_import_error(&import_statement, &err) {
+                                import_stats.skipped_non_fatal_errors += 1;
+                                return Ok(());
+                            }
+
+                            return Err(err);
+                        }
+
+                        import_stats.executed_statements += 1;
+
+                        if import_stats.executed_statements % IMPORT_PROGRESS_EVERY_STATEMENTS == 0 {
+                            emit_progress_if_due(true, &import_stats, transaction_state);
+                        }
+
+                        emit_progress_if_due(false, &import_stats, transaction_state);
+                        Ok(())
+                    },
+                )?;
+
+                import_stats.emitted_statement_chunks += emitted_chunks;
+                let wall_ms = statement_started_at.elapsed().as_millis();
+                let execute_ms = transaction_state.execute_statement_ms.saturating_sub(execute_ms_before);
+                import_stats.local_overhead_ms += wall_ms.saturating_sub(execute_ms);
+                callback_wall_ms += callback_started_at.elapsed().as_millis();
+
+                Ok(())
+        })?;
+            import_stats.parser_scan_ms += parser_started_at
+                .elapsed()
+                .as_millis()
+                .saturating_sub(callback_wall_ms);
+
+            pending_bytes.drain(..chunk_len);
+        }
+    }
+
+    let parser_started_at = std::time::Instant::now();
+    let mut callback_wall_ms = 0u128;
+    parser.flush(&mut |statement| {
+        let callback_started_at = std::time::Instant::now();
+        if statement_starts_with_use(statement) {
+            callback_wall_ms += callback_started_at.elapsed().as_millis();
+            import_stats.skipped_use_statements += 1;
+            return Ok(());
+        }
+
+        let normalized_statement = normalize_import_statement(statement);
+        import_stats.max_source_statement_bytes = import_stats
+            .max_source_statement_bytes
+            .max(normalized_statement.len());
+        if statement_is_import_dump_directive(&normalized_statement) {
+            callback_wall_ms += callback_started_at.elapsed().as_millis();
+            import_stats.skipped_dump_directives += 1;
+            emit_progress_if_due(false, &import_stats, transaction_state);
+            return Ok(());
+        }
+
+        if normalized_statement.len() >= IMPORT_LARGE_STATEMENT_BYTES {
+            println!(
+                "import executing large statement: bytes={} head='{}'",
+                normalized_statement.len(),
+                statement_head_token(&normalized_statement)
+            );
+        }
+
+        import_stats.source_statements += 1;
+        let statement_started_at = std::time::Instant::now();
+        let execute_ms_before = transaction_state.execute_statement_ms;
+        let mut emitted_chunks = 0usize;
+
+        stream_import_insert_values_statements(
+            &normalized_statement,
+            import_insert_chunk_target_bytes(),
+            import_insert_chunk_max_tuples(),
+            |import_statement| {
+            emitted_chunks += 1;
+            if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
+                if should_skip_import_error(&import_statement, &err) {
+                    import_stats.skipped_non_fatal_errors += 1;
+                    return Ok(());
+                }
+
+                return Err(err);
+            }
+
+            import_stats.executed_statements += 1;
+            emit_progress_if_due(false, &import_stats, transaction_state);
+            Ok(())
+        },
+        )?;
+
+        import_stats.emitted_statement_chunks += emitted_chunks;
+        let wall_ms = statement_started_at.elapsed().as_millis();
+        let execute_ms = transaction_state.execute_statement_ms.saturating_sub(execute_ms_before);
+        import_stats.local_overhead_ms += wall_ms.saturating_sub(execute_ms);
+        callback_wall_ms += callback_started_at.elapsed().as_millis();
+
+        Ok(())
+    })?;
+    import_stats.parser_scan_ms += parser_started_at
+        .elapsed()
+        .as_millis()
+        .saturating_sub(callback_wall_ms);
+
+    import_stats.committed_batches = transaction_state.committed_batches;
+    emit_progress_if_due(true, &import_stats, transaction_state);
+
+    Ok(import_stats)
+
+}
+
+fn statement_starts_with_use(statement: &str) -> bool {
+    starts_with_ascii_case_insensitive(statement.trim_start(), "use ")
+}
+
+fn should_skip_import_error(statement: &str, error: &str) -> bool {
+    let normalized_statement = statement.trim_start();
+    let normalized_error = error.to_ascii_lowercase();
+
+    if starts_with_ascii_case_insensitive(normalized_statement, "drop table")
+        && normalized_error.contains("not found") {
+        return true;
+    }
+
+    if starts_with_ascii_case_insensitive(normalized_statement, "insert ")
+        && import_duplicate_key_error_is_skippable(error)
+    {
+        return true;
+    }
+
+    false
+}
+
+fn import_duplicate_key_error_is_skippable(error: &str) -> bool {
+    let normalized_error = error.to_ascii_lowercase();
+    normalized_error.contains("duplicate primary key") || normalized_error.contains("duplicate key")
+}
+
+fn statement_is_import_dump_directive(statement: &str) -> bool {
+    let normalized = statement.trim_start();
+
+    starts_with_ascii_case_insensitive(normalized, "lock tables ")
+        || starts_with_ascii_case_insensitive(normalized, "unlock tables")
+    || starts_with_ascii_case_insensitive(normalized, "drop table ")
+        || starts_with_ascii_case_insensitive(normalized, "delimiter ")
+        || starts_with_ascii_case_insensitive(normalized, "set ")
+        || normalized.starts_with("/*!")
+}
+
+    fn statement_is_import_batchable_dml(statement: &str) -> bool {
+        let normalized = statement.trim_start();
+
+        starts_with_ascii_case_insensitive(normalized, "insert ")
+        || starts_with_ascii_case_insensitive(normalized, "update ")
+        || starts_with_ascii_case_insensitive(normalized, "delete ")
+        || starts_with_ascii_case_insensitive(normalized, "replace ")
+    }
+
+fn normalize_import_statement(statement: &str) -> String {
+    let mut normalized = statement.to_string();
+
+    // MySQL dumps commonly include index USING clauses that are currently unsupported.
+    // Removing them keeps structural intent while allowing first-pass CREATE parsing.
+    normalized = remove_case_insensitive_all(&normalized, " USING BTREE");
+    normalized = remove_case_insensitive_all(&normalized, " USING HASH");
+
+    normalized
+}
+
+fn statement_head_token(statement: &str) -> String {
+    statement
+        .split_whitespace()
+        .next()
+        .unwrap_or("<empty>")
+        .to_ascii_uppercase()
+}
+
+#[cfg(test)]
+fn split_import_insert_values_statement(
+    statement: &str,
+    max_bytes: usize,
+    max_tuples_per_chunk: usize,
+) -> Vec<String> {
+    let mut chunks = Vec::<String>::new();
+    stream_import_insert_values_statements(
+        statement,
+        max_bytes,
+        max_tuples_per_chunk,
+        |chunk| {
+            chunks.push(chunk.to_string());
+            Ok(())
+        },
+    )
+    .expect("import chunk splitting should not fail when collecting chunks");
+
+    chunks
+}
+
+fn stream_import_insert_values_statements<F>(
+    statement: &str,
+    max_bytes: usize,
+    max_tuples_per_chunk: usize,
+    mut on_statement: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) -> Result<(), String>,
+{
+    let normalized = statement.trim_start();
+    if !starts_with_ascii_case_insensitive(normalized, "insert ") {
+        return on_statement(statement);
+    }
+
+    let Some(values_index) = find_ascii_case_insensitive(statement, " values ") else {
+        return on_statement(statement);
+    };
+
+    let prefix_end = values_index + " values ".len();
+    let prefix = &statement[..prefix_end];
+    let values_tail = &statement[prefix_end..];
+
+    let tuples = extract_insert_value_tuples(values_tail);
+    if tuples.len() <= 1 {
+        return on_statement(statement);
+    }
+
+    let mut current = prefix.to_string();
+    let mut tuples_in_chunk = 0usize;
+
+    for tuple in tuples {
+        let tuple = tuple.trim();
+        let additional = if current.len() > prefix.len() {
+            tuple.len() + 1
+        } else {
+            tuple.len()
+        };
+
+        if current.len() > prefix.len()
+            && (current.len() + additional > max_bytes
+                || tuples_in_chunk >= max_tuples_per_chunk)
+        {
+            on_statement(&current)?;
+            current = prefix.to_string();
+            tuples_in_chunk = 0;
+        }
+
+        if current.len() > prefix.len() {
+            current.push(',');
+        }
+        current.push_str(tuple);
+        tuples_in_chunk += 1;
+    }
+
+    if current.len() > prefix.len() {
+        on_statement(&current)?;
+    }
+
+    Ok(())
+}
+
+fn import_insert_chunk_target_bytes() -> usize {
+    std::env::var("IMPORT_INSERT_CHUNK_BYTES")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 8_192)
+        .unwrap_or(IMPORT_INSERT_CHUNK_TARGET_BYTES)
+}
+
+fn import_insert_chunk_max_tuples() -> usize {
+    std::env::var("IMPORT_INSERT_CHUNK_MAX_TUPLES")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(IMPORT_INSERT_CHUNK_MAX_TUPLES)
+}
+
+fn import_transaction_batch_size() -> usize {
+    std::env::var("IMPORT_TX_BATCH_SIZE")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(IMPORT_TRANSACTION_BATCH_SIZE)
+}
+
+fn import_transaction_batch_max_age_ms() -> u128 {
+    std::env::var("IMPORT_TX_BATCH_MAX_AGE_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u128>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(IMPORT_TRANSACTION_BATCH_MAX_AGE_MS)
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    let haystack_bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+
+    if needle_bytes.len() > haystack_bytes.len() {
+        return None;
+    }
+
+    (0..=haystack_bytes.len() - needle_bytes.len()).find(|index| {
+        haystack_bytes[*index..*index + needle_bytes.len()].eq_ignore_ascii_case(needle_bytes)
+    })
+}
+
+fn starts_with_ascii_case_insensitive(input: &str, prefix: &str) -> bool {
+    input
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+}
+
+fn extract_insert_value_tuples(values_tail: &str) -> Vec<&str> {
+    let mut tuples = Vec::<&str>::new();
+
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick_quote = false;
+    let mut escape_next = false;
+    let mut paren_depth = 0usize;
+    let mut tuple_start: Option<usize> = None;
+
+    let bytes = values_tail.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+
+        if escape_next {
+            escape_next = false;
+            index += 1;
+            continue;
+        }
+
+        if (in_single_quote || in_double_quote) && ch == '\\' {
+            escape_next = true;
+            index += 1;
+            continue;
+        }
+
+        if ch == '\'' && !in_double_quote && !in_backtick_quote {
+            in_single_quote = !in_single_quote;
+            index += 1;
+            continue;
+        }
+
+        if ch == '"' && !in_single_quote && !in_backtick_quote {
+            in_double_quote = !in_double_quote;
+            index += 1;
+            continue;
+        }
+
+        if ch == '`' && !in_single_quote && !in_double_quote {
+            in_backtick_quote = !in_backtick_quote;
+            index += 1;
+            continue;
+        }
+
+        if in_single_quote || in_double_quote || in_backtick_quote {
+            index += 1;
+            continue;
+        }
+
+        if ch == '(' {
+            if paren_depth == 0 {
+                tuple_start = Some(index);
+            }
+            paren_depth += 1;
+        } else if ch == ')' && paren_depth > 0 {
+            paren_depth -= 1;
+            if paren_depth == 0
+                && let Some(start) = tuple_start.take() {
+                    tuples.push(&values_tail[start..=index]);
+                }
+        }
+
+        index += 1;
+    }
+
+    tuples
+}
+
+fn import_transport_error_is_retryable(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+
+    normalized.contains("no queued response")
+        || normalized.contains("resource temporarily unavailable")
+        || normalized.contains("failed to read response length")
+        || normalized.contains("no active peer connection")
+        || normalized.contains("connection reset")
+        || normalized.contains("broken pipe")
+}
+
+fn remove_case_insensitive_all(input: &str, needle: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+
+    let mut index = 0;
+    while let Some(relative) = find_ascii_case_insensitive(&input[index..], needle) {
+        let found = index + relative;
+        output.push_str(&input[index..found]);
+        index = found + needle.len();
+    }
+
+    output.push_str(&input[index..]);
+    output
+}
+
+#[derive(Default)]
+struct SqlStatementParser {
+    buffer: String,
+    in_single_quote: bool,
+    in_double_quote: bool,
+    in_backtick_quote: bool,
+    in_block_comment: bool,
+    in_line_comment: bool,
+    pending_dash: bool,
+    pending_slash: bool,
+    pending_block_comment_star: bool,
+}
+
+impl SqlStatementParser {
+
+    fn push_chunk<F>(
+        &mut self,
+        chunk: &str,
+        on_statement: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<(), String>,
+    {
+
+        for ch in chunk.chars() {
+
+            if self.in_line_comment {
+                if ch == '\n' {
+                    self.in_line_comment = false;
+                    if !self.buffer.is_empty()
+                        && !self.in_single_quote
+                        && !self.in_double_quote
+                        && !self.in_backtick_quote
+                    {
+                        self.buffer.push('\n');
+                    }
+                }
+                continue;
+            }
+
+            if self.in_block_comment {
+                if self.pending_block_comment_star && ch == '/' {
+                    self.in_block_comment = false;
+                    self.pending_block_comment_star = false;
+                } else {
+                    self.pending_block_comment_star = ch == '*';
+                }
+                continue;
+            }
+
+            if self.pending_dash {
+                self.pending_dash = false;
+
+                if !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote && ch == '-' {
+                    self.in_line_comment = true;
+                    continue;
+                }
+
+                self.buffer.push('-');
+            }
+
+            if self.pending_slash {
+                self.pending_slash = false;
+
+                if !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote && ch == '*' {
+                    self.in_block_comment = true;
+                    self.pending_block_comment_star = false;
+                    continue;
+                }
+
+                self.buffer.push('/');
+            }
+
+            if !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote {
+                if ch == '-' {
+                    self.pending_dash = true;
+                    continue;
+                }
+
+                if ch == '#' {
+                    self.in_line_comment = true;
+                    continue;
+                }
+
+                if ch == '/' {
+                    self.pending_slash = true;
+                    continue;
+                }
+            }
+
+            if ch == '\'' && !self.in_double_quote && !self.in_backtick_quote {
+                let escaped = self.buffer.ends_with('\\');
+                if !escaped {
+                    self.in_single_quote = !self.in_single_quote;
+                }
+                self.buffer.push(ch);
+                continue;
+            }
+
+            if ch == '"' && !self.in_single_quote && !self.in_backtick_quote {
+                let escaped = self.buffer.ends_with('\\');
+                if !escaped {
+                    self.in_double_quote = !self.in_double_quote;
+                }
+                self.buffer.push(ch);
+                continue;
+            }
+
+            if ch == '`' && !self.in_single_quote && !self.in_double_quote {
+                self.in_backtick_quote = !self.in_backtick_quote;
+                self.buffer.push(ch);
+                continue;
+            }
+
+            if ch == ';' && !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote {
+                let statement = self.buffer.trim();
+                if !statement.is_empty() {
+                    on_statement(statement)?;
+                }
+                self.buffer.clear();
+                continue;
+            }
+
+            self.buffer.push(ch);
+        }
+
+        Ok(())
+
+    }
+
+    fn flush<F>(&mut self, on_statement: &mut F) -> Result<(), String>
+    where
+        F: FnMut(&str) -> Result<(), String>,
+    {
+        if self.pending_dash {
+            self.buffer.push('-');
+            self.pending_dash = false;
+        }
+
+        if self.pending_slash {
+            self.buffer.push('/');
+            self.pending_slash = false;
+        }
+
+        let statement = self.buffer.trim();
+        if !statement.is_empty() {
+            on_statement(statement)?;
+        }
+
+        self.buffer.clear();
+        self.in_line_comment = false;
+        self.pending_block_comment_star = false;
+        Ok(())
+    }
+
+}
+
 pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> {
 
     let trimmed = input.trim();
@@ -741,6 +1914,31 @@ pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, Stri
             return Err("use requires a database name".to_string());
         }
         return Ok(Some(ConsoleCommand::UseDatabase(database_name.to_string())));
+    }
+
+    let import_prefix = "import";
+    if lowered.starts_with(import_prefix)
+        && command_text
+            .chars()
+            .nth(import_prefix.len())
+            .map(|ch| ch.is_whitespace())
+            .unwrap_or(true)
+    {
+        let file_name = command_text[import_prefix.len()..].trim();
+        if file_name.is_empty() {
+            return Err("import requires a file name".to_string());
+        }
+
+        let file_name = file_name
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+
+        if file_name.is_empty() {
+            return Err("import requires a file name".to_string());
+        }
+
+        return Ok(Some(ConsoleCommand::ImportFile(file_name)));
     }
 
     if let Some(target) = command_text.strip_prefix("connect ") {
@@ -885,6 +2083,7 @@ pub fn print_help() {
     println!("  show peers;               list discovered p2p peers (* = active)");
     println!("  connect <user@peer-id>;   switch session to a discovered peer");
     println!("  disconnect;               close the active peer session connection");
+    println!("  import <file.sql>;        stream SQL file into active database");
     println!("  <sql>;                    run SQL statements (multi-line supported)");
     println!();
     println!("Note: all commands must end with ';' to execute");
@@ -919,6 +2118,7 @@ fn is_console_command_fragment(line: &str) -> bool {
         lowered.as_str(),
         "help" | ".help" | "exit" | "quit" | "\\q" | "show p2p" | "show log" | "show peers" | "disconnect"
     ) || lowered.starts_with("use ")
+        || lowered.starts_with("import ")
         || lowered.starts_with("connect ")
 
 }
@@ -963,11 +2163,333 @@ mod tests {
     }
 
     #[test]
+    fn parse_import_extracts_file_name() {
+        match parse_console_command("import data/locations.sql;") {
+            Ok(Some(ConsoleCommand::ImportFile(file_name))) => {
+                assert_eq!(file_name, "data/locations.sql")
+            }
+            other => panic!("unexpected: {:?}", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn parse_import_requires_file_name() {
+        assert!(parse_console_command("import ;").is_err());
+    }
+
+    #[test]
     fn parse_sql_falls_through() {
         assert!(matches!(
             parse_console_command("select 1;"),
             Ok(Some(ConsoleCommand::Sql(_)))
         ));
+    }
+
+    #[test]
+    fn import_reader_splits_and_executes_statements() {
+        let input = "\
+            -- file header\n\
+            use sample;\n\
+            create table people (id int, name text);\n\
+            insert into people values (1, 'alice;demo');\n\
+            # footer\n\
+        ";
+
+        let mut executed = Vec::<String>::new();
+        let mut transaction_state = ImportTransactionState {
+            enabled: false,
+            active: false,
+            dml_statements_in_batch: 0,
+            committed_batches: 0,
+            batch_started_at: None,
+            statement_calls: 0,
+            execute_statement_ms: 0,
+            begin_statement_ms: 0,
+            commit_statement_ms: 0,
+            query_statement_ms: 0,
+            max_statement_ms: 0,
+            max_statement_kind: None,
+            max_statement_bytes: 0,
+        };
+
+        let stats = execute_import_from_reader(
+            BufReader::new(input.as_bytes()),
+            "main",
+            &mut transaction_state,
+            |db, statement, _transaction_state| {
+                executed.push(format!("{}:{}", db, statement.trim()));
+                Ok(())
+            },
+        )
+        .expect("import reader should succeed");
+
+        assert_eq!(stats.executed_statements, 2);
+        assert_eq!(stats.skipped_use_statements, 1);
+        assert_eq!(stats.skipped_dump_directives, 0);
+        assert_eq!(stats.skipped_non_fatal_errors, 0);
+        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(executed.len(), 2);
+        assert!(executed[0].contains("create table people"));
+        assert!(executed[1].contains("insert into people"));
+    }
+
+    #[test]
+    fn import_reader_populates_mock_table_structures() {
+        let input = "\
+            create table users (id int, name text);\n\
+            insert into users values (1, 'alice');\n\
+            insert into users values (2, 'bob');\n\
+            create table regions (id int);\n\
+            insert into regions values (10);\n\
+        ";
+
+        let mut row_counts = std::collections::HashMap::<String, usize>::new();
+        let mut transaction_state = ImportTransactionState {
+            enabled: false,
+            active: false,
+            dml_statements_in_batch: 0,
+            committed_batches: 0,
+            batch_started_at: None,
+            statement_calls: 0,
+            execute_statement_ms: 0,
+            begin_statement_ms: 0,
+            commit_statement_ms: 0,
+            query_statement_ms: 0,
+            max_statement_ms: 0,
+            max_statement_kind: None,
+            max_statement_bytes: 0,
+        };
+
+        let stats = execute_import_from_reader(
+            BufReader::new(input.as_bytes()),
+            "main",
+            &mut transaction_state,
+            |_db, statement, _transaction_state| {
+                let normalized = statement.trim().to_ascii_lowercase();
+
+                if let Some(rest) = normalized.strip_prefix("create table ") {
+                    let table_name = rest.split_whitespace().next().unwrap_or("");
+                    if !table_name.is_empty() {
+                        row_counts.entry(table_name.to_string()).or_insert(0);
+                    }
+                    return Ok(());
+                }
+
+                if let Some(rest) = normalized.strip_prefix("insert into ") {
+                    let table_name = rest.split_whitespace().next().unwrap_or("");
+                    if table_name.is_empty() {
+                        return Err("insert statement did not include table name".to_string());
+                    }
+
+                    let entry = row_counts.entry(table_name.to_string()).or_insert(0);
+                    *entry += 1;
+                    return Ok(());
+                }
+
+                Err(format!("unexpected statement in import: {}", statement))
+            },
+        )
+        .expect("import reader should succeed");
+
+        assert_eq!(stats.executed_statements, 5);
+        assert_eq!(stats.skipped_dump_directives, 0);
+        assert_eq!(stats.skipped_non_fatal_errors, 0);
+        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(row_counts.get("users"), Some(&2));
+        assert_eq!(row_counts.get("regions"), Some(&1));
+    }
+
+    #[test]
+    fn import_reader_skips_drop_table_not_found_errors() {
+        let input = "\
+            drop table ip_lookup;\n\
+            create table ip_lookup (id int);\n\
+            insert into ip_lookup values (1);\n\
+        ";
+
+        let mut executed = Vec::<String>::new();
+        let mut transaction_state = ImportTransactionState {
+            enabled: false,
+            active: false,
+            dml_statements_in_batch: 0,
+            committed_batches: 0,
+            batch_started_at: None,
+            statement_calls: 0,
+            execute_statement_ms: 0,
+            begin_statement_ms: 0,
+            commit_statement_ms: 0,
+            query_statement_ms: 0,
+            max_statement_ms: 0,
+            max_statement_kind: None,
+            max_statement_bytes: 0,
+        };
+
+        let stats = execute_import_from_reader(
+            BufReader::new(input.as_bytes()),
+            "main",
+            &mut transaction_state,
+            |_db, statement, _transaction_state| {
+                let normalized = statement.trim().to_ascii_lowercase();
+                if normalized.starts_with("drop table") {
+                    return Err("drop table failed: 'ip_lookup' not found".to_string());
+                }
+
+                executed.push(statement.trim().to_string());
+                Ok(())
+            },
+        )
+        .expect("import reader should continue past non-fatal drop errors");
+
+        assert_eq!(stats.executed_statements, 2);
+        assert_eq!(stats.skipped_dump_directives, 1);
+        assert_eq!(stats.skipped_non_fatal_errors, 0);
+        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(executed.len(), 2);
+    }
+
+    #[test]
+    fn normalize_import_statement_removes_mysql_using_clauses() {
+        let statement = "create table t (id int, primary key (id) USING BTREE, key idx (id) USING HASH)";
+        let normalized = normalize_import_statement(statement);
+
+        assert!(!normalized.to_ascii_lowercase().contains("using btree"));
+        assert!(!normalized.to_ascii_lowercase().contains("using hash"));
+        assert!(normalized.to_ascii_lowercase().contains("primary key (id)"));
+        assert!(normalized.to_ascii_lowercase().contains("key idx (id)"));
+    }
+
+    #[test]
+    fn import_reader_normalizes_mysql_using_clauses_before_execute() {
+        let input = "create table t (id int, primary key (id) USING BTREE);";
+        let mut transaction_state = ImportTransactionState {
+            enabled: false,
+            active: false,
+            dml_statements_in_batch: 0,
+            committed_batches: 0,
+            batch_started_at: None,
+            statement_calls: 0,
+            execute_statement_ms: 0,
+            begin_statement_ms: 0,
+            commit_statement_ms: 0,
+            query_statement_ms: 0,
+            max_statement_ms: 0,
+            max_statement_kind: None,
+            max_statement_bytes: 0,
+        };
+
+        let stats = execute_import_from_reader(
+            BufReader::new(input.as_bytes()),
+            "main",
+            &mut transaction_state,
+            |_db, statement, _transaction_state| {
+                if statement.to_ascii_lowercase().contains("using btree") {
+                    return Err("statement still contains unsupported USING BTREE".to_string());
+                }
+
+                Ok(())
+            },
+        )
+        .expect("import reader should normalize unsupported USING clauses");
+
+        assert_eq!(stats.executed_statements, 1);
+        assert_eq!(stats.skipped_dump_directives, 0);
+        assert_eq!(stats.committed_batches, 0);
+    }
+
+    #[test]
+    fn import_reader_skips_mysql_dump_directives() {
+        let input = "\
+            set @old_foreign_key_checks=@@foreign_key_checks;\n\
+            lock tables `ip_lookup` write;\n\
+            insert into ip_lookup values (1);\n\
+            unlock tables;\n\
+        ";
+
+        let mut executed = Vec::<String>::new();
+        let mut transaction_state = ImportTransactionState {
+            enabled: false,
+            active: false,
+            dml_statements_in_batch: 0,
+            committed_batches: 0,
+            batch_started_at: None,
+            statement_calls: 0,
+            execute_statement_ms: 0,
+            begin_statement_ms: 0,
+            commit_statement_ms: 0,
+            query_statement_ms: 0,
+            max_statement_ms: 0,
+            max_statement_kind: None,
+            max_statement_bytes: 0,
+        };
+
+        let stats = execute_import_from_reader(
+            BufReader::new(input.as_bytes()),
+            "main",
+            &mut transaction_state,
+            |_db, statement, _transaction_state| {
+                executed.push(statement.trim().to_string());
+                Ok(())
+            },
+        )
+        .expect("import reader should skip dump directives");
+
+        assert_eq!(stats.executed_statements, 1);
+        assert_eq!(stats.skipped_dump_directives, 3);
+        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(executed, vec!["insert into ip_lookup values (1)"]);
+    }
+
+    #[test]
+    fn import_transport_error_retry_classifier_matches_expected_errors() {
+        assert!(import_transport_error_is_retryable(
+            "transport error: failed to read response length: Resource temporarily unavailable (os error 35)"
+        ));
+        assert!(import_transport_error_is_retryable(
+            "transport error: no queued response for request_id"
+        ));
+        assert!(!import_transport_error_is_retryable(
+            "command rejected: sql parse failed"
+        ));
+    }
+
+    #[test]
+    fn import_batchable_dml_classifier_matches_expected_statements() {
+        assert!(statement_is_import_batchable_dml("insert into x values (1)"));
+        assert!(statement_is_import_batchable_dml(" update users set a=1"));
+        assert!(statement_is_import_batchable_dml("delete from users"));
+        assert!(statement_is_import_batchable_dml("replace into users values (1)"));
+        assert!(!statement_is_import_batchable_dml("create table users (id int)"));
+        assert!(!statement_is_import_batchable_dml("alter table users add key (id)"));
+    }
+
+    #[test]
+    fn split_import_insert_values_statement_splits_large_insert_values() {
+        let statement = "insert into users values (1,'alice'),(2,'bob'),(3,'charlie')";
+        let chunks = split_import_insert_values_statement(statement, 48, 16);
+
+        assert!(chunks.len() >= 2);
+        assert!(chunks.iter().all(|chunk| chunk.to_ascii_lowercase().starts_with("insert into users values ")));
+        assert!(chunks.iter().all(|chunk| chunk.contains("(")));
+    }
+
+    #[test]
+    fn split_import_insert_values_statement_keeps_non_insert_statement() {
+        let statement = "create table users (id int, name text)";
+        let chunks = split_import_insert_values_statement(statement, 32, 16);
+
+        assert_eq!(chunks, vec![statement.to_string()]);
+    }
+
+    #[test]
+    fn split_import_insert_values_statement_respects_tuple_cap() {
+        let statement = "insert into users values (1,'alice'),(2,'bob'),(3,'charlie'),(4,'dana')";
+        let chunks = split_import_insert_values_statement(statement, 4_096, 2);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].contains("(1,'alice')"));
+        assert!(chunks[0].contains("(2,'bob')"));
+        assert!(chunks[1].contains("(3,'charlie')"));
+        assert!(chunks[1].contains("(4,'dana')"));
     }
 
     #[test]

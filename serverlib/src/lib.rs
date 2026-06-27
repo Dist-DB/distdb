@@ -113,6 +113,7 @@ pub use engine::sql::{
 	create_table_schema_from_statement, 
 	parse_mysql8_sql_requests, 
 	parse_sql_requests,
+	parse_insert_rows_from_parsed_statement,
 	parse_insert_rows_from_statement,
 	parse_update_rows_from_statement,
 	parse_delete_rows_from_statement,

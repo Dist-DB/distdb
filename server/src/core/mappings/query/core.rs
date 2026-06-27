@@ -1,4 +1,5 @@
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1857,15 +1858,47 @@ fn execute_insert_impl(
 
     let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
 
-    let plan = match serverlib::parse_insert_rows_from_statement(statement_sql) {
-        Ok(plan) => plan,
-        Err(err) => {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("insert parse failed: {err}"),
-            );
-        }
+    let cached_plan = (!is_explain)
+        .then_some(statement.parsed_insert_plan.as_ref())
+        .flatten();
+
+    let parsed_plan = if cached_plan.is_none() {
+
+        Some(match (!is_explain).then_some(statement.parsed_statement.as_ref()).flatten() {
+
+            Some(parsed_statement) => match serverlib::parse_insert_rows_from_parsed_statement(parsed_statement) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert parse failed: {err}"),
+                    );
+                }
+            },
+
+            None => match serverlib::parse_insert_rows_from_statement(statement_sql) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert parse failed: {err}"),
+                    );
+                }
+            },
+            
+        })
+
+    } else {
+
+        None
+
     };
+
+    let plan = cached_plan.unwrap_or_else(|| {
+        parsed_plan
+            .as_ref()
+            .expect("parsed plan should exist when cached insert plan is absent")
+    });
 
     if is_explain {
 
@@ -1914,7 +1947,7 @@ fn execute_insert_impl(
             runtime_indexes,
             external_write_group_id,
             touched_write_tables,
-            &plan,
+            plan,
         )
         },
     )
@@ -1956,17 +1989,47 @@ fn execute_insert_locked(
         schema
             .fields
             .iter()
-            .map(|field| field.field_name.clone())
+            .map(|field| field.field_name.as_str())
             .collect::<Vec<_>>()
     } else {
-        plan.columns.clone()
+        plan.columns.iter().map(String::as_str).collect::<Vec<_>>()
     };
+
+    let insert_column_fields = columns
+        .iter()
+        .map(|column| {
+            schema
+                .field(column)
+                .ok_or_else(|| format!("insert failed: unknown column '{}'", column))
+                .map(|field| (*column, field))
+        })
+        .collect::<Result<Vec<_>, _>>();
+
+    let insert_column_fields = match insert_column_fields {
+        Ok(fields) => fields,
+        Err(message) => {
+            return ConnectorResponse::rejected(request_id.to_string(), message);
+        }
+    };
+
+    let missing_field_defaults = schema
+        .fields
+        .iter()
+        .filter(|field| !columns.iter().any(|column| *column == field.field_name))
+        .map(|field| {
+            (
+                field.field_name.as_str(),
+                field.default_value.as_ref(),
+                field.nullable,
+            )
+        })
+        .collect::<Vec<_>>();
 
     let mut seen = HashSet::with_capacity(columns.len());
 
     for column in &columns {
 
-        if !seen.insert(column.clone()) {
+        if !seen.insert(*column) {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("insert failed: duplicate column '{}'", column),
@@ -1998,8 +2061,26 @@ fn execute_insert_locked(
         |group_id, runtime_indexes| {
 
             let mut affected_rows = 0u64;
+            let mut pk_checks = 0u64;
+            let mut staged_payloads = Vec::with_capacity(insert_rows.len());
+            let track_runtime_indexes_for_insert = derived_indexes_for_table(table).next().is_some();
+            let mut staged_row_maps = if track_runtime_indexes_for_insert {
+                Vec::with_capacity(insert_rows.len())
+            } else {
+                Vec::new()
+            };
+            let mut staged_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
+            let primary_key_details = primary_key_index(table).map(|pk_index| {
+                let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
+                    vec![pk_index.field_name.as_str()]
+                } else {
+                    pk_index.field_names.iter().map(|name| name.as_str()).collect()
+                };
 
-            for row in &insert_rows {
+                (pk_index.index_id.0.as_str(), pk_fields)
+            });
+
+            for row in insert_rows.iter() {
 
                 if row.len() != columns.len() {
                     return ConnectorResponse::rejected(
@@ -2014,22 +2095,18 @@ fn execute_insert_locked(
 
                 let mut payload_row = HashMap::with_capacity(schema.fields.len());
 
-                for (column, value) in columns.iter().zip(row.iter()) {
-                    
-                    let field = schema
-                        .field(column)
-                        .expect("column existence already validated");
+                for ((column, field), value) in insert_column_fields.iter().zip(row.iter().cloned()) {
 
                     match value {
 
                         Some(value_bytes) => {
-                            payload_row.insert(column.clone(), value_bytes.clone());
+                            payload_row.insert((*column).to_string(), value_bytes);
                         },
 
                         None => {
 
                             if let Some(default) = &field.default_value {
-                                payload_row.insert(column.clone(), default.clone());
+                                payload_row.insert((*column).to_string(), default.clone());
                             } else if !field.nullable {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
@@ -2043,47 +2120,40 @@ fn execute_insert_locked(
 
                 }
 
-                for field in &schema.fields {
+                for (field_name, default_value, nullable) in &missing_field_defaults {
 
-                    if payload_row.contains_key(&field.field_name) {
+                    if let Some(default) = default_value {
+                        payload_row.insert((*field_name).to_string(), (*default).clone());
                         continue;
                     }
 
-                    if let Some(default) = &field.default_value {
-                        payload_row.insert(field.field_name.clone(), default.clone());
-                        continue;
-                    }
-
-                    if !field.nullable {
+                    if !nullable {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
                             format!(
                                 "insert failed: missing required column '{}'",
-                                field.field_name
+                                field_name
                             ),
                         );
                     }
 
                 }
 
-                if let Some(pk_index) = primary_key_index(table) {
-
-                    let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
-                        vec![pk_index.field_name.clone()]
-                    } else {
-                        pk_index.field_names.clone()
-                    };
+                if let Some((pk_index_id, pk_fields)) = primary_key_details.as_ref() {
+                    
+                    pk_checks = pk_checks.saturating_add(1);
 
                     let incoming_pk = pk_fields
                         .iter()
-                        .map(|pk| payload_row.get(pk).cloned().unwrap_or_default())
+                        .map(|pk| payload_row.get(*pk).cloned().unwrap_or_default())
                         .collect::<Vec<_>>();
 
-                    let pk_runtime = runtime_indexes.index(&pk_index.index_id.0);
+                    let pk_runtime = runtime_indexes.index(pk_index_id);
 
                     if pk_runtime
                         .map(|idx| idx.contains(&incoming_pk))
                         .unwrap_or(false)
+                        || staged_pk_keys.contains(&incoming_pk)
                     {
                         
                         let pk_display = pk_fields
@@ -2100,6 +2170,8 @@ fn execute_insert_locked(
 
                     }
 
+                    staged_pk_keys.insert(incoming_pk);
+
                 }
 
                 let encoded = match encode_row_payload(schema, &payload_row) {
@@ -2115,26 +2187,40 @@ fn execute_insert_locked(
 
                 };
 
-                if let Err(err) = append_row_payload_record(
-                    wal,
-                    &plan.table_id,
-                    table,
-                    runtime_indexes,
-                    TransactionKind::Insert,
-                    encoded,
-                    common::epoch_nanos!(),
-                    None,
-                    Some(group_id),
-                ) {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("insert WAL append failed: {err}"),
-                    );
+                staged_payloads.push(encoded);
+
+                if track_runtime_indexes_for_insert {
+                    staged_row_maps.push(payload_row);
                 }
 
                 affected_rows = affected_rows.saturating_add(1);
 
             }
+
+            if let Err(err) = append_row_payload_records_batch(
+                wal,
+                &plan.table_id,
+                table,
+                runtime_indexes,
+                TransactionKind::Insert,
+                staged_payloads,
+                Some(staged_row_maps),
+                common::epoch_nanos!(),
+                Some(group_id),
+            ) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("insert WAL append failed: {err}"),
+                );
+            }
+
+            log::debug!(
+                "insert execution table={} rows={} pk_checks={} runtime_indexes={}",
+                table.table_id,
+                affected_rows,
+                pk_checks,
+                table.indexes.len(),
+            );
 
             // Capture last insert id if any rows were inserted
             if affected_rows > 0 {
@@ -2153,16 +2239,16 @@ fn execute_insert_locked(
 
 }
 
-fn materialize_insert_source_rows(
+fn materialize_insert_source_rows<'a>(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &RuntimeIndexStore,
-    source: &serverlib::InsertRowsSource,
-) -> Result<Vec<Vec<Option<Vec<u8>>>>, String> {
+    source: &'a serverlib::InsertRowsSource,
+) -> Result<Cow<'a, [Vec<Option<Vec<u8>>>]>, String> {
 
     match source {
 
-        serverlib::InsertRowsSource::Values(rows) => Ok(rows.clone()),
+        serverlib::InsertRowsSource::Values(rows) => Ok(Cow::Borrowed(rows.as_slice())),
 
         serverlib::InsertRowsSource::Select(read_plan) => {
 
@@ -2172,7 +2258,7 @@ fn materialize_insert_source_rows(
                     catalog,
                     wal,
                     runtime_indexes,
-                    read_plan,
+                    &read_plan,
                     &mut |function| evaluate_inbuilt_sql_function(function),
                     &mut |row_map, condition| {
                         Ok(serverlib::row_matches_select_condition(
@@ -2196,7 +2282,7 @@ fn materialize_insert_source_rows(
 
             } else if read_plan.table_id.is_empty() {
                 
-                serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
+                serverlib::execute_projection_only_select_plan(&read_plan, &mut |function| {
                     evaluate_inbuilt_sql_function(function)
                 })
 
@@ -2230,7 +2316,7 @@ fn materialize_insert_source_rows(
                     table,
                     schema,
                     runtime_indexes,
-                    read_plan,
+                    &read_plan,
                     &access_plan,
                     &mut |function| evaluate_inbuilt_sql_function(function),
                     &mut |row_map, condition| {
@@ -2267,7 +2353,7 @@ fn materialize_insert_source_rows(
                     })
                     .collect::<Vec<_>>();
 
-            Ok(rows)
+            Ok(Cow::Owned(rows))
 
         }
 
@@ -2392,7 +2478,20 @@ fn execute_update_locked(
         }
     };
 
-    let mut pk_keys = if let Some(pk_index) = primary_key_index(table) {
+    let primary_key = primary_key_index(table);
+    let primary_key_fields = primary_key.map(|pk_index| {
+        if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
+            vec![pk_index.field_name.as_str()]
+        } else {
+            pk_index
+                .field_names
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+        }
+    });
+
+    let mut pk_keys = if let Some(pk_index) = primary_key {
         current_live_rows
             .iter()
             .map(|(_, row_map)| index_value_tuple(pk_index, row_map))
@@ -2400,6 +2499,11 @@ fn execute_update_locked(
     } else {
         HashSet::new()
     };
+
+    let current_live_row_ids = current_live_rows
+        .iter()
+        .map(|(row_id, _)| *row_id)
+        .collect::<HashSet<_>>();
 
     with_statement_write_batch(
         request_id,
@@ -2426,12 +2530,28 @@ fn execute_update_locked(
                     continue;
                 }
 
-                let mut updated_row = row_map.clone();
+                let delete_payload = match encode_row_payload(schema, &row_map) {
+                    Ok(encoded) => encoded,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("update delete payload encode failed: {err}"),
+                        );
+                    }
+                };
+
+                let old_pk = primary_key.map(|pk_index| index_value_tuple(pk_index, &row_map));
+
+                let mut updated_row = row_map;
 
                 for assignment in &plan.assignments {
                     match &assignment.value {
                         Some(value) => {
-                            updated_row.insert(assignment.field_name.clone(), value.clone());
+                            if let Some(slot) = updated_row.get_mut(&assignment.field_name) {
+                                *slot = value.clone();
+                            } else {
+                                updated_row.insert(assignment.field_name.clone(), value.clone());
+                            }
                         }
                         None => {
                             updated_row.remove(&assignment.field_name);
@@ -2451,20 +2571,15 @@ fn execute_update_locked(
                     }
                 }
 
-                if let Some(pk_index) = primary_key_index(table) {
+                if let Some(pk_index) = primary_key {
 
-                    let old_pk = index_value_tuple(pk_index, &row_map);
+                    let old_pk = old_pk.expect("primary key tuple should exist when primary key index is present");
                     let new_pk = index_value_tuple(pk_index, &updated_row);
 
                     if old_pk != new_pk && pk_keys.contains(&new_pk) {
-                        let pk_fields =
-                            if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
-                                vec![pk_index.field_name.clone()]
-                            } else {
-                                pk_index.field_names.clone()
-                            };
-
-                        let pk_display = pk_fields
+                        let pk_display = primary_key_fields
+                            .as_ref()
+                            .expect("primary key fields should exist when primary key index is present")
                             .iter()
                             .zip(new_pk.iter())
                             .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
@@ -2482,17 +2597,7 @@ fn execute_update_locked(
 
                 }
 
-                let delete_payload = match encode_row_payload(schema, &row_map) {
-                    Ok(encoded) => encoded,
-                    Err(err) => {
-                        return ConnectorResponse::rejected(
-                            request_id.to_string(),
-                            format!("update delete payload encode failed: {err}"),
-                        );
-                    }
-                };
-
-                if let Err(err) = append_row_payload_record(
+                if let Err(err) = append_row_payload_record_with_live_row_ids(
                     wal,
                     &plan.table_id,
                     table,
@@ -2501,6 +2606,7 @@ fn execute_update_locked(
                     delete_payload,
                     common::epoch_nanos!(),
                     Some(TransactionId(row_id)),
+                    Some(&current_live_row_ids),
                     Some(group_id),
                 ) {
                     return ConnectorResponse::rejected(
@@ -2658,6 +2764,11 @@ fn execute_delete_locked(
         }
     };
 
+    let current_live_row_ids = current_live_rows
+        .iter()
+        .map(|(row_id, _)| *row_id)
+        .collect::<HashSet<_>>();
+
     with_statement_write_batch(
         request_id,
         wal,
@@ -2693,7 +2804,7 @@ fn execute_delete_locked(
                     }
                 };
 
-                if let Err(err) = append_row_payload_record(
+                if let Err(err) = append_row_payload_record_with_live_row_ids(
                     wal,
                     &plan.table_id,
                     table,
@@ -2702,6 +2813,7 @@ fn execute_delete_locked(
                     delete_payload,
                     common::epoch_nanos!(),
                     Some(TransactionId(row_id)),
+                    Some(&current_live_row_ids),
                     Some(group_id),
                 ) {
                     return ConnectorResponse::rejected(
@@ -3781,10 +3893,9 @@ fn append_payload_record_with_group(
     group_id: Option<TransactionId>,
 ) -> Result<TransactionId, String> {
 
-    let existing = wal.since(wal_id, None);
-    let last = existing.last();
-    let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
-    let refid = last.map(|record| record.id);
+    let last_id = wal.latest_transaction_id(wal_id);
+    let next_id = TransactionId(last_id.map(|id| id.0 + 1).unwrap_or(1));
+    let refid = last_id;
     
     let record_group_id = group_id.or({
         if matches!(kind, TransactionKind::WriteBegin) {
@@ -3823,28 +3934,81 @@ pub(super) fn append_row_payload_record(
     refid: Option<TransactionId>,
     group_id: Option<TransactionId>,
 ) -> Result<(), String> {
-    let existing = wal.since(wal_id, None);
+    append_row_payload_record_with_live_row_ids(
+        wal,
+        wal_id,
+        table,
+        runtime_indexes,
+        kind,
+        payload,
+        timestamp_epoch_ms,
+        refid,
+        None,
+        group_id,
+    )
+}
+
+fn append_row_payload_record_with_live_row_ids(
+    wal: &ConcurrentWalManager,
+    wal_id: &str,
+    table: &serverlib::DatabaseTable,
+    runtime_indexes: &mut RuntimeIndexStore,
+    kind: TransactionKind,
+    payload: Vec<u8>,
+    timestamp_epoch_ms: u64,
+    refid: Option<TransactionId>,
+    expected_live_row_ids: Option<&HashSet<u64>>,
+    group_id: Option<TransactionId>,
+) -> Result<(), String> {
+    let mutation_start = Instant::now();
 
     if let Some(expected_refid) = refid {
-        let live_row_ids = load_live_rows(wal, wal_id, table.schema())
-            .into_iter()
-            .map(|(row_id, _)| row_id)
-            .collect::<HashSet<_>>();
+        let live_row_check_start = Instant::now();
+        let live_row_exists = if let Some(live_row_ids) = expected_live_row_ids {
+            live_row_ids.contains(&expected_refid.0)
+        } else {
+            let live_row_ids = load_live_rows(wal, wal_id, table.schema())
+                .into_iter()
+                .map(|(row_id, _)| row_id)
+                .collect::<HashSet<_>>();
+            live_row_ids.contains(&expected_refid.0)
+        };
+        let live_row_check_ms = live_row_check_start.elapsed().as_millis() as u64;
 
-        if !live_row_ids.contains(&expected_refid.0) {
+        if !live_row_exists {
             return Err(format!(
                 "row mutation references stale or missing live transaction id {}",
                 expected_refid.0
             ));
         }
+
+        if live_row_check_ms > 0 {
+            log::info!(
+                "mutation live-row check timing table={} kind={:?} live_row_check_ms={}",
+                table.table_id,
+                kind,
+                live_row_check_ms,
+            );
+        }
     }
 
-    let last = existing.last();
-    let next_id = TransactionId(last.map(|record| record.id.0 + 1).unwrap_or(1));
-    let refid = refid.or_else(|| last.map(|record| record.id));
+    let last_id = wal.latest_transaction_id(wal_id);
+    let next_id = TransactionId(last_id.map(|id| id.0 + 1).unwrap_or(1));
+    let refid = refid.or(last_id);
 
-    let row_map = decode_row_payload(table.schema(), &payload)
-        .map_err(|err| format!("row payload decode failed: {err}"))?;
+    let row_decode_start = Instant::now();
+    let derived_indexes = derived_indexes_for_table(table).collect::<Vec<_>>();
+    let track_runtime_indexes = !derived_indexes.is_empty();
+
+    let row_map = if track_runtime_indexes {
+        Some(
+            decode_row_payload(table.schema(), &payload)
+                .map_err(|err| format!("row payload decode failed: {err}"))?,
+        )
+    } else {
+        None
+    };
+    let row_decode_ms = row_decode_start.elapsed().as_millis() as u64;
 
     let record = TransactionRecord {
         id: next_id,
@@ -3852,16 +4016,158 @@ pub(super) fn append_row_payload_record(
         refid,
         timestamp_epoch_ms,
         actor: UserId::from_username("server"),
-        kind: kind.clone(),
+        kind,
         payload,
     };
 
+    let wal_append_start = Instant::now();
     wal.append(wal_id, record).map_err(|e| e.to_string())?;
+    let wal_append_ms = wal_append_start.elapsed().as_millis() as u64;
 
-    runtime_indexes.apply_table_row_mutation(derived_indexes_for_table(table), kind, &row_map);
+    let index_apply_start = Instant::now();
+
+    if let Some(row_map) = row_map.as_ref() {
+        runtime_indexes.apply_table_row_mutation(derived_indexes.iter().copied(), kind, row_map);
+    }
+
+    let index_apply_ms = index_apply_start.elapsed().as_millis() as u64;
+    let total_ms = mutation_start.elapsed().as_millis() as u64;
+
+    log::debug!(
+        "mutation timing table={} kind={:?} track_runtime_indexes={} row_decode_ms={} wal_append_ms={} index_apply_ms={} total_ms={}",
+        table.table_id,
+        kind,
+        track_runtime_indexes,
+        row_decode_ms,
+        wal_append_ms,
+        index_apply_ms,
+        total_ms,
+    );
 
     Ok(())
 
+}
+
+pub(super) fn append_row_payload_records_batch(
+    wal: &ConcurrentWalManager,
+    wal_id: &str,
+    table: &serverlib::DatabaseTable,
+    runtime_indexes: &mut RuntimeIndexStore,
+    kind: TransactionKind,
+    payloads: Vec<Vec<u8>>,
+    prepared_row_maps: Option<Vec<HashMap<String, Vec<u8>>>>,
+    timestamp_epoch_ms: u64,
+    group_id: Option<TransactionId>,
+) -> Result<(), String> {
+    if payloads.is_empty() {
+        return Ok(());
+    }
+
+    let batch_start = Instant::now();
+    let derived_indexes = derived_indexes_for_table(table).collect::<Vec<_>>();
+    let track_runtime_indexes = !derived_indexes.is_empty();
+    let payload_count = payloads.len();
+
+    let last_id = wal.latest_transaction_id(wal_id);
+    let mut next_id = last_id.map(|id| id.0.saturating_add(1)).unwrap_or(1);
+    let mut refid = last_id;
+    let actor = UserId::from_username("server");
+
+    let mut records = Vec::with_capacity(payloads.len());
+    let mut row_maps = prepared_row_maps.unwrap_or_default();
+    let use_prepared_row_maps = track_runtime_indexes && row_maps.len() == payload_count;
+
+    if track_runtime_indexes && !use_prepared_row_maps {
+        row_maps = Vec::with_capacity(payload_count);
+    }
+
+    let materialize_start = Instant::now();
+
+    for payload in payloads {
+        if track_runtime_indexes && !use_prepared_row_maps {
+            let row_map = decode_row_payload(table.schema(), &payload)
+                .map_err(|err| format!("row payload decode failed: {err}"))?;
+            row_maps.push(row_map);
+        }
+
+        let tx_id = TransactionId(next_id);
+        next_id = next_id.saturating_add(1);
+
+        records.push(TransactionRecord {
+            id: tx_id,
+            groupid: group_id,
+            refid,
+            timestamp_epoch_ms,
+            actor: actor.clone(),
+            kind,
+            payload,
+        });
+
+        refid = Some(tx_id);
+    }
+
+    let materialize_us = materialize_start.elapsed().as_micros() as u64;
+
+    let wal_append_start = Instant::now();
+    wal.append_batch(wal_id, records)
+        .map_err(|err| err.to_string())?;
+    let wal_append_us = wal_append_start.elapsed().as_micros() as u64;
+
+    let index_apply_start = Instant::now();
+
+    if track_runtime_indexes {
+        match kind {
+            TransactionKind::Delete => {
+                runtime_indexes.remove_table_rows_batch(&derived_indexes, &row_maps);
+            }
+
+            TransactionKind::Insert | TransactionKind::Update => {
+                runtime_indexes.record_table_rows_batch(&derived_indexes, &row_maps);
+            }
+
+            _ => {}
+        }
+    }
+
+    let index_apply_us = index_apply_start.elapsed().as_micros() as u64;
+    let total_us = batch_start.elapsed().as_micros() as u64;
+
+    if track_runtime_indexes && index_apply_us >= 5_000 {
+        let mut index_stats = Vec::with_capacity(derived_indexes.len());
+
+        for index in &derived_indexes {
+            let index_id = &index.index_id.0;
+            let stats = runtime_indexes
+                .stats(index_id)
+                .map(|(cardinality, capacity)| format!("{}:{}/{}", index_id, cardinality, capacity))
+                .unwrap_or_else(|| format!("{}:missing", index_id));
+            index_stats.push(stats);
+        }
+
+        log::warn!(
+            "batch mutation index spike table={} kind={:?} rows={} index_apply_us={} index_stats=[{}]",
+            table.table_id,
+            kind,
+            payload_count,
+            index_apply_us,
+            index_stats.join(", "),
+        );
+    }
+
+    log::debug!(
+        "batch mutation timing table={} kind={:?} rows={} track_runtime_indexes={} materialize_us={} wal_append_us={} index_apply_us={} total_us={}",
+        table.table_id,
+        kind,
+        payload_count,
+        track_runtime_indexes,
+        materialize_us,
+        wal_append_us,
+        index_apply_us,
+        total_us,
+    );
+
+    Ok(())
+    
 }
 
 fn with_statement_write_batch<F>(
@@ -3926,6 +4232,11 @@ where
             common::epoch_nanos!(),
             Some(write_group_id),
         ) {
+            log::warn!(
+                "runtime index rebuild triggered table={} reason=write_commit_failed error={}",
+                table.table_id,
+                err
+            );
             let _ = append_payload_record_with_group(
                 wal,
                 &table.table_id,
@@ -3944,6 +4255,11 @@ where
         response
 
     } else {
+
+        log::warn!(
+            "runtime index rebuild triggered table={} reason=statement_response_rejected",
+            table.table_id
+        );
         
         let _ = append_payload_record_with_group(
             wal,
@@ -3966,6 +4282,7 @@ pub(crate) fn commit_external_write_group(
     table_ids: &HashSet<String>,
     group_id: TransactionId,
 ) -> Result<(), String> {
+
     for table_id in table_ids {
         append_payload_record_with_group(
             wal,
@@ -3978,6 +4295,7 @@ pub(crate) fn commit_external_write_group(
     }
 
     Ok(())
+
 }
 
 pub(crate) fn abort_external_write_group(
@@ -3996,6 +4314,11 @@ pub(crate) fn abort_external_write_group(
             Vec::new(),
             common::epoch_nanos!(),
             Some(group_id),
+        );
+
+        log::warn!(
+            "runtime index rebuild triggered table={} reason=external_write_group_abort",
+            table_id
         );
 
         if let Some(table) = catalogs.values().find_map(|catalog| catalog.table(table_id)) {
@@ -4037,7 +4360,7 @@ fn append_payload_record_pair(
     append_payload_record(
         wal,
         database_wal_id,
-        kind.clone(),
+        kind,
         payload.clone(),
         timestamp_epoch_ms,
     )
