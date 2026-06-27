@@ -1,5 +1,25 @@
 use super::*;
 
+fn set_query_branch_plans(steps: &[SelectSetQueryStep]) -> Vec<&SelectReadPlan> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            SelectSetQueryStep::Branch(plan) => Some(plan),
+            SelectSetQueryStep::BoundaryOperation(_) => None,
+        })
+        .collect::<Vec<_>>()
+}
+
+fn set_query_boundary_operations(steps: &[SelectSetQueryStep]) -> Vec<SelectSetBoundaryOp> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            SelectSetQueryStep::Branch(_) => None,
+            SelectSetQueryStep::BoundaryOperation(operation) => Some(*operation),
+        })
+        .collect::<Vec<_>>()
+}
+
 #[test]
 fn select_projection_returns_requested_columns() {
     let projection = parse_select_projection_from_statement("SELECT uid, id_person FROM __account")
@@ -17,6 +37,215 @@ fn select_star_projection_returns_none() {
         .expect("projection should parse");
 
     assert_eq!(projection, None);
+}
+
+#[test]
+fn select_distinct_returns_explicit_unsupported_error() {
+    let plan = parse_select_read_plan_from_statement("select distinct id from users")
+        .expect("distinct select should parse");
+
+    assert!(plan.distinct);
+}
+
+#[test]
+fn select_group_by_returns_explicit_unsupported_error() {
+    let plan = parse_select_read_plan_from_statement("select id from users group by id")
+        .expect("group by select should parse in first-pass mode");
+
+    assert_eq!(plan.group_by, vec!["id".to_string()]);
+    assert!(plan.distinct);
+}
+
+#[test]
+fn select_order_by_returns_explicit_unsupported_error() {
+    let plan = parse_select_read_plan_from_statement("select id from users order by id")
+        .expect("order by select should parse");
+
+    assert_eq!(plan.order_by.len(), 1);
+    assert_eq!(plan.order_by[0].field_name, "id");
+    assert!(!plan.order_by[0].descending);
+}
+
+#[test]
+fn select_projection_only_order_by_ordinal_is_supported() {
+    let plan = parse_select_read_plan_from_statement("select now() as ts order by 1 desc")
+        .expect("projection-only order by ordinal should parse");
+
+    assert_eq!(plan.order_by.len(), 1);
+    assert_eq!(plan.order_by[0].field_name, "ts");
+    assert!(plan.order_by[0].descending);
+}
+
+#[test]
+fn select_projection_only_order_by_unknown_alias_is_rejected() {
+    let error = parse_select_read_plan_from_statement("select now() as ts order by missing")
+        .expect_err("projection-only order by unknown alias should be rejected");
+
+    assert!(matches!(
+        error,
+        SqlParseError::UnsupportedStatement(message)
+            if message == "ORDER BY without FROM references unknown output field 'missing'"
+    ));
+}
+
+#[test]
+fn union_select_parses_branch_plans_and_quantifier() {
+    let (steps, order_by, limit, offset) = parse_union_select_read_plans_from_statement(
+        "select id from users union all select id from archived_users",
+    )
+    .expect("union all should parse branch plans");
+
+    let branch_plans = set_query_branch_plans(&steps);
+    let boundary_operations = set_query_boundary_operations(&steps);
+
+    assert_eq!(branch_plans.len(), 2);
+    assert_eq!(boundary_operations, vec![SelectSetBoundaryOp::UnionAll]);
+    assert!(order_by.is_empty());
+    assert_eq!(limit, None);
+    assert_eq!(offset, None);
+    assert_eq!(branch_plans[0].table_id, "users");
+    assert_eq!(branch_plans[1].table_id, "archived_users");
+}
+
+#[test]
+fn union_select_parses_mixed_quantifiers_and_query_level_windowing() {
+    let (steps, order_by, limit, offset) =
+        parse_union_select_read_plans_from_statement(
+            "select id from users union all select id from archived_users union select id from users order by id desc limit 5 offset 1",
+        )
+        .expect("mixed union quantifiers should parse");
+
+    let branch_plans = set_query_branch_plans(&steps);
+    let boundary_operations = set_query_boundary_operations(&steps);
+
+    assert_eq!(branch_plans.len(), 3);
+    assert_eq!(
+        boundary_operations,
+        vec![
+            SelectSetBoundaryOp::UnionAll,
+            SelectSetBoundaryOp::UnionDistinct,
+        ]
+    );
+    assert_eq!(order_by.len(), 1);
+    assert_eq!(order_by[0].field_name, "id");
+    assert!(order_by[0].descending);
+    assert_eq!(limit, Some(5));
+    assert_eq!(offset, Some(1));
+}
+
+#[test]
+fn except_select_parses_boundary_operation() {
+    let (steps, _, _, _) = parse_union_select_read_plans_from_statement(
+        "select id from users except select id from archived_users",
+    )
+    .expect("except query should parse");
+
+    let branch_plans = set_query_branch_plans(&steps);
+    let boundary_operations = set_query_boundary_operations(&steps);
+
+    assert_eq!(branch_plans.len(), 2);
+    assert_eq!(
+        boundary_operations,
+        vec![SelectSetBoundaryOp::ExceptDistinct]
+    );
+}
+
+#[test]
+fn intersect_select_parses_boundary_operation() {
+    let (steps, _, _, _) = parse_union_select_read_plans_from_statement(
+        "select id from users intersect select id from archived_users",
+    )
+    .expect("intersect query should parse");
+
+    let branch_plans = set_query_branch_plans(&steps);
+    let boundary_operations = set_query_boundary_operations(&steps);
+
+    assert_eq!(branch_plans.len(), 2);
+    assert_eq!(
+        boundary_operations,
+        vec![SelectSetBoundaryOp::IntersectDistinct]
+    );
+}
+
+#[test]
+fn mixed_set_operators_preserve_parser_precedence_order() {
+    let (steps, _, _, _) = parse_union_select_read_plans_from_statement(
+        "select id from users union select id from archived_users except select id from users",
+    )
+    .expect("mixed set operators should parse");
+
+    assert_eq!(set_query_branch_plans(&steps).len(), 3);
+    assert_eq!(
+        set_query_boundary_operations(&steps),
+        vec![
+            SelectSetBoundaryOp::UnionDistinct,
+            SelectSetBoundaryOp::ExceptDistinct,
+        ]
+    );
+}
+
+#[test]
+fn union_select_parses_order_by_ordinal_position() {
+    let (_, order_by, _, _) = parse_union_select_read_plans_from_statement(
+        "select id from users union all select id from archived_users order by 1 desc",
+    )
+    .expect("union order by ordinal should parse");
+
+    assert_eq!(order_by.len(), 1);
+    assert_eq!(order_by[0].field_name, "__union_order_by_ordinal__1");
+    assert!(order_by[0].descending);
+}
+
+#[test]
+fn union_select_with_cte_propagates_ctes_to_branch_plans() {
+    let (steps, _, _, _) = parse_union_select_read_plans_from_statement(
+        "with staged as (select id from users) select id from staged union all select id from staged",
+    )
+    .expect("union with cte should parse");
+
+    let branch_plans = set_query_branch_plans(&steps);
+    let boundary_operations = set_query_boundary_operations(&steps);
+
+    assert_eq!(branch_plans.len(), 2);
+    assert_eq!(boundary_operations, vec![SelectSetBoundaryOp::UnionAll]);
+    assert_eq!(branch_plans[0].ctes.len(), 1);
+    assert_eq!(branch_plans[1].ctes.len(), 1);
+    assert_eq!(branch_plans[0].ctes[0].table_id, "staged");
+}
+
+#[test]
+fn select_with_cte_parses_cte_plan() {
+    let plan = parse_select_read_plan_from_statement(
+        "with staged as (select id from users) select id from staged",
+    )
+    .expect("cte select should parse");
+
+    assert_eq!(plan.ctes.len(), 1);
+    assert_eq!(plan.ctes[0].table_id, "staged");
+    assert_eq!(plan.ctes[0].read_plan.table_id, "users");
+    assert_eq!(plan.table_id, "staged");
+}
+
+#[test]
+fn select_group_by_having_combines_having_into_filter() {
+    let plan = parse_select_read_plan_from_statement(
+        "select id from users group by id having id = 1",
+    )
+    .expect("group by having should parse");
+
+    assert_eq!(plan.group_by, vec!["id".to_string()]);
+    assert!(plan.having_condition.is_some());
+    assert!(plan.where_condition.is_some());
+}
+
+#[test]
+fn select_with_window_clause_sets_window_flag() {
+    let plan = parse_select_read_plan_from_statement(
+        "select id from users window w as (partition by id)",
+    )
+    .expect("window clause should parse");
+
+    assert!(plan.has_window_clause);
 }
 
 #[test]

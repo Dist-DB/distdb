@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::Function;
 
@@ -110,9 +111,11 @@ where
 
     }
 
+    let rows = apply_select_post_processing(vec![row], &columns, read_plan);
+
     Ok(SelectExecutionResult {
         columns,
-        rows: vec![row],
+        rows,
     })
 
 }
@@ -134,10 +137,13 @@ where
 {
 
     let projection_items = expand_relation_projection_items(schema, &read_plan.projection_items);
+    let visible_projection_len = projection_items.len();
+    let projection_items = ensure_order_by_projection_items(projection_items, read_plan);
 
     let mut columns = Vec::with_capacity(projection_items.len());
 
     for (seq, projection_item) in projection_items.iter().enumerate() {
+        let is_hidden_sort_key = seq >= visible_projection_len;
         
         match projection_item {
 
@@ -156,7 +162,7 @@ where
                     nullable: field.nullable,
                     indexed: field.indexed,
                     default_value: field.default_value.clone(),
-                    metadata: field.metadata.clone(),
+                    metadata: column_metadata_with_visibility(field.metadata.clone(), is_hidden_sort_key),
                 });
             },
 
@@ -168,7 +174,7 @@ where
                     nullable: true,
                     indexed: FieldIndex::None,
                     default_value: None,
-                    metadata: None,
+                    metadata: column_metadata_with_visibility(None, is_hidden_sort_key),
                 });
             },
 
@@ -180,7 +186,7 @@ where
                     nullable: true,
                     indexed: FieldIndex::None,
                     default_value: None,
-                    metadata: None,
+                    metadata: column_metadata_with_visibility(None, is_hidden_sort_key),
                 });
             },
 
@@ -286,9 +292,12 @@ where
 
     }
 
+    let rows = apply_select_post_processing(rows, &columns, read_plan);
+    let (columns, rows) = strip_hidden_output_columns(columns, rows);
+
     Ok(SelectExecutionResult {
         columns,
-        rows: apply_row_window(rows, read_plan.limit, read_plan.offset),
+        rows,
     })
     
 }
@@ -313,11 +322,14 @@ where
     }
 
     let projection_items = expand_join_projection_items(catalog, &read_plan.relations, &read_plan.projection_items)?;
+    let visible_projection_len = projection_items.len();
+    let projection_items = ensure_order_by_projection_items(projection_items, read_plan);
 
     let mut columns = Vec::with_capacity(projection_items.len());
     let mut static_projection_values = Vec::with_capacity(projection_items.len());
 
     for (seq, projection_item) in projection_items.iter().enumerate() {
+        let is_hidden_sort_key = seq >= visible_projection_len;
 
         match projection_item {
 
@@ -325,6 +337,7 @@ where
                 field_name,
                 output_name,
             } => {
+
                 let Some(field) = resolve_join_field(catalog, &read_plan.relations, field_name) else {
                     return Err(format!("select join failed: unknown column '{}'", field_name));
                 };
@@ -343,7 +356,7 @@ where
                     nullable: is_nullable,
                     indexed: field.indexed,
                     default_value: field.default_value.clone(),
-                    metadata: field.metadata.clone(),
+                    metadata: column_metadata_with_visibility(field.metadata.clone(), is_hidden_sort_key),
                 });
 
                 static_projection_values.push(None);
@@ -368,7 +381,7 @@ where
                     nullable: true,
                     indexed: FieldIndex::None,
                     default_value: None,
-                    metadata: None,
+                    metadata: column_metadata_with_visibility(None, is_hidden_sort_key),
                 });
 
                 static_projection_values.push(value);
@@ -382,7 +395,7 @@ where
                     nullable: true,
                     indexed: FieldIndex::None,
                     default_value: None,
-                    metadata: None,
+                    metadata: column_metadata_with_visibility(None, is_hidden_sort_key),
                 });
 
                 static_projection_values.push(None);
@@ -474,9 +487,12 @@ where
 
     }
 
+    let rows = apply_select_post_processing(rows, &columns, read_plan);
+    let (columns, rows) = strip_hidden_output_columns(columns, rows);
+
     Ok(SelectExecutionResult {
         columns,
-        rows: apply_row_window(rows, read_plan.limit, read_plan.offset),
+        rows,
     })
 
 }
@@ -498,6 +514,174 @@ fn apply_row_window(
         .take(end.saturating_sub(start))
         .collect()
 
+}
+
+fn apply_select_post_processing(
+    mut rows: Vec<Vec<Vec<u8>>>,
+    columns: &[FieldDef],
+    read_plan: &SelectReadPlan,
+) -> Vec<Vec<Vec<u8>>> {
+
+    let visible_indexes = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            let hidden = column
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.is_hidden())
+                .unwrap_or(false);
+            if hidden { None } else { Some(index) }
+        })
+        .collect::<Vec<_>>();
+
+    if read_plan.distinct {
+        let mut unique_rows = Vec::with_capacity(rows.len());
+        let mut seen = HashSet::new();
+
+        for row in rows {
+            let key = if visible_indexes.len() == columns.len() {
+                row.clone()
+            } else {
+                visible_indexes
+                    .iter()
+                    .filter_map(|index| row.get(*index).cloned())
+                    .collect::<Vec<_>>()
+            };
+
+            if seen.insert(key) {
+                unique_rows.push(row);
+            }
+        }
+
+        rows = unique_rows;
+    }
+
+    if !read_plan.order_by.is_empty() {
+        let mut order_indexes = Vec::with_capacity(read_plan.order_by.len());
+
+        for item in &read_plan.order_by {
+            if let Some(index) = columns.iter().position(|column| column.field_name == item.field_name) {
+                order_indexes.push((index, item.descending));
+            }
+        }
+
+        if !order_indexes.is_empty() {
+            rows.sort_by(|left, right| {
+                for (index, descending) in &order_indexes {
+                    let ordering = left
+                        .get(*index)
+                        .cmp(&right.get(*index));
+
+                    if ordering != Ordering::Equal {
+                        return if *descending { ordering.reverse() } else { ordering };
+                    }
+                }
+
+                Ordering::Equal
+            });
+        }
+    }
+
+    apply_row_window(rows, read_plan.limit, read_plan.offset)
+
+}
+
+fn ensure_order_by_projection_items(
+    mut projection_items: Vec<SelectProjectionItem>,
+    read_plan: &SelectReadPlan,
+) -> Vec<SelectProjectionItem> {
+
+    for order_by in &read_plan.order_by {
+        
+        let covered = projection_items.iter().any(|item| match item {
+
+            SelectProjectionItem::Column {
+                field_name,
+                output_name,
+            } => field_name == &order_by.field_name || output_name == &order_by.field_name,
+            
+            SelectProjectionItem::Case { output_name, .. }
+            | SelectProjectionItem::InbuiltFunction { output_name, .. } => {
+                output_name == &order_by.field_name
+            }
+            
+            SelectProjectionItem::Wildcard { .. } => false,
+
+        });
+
+        if !covered {
+            projection_items.push(SelectProjectionItem::Column {
+                field_name: order_by.field_name.clone(),
+                output_name: order_by.field_name.clone(),
+            });
+        }
+    }
+
+    projection_items
+
+}
+
+fn column_metadata_with_visibility(
+    metadata: Option<common::schema::FieldMetadata>,
+    hidden: bool,
+) -> Option<common::schema::FieldMetadata> {
+
+    if !hidden {
+        return metadata;
+    }
+
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.system_visibility = common::schema::SystemFieldVisibility::Hidden;
+    Some(metadata)
+
+}
+
+fn strip_hidden_output_columns(
+    columns: Vec<FieldDef>,
+    rows: Vec<Vec<Vec<u8>>>,
+) -> (Vec<FieldDef>, Vec<Vec<Vec<u8>>>) {
+
+    let visible_indexes = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            let hidden = column
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.is_hidden())
+                .unwrap_or(false);
+            if hidden { None } else { Some(index) }
+        })
+        .collect::<Vec<_>>();
+
+    if visible_indexes.len() == columns.len() {
+        return (columns, rows);
+    }
+
+    let visible_columns = visible_indexes
+        .iter()
+        .enumerate()
+        .filter_map(|(visible_seq, index)| {
+            columns.get(*index).cloned().map(|mut column| {
+                column.seqno = (visible_seq + 1) as u32;
+                column
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let visible_rows = rows
+        .into_iter()
+        .map(|row| {
+            visible_indexes
+                .iter()
+                .filter_map(|index| row.get(*index).cloned())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    (visible_columns, visible_rows)
+    
 }
 
 fn join_field_can_be_null_extended(

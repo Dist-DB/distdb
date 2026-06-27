@@ -36,16 +36,19 @@ pub(super) fn classify_statement(
     }
 
     let (directive, operation, object_name) = match statement {
+
         Statement::Query(query) => {
-            let has_union = query_contains_operator(query, SetOperator::Union);
+            let has_set_operation = query_contains_operator(query, SetOperator::Union)
+                || query_contains_operator(query, SetOperator::Except)
+                || query_contains_operator(query, SetOperator::Intersect);
             let object_name = first_object_name_in_set_expr(&query.body);
 
-            if has_union {
+            if has_set_operation {
                 (SqlDirective::Union, SqlOperation::UnionQuery, object_name)
             } else {
                 (SqlDirective::Retrieve, SqlOperation::Select, object_name)
             }
-        }
+        },
 
         Statement::Insert(insert) => (
             SqlDirective::Create,
@@ -231,6 +234,7 @@ pub(super) fn classify_statement(
         ),
 
         _ => return Err(SqlParseError::UnsupportedStatement(normalized.to_string())),
+
     };
 
     if matches!(
@@ -260,7 +264,9 @@ pub(super) fn classify_statement(
 }
 
 fn set_expr_contains_operator(set_expr: &SetExpr, needle: SetOperator) -> bool {
+
     match set_expr {
+
         SetExpr::SetOperation {
             op,
             left,
@@ -270,13 +276,18 @@ fn set_expr_contains_operator(set_expr: &SetExpr, needle: SetOperator) -> bool {
             *op == needle
                 || set_expr_contains_operator(left, needle)
                 || set_expr_contains_operator(right, needle)
-        }
+        },
+
         SetExpr::Query(query) => query_contains_operator(query, needle),
+
         _ => false,
+
     }
+
 }
 
 fn query_contains_operator(query: &Query, needle: SetOperator) -> bool {
+
     set_expr_contains_operator(&query.body, needle)
         || query
             .with
@@ -290,65 +301,95 @@ fn query_contains_operator(query: &Query, needle: SetOperator) -> bool {
 }
 
 fn first_object_name_in_set_expr(set_expr: &SetExpr) -> Option<String> {
+
     match set_expr {
+
         SetExpr::Select(select) => select
             .from
             .first()
             .and_then(first_object_name_in_table_with_joins),
+
         SetExpr::Query(query) => first_object_name_in_set_expr(&query.body),
+
         SetExpr::SetOperation { left, right, .. } => {
             first_object_name_in_set_expr(left).or_else(|| first_object_name_in_set_expr(right))
         }
         _ => None,
+
     }
+
 }
 
 fn first_object_name_in_delete(delete: &Delete) -> Option<String> {
+
     match &delete.from {
         FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => {
             tables.first().and_then(first_object_name_in_table_with_joins)
         }
     }
+
 }
 
 fn first_object_name_in_table_with_joins(table: &TableWithJoins) -> Option<String> {
+
     match &table.relation {
+
         TableFactor::Table { name, .. } => Some(name.to_string()),
+
         TableFactor::Derived { subquery, .. } => first_object_name_in_set_expr(&subquery.body),
+
         TableFactor::NestedJoin {
             table_with_joins, ..
         } => first_object_name_in_table_with_joins(table_with_joins),
+
         _ => None,
+
     }
+
 }
 
 fn schema_name_to_string(schema_name: &SchemaName) -> Option<String> {
+
     match schema_name {
+
         SchemaName::Simple(name) => Some(name.to_string()),
+
         SchemaName::UnnamedAuthorization(name) => Some(name.to_string()),
+
         SchemaName::NamedAuthorization(name, _) => Some(name.to_string()),
+
     }
+
 }
 
 fn use_target_to_object_name(use_target: &Use) -> Option<String> {
+
     match use_target {
+
         Use::Catalog(name)
         | Use::Schema(name)
         | Use::Database(name)
         | Use::Warehouse(name)
         | Use::Object(name) => Some(name.to_string()),
+
         Use::Default => None,
+
     }
+
 }
 
 fn first_object_name_in_grant_objects(objects: &GrantObjects) -> Option<String> {
+
     match objects {
+
         GrantObjects::AllSequencesInSchema { schemas }
         | GrantObjects::AllTablesInSchema { schemas }
         | GrantObjects::Schemas(schemas)
         | GrantObjects::Sequences(schemas)
         | GrantObjects::Tables(schemas) => schemas.first().map(|name| name.to_string()),
+
     }
+
 }
 
 pub(super) fn classify_text_fallback(
@@ -368,6 +409,7 @@ pub(super) fn classify_text_fallback(
     }
 
     let mut object_idx = 1usize;
+
     if verb == "create" && tokens.get(1).is_some_and(|tok| tok.eq_ignore_ascii_case("or")) {
         let modifier = tokens.get(2)?.to_ascii_lowercase();
         if modifier != "replace" && modifier != "alter" {
@@ -380,31 +422,40 @@ pub(super) fn classify_text_fallback(
     let object_name = fallback_object_name_after_tokens(&tokens, &verb, object_idx);
 
     match (verb.as_str(), object_kind.as_str()) {
+
         ("create", "trigger") => {
             Some((SqlDirective::Create, SqlOperation::CreateTrigger, object_name))
-        }
+        },
+
         ("drop", "trigger") => {
             Some((SqlDirective::AlterSchema, SqlOperation::DropTrigger, object_name))
-        }
+        },
+
         ("create", "procedure") => Some((
             SqlDirective::Create,
             SqlOperation::CreateStoredProcedure,
             object_name,
         )),
+
         ("drop", "procedure") => Some((
             SqlDirective::AlterSchema,
             SqlOperation::DropStoredProcedure,
             object_name,
         )),
+
         ("drop", "database") => Some((
             SqlDirective::AlterSchema,
             SqlOperation::DropDatabase,
             object_name,
         )),
+
         // Intentionally unsupported for now.
         ("create", "function") | ("drop", "function") => None,
+        
         _ => None,
+
     }
+    
 }
 
 fn fallback_object_name_after_tokens(tokens: &[&str], verb: &str, object_idx: usize) -> Option<String> {

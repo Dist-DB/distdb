@@ -147,6 +147,34 @@ fn parenthesized_union_select_maps_to_union_directive() {
 }
 
 #[test]
+fn except_select_maps_to_union_directive() {
+    let requests = parse_mysql8_sql_requests(
+        "select id from users except select id from archived_users",
+        "main",
+    )
+    .expect("except select should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Union);
+    assert_eq!(requests[0].operation, SqlOperation::UnionQuery);
+    assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+}
+
+#[test]
+fn intersect_select_maps_to_union_directive() {
+    let requests = parse_mysql8_sql_requests(
+        "select id from users intersect select id from archived_users",
+        "main",
+    )
+    .expect("intersect select should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Union);
+    assert_eq!(requests[0].operation, SqlOperation::UnionQuery);
+    assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+}
+
+#[test]
 fn create_view_operation_parses_object_name() {
     let requests =
         parse_mysql8_sql_requests("create view active_users as select * from users", "main")

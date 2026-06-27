@@ -1,25 +1,34 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement,
-    TableFactor,
+    BinaryOperator, Expr, GroupByExpr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr,
+    SetOperator, SetQuantifier, Statement, TableFactor, With,
 };
 
 use super::literals::parse_default_value;
 use super::{
     dialect_capabilities_for_target, evaluate_sql_function, is_supported_sql_function,
     parse_mysql_statements,
-    validate_regex_pattern, SelectCaseWhen, SelectComparisonOp, SelectCondition, SelectJoin, SelectJoinKind,
-    SelectExpression, SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation,
+    validate_regex_pattern, SelectCaseWhen, SelectComparisonOp, SelectCondition, SelectCtePlan,
+    SelectJoin, SelectJoinKind, SelectOrderByItem, SelectSetBoundaryOp, SelectSetQueryStep, SelectExpression, SelectPredicate,
+    SelectProjectionItem, SelectReadPlan, SelectRelation,
     SqlParseError, DEFAULT_SQL_COMPATIBILITY_TARGET,
 };
 
 type SelectRelationBinding = SelectRelation;
+type SetQueryParseResult = (
+    Vec<SelectSetQueryStep>,
+    Vec<SelectOrderByItem>,
+    Option<usize>,
+    Option<usize>,
+);
 
 pub fn parse_select_projection_from_statement(
     statement: &str,
 ) -> Result<Option<Vec<String>>, SqlParseError> {
+
     parse_select_read_plan_from_statement(statement).map(|plan| plan.projection)
+    
 }
 
 pub fn parse_select_read_plan_from_statement(
@@ -51,11 +60,65 @@ fn parse_select_read_plan_from_query(
     is_explain: bool,
 ) -> Result<SelectReadPlan, SqlParseError> {
 
+    let ctes = parse_cte_plans_from_query(query)?;
+
+    if !query.limit_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT LIMIT BY is not supported yet".to_string(),
+        ));
+    }
+
+    if query.fetch.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT FETCH is not supported yet".to_string(),
+        ));
+    }
+
+    if !query.locks.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT FOR UPDATE/SHARE is not supported yet".to_string(),
+        ));
+    }
+
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Err(SqlParseError::UnsupportedStatement(
             "only simple SELECT queries are currently supported for projection parsing".to_string(),
         ));
     };
+
+    let mut distinct = select.distinct.is_some();
+
+    if select.top.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT TOP is not supported yet".to_string(),
+        ));
+    }
+
+    if !select.lateral_views.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT LATERAL VIEW is not supported yet".to_string(),
+        ));
+    }
+
+    if select.prewhere.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT PREWHERE is not supported yet".to_string(),
+        ));
+    }
+
+    let has_window_clause = !select.named_window.is_empty();
+
+    if !select.cluster_by.is_empty() || !select.distribute_by.is_empty() || !select.sort_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT CLUSTER/DISTRIBUTE/SORT BY is not supported yet".to_string(),
+        ));
+    }
+
+    if select.qualify.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT QUALIFY is not supported yet".to_string(),
+        ));
+    }
 
     if let Some(plan) = parse_passthrough_derived_select_plan(query, select, is_explain)? {
         return Ok(plan);
@@ -65,6 +128,7 @@ fn parse_select_read_plan_from_query(
         select.from.first(),
         &query.to_string(),
     )?;
+
     let joins = parse_joins_from_table_with_joins(
         select.from.first(),
         &query.to_string(),
@@ -75,12 +139,14 @@ fn parse_select_read_plan_from_query(
         .projection
         .iter()
         .any(|item| matches!(item, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)));
+
     let projection_is_wildcard = select
         .projection
         .iter()
         .any(|item| matches!(item, SelectItem::Wildcard(_)));
 
     let (projection, projection_items) = if has_wildcard_projection {
+        
         for item in &select.projection {
             if let SelectItem::QualifiedWildcard(prefix, _) = item {
                 validate_qualified_prefix(prefix, &relation_bindings)?;
@@ -92,7 +158,9 @@ fn parse_select_read_plan_from_query(
             .iter()
             .map(|item| parse_select_projection_item(item, &relation_bindings))
             .collect::<Result<Vec<_>, _>>()?)
+
     } else {
+
         let mut fields = Vec::new();
         let mut items = Vec::new();
 
@@ -107,10 +175,13 @@ fn parse_select_read_plan_from_query(
         }
 
         (Some(fields), items)
+
     };
 
     let table_id = match relation_bindings.first() {
+
         Some(binding) => binding.table_id.clone(),
+
         None => {
             if projection_is_wildcard {
                 return Err(SqlParseError::MissingIdentifier {
@@ -131,12 +202,36 @@ fn parse_select_read_plan_from_query(
                 });
             }
         }
+
     };
 
     let where_condition = parse_select_condition_from_expr(
         select.selection.as_ref(),
         &relation_bindings,
     )?;
+
+    let group_by = parse_group_by_fields(&select.group_by, &relation_bindings)?;
+    let having_condition = parse_select_condition_from_expr(select.having.as_ref(), &relation_bindings)?;
+
+    if having_condition.is_some() && group_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT HAVING requires GROUP BY in current execution model".to_string(),
+        ));
+    }
+
+    if !group_by.is_empty() {
+        ensure_group_by_projection_is_supported(&projection_items, &group_by)?;
+        distinct = true;
+    }
+
+    let where_condition = combine_where_having_conditions(where_condition, having_condition.clone());
+
+    let order_by = parse_order_by_items(
+        query.order_by.as_ref(),
+        &relation_bindings,
+        &projection_items,
+    )?;
+
     let pushdown_conditions = derive_relation_pushdown_conditions(
         where_condition.as_ref(),
         &relation_bindings,
@@ -148,12 +243,18 @@ fn parse_select_read_plan_from_query(
 
     Ok(SelectReadPlan {
         table_id,
+        ctes,
         relations: relation_bindings,
         joins,
         pushdown_conditions,
         projection,
         projection_items,
         projection_is_wildcard,
+        distinct,
+        order_by,
+        group_by,
+        having_condition,
+        has_window_clause,
         limit,
         offset,
         where_condition,
@@ -162,11 +263,530 @@ fn parse_select_read_plan_from_query(
 
 }
 
+fn parse_cte_plans_from_query(query: &Query) -> Result<Vec<SelectCtePlan>, SqlParseError> {
+
+    let Some(with) = query.with.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    if with.recursive {
+        return Err(SqlParseError::UnsupportedStatement(
+            "recursive CTE is not supported yet".to_string(),
+        ));
+    }
+
+    let mut ctes = Vec::with_capacity(with.cte_tables.len());
+
+    for cte in &with.cte_tables {
+
+        if cte.materialized.is_some() {
+            return Err(SqlParseError::UnsupportedStatement(
+                "CTE MATERIALIZED/NOT MATERIALIZED is not supported yet".to_string(),
+            ));
+        }
+
+        let cte_table_id = common::normalize_identifier!(&cte.alias.name.value);
+        if cte_table_id.is_empty() {
+            return Err(SqlParseError::MissingIdentifier {
+                keyword: "with",
+                statement: query.to_string(),
+            });
+        }
+
+        let cte_plan = parse_select_read_plan_from_query(cte.query.as_ref(), false)?;
+
+        ctes.push(SelectCtePlan {
+            table_id: cte_table_id,
+            read_plan: Box::new(cte_plan),
+        });
+    }
+
+    Ok(ctes)
+
+}
+
+fn parse_group_by_fields(
+    group_by: &GroupByExpr,
+    relation_bindings: &[SelectRelationBinding],
+) -> Result<Vec<String>, SqlParseError> {
+    
+    match group_by {
+
+        GroupByExpr::All(_) => Err(SqlParseError::UnsupportedStatement(
+            "GROUP BY ALL is not supported yet".to_string(),
+        )),
+
+        GroupByExpr::Expressions(expressions, _) => {
+            let mut fields = Vec::with_capacity(expressions.len());
+
+            for expression in expressions {
+                let field = parse_condition_column_name(expression, relation_bindings).map_err(|_| {
+                    SqlParseError::UnsupportedStatement(
+                        "GROUP BY currently supports only direct column references".to_string(),
+                    )
+                })?;
+
+                fields.push(field);
+            }
+
+            Ok(fields)
+        },
+
+    }
+
+}
+
+fn ensure_group_by_projection_is_supported(
+    projection_items: &[SelectProjectionItem],
+    group_by_fields: &[String],
+) -> Result<(), SqlParseError> {
+
+    for projection in projection_items {
+
+        let SelectProjectionItem::Column { field_name, .. } = projection else {
+            return Err(SqlParseError::UnsupportedStatement(
+                "GROUP BY currently supports only direct column projections".to_string(),
+            ));
+        };
+
+        if !group_by_fields.iter().any(|field| field == field_name) {
+            return Err(SqlParseError::UnsupportedStatement(
+                "GROUP BY projection must only reference grouped columns in current execution model"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+
+}
+
+fn combine_where_having_conditions(
+    where_condition: Option<SelectCondition>,
+    having_condition: Option<SelectCondition>,
+) -> Option<SelectCondition> {
+
+    match (where_condition, having_condition) {
+
+        (Some(where_condition), Some(having_condition)) => {
+            Some(SelectCondition::And(vec![where_condition, having_condition]))
+        },
+        
+        (Some(where_condition), None) => Some(where_condition),
+        
+        (None, Some(having_condition)) => Some(having_condition),
+        
+        (None, None) => None,
+
+    }
+
+}
+
+fn parse_order_by_items(
+    order_by: Option<&sqlparser::ast::OrderBy>,
+    relation_bindings: &[SelectRelationBinding],
+    projection_items: &[SelectProjectionItem],
+) -> Result<Vec<SelectOrderByItem>, SqlParseError> {
+
+    let Some(order_by) = order_by else {
+        return Ok(Vec::new());
+    };
+
+    if order_by.interpolate.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "ORDER BY INTERPOLATE is not supported yet".to_string(),
+        ));
+    }
+
+    if relation_bindings.is_empty() {
+        let projection_outputs = projection_items
+            .iter()
+            .filter_map(|item| match item {
+                SelectProjectionItem::Column {
+                    field_name,
+                    output_name,
+                } => {
+                    let mut names = vec![output_name.clone()];
+                    if output_name != field_name {
+                        names.push(field_name.clone());
+                    }
+
+                    Some(names)
+                }
+                SelectProjectionItem::Case { output_name, .. }
+                | SelectProjectionItem::InbuiltFunction { output_name, .. } => {
+                    Some(vec![output_name.clone()])
+                }
+                SelectProjectionItem::Wildcard { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
+        let mut items = Vec::with_capacity(order_by.exprs.len());
+
+        for expression in &order_by.exprs {
+            if expression.nulls_first.is_some() || expression.with_fill.is_some() {
+                return Err(SqlParseError::UnsupportedStatement(
+                    "ORDER BY NULLS FIRST/LAST or WITH FILL is not supported yet".to_string(),
+                ));
+            }
+
+            let field_name = match &expression.expr {
+                Expr::Identifier(identifier) => {
+                    let normalized = common::normalize_identifier!(&identifier.value);
+
+                    let Some(resolved) = projection_outputs
+                        .iter()
+                        .find_map(|output_names| {
+                            if output_names.iter().any(|name| name == &normalized) {
+                                output_names.first().cloned()
+                            } else {
+                                None
+                            }
+                        })
+                    else {
+                        return Err(SqlParseError::UnsupportedStatement(format!(
+                            "ORDER BY without FROM references unknown output field '{}'",
+                            identifier.value
+                        )));
+                    };
+
+                    resolved
+                }
+
+                Expr::Value(sqlparser::ast::Value::Number(position, _)) => {
+                    let position = position.parse::<usize>().map_err(|_| {
+                        SqlParseError::UnsupportedStatement(
+                            "ORDER BY without FROM ordinal must be an unsigned numeric literal"
+                                .to_string(),
+                        )
+                    })?;
+
+                    if position == 0 {
+                        return Err(SqlParseError::UnsupportedStatement(
+                            "ORDER BY without FROM ordinal must start at 1".to_string(),
+                        ));
+                    }
+
+                    let index = position - 1;
+
+                    let Some(output_names) = projection_outputs.get(index) else {
+                        return Err(SqlParseError::UnsupportedStatement(format!(
+                            "ORDER BY without FROM ordinal {} is out of range",
+                            position
+                        )));
+                    };
+
+                    output_names.first().cloned().ok_or_else(|| {
+                        SqlParseError::UnsupportedStatement(
+                            "ORDER BY without FROM could not resolve output field".to_string(),
+                        )
+                    })?
+                }
+
+                _ => {
+                    return Err(SqlParseError::UnsupportedStatement(
+                        "ORDER BY without FROM currently supports only output aliases or ordinal positions"
+                            .to_string(),
+                    ));
+                }
+            };
+
+            items.push(SelectOrderByItem {
+                field_name,
+                descending: expression.asc == Some(false),
+            });
+        }
+
+        return Ok(items);
+    }
+
+    let mut items = Vec::with_capacity(order_by.exprs.len());
+    
+    for expression in &order_by.exprs {
+        if expression.nulls_first.is_some() || expression.with_fill.is_some() {
+            return Err(SqlParseError::UnsupportedStatement(
+                "ORDER BY NULLS FIRST/LAST or WITH FILL is not supported yet".to_string(),
+            ));
+        }
+
+        let field_name = parse_condition_column_name(&expression.expr, relation_bindings).map_err(|_| {
+            SqlParseError::UnsupportedStatement(
+                "ORDER BY currently supports only direct column references".to_string(),
+            )
+        })?;
+
+        items.push(SelectOrderByItem {
+            field_name,
+            descending: expression.asc == Some(false),
+        });
+    }
+
+    Ok(items)
+
+}
+
+pub fn parse_union_select_read_plans_from_statement(
+    statement: &str,
+) -> Result<SetQueryParseResult, SqlParseError> {
+
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let parsed = parse_mysql_statements(trimmed)?;
+    let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
+
+    let Statement::Query(query) = single else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not SELECT set query".to_string(),
+        ));
+    };
+
+    if !query.limit_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "set query LIMIT BY is not supported yet".to_string(),
+        ));
+    }
+
+    if query.fetch.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "set query FETCH is not supported yet".to_string(),
+        ));
+    }
+
+    if !query.locks.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "set query FOR UPDATE/SHARE is not supported yet".to_string(),
+        ));
+    }
+
+    let mut steps = Vec::new();
+    collect_set_query_steps(&query.body, query.with.as_ref(), &mut steps)?;
+
+    let branch_count = steps
+        .iter()
+        .filter(|step| matches!(step, SelectSetQueryStep::Branch(_)))
+        .count();
+
+    if branch_count < 2 {
+        return Err(SqlParseError::UnsupportedStatement(
+            "set query requires at least two SELECT branches".to_string(),
+        ));
+    }
+
+    let order_by = parse_union_order_by_items(query.order_by.as_ref())?;
+    let limit = parse_query_limit(query.limit.as_ref())?;
+    let offset = parse_query_offset(query.offset.as_ref())?;
+
+    Ok((steps, order_by, limit, offset))
+
+}
+
+fn collect_set_query_steps(
+    set_expr: &SetExpr,
+    inherited_with: Option<&With>,
+    steps: &mut Vec<SelectSetQueryStep>,
+) -> Result<(), SqlParseError> {
+
+    match set_expr {
+
+        SetExpr::SetOperation {
+            op,
+            set_quantifier,
+            left,
+            right,
+        } => {
+            collect_set_query_steps(left, inherited_with, steps)?;
+            collect_set_query_steps(right, inherited_with, steps)?;
+
+            let boundary_operation = match op {
+                SetOperator::Union => {
+                    if matches!(set_quantifier, SetQuantifier::All) {
+                        SelectSetBoundaryOp::UnionAll
+                    } else {
+                        SelectSetBoundaryOp::UnionDistinct
+                    }
+                }
+
+                SetOperator::Except => {
+                    if matches!(set_quantifier, SetQuantifier::All) {
+                        return Err(SqlParseError::UnsupportedStatement(
+                            "EXCEPT ALL is not supported yet".to_string(),
+                        ));
+                    }
+
+                    SelectSetBoundaryOp::ExceptDistinct
+                }
+
+                SetOperator::Intersect => {
+                    if matches!(set_quantifier, SetQuantifier::All) {
+                        return Err(SqlParseError::UnsupportedStatement(
+                            "INTERSECT ALL is not supported yet".to_string(),
+                        ));
+                    }
+
+                    SelectSetBoundaryOp::IntersectDistinct
+                }
+            };
+
+            steps.push(SelectSetQueryStep::BoundaryOperation(boundary_operation));
+            Ok(())
+        
+        },
+
+        SetExpr::Select(_) => {
+            let branch_plan = parse_union_branch_set_expr(set_expr, inherited_with)?;
+            steps.push(SelectSetQueryStep::Branch(branch_plan));
+            Ok(())
+        }
+
+        SetExpr::Query(query) => {
+            let query = query.as_ref();
+
+            if matches!(query.body.as_ref(), SetExpr::SetOperation { .. }) {
+                if query.order_by.is_some()
+                    || query.limit.is_some()
+                    || !query.limit_by.is_empty()
+                    || query.offset.is_some()
+                    || query.fetch.is_some()
+                    || !query.locks.is_empty()
+                {
+                    return Err(SqlParseError::UnsupportedStatement(
+                        "set-query branch-level ORDER BY/LIMIT/OFFSET/FETCH/LOCK clauses are not supported yet"
+                            .to_string(),
+                    ));
+                }
+
+                let nested_with = query.with.as_ref().or(inherited_with);
+                collect_set_query_steps(query.body.as_ref(), nested_with, steps)
+            } else {
+                let branch_plan = parse_union_branch_set_expr(set_expr, inherited_with)?;
+                steps.push(SelectSetQueryStep::Branch(branch_plan));
+                Ok(())
+            }
+        }
+
+        _ => Err(SqlParseError::UnsupportedStatement(
+            "set query branch must be a SELECT query".to_string(),
+        )),
+
+    }
+
+}
+fn parse_union_branch_set_expr(
+    set_expr: &SetExpr,
+    inherited_with: Option<&With>,
+) -> Result<SelectReadPlan, SqlParseError> {
+
+    match set_expr {
+
+        SetExpr::Select(select) => {
+            let query = Query {
+                with: inherited_with.cloned(),
+                body: Box::new(SetExpr::Select(select.clone())),
+                order_by: None,
+                limit: None,
+                limit_by: Vec::new(),
+                offset: None,
+                fetch: None,
+                locks: Vec::new(),
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+            };
+
+            parse_select_read_plan_from_query(&query, false)
+        },
+
+        SetExpr::Query(query) => {
+            let mut branch_query = query.as_ref().clone();
+            if branch_query.with.is_none() {
+                branch_query.with = inherited_with.cloned();
+            }
+
+            parse_select_read_plan_from_query(&branch_query, false)
+        }
+
+        _ => Err(SqlParseError::UnsupportedStatement(
+            "set query branch must be a SELECT query".to_string(),
+        )),
+
+    }
+
+}
+
+fn parse_union_order_by_items(
+    order_by: Option<&sqlparser::ast::OrderBy>,
+) -> Result<Vec<SelectOrderByItem>, SqlParseError> {
+    const UNION_ORDER_BY_ORDINAL_PREFIX: &str = "__union_order_by_ordinal__";
+
+    let Some(order_by) = order_by else {
+        return Ok(Vec::new());
+    };
+
+    if order_by.interpolate.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "UNION ORDER BY INTERPOLATE is not supported yet".to_string(),
+        ));
+    }
+
+    let mut items = Vec::with_capacity(order_by.exprs.len());
+    for expression in &order_by.exprs {
+        if expression.nulls_first.is_some() || expression.with_fill.is_some() {
+            return Err(SqlParseError::UnsupportedStatement(
+                "UNION ORDER BY NULLS FIRST/LAST or WITH FILL is not supported yet".to_string(),
+            ));
+        }
+
+        let field_name = match &expression.expr {
+            Expr::Identifier(identifier) => common::normalize_identifier!(&identifier.value),
+
+            Expr::CompoundIdentifier(parts) if !parts.is_empty() => {
+                common::normalize_identifier!(
+                    &parts
+                        .iter()
+                        .map(|part| part.value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                )
+            }
+
+            Expr::Value(sqlparser::ast::Value::Number(position, _)) => {
+                let position = position.parse::<usize>().map_err(|_| {
+                    SqlParseError::UnsupportedStatement(
+                        "UNION ORDER BY ordinal must be an unsigned numeric literal".to_string(),
+                    )
+                })?;
+
+                if position == 0 {
+                    return Err(SqlParseError::UnsupportedStatement(
+                        "UNION ORDER BY ordinal must start at 1".to_string(),
+                    ));
+                }
+
+                format!("{UNION_ORDER_BY_ORDINAL_PREFIX}{position}")
+            }
+
+            _ => {
+                return Err(SqlParseError::UnsupportedStatement(
+                    "UNION ORDER BY currently supports only direct column references or ordinal positions"
+                        .to_string(),
+                ));
+            }
+        };
+
+        items.push(SelectOrderByItem {
+            field_name,
+            descending: expression.asc == Some(false),
+        });
+    }
+
+    Ok(items)
+}
+
 fn parse_passthrough_derived_select_plan(
     query: &Query,
     select: &sqlparser::ast::Select,
     is_explain: bool,
 ) -> Result<Option<SelectReadPlan>, SqlParseError> {
+    
     if select.from.len() != 1 {
         return Ok(None);
     }
@@ -1118,8 +1738,7 @@ fn parse_select_condition_expression(
                                 op,
                                 subquery: Box::new(subquery_plan),
                             }))
-                        } else
-                        if let Some(right_field_name) = parse_unbound_field_reference(right) {
+                        } else if let Some(right_field_name) = parse_unbound_field_reference(right) {
                             Ok(SelectCondition::Predicate(SelectPredicate::FieldComparison {
                                 left_field_name: field_name,
                                 op,

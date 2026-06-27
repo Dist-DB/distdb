@@ -1,4 +1,16 @@
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SystemFieldVisibility {
+    Visible,
+    Hidden,
+}
+
+impl Default for SystemFieldVisibility {
+    fn default() -> Self {
+        Self::Visible
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FieldMetadata {
     #[serde(default)]
@@ -11,4 +23,12 @@ pub struct FieldMetadata {
     pub character_set: Option<String>,
     #[serde(default)]
     pub collation: Option<String>,
+    #[serde(default)]
+    pub system_visibility: SystemFieldVisibility,
+}
+
+impl FieldMetadata {
+    pub fn is_hidden(&self) -> bool {
+        matches!(self.system_visibility, SystemFieldVisibility::Hidden)
+    }
 }

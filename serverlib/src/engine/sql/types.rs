@@ -154,6 +154,27 @@ pub struct SelectJoin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectOrderByItem {
+    pub field_name: String,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectSetBoundaryOp {
+    UnionAll,
+    UnionDistinct,
+    ExceptDistinct,
+    IntersectDistinct,
+}
+
+#[expect(clippy::large_enum_variant, reason="step lists are short and branch plans are consumed in parser/runtime pipelines where enum size is acceptable")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectSetQueryStep {
+    Branch(SelectReadPlan),
+    BoundaryOperation(SelectSetBoundaryOp),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectComparisonOp {
     Eq,
     NotEq,
@@ -264,16 +285,28 @@ pub enum SelectProjectionItem {
 pub struct SelectReadPlan {
     // Empty when SELECT omits FROM and contains only inbuilt projection functions.
     pub table_id: String,
+    pub ctes: Vec<SelectCtePlan>,
     pub relations: Vec<SelectRelation>,
     pub joins: Vec<SelectJoin>,
     pub pushdown_conditions: Vec<Option<SelectCondition>>,
     pub projection: Option<Vec<String>>,
     pub projection_items: Vec<SelectProjectionItem>,
     pub projection_is_wildcard: bool,
+    pub distinct: bool,
+    pub order_by: Vec<SelectOrderByItem>,
+    pub group_by: Vec<String>,
+    pub having_condition: Option<SelectCondition>,
+    pub has_window_clause: bool,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub where_condition: Option<SelectCondition>,
     pub is_explain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectCtePlan {
+    pub table_id: String,
+    pub read_plan: Box<SelectReadPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

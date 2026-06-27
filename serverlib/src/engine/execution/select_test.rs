@@ -196,6 +196,22 @@ fn execute_projection_only_select_plan_returns_inbuilt_row() {
 }
 
 #[test]
+fn execute_projection_only_select_plan_accepts_order_by_ordinal() {
+    let read_plan = parse_select_read_plan_from_statement("select concat('sa', 'm') as value order by 1 desc")
+        .expect("projection-only order by plan should parse");
+
+    let result = execute_projection_only_select_plan(
+        &read_plan,
+        &mut |_function| Ok(Some(b"sam".to_vec())),
+    )
+    .expect("projection-only order by select should succeed");
+
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].field_name, "value");
+    assert_eq!(result.rows, vec![vec![b"sam".to_vec()]]);
+}
+
+#[test]
 fn execute_projection_only_select_plan_supports_row_independent_case_projection() {
     let read_plan = parse_select_read_plan_from_statement(
         "select case 1 when abs(-1) then upper('yes') else lower('NO') end as state",
@@ -1082,6 +1098,7 @@ fn execute_joined_select_plan_expands_qualified_wildcard_projection() {
 
     let read_plan = SelectReadPlan {
         table_id: "users".to_string(),
+        ctes: Vec::new(),
         relations: vec![
             SelectRelation {
                 table_id: "users".to_string(),
@@ -1110,6 +1127,11 @@ fn execute_joined_select_plan_expands_qualified_wildcard_projection() {
             relation: Some("u".to_string()),
         }],
         projection_is_wildcard: false,
+        distinct: false,
+        order_by: Vec::new(),
+        group_by: Vec::new(),
+        having_condition: None,
+        has_window_clause: false,
         limit: None,
         offset: None,
         where_condition: None,
@@ -1144,6 +1166,7 @@ fn execute_joined_select_plan_expands_unqualified_wildcard_projection() {
 
     let read_plan = SelectReadPlan {
         table_id: "users".to_string(),
+        ctes: Vec::new(),
         relations: vec![
             SelectRelation {
                 table_id: "users".to_string(),
@@ -1170,6 +1193,11 @@ fn execute_joined_select_plan_expands_unqualified_wildcard_projection() {
         projection: None,
         projection_items: vec![SelectProjectionItem::Wildcard { relation: None }],
         projection_is_wildcard: true,
+        distinct: false,
+        order_by: Vec::new(),
+        group_by: Vec::new(),
+        having_condition: None,
+        has_window_clause: false,
         limit: None,
         offset: None,
         where_condition: None,

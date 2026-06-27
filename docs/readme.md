@@ -101,4 +101,9 @@ The implementation should:
 - translate parsed statements into one or more execution actions
 - reject unsupported MySQL 8.0.x syntax explicitly rather than silently normalizing it
 
+## Additional Notes
+
+- SELECT architecture assumptions and implementation notes:
+	- [select-architecture.md](select-architecture.md)
+
 
