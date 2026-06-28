@@ -890,7 +890,11 @@ impl DatabaseCatalog {
                 continue;
             }
 
-            let payload = SchemaChangePayload::decode(&record.payload)
+            let payload = SchemaChangePayload::decode(
+                record
+                    .payload_logical()
+                    .ok_or(DatabaseError::SchemaPayloadDeserialize)?,
+            )
                 .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
             
             self.apply_schema_change(payload)?;
@@ -918,7 +922,23 @@ impl DatabaseCatalog {
                 | TransactionKind::MetadataChange
                 | TransactionKind::SecurityChange
                 | TransactionKind::SqlDefinitionChange => {
-                    let decoded = DecodedTransactionPayload::decode(record.kind, &record.payload)
+                    let decoded = DecodedTransactionPayload::decode(
+                        record.kind,
+                        record
+                            .payload_logical()
+                            .ok_or_else(|| match record.kind {
+                                TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
+                                    DatabaseError::SchemaPayloadDeserialize
+                                }
+                                TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
+                                    DatabaseError::MetadataPayloadDeserialize
+                                }
+                                TransactionKind::SqlDefinitionChange => {
+                                    DatabaseError::SqlDefinitionPayloadDeserialize
+                                }
+                                _ => unreachable!("payload decode dispatch should only map structured transaction kinds"),
+                            })?,
+                    )
                         .map_err(|_| match record.kind {
                             TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
                                 DatabaseError::SchemaPayloadDeserialize

@@ -2,6 +2,11 @@ use std::collections::HashMap;
 
 use super::schema_migration::{convert_value_to_field_type, TypeConversionPolicy};
 use super::table_schema::TableSchema;
+use super::transaction::transaction_record::{
+    PayloadTransformError, TransactionPayloadContext, TransactionPayloadTransform,
+    TransactionPayloadWriteTransform,
+};
+use super::transaction::transaction_kind::TransactionKind;
 
 type OrdinalRowPayload = Vec<Option<Vec<u8>>>;
 
@@ -16,6 +21,211 @@ pub struct EncryptedRowPayloadEnvelope {
     pub nonce: Vec<u8>,
     pub auth_tag: Vec<u8>,
     pub ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptedRowPayloadTransformPolicy {
+    PreserveOpaque,
+    RejectEncrypted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncryptedRowPayloadTransform {
+    policy: EncryptedRowPayloadTransformPolicy,
+}
+
+impl EncryptedRowPayloadTransform {
+    pub fn preserve_opaque() -> Self {
+        Self {
+            policy: EncryptedRowPayloadTransformPolicy::PreserveOpaque,
+        }
+    }
+
+    pub fn reject_encrypted() -> Self {
+        Self {
+            policy: EncryptedRowPayloadTransformPolicy::RejectEncrypted,
+        }
+    }
+}
+
+impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
+    fn transform_payload(
+        &self,
+        payload: &[u8],
+        _context: &TransactionPayloadContext,
+    ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        match decode_encrypted_row_payload_envelope(payload) {
+            Ok(Some(_)) => match self.policy {
+                EncryptedRowPayloadTransformPolicy::PreserveOpaque => {
+                    Ok(Some(payload.to_vec()))
+                }
+                EncryptedRowPayloadTransformPolicy::RejectEncrypted => {
+                    Err(PayloadTransformError::DecryptFailed)
+                }
+            },
+            Ok(None) => Ok(None),
+            Err(message) => {
+                if message.starts_with("unsupported encrypted row payload version") {
+                    Err(PayloadTransformError::UnsupportedFormat)
+                } else {
+                    Err(PayloadTransformError::InvalidEncryptedPayload)
+                }
+            }
+        }
+    }
+}
+
+impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
+    fn transform_payload_for_write(
+        &self,
+        _record: &super::transaction::transaction_record::TransactionRecord,
+        payload: &[u8],
+        _context: &TransactionPayloadContext,
+    ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        match decode_encrypted_row_payload_envelope(payload) {
+            Ok(Some(_)) => match self.policy {
+                EncryptedRowPayloadTransformPolicy::PreserveOpaque => {
+                    Ok(Some(payload.to_vec()))
+                }
+                EncryptedRowPayloadTransformPolicy::RejectEncrypted => {
+                    Err(PayloadTransformError::InvalidEncryptedPayload)
+                }
+            },
+            Ok(None) => Ok(None),
+            Err(message) => {
+                if message.starts_with("unsupported encrypted row payload version") {
+                    Err(PayloadTransformError::UnsupportedFormat)
+                } else {
+                    Err(PayloadTransformError::InvalidEncryptedPayload)
+                }
+            }
+        }
+    }
+}
+
+pub trait RowPayloadEncryptionProvider: Send + Sync {
+    fn encrypt_row_payload(
+        &self,
+        context: &TransactionPayloadContext,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, PayloadTransformError>;
+}
+
+pub trait RowPayloadDecryptionProvider: Send + Sync {
+    fn decrypt_row_payload(
+        &self,
+        context: &TransactionPayloadContext,
+        envelope: &EncryptedRowPayloadEnvelope,
+    ) -> Result<Vec<u8>, PayloadTransformError>;
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnconfiguredRowPayloadEncryptionProvider;
+
+impl RowPayloadEncryptionProvider for UnconfiguredRowPayloadEncryptionProvider {
+    fn encrypt_row_payload(
+        &self,
+        _context: &TransactionPayloadContext,
+        _plaintext: &[u8],
+    ) -> Result<Vec<u8>, PayloadTransformError> {
+        Err(PayloadTransformError::EncryptionNotConfigured)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnconfiguredRowPayloadDecryptionProvider;
+
+impl RowPayloadDecryptionProvider for UnconfiguredRowPayloadDecryptionProvider {
+    fn decrypt_row_payload(
+        &self,
+        _context: &TransactionPayloadContext,
+        _envelope: &EncryptedRowPayloadEnvelope,
+    ) -> Result<Vec<u8>, PayloadTransformError> {
+        Err(PayloadTransformError::EncryptionNotConfigured)
+    }
+}
+
+pub struct RowPayloadEncryptionWriteTransform<P> {
+    provider: P,
+}
+
+impl<P> RowPayloadEncryptionWriteTransform<P> {
+    pub fn new(provider: P) -> Self {
+        Self { provider }
+    }
+}
+
+pub struct RowPayloadDecryptionTransform<P> {
+    provider: P,
+}
+
+impl<P> RowPayloadDecryptionTransform<P> {
+    pub fn new(provider: P) -> Self {
+        Self { provider }
+    }
+}
+
+impl<P: RowPayloadEncryptionProvider> TransactionPayloadWriteTransform
+    for RowPayloadEncryptionWriteTransform<P>
+{
+    fn transform_payload_for_write(
+        &self,
+        record: &super::transaction::transaction_record::TransactionRecord,
+        payload: &[u8],
+        context: &TransactionPayloadContext,
+    ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
+            return Ok(None);
+        }
+
+        if looks_like_encrypted_row_payload(payload) {
+            return Ok(None);
+        }
+
+        let Some(_key_ref) = context.at_rest_encryption_key_ref() else {
+            return Ok(None);
+        };
+
+        if context.at_rest_encryption_key_version().unwrap_or(0) == 0 {
+            return Err(PayloadTransformError::EncryptionNotConfigured);
+        }
+
+        self.provider
+            .encrypt_row_payload(context, payload)
+            .map(Some)
+    }
+}
+
+impl<P: RowPayloadDecryptionProvider> TransactionPayloadTransform for RowPayloadDecryptionTransform<P> {
+    fn transform_payload(
+        &self,
+        payload: &[u8],
+        context: &TransactionPayloadContext,
+    ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        let Some(key_ref) = context.at_rest_encryption_key_ref() else {
+            return Ok(None);
+        };
+
+        let key_version = context.at_rest_encryption_key_version().unwrap_or(0);
+        if key_version == 0 || key_ref.is_empty() {
+            return Err(PayloadTransformError::EncryptionNotConfigured);
+        }
+
+        match decode_encrypted_row_payload_envelope(payload) {
+            Ok(Some(envelope)) => self
+                .provider
+                .decrypt_row_payload(context, &envelope)
+                .map(Some),
+            Ok(None) => Ok(None),
+            Err(message) => {
+                if message.starts_with("unsupported encrypted row payload version") {
+                    Err(PayloadTransformError::UnsupportedFormat)
+                } else {
+                    Err(PayloadTransformError::InvalidEncryptedPayload)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -159,12 +369,6 @@ pub fn decode_row_payload(
     payload: &[u8],
 ) -> Result<HashMap<String, Vec<u8>>, String> {
 
-    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
-        return Err(
-            "row payload is encrypted at rest and must be decrypted before decode".to_string(),
-        );
-    }
-    
     let ordered_field_names = field_names_by_ordinal(schema);
 
     if let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
@@ -197,6 +401,12 @@ pub fn decode_row_payload(
         return Ok(row_map);
     }
 
+    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
+        return Err(
+            "row payload is encrypted at rest and must be decrypted before decode".to_string(),
+        );
+    }
+
     Err("row payload decode failed".to_string())
     
 }
@@ -206,12 +416,6 @@ pub fn decode_row_field_value(
     payload: &[u8],
     field_name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-
-    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
-        return Err(
-            "row payload is encrypted at rest and must be decrypted before field decode".to_string(),
-        );
-    }
 
     let ordered_field_names = field_names_by_ordinal(schema);
 
@@ -228,6 +432,12 @@ pub fn decode_row_field_value(
         && let Ok(legacy_ordinal_row) = bincode::deserialize::<Vec<Vec<u8>>>(payload) {
             return Ok(legacy_ordinal_row.get(position).cloned());
         }
+
+    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
+        return Err(
+            "row payload is encrypted at rest and must be decrypted before field decode".to_string(),
+        );
+    }
 
     Err("row payload decode failed".to_string())
 

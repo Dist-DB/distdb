@@ -16,6 +16,7 @@ use serverlib::{
     TransactionRecord, UserId,
 };
 use serverlib::decode_row_payload;
+use serverlib::render_stored_field_value;
 
 #[derive(Debug)]
 struct InProcessServerTransport {
@@ -88,15 +89,15 @@ fn bootstrap_replays_latest_schema_from_wal() {
     app.wal
         .append(
             &catalog.database_id.0,
-            TransactionRecord {
-                id: TransactionId(1),
-                groupid: None,
-                refid: None,
-                timestamp_epoch_ms: 1,
-                actor: UserId::from_username("bootstrap-tester"),
-                kind: TransactionKind::SchemaChange,
-                payload: payload.encode().expect("schema payload should encode"),
-            },
+            TransactionRecord::with_payload(
+                TransactionId(1),
+                None,
+                None,
+                1,
+                UserId::from_username("bootstrap-tester"),
+                TransactionKind::SchemaChange,
+                payload.encode().expect("schema payload should encode"),
+            ),
         )
         .expect("schema transaction should append");
 
@@ -176,17 +177,17 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
     app.wal
         .append(
             &wal_id,
-            TransactionRecord {
-                id: TransactionId(1),
-                groupid: None,
-                refid: None,
-                timestamp_epoch_ms: 1,
-                actor: actor.clone(),
-                kind: TransactionKind::SqlDefinitionChange,
-                payload: trigger_payload
+            TransactionRecord::with_payload(
+                TransactionId(1),
+                None,
+                None,
+                1,
+                actor.clone(),
+                TransactionKind::SqlDefinitionChange,
+                trigger_payload
                     .encode()
                     .expect("trigger sql payload should encode"),
-            },
+            ),
         )
         .expect("trigger sql definition append should succeed");
 
@@ -200,17 +201,17 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
     app.wal
         .append(
             &wal_id,
-            TransactionRecord {
-                id: TransactionId(2),
-                groupid: None,
-                refid: Some(TransactionId(1)),
-                timestamp_epoch_ms: 2,
-                actor: actor.clone(),
-                kind: TransactionKind::MetadataChange,
-                payload: trigger_metadata_payload
+            TransactionRecord::with_payload(
+                TransactionId(2),
+                None,
+                Some(TransactionId(1)),
+                2,
+                actor.clone(),
+                TransactionKind::MetadataChange,
+                trigger_metadata_payload
                     .encode()
                     .expect("trigger metadata payload should encode"),
-            },
+            ),
         )
         .expect("trigger metadata append should succeed");
 
@@ -226,17 +227,17 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
     app.wal
         .append(
             &wal_id,
-            TransactionRecord {
-                id: TransactionId(3),
-                groupid: None,
-                refid: Some(TransactionId(2)),
-                timestamp_epoch_ms: 3,
-                actor: actor.clone(),
-                kind: TransactionKind::SqlDefinitionChange,
-                payload: view_upsert_payload
+            TransactionRecord::with_payload(
+                TransactionId(3),
+                None,
+                Some(TransactionId(2)),
+                3,
+                actor.clone(),
+                TransactionKind::SqlDefinitionChange,
+                view_upsert_payload
                     .encode()
                     .expect("view upsert payload should encode"),
-            },
+            ),
         )
         .expect("view upsert append should succeed");
 
@@ -252,17 +253,17 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
     app.wal
         .append(
             &wal_id,
-            TransactionRecord {
-                id: TransactionId(4),
-                groupid: None,
-                refid: Some(TransactionId(3)),
-                timestamp_epoch_ms: 4,
+            TransactionRecord::with_payload(
+                TransactionId(4),
+                None,
+                Some(TransactionId(3)),
+                4,
                 actor,
-                kind: TransactionKind::SqlDefinitionChange,
-                payload: view_drop_payload
+                TransactionKind::SqlDefinitionChange,
+                view_drop_payload
                     .encode()
                     .expect("view drop payload should encode"),
-            },
+            ),
         )
         .expect("view drop append should succeed");
 
@@ -562,10 +563,16 @@ fn insert_query_appends_insert_record_to_table_wal() {
         .and_then(|catalog| catalog.table_schema("users"))
         .expect("users schema should exist");
 
-    let payload = decode_row_payload(schema, &insert_record.payload)
+    let payload = decode_row_payload(
+        schema,
+        insert_record.payload().expect("insert payload should be present"),
+    )
         .expect("insert payload should deserialize");
 
-    assert_eq!(payload.get("id"), Some(&b"1".to_vec()));
+    assert_eq!(
+        payload.get("id").map(|value| render_stored_field_value(value)),
+        Some(b"1".to_vec())
+    );
     assert_eq!(payload.get("email"), Some(&b"sam@example.com".to_vec()));
 
 }
@@ -826,17 +833,17 @@ fn affinity_wal_import_ignores_stale_schema_revision_and_returns_database_to_rea
 
     let malformed = vec![(
         wal_stream_id,
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: UserId::from_username("affinity-sync-test"),
-            kind: TransactionKind::SchemaChange,
-            payload: stale_schema_payload
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            UserId::from_username("affinity-sync-test"),
+            TransactionKind::SchemaChange,
+            stale_schema_payload
                 .encode()
                 .expect("schema payload should encode"),
-        },
+        ),
     )];
 
     let result = app.import_wal_records("main", malformed);
@@ -901,30 +908,28 @@ fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
     app.wal
         .append(
             "users",
-            TransactionRecord {
-                id: TransactionId(1),
-                groupid: None,
-                refid: None,
-                timestamp_epoch_ms: 1,
-                actor: UserId::from_username("export-test"),
-                kind: TransactionKind::Ignore,
-                payload: Vec::new(),
-            },
+            TransactionRecord::without_payload(
+                TransactionId(1),
+                None,
+                None,
+                1,
+                UserId::from_username("export-test"),
+                TransactionKind::Ignore,
+            ),
         )
         .expect("users WAL append should succeed");
 
     app.wal
         .append(
             "accounts",
-            TransactionRecord {
-                id: TransactionId(2),
-                groupid: None,
-                refid: None,
-                timestamp_epoch_ms: 2,
-                actor: UserId::from_username("export-test"),
-                kind: TransactionKind::Ignore,
-                payload: Vec::new(),
-            },
+            TransactionRecord::without_payload(
+                TransactionId(2),
+                None,
+                None,
+                2,
+                UserId::from_username("export-test"),
+                TransactionKind::Ignore,
+            ),
         )
         .expect("accounts WAL append should succeed");
 

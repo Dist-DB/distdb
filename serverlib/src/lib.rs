@@ -58,7 +58,11 @@ pub use engine::database::core::{
 	EntityMetadata,
 	decode_encrypted_row_payload_envelope, decode_row_field_value, decode_row_payload,
 	encode_encrypted_row_payload_envelope, encode_row_payload,
-	EncryptedRowPayloadEnvelope, ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION,
+	EncryptedRowPayloadEnvelope, EncryptedRowPayloadTransform,
+	RowPayloadDecryptionProvider, RowPayloadDecryptionTransform,
+	RowPayloadEncryptionProvider, RowPayloadEncryptionWriteTransform,
+	EncryptedRowPayloadTransformPolicy, ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION,
+	UnconfiguredRowPayloadDecryptionProvider, UnconfiguredRowPayloadEncryptionProvider,
 	render_stored_field_value, display_stored_field_value, compare_stored_field_values,
 	DatabaseObjectRef, DatabaseObjectType,
 	DatabaseView, IndexId, ObjectStatus,
@@ -86,7 +90,7 @@ pub use engine::execution::{
 	execute_relation_select_plan, explain_joined_select_plan_result, explain_select_plan_result,
 	advise_select_execution, SelectExecutionAdvice,
 	field_has_single_column_index, join_condition_field_names, join_condition_matches_provider,
-	load_live_row_count, load_live_rows, warm_equality_cache_from_live_rows, materialize_relation_rows, plan_relation_access, relation_qualifier,
+	load_live_row_count, load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows, materialize_relation_rows, plan_relation_access, relation_qualifier,
 	row_matches_condition_with, row_matches_select_condition, ConditionValueProvider,
 	ControlFlowBranch, CursorDiagnostics, CursorDirective,
 	IfElseEndBlock, SelectReadPlanCursorSource,
@@ -102,7 +106,10 @@ pub use engine::database::table_schema::{FieldDef, FieldType, SchemaError, Schem
 pub use engine::database::transaction::
 	{EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
 	SqlObjectKind, TableLifecycleAction, TableLifecyclePayload,
-	TransactionId, TransactionKind, TransactionRecord,
+	ChainedTransactionPayloadResolver, ChainedTransactionPayloadWriter,
+	PlainTransactionPayloadResolver,
+	TransactionId, TransactionKind, TransactionPayloadContext, TransactionPayloadResolver,
+	TransactionPayloadTransform, TransactionPayloadWriteTransform, TransactionRecord,
 	encode_wal_frame, decode_wal_frame,
 };
 

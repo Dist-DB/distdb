@@ -15,41 +15,41 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
 
     wal.append(
         orders_wal_id,
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: vec![1, 2, 3],
-        },
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::Insert,
+            vec![1, 2, 3],
+        ),
     )?;
 
     wal.append(
         orders_wal_id,
-        TransactionRecord {
-            id: TransactionId(2),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 2,
-            actor: actor.clone(),
-            kind: TransactionKind::Update,
-            payload: vec![4, 5, 6],
-        },
+        TransactionRecord::with_payload(
+            TransactionId(2),
+            None,
+            None,
+            2,
+            actor.clone(),
+            TransactionKind::Update,
+            vec![4, 5, 6],
+        ),
     )?;
 
     wal.append(
         inventory_wal_id,
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 3,
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            3,
             actor,
-            kind: TransactionKind::Insert,
-            payload: vec![7],
-        },
+            TransactionKind::Insert,
+            vec![7],
+        ),
     )?;
 
     let replay = wal.since(orders_wal_id, Some(TransactionId(1)));
@@ -91,29 +91,27 @@ mod tests {
 
         wal.append(
             "events",
-            TransactionRecord {
-                id: TransactionId(4),
-                groupid: None,
-                refid: None,
-                timestamp_epoch_ms: 1,
-                actor: actor.clone(),
-                kind: TransactionKind::Insert,
-                payload: vec![],
-            },
+            TransactionRecord::without_payload(
+                TransactionId(4),
+                None,
+                None,
+                1,
+                actor.clone(),
+                TransactionKind::Insert,
+            ),
         )
         .expect("first append should succeed");
 
         let out_of_order = wal.append(
             "events",
-            TransactionRecord {
-                id: TransactionId(3),
-                groupid: None,
-                refid: None,
-                timestamp_epoch_ms: 2,
+            TransactionRecord::without_payload(
+                TransactionId(3),
+                None,
+                None,
+                2,
                 actor,
-                kind: TransactionKind::Update,
-                payload: vec![],
-            },
+                TransactionKind::Update,
+            ),
         );
 
         assert!(out_of_order.is_ok());

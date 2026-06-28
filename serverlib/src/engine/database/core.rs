@@ -18,7 +18,11 @@ pub use super::relationship::DatabaseRelationship;
 pub use super::row_payload::{
 	decode_encrypted_row_payload_envelope, decode_row_field_value, decode_row_payload,
 	encode_encrypted_row_payload_envelope, encode_row_payload,
-	EncryptedRowPayloadEnvelope, ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION,
+	EncryptedRowPayloadEnvelope, EncryptedRowPayloadTransform,
+	RowPayloadDecryptionProvider, RowPayloadDecryptionTransform,
+	RowPayloadEncryptionProvider, RowPayloadEncryptionWriteTransform,
+	EncryptedRowPayloadTransformPolicy, ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION,
+	UnconfiguredRowPayloadDecryptionProvider, UnconfiguredRowPayloadEncryptionProvider,
 };
 pub use super::schema_change_tx::SchemaChangeTx;
 pub use super::schema_change_state::{ActiveSchemaChange, SchemaChangePhase};

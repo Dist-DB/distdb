@@ -629,17 +629,17 @@ fn schema_replay_uses_latest_transaction_payload() {
 
     wal.append(
         "users",
-        crate::TransactionRecord {
-            id: crate::TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: crate::TransactionKind::SchemaChange,
-            payload: first_payload
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            crate::TransactionKind::SchemaChange,
+            first_payload
                 .encode()
                 .expect("schema payload should encode"),
-        },
+        ),
     )
     .expect("first schema append should succeed");
 
@@ -662,17 +662,17 @@ fn schema_replay_uses_latest_transaction_payload() {
 
     wal.append(
         "users",
-        crate::TransactionRecord {
-            id: crate::TransactionId(2),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 2,
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(2),
+            None,
+            None,
+            2,
             actor,
-            kind: crate::TransactionKind::SchemaChange,
-            payload: second_payload
+            crate::TransactionKind::SchemaChange,
+            second_payload
                 .encode()
                 .expect("schema payload should encode"),
-        },
+        ),
     )
     .expect("second schema append should succeed");
 
@@ -719,17 +719,17 @@ fn metadata_and_sql_definition_replay_builds_view_state() {
 
     wal.append(
         "main_db",
-        crate::TransactionRecord {
-            id: crate::TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 100,
-            actor: actor.clone(),
-            kind: crate::TransactionKind::MetadataChange,
-            payload: metadata_payload
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(1),
+            None,
+            None,
+            100,
+            actor.clone(),
+            crate::TransactionKind::MetadataChange,
+            metadata_payload
                 .encode()
                 .expect("metadata payload should encode"),
-        },
+        ),
     )
     .expect("metadata append should succeed");
 
@@ -744,15 +744,15 @@ fn metadata_and_sql_definition_replay_builds_view_state() {
 
     wal.append(
         "main_db",
-        crate::TransactionRecord {
-            id: crate::TransactionId(2),
-            groupid: None,
-            refid: Some(crate::TransactionId(1)),
-            timestamp_epoch_ms: 101,
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(2),
+            None,
+            Some(crate::TransactionId(1)),
+            101,
             actor,
-            kind: crate::TransactionKind::SqlDefinitionChange,
-            payload: sql_payload.encode().expect("sql payload should encode"),
-        },
+            crate::TransactionKind::SqlDefinitionChange,
+            sql_payload.encode().expect("sql payload should encode"),
+        ),
     )
     .expect("sql append should succeed");
 
@@ -785,17 +785,17 @@ fn table_lifecycle_replay_honors_create_then_drop() {
 
     wal.append(
         "main_db",
-        crate::TransactionRecord {
-            id: crate::TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: crate::TransactionKind::TableLifecycle,
-            payload: create_payload
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            crate::TransactionKind::TableLifecycle,
+            create_payload
                 .encode()
                 .expect("table create payload should encode"),
-        },
+        ),
     )
     .expect("create lifecycle append should succeed");
 
@@ -808,17 +808,17 @@ fn table_lifecycle_replay_honors_create_then_drop() {
 
     wal.append(
         "main_db",
-        crate::TransactionRecord {
-            id: crate::TransactionId(2),
-            groupid: None,
-            refid: Some(crate::TransactionId(1)),
-            timestamp_epoch_ms: 2,
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(2),
+            None,
+            Some(crate::TransactionId(1)),
+            2,
             actor,
-            kind: crate::TransactionKind::TableLifecycle,
-            payload: drop_payload
+            crate::TransactionKind::TableLifecycle,
+            drop_payload
                 .encode()
                 .expect("table drop payload should encode"),
-        },
+        ),
     )
     .expect("drop lifecycle append should succeed");
 

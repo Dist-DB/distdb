@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,21 +17,98 @@ use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE}
 use common::helpers::{read_bytes, stable_id, write_bytes};
 
 use crate::core::identity::UserId;
-use crate::engine::database::row_payload::looks_like_encrypted_row_payload;
+use crate::engine::database::row_payload::{
+    looks_like_encrypted_row_payload, EncryptedRowPayloadTransform,
+    RowPayloadDecryptionTransform, RowPayloadEncryptionWriteTransform,
+    UnconfiguredRowPayloadDecryptionProvider,
+    UnconfiguredRowPayloadEncryptionProvider,
+};
+use crate::engine::database::transaction::transaction_record::{
+    ChainedTransactionPayloadResolver, ChainedTransactionPayloadWriter,
+    PayloadTransformError, TransactionPayloadContext, TransactionPayloadResolver,
+    TransactionPayloadTransform, TransactionPayloadWriteTransform,
+};
 use crate::engine::database::transaction::{TransactionId, TransactionLog, TransactionRecord};
 use crate::TransactionKind;
 
-const WAL_PAYLOAD_COMPRESSION_MAGIC: [u8; 4] = *b"wpc1";
-const WAL_PAYLOAD_COMPRESSION_VERSION: u8 = 1;
-const WAL_PAYLOAD_COMPRESSION_CODEC_ZLIB: u8 = 1;
+static NEXT_WAL_CACHE_SCOPE_ID: AtomicUsize = AtomicUsize::new(1);
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct LegacyCompressedWalPayloadEnvelope {
-    magic: [u8; 4],
-    version: u8,
-    codec: u8,
-    original_len: u32,
-    payload: Vec<u8>,
+fn next_wal_cache_scope_id() -> usize {
+    NEXT_WAL_CACHE_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WalCompressionPayloadTransform;
+
+impl TransactionPayloadTransform for WalCompressionPayloadTransform {
+    fn transform_payload(
+        &self,
+        payload: &[u8],
+        _context: &TransactionPayloadContext,
+    ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        match maybe_decode_compressed_payload_bytes(payload) {
+            Ok(Some(decoded)) => Ok(Some(decoded)),
+            Ok(None) => Ok(None),
+            Err("failed to decompress WAL payload") => {
+                Err(PayloadTransformError::InvalidCompressedPayload)
+            }
+            Err("decompressed WAL payload length mismatch") => {
+                Err(PayloadTransformError::IntegrityCheckFailed)
+            }
+            Err(message) => Err(PayloadTransformError::InternalTransformError(
+                message.to_string(),
+            )),
+        }
+    }
+}
+
+fn wal_storage_payload_resolver() -> ChainedTransactionPayloadResolver {
+    ChainedTransactionPayloadResolver::new()
+        .with_transform(WalCompressionPayloadTransform)
+        .with_transform(RowPayloadDecryptionTransform::new(
+            UnconfiguredRowPayloadDecryptionProvider,
+        ))
+        .with_transform(EncryptedRowPayloadTransform::preserve_opaque())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WalCompressionPayloadWriteTransform;
+
+impl TransactionPayloadWriteTransform for WalCompressionPayloadWriteTransform {
+    fn transform_payload_for_write(
+        &self,
+        record: &TransactionRecord,
+        payload: &[u8],
+        _context: &TransactionPayloadContext,
+    ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        if should_skip_payload_compression(record, payload) {
+            return Ok(None);
+        }
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(payload)
+            .map_err(|_| PayloadTransformError::InternalTransformError(
+                "failed to compress WAL payload".to_string(),
+            ))?;
+
+        let compressed = encoder
+            .finish()
+            .map_err(|_| PayloadTransformError::InternalTransformError(
+                "failed to finish WAL payload compression".to_string(),
+            ))?;
+
+        Ok(Some(compressed))
+    }
+}
+
+fn wal_storage_payload_writer() -> ChainedTransactionPayloadWriter {
+    ChainedTransactionPayloadWriter::new()
+        .with_transform(RowPayloadEncryptionWriteTransform::new(
+            UnconfiguredRowPayloadEncryptionProvider,
+        ))
+        .with_transform(EncryptedRowPayloadTransform::preserve_opaque())
+        .with_transform(WalCompressionPayloadWriteTransform)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +144,7 @@ enum WalCommand {
 pub struct ConcurrentWalManager {
     workers: Mutex<HashMap<String, Sender<WalCommand>>>,
     storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
+    cache_scope_id: usize,
     write_high_water_by_stream: Mutex<HashMap<String, u64>>,
     stream_modes: Mutex<HashMap<String, WalStreamMode>>,
     data_dir: Option<Arc<PathBuf>>,
@@ -77,6 +156,7 @@ impl Default for ConcurrentWalManager {
         Self {
             workers: Mutex::new(HashMap::new()),
             storage: Arc::new(Mutex::new(HashMap::new())),
+            cache_scope_id: next_wal_cache_scope_id(),
             write_high_water_by_stream: Mutex::new(HashMap::new()),
             stream_modes: Mutex::new(HashMap::new()),
             data_dir: None,
@@ -88,7 +168,7 @@ impl Default for ConcurrentWalManager {
 impl ConcurrentWalManager {
 
     pub fn cache_scope_id(&self) -> usize {
-        Arc::as_ptr(&self.storage) as usize
+        self.cache_scope_id
     }
 
     fn hydrate_stream_if_needed(&self, wal_id: &str, stream_key: &str) {
@@ -196,6 +276,7 @@ impl ConcurrentWalManager {
         Self {
             workers: Mutex::new(HashMap::new()),
             storage: Arc::new(Mutex::new(HashMap::new())),
+            cache_scope_id: next_wal_cache_scope_id(),
             write_high_water_by_stream: Mutex::new(HashMap::new()),
             stream_modes: Mutex::new(HashMap::new()),
             data_dir: Some(Arc::new(data_dir)),
@@ -455,6 +536,24 @@ impl ConcurrentWalManager {
         Ok(())
     }
 
+    pub fn since_with_context(
+        &self,
+        wal_id: &str,
+        from: Option<TransactionId>,
+        context: &TransactionPayloadContext,
+    ) -> Result<Vec<TransactionRecord>, &'static str> {
+        let mut records = self.since(wal_id, from);
+        let resolver = wal_storage_payload_resolver();
+
+        for record in &mut records {
+            record
+                .resolve_payload_with_context(&resolver, context)
+                .map_err(map_payload_transform_error)?;
+        }
+
+        Ok(records)
+    }
+
 }
 
 impl TransactionLog for ConcurrentWalManager {
@@ -541,68 +640,109 @@ fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
 pub(crate) fn encode_record_for_storage(
     record: &TransactionRecord,
 ) -> Result<Vec<u8>, &'static str> {
+    let context = TransactionPayloadContext::default();
+    encode_record_for_storage_with_context(record, &context)
+}
+
+pub(crate) fn encode_record_for_storage_with_context(
+    record: &TransactionRecord,
+    context: &TransactionPayloadContext,
+) -> Result<Vec<u8>, &'static str> {
+
     let mut record_for_storage = record.clone();
-    record_for_storage.payload = maybe_compress_record_payload_bytes(
-        &record_for_storage.payload,
-        should_skip_payload_compression(record),
-    )?;
+    let writer = wal_storage_payload_writer();
+    let stored_payload = writer
+        .write_payload_with_context(record, record_for_storage.payload_raw(), context)
+        .map_err(map_payload_write_transform_error)?;
+    record_for_storage.set_payload(stored_payload);
 
     bincode::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record")
+
 }
 
 pub(crate) fn decode_record_from_storage(
     encoded: &[u8],
 ) -> Result<TransactionRecord, &'static str> {
-    let record = bincode::deserialize::<TransactionRecord>(encoded)
-        .map_err(|_| "failed to deserialize WAL record")?;
 
-    decode_record_payload_if_needed(record)
+    let context = TransactionPayloadContext::default();
+    decode_record_from_storage_with_context(encoded, &context)
+
 }
 
-fn should_skip_payload_compression(record: &TransactionRecord) -> bool {
+pub(crate) fn decode_record_from_storage_with_context(
+    encoded: &[u8],
+    context: &TransactionPayloadContext,
+) -> Result<TransactionRecord, &'static str> {
+
+    let mut record = bincode::deserialize::<TransactionRecord>(encoded)
+        .map_err(|_| "failed to deserialize WAL record")?;
+
+    let resolver = wal_storage_payload_resolver();
+    
+    record
+        .resolve_payload_with_context(&resolver, context)
+        .map_err(map_payload_transform_error)?;
+
+    Ok(record)
+
+}
+
+fn should_skip_payload_compression(record: &TransactionRecord, payload: &[u8]) -> bool {
+
     matches!(
         record.kind,
         TransactionKind::Insert | TransactionKind::Update | TransactionKind::Delete
-    ) && looks_like_encrypted_row_payload(&record.payload)
+    ) && looks_like_encrypted_row_payload(payload)
+
 }
 
-fn maybe_compress_record_payload_bytes(
-    payload: &[u8],
-    skip_compression: bool,
-) -> Result<Vec<u8>, &'static str> {
+fn map_payload_transform_error(error: PayloadTransformError) -> &'static str {
 
-    if skip_compression
-        || looks_like_compressed_payload_envelope(payload)
-    {
-        return Ok(payload.to_vec());
-    }
+    match error {
+        
+        PayloadTransformError::InvalidCompressedPayload => "failed to decompress WAL payload",
+        
+        PayloadTransformError::IntegrityCheckFailed => "decompressed WAL payload length mismatch",
+        
+        PayloadTransformError::UnsupportedFormat => "unsupported WAL payload format",
 
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(payload)
-        .map_err(|_| "failed to compress WAL payload")?;
-
-    let compressed = encoder
-        .finish()
-        .map_err(|_| "failed to finish WAL payload compression")?;
-
-    Ok(compressed)
+        PayloadTransformError::InvalidEncryptedPayload
+        | PayloadTransformError::DecryptFailed
+        | PayloadTransformError::EncryptionNotConfigured
+        | PayloadTransformError::InternalTransformError(_) => "failed to deserialize WAL record"
     
-}
-
-fn decode_record_payload_if_needed(
-    mut record: TransactionRecord,
-) -> Result<TransactionRecord, &'static str> {
-    if let Some(decoded_payload) = maybe_decode_compressed_payload_bytes(&record.payload)? {
-        record.payload = decoded_payload;
     }
 
-    Ok(record)
+}
+
+fn map_payload_write_transform_error(error: PayloadTransformError) -> &'static str {
+    
+    match error {
+
+        PayloadTransformError::InternalTransformError(message)
+            if message == "failed to compress WAL payload" => "failed to compress WAL payload",
+
+        PayloadTransformError::InternalTransformError(message)
+            if message == "failed to finish WAL payload compression" => "failed to finish WAL payload compression",
+            
+        PayloadTransformError::UnsupportedFormat => "unsupported WAL payload format",
+
+        PayloadTransformError::IntegrityCheckFailed => "decompressed WAL payload length mismatch",
+
+        PayloadTransformError::InvalidCompressedPayload => "failed to compress WAL payload",
+        
+        PayloadTransformError::InvalidEncryptedPayload
+        | PayloadTransformError::DecryptFailed
+        | PayloadTransformError::EncryptionNotConfigured
+        | PayloadTransformError::InternalTransformError(_) => "failed to serialize WAL record",
+
+    }
 }
 
 fn maybe_decode_compressed_payload_bytes(
     payload: &[u8],
 ) -> Result<Option<Vec<u8>>, &'static str> {
+
     if looks_like_zlib_payload(payload) {
         if let Some(decoded) = try_zlib_decode_payload(payload) {
             return Ok(Some(decoded));
@@ -611,73 +751,33 @@ fn maybe_decode_compressed_payload_bytes(
         return Err("failed to decompress WAL payload");
     }
 
-    if looks_like_compressed_payload_envelope(payload) {
-        let compressed = &payload[WAL_PAYLOAD_COMPRESSION_MAGIC.len()..];
-        if let Some(decoded) = try_zlib_decode_payload(compressed) {
-            return Ok(Some(decoded));
-        }
-
-        return Err("failed to decompress WAL payload");
-    }
-
-    if let Some(decoded_legacy) = try_decode_legacy_enveloped_payload(payload)? {
-        return Ok(Some(decoded_legacy));
-    }
-
     Ok(None)
+
 }
 
 fn try_zlib_decode_payload(compressed: &[u8]) -> Option<Vec<u8>> {
+
     let mut decoder = ZlibDecoder::new(compressed);
     let mut decompressed = Vec::new();
+    
     decoder.read_to_end(&mut decompressed).ok()?;
     Some(decompressed)
+
 }
 
 fn looks_like_zlib_payload(payload: &[u8]) -> bool {
+
     if payload.len() < 2 || payload[0] != 0x78 {
         return false;
     }
 
     let header = u16::from(payload[0]) << 8 | u16::from(payload[1]);
     header % 31 == 0
-}
 
-fn try_decode_legacy_enveloped_payload(
-    payload: &[u8],
-) -> Result<Option<Vec<u8>>, &'static str> {
-    let Ok(envelope) = bincode::deserialize::<LegacyCompressedWalPayloadEnvelope>(payload) else {
-        return Ok(None);
-    };
-
-    if envelope.magic != WAL_PAYLOAD_COMPRESSION_MAGIC {
-        return Ok(None);
-    }
-
-    if envelope.version != WAL_PAYLOAD_COMPRESSION_VERSION {
-        return Err("unsupported WAL payload envelope version");
-    }
-
-    if envelope.codec != WAL_PAYLOAD_COMPRESSION_CODEC_ZLIB {
-        return Err("unsupported WAL payload envelope codec");
-    }
-
-    let Some(decompressed) = try_zlib_decode_payload(envelope.payload.as_slice()) else {
-        return Err("failed to decompress WAL payload");
-    };
-
-    if decompressed.len() != envelope.original_len as usize {
-        return Err("decompressed WAL payload length mismatch");
-    }
-
-    Ok(Some(decompressed))
-}
-
-fn looks_like_compressed_payload_envelope(payload: &[u8]) -> bool {
-    payload.starts_with(&WAL_PAYLOAD_COMPRESSION_MAGIC)
 }
 
 fn write_timestamp_if_data_write(record: &TransactionRecord) -> Option<u64> {
+
     if matches!(
         record.kind,
         TransactionKind::Insert | TransactionKind::Update | TransactionKind::Delete
@@ -686,18 +786,22 @@ fn write_timestamp_if_data_write(record: &TransactionRecord) -> Option<u64> {
     } else {
         None
     }
+
 }
 
 fn latest_write_timestamp(entries: &[TransactionRecord]) -> Option<u64> {
+
     entries
         .iter()
         .filter_map(write_timestamp_if_data_write)
         .max()
+
 }
 
 fn obfuscated_stream_key(wal_id: &str) -> Result<String, &'static str> {
 
     let normalized = wal_id.trim().to_ascii_lowercase();
+
     if normalized.is_empty() {
         return Err("wal_id must not be empty");
     }
@@ -771,6 +875,7 @@ fn ensure_wal_file(path: &Path) -> Result<(), &'static str> {
 }
 
 fn open_wal_append_file(path: &Path) -> Result<fs::File, &'static str> {
+
     fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -783,6 +888,7 @@ fn append_wal_bytes(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), &'static str> {
+
     if append_file.is_none() {
         *append_file = Some(open_wal_append_file(path)?);
     }
@@ -802,6 +908,7 @@ fn append_wal_bytes(
     }
 
     Ok(())
+    
 }
 
 fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'static str> {
@@ -854,7 +961,7 @@ fn compact_entries_to_latest_schema_and_metadata(
         if !retained_ids.contains(&record.id.0) {
             record.kind = TransactionKind::Ignore;
             record.refid = None;
-            record.payload.clear();
+            record.clear_payload();
         }
     }
 
@@ -880,15 +987,14 @@ fn compact_entries_to_latest_schema_and_metadata(
         .map(|record| record.id)
         .filter(|refid| retained_ids.contains(&refid.0));
 
-    retained.push(TransactionRecord {
-        id: TransactionId(last_id.0 + 1),
-        groupid: None,
-        refid: truncate_refid,
+    retained.push(TransactionRecord::without_payload(
+        TransactionId(last_id.0 + 1),
+        None,
+        truncate_refid,
         timestamp_epoch_ms,
         actor,
-        kind: TransactionKind::Truncate,
-        payload: Vec::new(),
-    });
+        TransactionKind::Truncate,
+    ));
 
     *entries = retained;
 

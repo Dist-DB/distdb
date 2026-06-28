@@ -1,5 +1,5 @@
 use super::table_schema::TableSchema;
-use super::transaction_payload::TransactionPayloadCodec;
+use super::transaction::transaction_payload::TransactionPayloadCodec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TableLifecycleAction {

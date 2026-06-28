@@ -135,33 +135,32 @@ fn disk_executor_rewrites_flushes_and_cuts_over() {
 
     let actor = UserId::from_username("migrator");
     let seed_records = vec![
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: vec![1],
-        },
-        TransactionRecord {
-            id: TransactionId(2),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 2,
-            actor: actor.clone(),
-            kind: TransactionKind::Delete,
-            payload: vec![2],
-        },
-        TransactionRecord {
-            id: TransactionId(3),
-            groupid: None,
-            refid: Some(TransactionId(2)),
-            timestamp_epoch_ms: 3,
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::Insert,
+            vec![1],
+        ),
+        TransactionRecord::without_payload(
+            TransactionId(2),
+            None,
+            Some(TransactionId(1)),
+            2,
+            actor.clone(),
+            TransactionKind::Delete,
+        ),
+        TransactionRecord::with_payload(
+            TransactionId(3),
+            None,
+            Some(TransactionId(2)),
+            3,
             actor,
-            kind: TransactionKind::Update,
-            payload: vec![3],
-        },
+            TransactionKind::Update,
+            vec![3],
+        ),
     ];
 
     let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
@@ -219,15 +218,15 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
     row.insert("first_name".to_string(), b"sam".to_vec());
     row.insert("legacy".to_string(), b"drop".to_vec());
 
-    let seed_records = vec![TransactionRecord {
-        id: TransactionId(1),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: 1,
+    let seed_records = vec![TransactionRecord::with_payload(
+        TransactionId(1),
+        None,
+        None,
+        1,
         actor,
-        kind: TransactionKind::Insert,
-        payload: bincode::serialize(&row).expect("row should encode"),
-    }];
+        TransactionKind::Insert,
+        bincode::serialize(&row).expect("row should encode"),
+    )];
 
     let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
     write_bytes(&wal_path, &wal_file).expect("seed wal should write");
@@ -252,7 +251,12 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
     assert_eq!(rewritten.len(), 1);
 
     let out_row: HashMap<String, Vec<u8>> =
-        bincode::deserialize(&rewritten[0].payload).expect("payload should decode");
+        bincode::deserialize(
+            rewritten[0]
+                .payload()
+                .expect("payload should be present"),
+        )
+        .expect("payload should decode");
 
     assert_eq!(out_row.get("given_name"), Some(&b"sam".to_vec()));
     assert_eq!(out_row.get("status"), Some(&b"active".to_vec()));
@@ -296,15 +300,15 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
     let mut row = HashMap::new();
     row.insert("age".to_string(), b"not-a-number".to_vec());
 
-    let seed_records = vec![TransactionRecord {
-        id: TransactionId(1),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: 1,
+    let seed_records = vec![TransactionRecord::with_payload(
+        TransactionId(1),
+        None,
+        None,
+        1,
         actor,
-        kind: TransactionKind::Insert,
-        payload: bincode::serialize(&row).expect("row should encode"),
-    }];
+        TransactionKind::Insert,
+        bincode::serialize(&row).expect("row should encode"),
+    )];
 
     let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
     write_bytes(&wal_path, &wal_file).expect("seed wal should write");
@@ -366,15 +370,15 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
     let mut row = HashMap::new();
     row.insert("age".to_string(), b"not-a-number".to_vec());
 
-    let seed_records = vec![TransactionRecord {
-        id: TransactionId(1),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: 1,
+    let seed_records = vec![TransactionRecord::with_payload(
+        TransactionId(1),
+        None,
+        None,
+        1,
         actor,
-        kind: TransactionKind::Insert,
-        payload: bincode::serialize(&row).expect("row should encode"),
-    }];
+        TransactionKind::Insert,
+        bincode::serialize(&row).expect("row should encode"),
+    )];
 
     let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
     write_bytes(&wal_path, &wal_file).expect("seed wal should write");
@@ -401,7 +405,12 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
 
     let rewritten = load_records_from_path(&wal_path).expect("rewritten wal should load");
     let out_row: HashMap<String, Vec<u8>> =
-        bincode::deserialize(&rewritten[0].payload).expect("payload should decode");
+        bincode::deserialize(
+            rewritten[0]
+                .payload()
+                .expect("payload should be present"),
+        )
+        .expect("payload should decode");
     assert_eq!(
         out_row
             .get("age")

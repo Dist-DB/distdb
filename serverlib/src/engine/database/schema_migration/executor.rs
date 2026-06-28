@@ -7,7 +7,10 @@ use super::super::catalog::DatabaseCatalog;
 use super::super::core::{DatabaseError, DatabaseResult};
 use super::super::transaction::{TransactionKind, TransactionRecord};
 use super::conversion::apply_schema_rules_to_payload;
-use super::io::{frame_records_as_wal_file, load_records_from_path, map_io_error_to_catalog_error, stream_key_for_table};
+use super::io::{
+    frame_records_as_wal_file_with_context, load_records_from_path_with_context,
+    map_io_error_to_catalog_error, payload_context_for_table, stream_key_for_table,
+};
 use super::types::{SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet};
 
 #[derive(Debug, Clone, Copy)]
@@ -97,7 +100,8 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
             .data_dir
             .join(format!("{}.migrate.bak", common::helpers::format::FileKind::Data.file_name(&stream_key)));
 
-        let source_records = load_records_from_path(&final_path)?;
+        let payload_context = payload_context_for_table(_catalog, table_id)?;
+        let source_records = load_records_from_path_with_context(&final_path, &payload_context)?;
         let source_total = source_records.len() as u64;
 
         let rules = self
@@ -119,7 +123,10 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
         {
             if matches!(record.kind, TransactionKind::Insert | TransactionKind::Update)
                 && let Some(ref rule_set) = rules {
-                    record.payload = apply_schema_rules_to_payload(&record.payload, rule_set, schema)?;
+                    let payload = record
+                        .payload_logical()
+                        .ok_or(DatabaseError::CatalogWrite)?;
+                    record.set_payload(Some(apply_schema_rules_to_payload(payload, rule_set, schema)?));
                 }
             rewritten.push(record);
         }
@@ -179,8 +186,9 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
 
         let image = staged.get(&key).ok_or(DatabaseError::TableNotLocked)?;
 
-        let file_bytes =
-            frame_records_as_wal_file(&image.records).map_err(|_| DatabaseError::CatalogWrite)?;
+        let payload_context = payload_context_for_table(_catalog, table_id)?;
+        let file_bytes = frame_records_as_wal_file_with_context(&image.records, &payload_context)
+            .map_err(|_| DatabaseError::CatalogWrite)?;
         
         common::helpers::write_bytes(&image.temp_path, &file_bytes).map_err(|_| DatabaseError::CatalogWrite)
 

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use connector::{ConnectorResult, DataQuery};
 use serverlib::DatabaseCatalog;
@@ -8,6 +9,17 @@ use serverlib::{
 };
 
 use super::*;
+
+fn test_node_data_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "distdb-query-tests-{}-{}",
+        std::process::id(),
+        common::epoch_nanos!()
+    ));
+
+    std::fs::create_dir_all(&dir).expect("test data dir should be created");
+    dir
+}
 
 fn query_result_rows(response: connector::ConnectorResponse) -> Vec<Vec<String>> {
     let ConnectorResult::Query(result) = response.result else {
@@ -116,7 +128,7 @@ fn begin_transaction_is_explicitly_recognized() {
         &data_query,
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -145,7 +157,7 @@ fn commit_is_explicitly_recognized() {
         &data_query,
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -194,6 +206,7 @@ fn append_row_payload_record_rejects_missing_refid() {
         serverlib::encode_row_payload(table.schema(), &row).expect("row payload should encode");
 
     let err = super::core::append_row_payload_record(
+        &catalog,
         &wal,
         "users",
         &table,
@@ -249,6 +262,7 @@ fn union_query_executes_and_deduplicates_rows() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -272,7 +286,7 @@ fn union_query_executes_and_deduplicates_rows() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -302,7 +316,7 @@ fn create_database_with_aes_option_enables_at_rest_encryption() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -339,7 +353,7 @@ fn create_database_with_explicit_aes_key_ref_sets_metadata() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -401,6 +415,7 @@ fn except_query_executes_with_distinct_semantics() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -424,7 +439,7 @@ fn except_query_executes_with_distinct_semantics() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -476,6 +491,7 @@ fn intersect_query_executes_with_distinct_semantics() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -499,7 +515,7 @@ fn intersect_query_executes_with_distinct_semantics() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -559,6 +575,7 @@ fn mixed_set_operators_execute_with_precedence_aware_result() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -582,7 +599,7 @@ fn mixed_set_operators_execute_with_precedence_aware_result() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -638,6 +655,7 @@ fn union_query_supports_mixed_union_and_union_all_semantics() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -661,7 +679,7 @@ fn union_query_supports_mixed_union_and_union_all_semantics() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -717,6 +735,7 @@ fn union_query_applies_query_level_order_by_limit_and_offset() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -740,7 +759,7 @@ fn union_query_applies_query_level_order_by_limit_and_offset() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -791,6 +810,7 @@ fn union_query_applies_order_by_ordinal_position() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -815,7 +835,7 @@ fn union_query_applies_order_by_ordinal_position() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -866,6 +886,7 @@ fn union_query_with_top_level_cte_executes_branches() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             "users",
             table,
@@ -890,7 +911,7 @@ fn union_query_with_top_level_cte_executes_branches() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -957,6 +978,7 @@ fn union_query_coerces_numeric_and_text_column_types_to_text() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -980,7 +1002,7 @@ fn union_query_coerces_numeric_and_text_column_types_to_text() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1040,6 +1062,7 @@ fn union_query_keeps_integer_family_for_signed_and_unsigned_columns() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -1064,7 +1087,7 @@ fn union_query_keeps_integer_family_for_signed_and_unsigned_columns() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1123,6 +1146,7 @@ fn union_query_widens_fixed_length_strings() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -1146,7 +1170,7 @@ fn union_query_widens_fixed_length_strings() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1205,6 +1229,7 @@ fn union_query_reconciles_enum_types_to_wider_string_family() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -1229,7 +1254,7 @@ fn union_query_reconciles_enum_types_to_wider_string_family() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1297,6 +1322,7 @@ fn union_query_deduplicates_case_insensitively_under_ci_collation() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -1321,7 +1347,7 @@ fn union_query_deduplicates_case_insensitively_under_ci_collation() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1340,7 +1366,7 @@ fn union_query_deduplicates_case_insensitively_under_ci_collation() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1411,6 +1437,7 @@ fn union_query_rejects_conflicting_collations() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -1434,7 +1461,7 @@ fn union_query_rejects_conflicting_collations() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1496,6 +1523,7 @@ fn union_query_rejects_incompatible_blob_and_spatial_types() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             table_id,
             table,
@@ -1520,7 +1548,7 @@ fn union_query_rejects_incompatible_blob_and_spatial_types() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1566,6 +1594,7 @@ fn select_distinct_group_having_order_executes_in_first_pass_model() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             "users",
             table,
@@ -1590,7 +1619,7 @@ fn select_distinct_group_having_order_executes_in_first_pass_model() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1645,6 +1674,7 @@ fn select_orders_by_non_projected_field_without_returning_hidden_sort_key() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             "users",
             table,
@@ -1668,7 +1698,7 @@ fn select_orders_by_non_projected_field_without_returning_hidden_sort_key() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1730,6 +1760,7 @@ fn select_with_cte_executes_and_orders_rows() {
             .expect("row payload should encode");
 
         super::core::append_row_payload_record(
+            &catalog,
             &wal,
             "users",
             table,
@@ -1754,7 +1785,7 @@ fn select_with_cte_executes_and_orders_rows() {
         },
         &mut catalogs,
         &wal,
-        std::path::Path::new("."),
+        &test_node_data_dir(),
         &mut runtime_indexes,
         "session-test",
         1,
@@ -1800,6 +1831,7 @@ fn append_row_payload_record_rejects_stale_refid() {
         serverlib::encode_row_payload(table.schema(), &row).expect("row payload should encode");
 
     super::core::append_row_payload_record(
+        &catalog,
         &wal,
         "users",
         &table,
@@ -1813,6 +1845,7 @@ fn append_row_payload_record_rejects_stale_refid() {
     .expect("insert should succeed");
 
     super::core::append_row_payload_record(
+        &catalog,
         &wal,
         "users",
         &table,
@@ -1826,6 +1859,7 @@ fn append_row_payload_record_rejects_stale_refid() {
     .expect("first delete should succeed");
 
     let err = super::core::append_row_payload_record(
+        &catalog,
         &wal,
         "users",
         &table,

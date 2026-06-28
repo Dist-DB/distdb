@@ -63,15 +63,15 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&users_schema, &user_row).expect("user row should encode"),
-        },
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&users_schema, &user_row).expect("user row should encode"),
+        ),
     )
     .expect("user row should append");
 
@@ -82,16 +82,16 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
 
     wal.append(
         "profiles",
-        TransactionRecord {
-            id: TransactionId(10),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 10,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&profiles_schema, &profile_row)
+        TransactionRecord::with_payload(
+            TransactionId(10),
+            None,
+            None,
+            10,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &profile_row)
                 .expect("profile row should encode"),
-        },
+        ),
     )
     .expect("profile row should append");
 
@@ -102,16 +102,16 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
 
     wal.append(
         "profiles",
-        TransactionRecord {
-            id: TransactionId(11),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 11,
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
             actor,
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&profiles_schema, &second_profile_row)
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
                 .expect("profile row should encode"),
-        },
+        ),
     )
     .expect("profile row should append");
 
@@ -122,16 +122,16 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
 
     wal.append(
         "profiles",
-        TransactionRecord {
-            id: TransactionId(12),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 12,
-            actor: UserId("test-user".to_string()),
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&profiles_schema, &unmatched_profile_row)
+        TransactionRecord::with_payload(
+            TransactionId(12),
+            None,
+            None,
+            12,
+            UserId("test-user".to_string()),
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &unmatched_profile_row)
                 .expect("profile row should encode"),
-        },
+        ),
     )
     .expect("profile row should append");
 }

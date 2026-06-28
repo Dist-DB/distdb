@@ -48,15 +48,15 @@ impl ServerApp {
             let payload = serverlib::encode_row_payload(schema, &row_map)
                 .map_err(|err| format!("failed to encode snapshot row for table '{}': {}", table_id, err))?;
 
-            records.push(TransactionRecord {
-                id: TransactionId((idx as u64) + 1),
-                groupid: None,
-                refid: None,
+            records.push(TransactionRecord::with_payload(
+                TransactionId((idx as u64) + 1),
+                None,
+                None,
                 timestamp_epoch_ms,
-                actor: UserId::from_username("snapshot"),
-                kind: TransactionKind::Insert,
+                UserId::from_username("snapshot"),
+                TransactionKind::Insert,
                 payload,
-            });
+            ));
         }
 
         sandbox_wal

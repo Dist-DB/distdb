@@ -1158,6 +1158,7 @@ where
     let mut pending_bytes = Vec::<u8>::new();
 
     let mut emit_progress_if_due = |force: bool, stats: &ImportStats, tx: &ImportTransactionState| {
+        
         let elapsed_ms = import_started_at.elapsed().as_millis();
         let due = elapsed_ms > 0
             && elapsed_ms % IMPORT_PROGRESS_EVERY_MS == 0;
@@ -1166,29 +1167,30 @@ where
             return;
         }
 
-        println!(
-            "import progress: executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} elapsed_s={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={}",
-            stats.executed_statements,
-            stats.skipped_use_statements,
-            stats.skipped_dump_directives,
-            stats.skipped_non_fatal_errors,
-            tx.committed_batches,
-            stats.source_statements,
-            stats.emitted_statement_chunks,
-            import_started_at.elapsed().as_secs(),
-            stats.local_overhead_ms,
-            stats.parser_scan_ms,
-            stats.max_pending_bytes,
-            stats.max_source_statement_bytes,
-            tx.execute_statement_ms,
-            tx.begin_statement_ms,
-            tx.commit_statement_ms,
-            tx.query_statement_ms,
-            tx.statement_calls,
-            tx.max_statement_ms,
-        );
+        // println!(
+        //     "import progress: executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} elapsed_s={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={}",
+        //     stats.executed_statements,
+        //     stats.skipped_use_statements,
+        //     stats.skipped_dump_directives,
+        //     stats.skipped_non_fatal_errors,
+        //     tx.committed_batches,
+        //     stats.source_statements,
+        //     stats.emitted_statement_chunks,
+        //     import_started_at.elapsed().as_secs(),
+        //     stats.local_overhead_ms,
+        //     stats.parser_scan_ms,
+        //     stats.max_pending_bytes,
+        //     stats.max_source_statement_bytes,
+        //     tx.execute_statement_ms,
+        //     tx.begin_statement_ms,
+        //     tx.commit_statement_ms,
+        //     tx.query_statement_ms,
+        //     tx.statement_calls,
+        //     tx.max_statement_ms,
+        // );
 
         last_progress_output_at = std::time::Instant::now();
+
     };
 
     loop {
@@ -1216,11 +1218,16 @@ where
             }
 
             let chunk_len = match std::str::from_utf8(&pending_bytes) {
+
                 Ok(valid) => {
+
                     let parser_started_at = std::time::Instant::now();
                     let mut callback_wall_ms = 0u128;
+                    
                     parser.push_chunk(valid, &mut |statement| {
+
                         let callback_started_at = std::time::Instant::now();
+                        
                         if statement_starts_with_use(statement) {
                             callback_wall_ms += callback_started_at.elapsed().as_millis();
                             import_stats.skipped_use_statements += 1;
@@ -1228,9 +1235,11 @@ where
                         }
 
                         let normalized_statement = normalize_import_statement(statement);
+                        
                         import_stats.max_source_statement_bytes = import_stats
                             .max_source_statement_bytes
                             .max(normalized_statement.len());
+                        
                         if statement_is_import_dump_directive(&normalized_statement) {
                             callback_wall_ms += callback_started_at.elapsed().as_millis();
                             import_stats.skipped_dump_directives += 1;
@@ -1247,6 +1256,7 @@ where
                         }
 
                         import_stats.source_statements += 1;
+                        
                         let statement_started_at = std::time::Instant::now();
                         let execute_ms_before = transaction_state.execute_statement_ms;
                         let mut emitted_chunks = 0usize;
@@ -1256,6 +1266,7 @@ where
                             import_insert_chunk_target_bytes(),
                             import_insert_chunk_max_tuples(),
                             |import_statement| {
+
                                 emitted_chunks += 1;
                                 if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
                                     if should_skip_import_error(&import_statement, &err) {
@@ -1274,6 +1285,7 @@ where
 
                                 emit_progress_if_due(false, &import_stats, transaction_state);
                                 Ok(())
+
                             },
                         )?;
 
@@ -1284,14 +1296,18 @@ where
                         callback_wall_ms += callback_started_at.elapsed().as_millis();
 
                         Ok(())
+
                     })?;
+
                     import_stats.parser_scan_ms += parser_started_at
                         .elapsed()
                         .as_millis()
                         .saturating_sub(callback_wall_ms);
 
                     pending_bytes.clear();
+                    
                     break;
+
                 }
 
                 Err(err) if err.error_len().is_none() => err.valid_up_to(),

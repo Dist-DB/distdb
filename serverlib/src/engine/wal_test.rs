@@ -2,15 +2,15 @@
 use super::*;
 
 fn make_record(id: u64, kind: TransactionKind, actor: &UserId) -> TransactionRecord {
-    TransactionRecord {
-        id: TransactionId(id),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: id,
-        actor: actor.clone(),
+    TransactionRecord::with_payload(
+        TransactionId(id),
+        None,
+        None,
+        id,
+        actor.clone(),
         kind,
-        payload: vec![id as u8],
-    }
+        vec![id as u8],
+    )
 }
 
 #[test]
@@ -67,15 +67,15 @@ fn compact_clears_refids_to_removed_records() {
     .expect("append should succeed");
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(3),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 3,
-            actor: actor.clone(),
-            kind: TransactionKind::SchemaChange,
-            payload: vec![3],
-        },
+        TransactionRecord::with_payload(
+            TransactionId(3),
+            None,
+            Some(TransactionId(1)),
+            3,
+            actor.clone(),
+            TransactionKind::SchemaChange,
+            vec![3],
+        ),
     )
     .expect("append should succeed");
 
@@ -213,15 +213,15 @@ fn ephemeral_stream_in_file_mode_keeps_data_in_memory_only() {
 #[test]
 fn encoded_storage_record_roundtrip_handles_large_payloads() {
     let actor = UserId::from_username("tester");
-    let record = TransactionRecord {
-        id: TransactionId(1),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: 1,
+    let record = TransactionRecord::with_payload(
+        TransactionId(1),
+        None,
+        None,
+        1,
         actor,
-        kind: TransactionKind::Insert,
-        payload: vec![b'x'; 8192],
-    };
+        TransactionKind::Insert,
+        vec![b'x'; 8192],
+    );
 
     let stored = super::encode_record_for_storage(&record).expect("record should encode");
     let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
@@ -234,15 +234,15 @@ fn encoded_storage_record_roundtrip_handles_large_payloads() {
 #[test]
 fn decode_storage_record_accepts_legacy_uncompressed_bytes() {
     let actor = UserId::from_username("tester");
-    let record = TransactionRecord {
-        id: TransactionId(7),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: 7,
+    let record = TransactionRecord::with_payload(
+        TransactionId(7),
+        None,
+        None,
+        7,
         actor,
-        kind: TransactionKind::Update,
-        payload: vec![1, 2, 3],
-    };
+        TransactionKind::Update,
+        vec![1, 2, 3],
+    );
 
     let legacy_raw = bincode::serialize(&record).expect("legacy record should serialize");
     let decoded =
@@ -254,15 +254,15 @@ fn decode_storage_record_accepts_legacy_uncompressed_bytes() {
 #[test]
 fn encoded_storage_record_compresses_small_non_encrypted_payloads() {
     let actor = UserId::from_username("tester");
-    let record = TransactionRecord {
-        id: TransactionId(8),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: 8,
+    let record = TransactionRecord::with_payload(
+        TransactionId(8),
+        None,
+        None,
+        8,
         actor,
-        kind: TransactionKind::Insert,
-        payload: b"ip_lookup:UNITED STATES".to_vec(),
-    };
+        TransactionKind::Insert,
+        b"ip_lookup:UNITED STATES".to_vec(),
+    );
 
     let stored = super::encode_record_for_storage(&record).expect("record should encode");
     let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
@@ -270,15 +270,33 @@ fn encoded_storage_record_compresses_small_non_encrypted_payloads() {
         bincode::deserialize(&stored).expect("stored record should deserialize");
 
     assert_ne!(stored, bincode::serialize(&record).expect("record should serialize"));
-    assert!(!stored_record
-        .payload
-        .starts_with(&super::WAL_PAYLOAD_COMPRESSION_MAGIC));
     assert!(
         stored_record
-            .payload
+            .payload()
+            .expect("payload should be present")
             .starts_with(&[0x78])
     );
     assert_eq!(decoded, record);
+}
+
+#[test]
+fn decoded_storage_record_preserves_raw_payload_and_exposes_resolved_payload() {
+    let actor = UserId::from_username("tester");
+    let record = TransactionRecord::with_payload(
+        TransactionId(9),
+        None,
+        None,
+        9,
+        actor,
+        TransactionKind::Insert,
+        b"ip_lookup:CANADA".to_vec(),
+    );
+
+    let stored = super::encode_record_for_storage(&record).expect("record should encode");
+    let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
+
+    assert_eq!(decoded.payload(), Some(&b"ip_lookup:CANADA"[..]));
+    assert_ne!(decoded.payload_raw(), Some(&b"ip_lookup:CANADA"[..]));
 }
 
 #[test]
@@ -293,15 +311,15 @@ fn encoded_storage_record_skips_compression_for_encrypted_mutation_payloads() {
         )
         .expect("encrypted payload should encode");
 
-    let record = TransactionRecord {
-        id: TransactionId(9),
-        groupid: None,
-        refid: None,
-        timestamp_epoch_ms: 9,
+    let record = TransactionRecord::with_payload(
+        TransactionId(9),
+        None,
+        None,
+        9,
         actor,
-        kind: TransactionKind::Insert,
-        payload: encrypted_payload,
-    };
+        TransactionKind::Insert,
+        encrypted_payload,
+    );
 
     let raw = bincode::serialize(&record).expect("record should serialize");
     let stored = super::encode_record_for_storage(&record).expect("record should encode");
@@ -309,5 +327,82 @@ fn encoded_storage_record_skips_compression_for_encrypted_mutation_payloads() {
 
     assert_eq!(stored, raw);
     assert_eq!(decoded, record);
+}
+
+#[test]
+fn storage_write_and_read_chains_roundtrip_plaintext_payload() {
+    let actor = UserId::from_username("tester");
+    let record = TransactionRecord::with_payload(
+        TransactionId(10),
+        None,
+        None,
+        10,
+        actor,
+        TransactionKind::Insert,
+        b"roundtrip-chain-payload".to_vec(),
+    );
+
+    let stored = super::encode_record_for_storage(&record).expect("record should encode");
+    let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
+    let stored_record: TransactionRecord =
+        bincode::deserialize(&stored).expect("stored record should deserialize");
+
+    assert_eq!(decoded.payload_logical(), record.payload_raw());
+    assert_ne!(stored_record.payload_raw(), record.payload_raw());
+}
+
+#[test]
+fn storage_encode_with_encryption_context_reports_unconfigured_provider() {
+    let actor = UserId::from_username("tester");
+    let context = crate::TransactionPayloadContext::new()
+        .with_database_id("main")
+        .with_table_id("users")
+        .with_at_rest_encryption("enc:node-main:db-main", 1);
+    let record = TransactionRecord::with_payload(
+        TransactionId(11),
+        None,
+        None,
+        11,
+        actor,
+        TransactionKind::Insert,
+        b"needs-encryption".to_vec(),
+    );
+
+    let err = super::encode_record_for_storage_with_context(&record, &context)
+        .expect_err("unconfigured encryption provider should fail with context");
+
+    assert_eq!(err, "failed to serialize WAL record");
+}
+
+#[test]
+fn storage_decode_with_encryption_context_reports_unconfigured_provider() {
+    let actor = UserId::from_username("tester");
+    let encrypted_payload = crate::engine::database::row_payload::
+        encode_encrypted_row_payload_envelope(
+            1,
+            vec![7; 12],
+            vec![9; 16],
+            b"ciphertext".to_vec(),
+        )
+        .expect("encrypted payload should encode");
+    let context = crate::TransactionPayloadContext::new()
+        .with_database_id("main")
+        .with_table_id("users")
+        .with_at_rest_encryption("enc:node-main:db-main", 1);
+    let record = TransactionRecord::with_payload(
+        TransactionId(12),
+        None,
+        None,
+        12,
+        actor,
+        TransactionKind::Insert,
+        encrypted_payload,
+    );
+    let stored = bincode::serialize(&record).expect("record should serialize");
+
+    let err = super::decode_record_from_storage_with_context(&stored, &context)
+        .expect_err("unconfigured decryption provider should fail with context");
+
+    assert_eq!(err, "failed to deserialize WAL record");
 }
 

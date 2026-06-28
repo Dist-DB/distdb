@@ -57,15 +57,15 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
     user_row.insert("email".to_string(), b"sam@example.com".to_vec());
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&users_schema, &user_row).expect("user row should encode"),
-        },
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&users_schema, &user_row).expect("user row should encode"),
+        ),
     )
     .expect("user row should append");
 
@@ -74,16 +74,16 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
     other_user_row.insert("email".to_string(), b"alex@example.com".to_vec());
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(2),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 2,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&users_schema, &other_user_row)
+        TransactionRecord::with_payload(
+            TransactionId(2),
+            None,
+            None,
+            2,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&users_schema, &other_user_row)
                 .expect("user row should encode"),
-        },
+        ),
     )
     .expect("user row should append");
 
@@ -93,16 +93,16 @@ fn seed_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
     profile_row.insert("name".to_string(), b"Sam".to_vec());
     wal.append(
         "profiles",
-        TransactionRecord {
-            id: TransactionId(10),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 10,
+        TransactionRecord::with_payload(
+            TransactionId(10),
+            None,
+            None,
+            10,
             actor,
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&profiles_schema, &profile_row)
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &profile_row)
                 .expect("profile row should encode"),
-        },
+        ),
     )
     .expect("profile row should append");
 }
@@ -304,16 +304,16 @@ fn execute_relation_select_plan_count_star_uses_pk_cardinality_when_full_table()
         wal_seed
             .append(
                 "users",
-                TransactionRecord {
-                    id: TransactionId(i),
-                    groupid: None,
-                    refid: None,
-                    timestamp_epoch_ms: i,
-                    actor: actor.clone(),
-                    kind: TransactionKind::Insert,
-                    payload: encode_row_payload(&users_schema, &row_map)
+                TransactionRecord::with_payload(
+                    TransactionId(i),
+                    None,
+                    None,
+                    i,
+                    actor.clone(),
+                    TransactionKind::Insert,
+                    encode_row_payload(&users_schema, &row_map)
                         .expect("row should encode"),
-                },
+                ),
             )
             .expect("row should append");
     }

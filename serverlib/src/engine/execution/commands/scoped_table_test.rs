@@ -69,15 +69,15 @@ fn release_scoped_ephemeral_table_drops_catalog_and_wal_stream() {
 
     wal.append(
         "tmp_users",
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: UserId::from_username("tester"),
-            kind: TransactionKind::Insert,
-            payload: vec![1],
-        },
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            UserId::from_username("tester"),
+            TransactionKind::Insert,
+            vec![1],
+        ),
     )
     .expect("append should succeed");
 

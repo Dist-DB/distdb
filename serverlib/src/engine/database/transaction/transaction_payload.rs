@@ -1,18 +1,21 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use super::entity_metadata_payload::EntityMetadataPayload;
-use super::schema_change_payload::SchemaChangePayload;
-use super::sql_definition_payload::SqlDefinitionPayload;
-use super::table_lifecycle_payload::TableLifecyclePayload;
+use crate::engine::database::entity_metadata_payload::EntityMetadataPayload;
+use crate::engine::database::schema_change_payload::SchemaChangePayload;
+use crate::engine::database::sql_definition_payload::SqlDefinitionPayload;
+use crate::engine::database::table_lifecycle_payload::TableLifecyclePayload;
 use super::transaction_kind::TransactionKind;
 
+
 pub trait TransactionPayloadCodec: Sized {
+
     const KIND: TransactionKind;
 
     fn encode_payload(&self) -> Result<Vec<u8>, &'static str>;
 
     fn decode_payload(payload: &[u8]) -> Result<Self, &'static str>;
+    
 }
 
 trait SerdeTransactionPayload: Sized + Serialize + DeserializeOwned {

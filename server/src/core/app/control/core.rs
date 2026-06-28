@@ -458,7 +458,7 @@ impl ServerApp {
                 write_group_id,
             );
             let total_ms = commit_start.elapsed().as_millis() as u64;
-            log::info!(
+            log::debug!(
                 "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=failed",
                 request_id,
                 session_id,
@@ -473,7 +473,7 @@ impl ServerApp {
         }
 
         let total_ms = commit_start.elapsed().as_millis() as u64;
-        log::info!(
+        log::debug!(
             "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=ok",
             request_id,
             session_id,

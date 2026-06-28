@@ -60,28 +60,27 @@ fn seed_users_table(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) -
 
         wal.append(
             "users",
-            TransactionRecord {
-                id: TransactionId(tx_id),
-                groupid: None,
-                refid: None,
-                timestamp_epoch_ms: tx_id,
-                actor: actor.clone(),
-                kind: TransactionKind::Insert,
-                payload: encode_row_payload(&schema, &row).expect("row should encode"),
-            },
+            TransactionRecord::with_payload(
+                TransactionId(tx_id),
+                None,
+                None,
+                tx_id,
+                actor.clone(),
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &row).expect("row should encode"),
+            ),
         )
         .expect("row should append");
     }
 
-    let delete_record = TransactionRecord {
-        id: TransactionId(3),
-        groupid: None,
-        refid: Some(TransactionId(2)),
-        timestamp_epoch_ms: 3,
+    let delete_record = TransactionRecord::without_payload(
+        TransactionId(3),
+        None,
+        Some(TransactionId(2)),
+        3,
         actor,
-        kind: TransactionKind::Delete,
-        payload: Vec::new(),
-    };
+        TransactionKind::Delete,
+    );
 
     wal.append("users", delete_record)
         .expect("delete should append");
@@ -270,29 +269,28 @@ fn load_live_rows_tracks_latest_version_chain_and_delete() {
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(4),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 4,
-            actor: actor.clone(),
-            kind: TransactionKind::Delete,
-            payload: Vec::new(),
-        },
+        TransactionRecord::without_payload(
+            TransactionId(4),
+            None,
+            Some(TransactionId(1)),
+            4,
+            actor.clone(),
+            TransactionKind::Delete,
+        ),
     )
     .expect("delete old version should append");
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(5),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 5,
-            actor: actor.clone(),
-            kind: TransactionKind::Update,
-            payload: encode_row_payload(&schema, &updated_row).expect("updated row should encode"),
-        },
+        TransactionRecord::with_payload(
+            TransactionId(5),
+            None,
+            Some(TransactionId(1)),
+            5,
+            actor.clone(),
+            TransactionKind::Update,
+            encode_row_payload(&schema, &updated_row).expect("updated row should encode"),
+        ),
     )
     .expect("updated version should append");
 
@@ -303,15 +301,14 @@ fn load_live_rows_tracks_latest_version_chain_and_delete() {
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(6),
-            groupid: None,
-            refid: Some(TransactionId(5)),
-            timestamp_epoch_ms: 6,
+        TransactionRecord::without_payload(
+            TransactionId(6),
+            None,
+            Some(TransactionId(5)),
+            6,
             actor,
-            kind: TransactionKind::Delete,
-            payload: Vec::new(),
-        },
+            TransactionKind::Delete,
+        ),
     )
     .expect("delete latest version should append");
 
@@ -335,29 +332,28 @@ fn load_live_row_count_tracks_latest_version_chain_and_delete() {
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(4),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 4,
-            actor: actor.clone(),
-            kind: TransactionKind::Delete,
-            payload: Vec::new(),
-        },
+        TransactionRecord::without_payload(
+            TransactionId(4),
+            None,
+            Some(TransactionId(1)),
+            4,
+            actor.clone(),
+            TransactionKind::Delete,
+        ),
     )
     .expect("delete old version should append");
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(5),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 5,
-            actor: actor.clone(),
-            kind: TransactionKind::Update,
-            payload: encode_row_payload(&schema, &updated_row).expect("updated row should encode"),
-        },
+        TransactionRecord::with_payload(
+            TransactionId(5),
+            None,
+            Some(TransactionId(1)),
+            5,
+            actor.clone(),
+            TransactionKind::Update,
+            encode_row_payload(&schema, &updated_row).expect("updated row should encode"),
+        ),
     )
     .expect("updated version should append");
 
@@ -365,15 +361,14 @@ fn load_live_row_count_tracks_latest_version_chain_and_delete() {
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(6),
-            groupid: None,
-            refid: Some(TransactionId(5)),
-            timestamp_epoch_ms: 6,
+        TransactionRecord::without_payload(
+            TransactionId(6),
+            None,
+            Some(TransactionId(5)),
+            6,
             actor,
-            kind: TransactionKind::Delete,
-            payload: Vec::new(),
-        },
+            TransactionKind::Delete,
+        ),
     )
     .expect("delete latest version should append");
 
@@ -407,33 +402,32 @@ fn runtime_index_bootstrap_uses_latest_live_row_keys() {
     ]);
 
     for record in [
-        TransactionRecord {
-            id: TransactionId(1),
-            groupid: None,
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&schema, &original_row).expect("original row should encode"),
-        },
-        TransactionRecord {
-            id: TransactionId(2),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 2,
-            actor: actor.clone(),
-            kind: TransactionKind::Delete,
-            payload: Vec::new(),
-        },
-        TransactionRecord {
-            id: TransactionId(3),
-            groupid: None,
-            refid: Some(TransactionId(1)),
-            timestamp_epoch_ms: 3,
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&schema, &original_row).expect("original row should encode"),
+        ),
+        TransactionRecord::without_payload(
+            TransactionId(2),
+            None,
+            Some(TransactionId(1)),
+            2,
+            actor.clone(),
+            TransactionKind::Delete,
+        ),
+        TransactionRecord::with_payload(
+            TransactionId(3),
+            None,
+            Some(TransactionId(1)),
+            3,
             actor,
-            kind: TransactionKind::Update,
-            payload: encode_row_payload(&schema, &updated_row).expect("updated row should encode"),
-        },
+            TransactionKind::Update,
+            encode_row_payload(&schema, &updated_row).expect("updated row should encode"),
+        ),
     ] {
         wal.append("users", record)
             .expect("wal append should succeed");
@@ -491,30 +485,29 @@ fn load_live_rows_ignores_uncommitted_write_group() {
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: group_id,
-            groupid: Some(group_id),
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::WriteBegin,
-            payload: b"req-insert".to_vec(),
-        },
+        TransactionRecord::without_payload(
+            group_id,
+            Some(group_id),
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::WriteBegin,
+        ),
     )
     .expect("write begin should append");
 
     wal.append(
         "users",
-        TransactionRecord {
-            id: TransactionId(2),
-            groupid: Some(group_id),
-            refid: None,
-            timestamp_epoch_ms: 2,
+        TransactionRecord::with_payload(
+            TransactionId(2),
+            Some(group_id),
+            None,
+            2,
             actor,
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&schema, &HashMap::from([("id".to_string(), b"1".to_vec())]))
+            TransactionKind::Insert,
+            encode_row_payload(&schema, &HashMap::from([("id".to_string(), b"1".to_vec())]))
                 .expect("row should encode"),
-        },
+        ),
     )
     .expect("grouped insert should append");
 
@@ -531,34 +524,32 @@ fn load_live_rows_applies_committed_write_group() {
     let group_id = TransactionId(1);
 
     for record in [
-        TransactionRecord {
-            id: group_id,
-            groupid: Some(group_id),
-            refid: None,
-            timestamp_epoch_ms: 1,
-            actor: actor.clone(),
-            kind: TransactionKind::WriteBegin,
-            payload: b"req-insert".to_vec(),
-        },
-        TransactionRecord {
-            id: TransactionId(2),
-            groupid: Some(group_id),
-            refid: None,
-            timestamp_epoch_ms: 2,
-            actor: actor.clone(),
-            kind: TransactionKind::Insert,
-            payload: encode_row_payload(&schema, &HashMap::from([("id".to_string(), b"1".to_vec())]))
+        TransactionRecord::without_payload(
+            group_id,
+            Some(group_id),
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::WriteBegin,
+        ),
+        TransactionRecord::with_payload(
+            TransactionId(2),
+            Some(group_id),
+            None,
+            2,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&schema, &HashMap::from([("id".to_string(), b"1".to_vec())]))
                 .expect("row should encode"),
-        },
-        TransactionRecord {
-            id: TransactionId(3),
-            groupid: Some(group_id),
-            refid: Some(TransactionId(2)),
-            timestamp_epoch_ms: 3,
+        ),
+        TransactionRecord::without_payload(
+            TransactionId(3),
+            Some(group_id),
+            Some(TransactionId(2)),
+            3,
             actor,
-            kind: TransactionKind::WriteCommit,
-            payload: Vec::new(),
-        },
+            TransactionKind::WriteCommit,
+        ),
     ] {
         wal.append("users", record).expect("record should append");
     }
@@ -608,7 +599,7 @@ fn materialize_relation_rows_supports_full_scan_and_equality_probe() {
 }
 
 #[test]
-fn materialize_relation_rows_short_circuits_when_runtime_lookup_misses() {
+fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_misses() {
     let wal = ConcurrentWalManager::in_memory();
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
@@ -637,6 +628,7 @@ fn materialize_relation_rows_short_circuits_when_runtime_lookup_misses() {
         },
     );
 
-    assert!(rows.is_empty());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
     
 }

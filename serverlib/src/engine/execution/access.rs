@@ -5,6 +5,7 @@ use crate::engine::database::transaction::TransactionLog;
 use crate::engine::database::runtime_index::derived_indexes_for_table;
 use crate::engine::database::schema_migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::{
+    TransactionPayloadContext,
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
     SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
 };
@@ -172,8 +173,19 @@ pub fn collect_indexable_equality_filters_for_schema(
             op: SelectComparisonOp::Eq,
             value,
         }) => {
+            let resolved_field_name = if schema.field(field_name).is_some() {
+                field_name.clone()
+            } else {
+                field_name
+                    .rsplit('.')
+                    .next()
+                    .filter(|candidate| schema.field(candidate).is_some())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| field_name.clone())
+            };
+
             let normalized_value = schema
-                .field(field_name)
+                .field(&resolved_field_name)
                 .and_then(|field| {
                     convert_value_to_field_type(
                         value,
@@ -184,7 +196,7 @@ pub fn collect_indexable_equality_filters_for_schema(
                 })
                 .unwrap_or_else(|| value.clone());
 
-            filters.insert(field_name.clone(), normalized_value);
+            filters.insert(resolved_field_name, normalized_value);
             true
         }
 
@@ -231,8 +243,20 @@ pub fn load_live_rows(
     table_id: &str,
     schema: &TableSchema,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+    let context = TransactionPayloadContext::default();
+    load_live_rows_with_context(wal, table_id, schema, &context).unwrap_or_default()
+}
 
-    let wal_records = wal.since(table_id, None);
+pub fn load_live_rows_with_context(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+    schema: &TableSchema,
+    context: &TransactionPayloadContext,
+) -> Result<Vec<(u64, HashMap<String, Vec<u8>>)>, String> {
+
+    let wal_records = wal
+        .since_with_context(table_id, None, context)
+        .map_err(str::to_string)?;
     let mut live_rows = HashMap::new();
     let mut row_order = Vec::new();
     let mut committed_groups = HashSet::new();
@@ -273,7 +297,11 @@ pub fn load_live_rows(
             TransactionKind::Ignore => {}
 
             TransactionKind::Insert | TransactionKind::Update => {
-                match decode_row_payload(schema, &record.payload) {
+                let Some(payload) = record.payload_logical() else {
+                    continue;
+                };
+
+                match decode_row_payload(schema, payload) {
                 Ok(row_map) => {
                     row_order.push(record.id.0);
                     live_rows.insert(record.id.0, row_map);
@@ -293,10 +321,12 @@ pub fn load_live_rows(
         }
     }
 
-    row_order
+    let rows = row_order
         .into_iter()
         .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
-        .collect()
+        .collect::<Vec<_>>();
+
+    Ok(rows)
 
 }
 
@@ -504,9 +534,14 @@ pub fn materialize_relation_rows(
             index_id,
             lookup_key,
         } => {
-            if let Some(state) = runtime_indexes.index(index_id)
-                && state.cardinality() > 0 && !state.contains(lookup_key) {
-                    return Vec::new();
+            if let Some(state) = runtime_indexes.index(index_id) {
+                if state.cardinality() == 0 {
+                    return load_live_rows(wal, &table.table_id, schema);
+                }
+
+                if !state.contains(lookup_key) {
+                    return load_live_rows(wal, &table.table_id, schema);
+                }
                 }
 
             if lookup_key.len() == 1
