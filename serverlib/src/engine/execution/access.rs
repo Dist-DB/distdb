@@ -22,11 +22,11 @@ static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<HashMap<(usize, String), (u64, usize
 #[derive(Debug, Default)]
 struct EqualityTableCacheEntry {
     latest_tx_id: u64,
-    rows_by_id: HashMap<u64, HashMap<String, Vec<u8>>>,
-    row_ids_by_field_value: HashMap<String, HashMap<Vec<u8>, Vec<u64>>>,
+    rows_by_id: AHashMap<u64, HashMap<String, Vec<u8>>>,
+    row_ids_by_field_value: AHashMap<String, AHashMap<Vec<u8>, Vec<u64>>>,
 }
 
-static EQUALITY_TABLE_CACHE: OnceLock<Mutex<HashMap<(usize, String), EqualityTableCacheEntry>>> =
+static EQUALITY_TABLE_CACHE: OnceLock<Mutex<AHashMap<(usize, String), EqualityTableCacheEntry>>> =
     OnceLock::new();
 
 const LIVE_ROW_APPLY_PARALLEL_MIN_RECORDS: usize = 500_000;
@@ -153,10 +153,10 @@ fn decode_live_row_chunk(
 }
 
 fn build_postings_for_field(
-    rows_by_id: &HashMap<u64, HashMap<String, Vec<u8>>>,
+    rows_by_id: &AHashMap<u64, HashMap<String, Vec<u8>>>,
     field_name: &str,
-) -> HashMap<Vec<u8>, Vec<u64>> {
-    let mut row_ids_by_value = HashMap::<Vec<u8>, Vec<u64>>::new();
+) -> AHashMap<Vec<u8>, Vec<u64>> {
+    let mut row_ids_by_value = AHashMap::<Vec<u8>, Vec<u64>>::new();
 
     for (row_id, row_map) in rows_by_id {
         if let Some(value) = row_map.get(field_name).cloned() {
@@ -188,9 +188,9 @@ fn build_warm_equality_cache_serial(
     fields: &[String],
     live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
 ) -> EqualityTableCacheEntry {
-    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+    let mut rows_by_id = AHashMap::with_capacity(live_rows.len());
     let mut postings_by_field = (0..fields.len())
-        .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
+        .map(|_| AHashMap::<Vec<u8>, Vec<u64>>::new())
         .collect::<Vec<_>>();
 
     for (row_id, row_map) in live_rows {
@@ -210,7 +210,7 @@ fn build_warm_equality_cache_serial(
         .iter()
         .cloned()
         .zip(postings_by_field)
-        .collect::<HashMap<_, _>>();
+        .collect::<AHashMap<_, _>>();
 
     EqualityTableCacheEntry {
         latest_tx_id: 0,
@@ -250,9 +250,9 @@ fn build_warm_equality_cache_parallel(
 
         for chunk in chunks {
             handles.push(scope.spawn(move || {
-                let mut local_rows_by_id = HashMap::with_capacity(chunk.len());
+                let mut local_rows_by_id = AHashMap::with_capacity(chunk.len());
                 let mut local_postings_by_field = (0..fields.len())
-                    .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
+                    .map(|_| AHashMap::<Vec<u8>, Vec<u64>>::new())
                     .collect::<Vec<_>>();
 
                 for (row_id, row_map) in chunk {
@@ -281,9 +281,9 @@ fn build_warm_equality_cache_parallel(
         out
     });
 
-    let mut rows_by_id = HashMap::with_capacity(live_row_count);
+    let mut rows_by_id = AHashMap::with_capacity(live_row_count);
     let mut postings_by_field = (0..fields.len())
-        .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
+        .map(|_| AHashMap::<Vec<u8>, Vec<u64>>::new())
         .collect::<Vec<_>>();
 
     for (local_rows_by_id, local_postings_by_field) in partials {
@@ -301,7 +301,7 @@ fn build_warm_equality_cache_parallel(
         .iter()
         .cloned()
         .zip(postings_by_field)
-        .collect::<HashMap<_, _>>();
+        .collect::<AHashMap<_, _>>();
 
     EqualityTableCacheEntry {
         latest_tx_id: 0,
@@ -365,7 +365,7 @@ pub fn warm_equality_cache_from_live_rows(
 
     entry.latest_tx_id = latest_tx_id;
 
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     if let Ok(mut cache_guard) = cache.lock() {
         cache_guard.insert(
             (cache_scope_id, table_id.to_string()),
@@ -727,7 +727,7 @@ pub fn load_live_rows_by_equality(
         .map(|tx| tx.0)
         .unwrap_or(0);
 
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
         && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
@@ -744,13 +744,13 @@ pub fn load_live_rows_by_equality(
     }
 
     let live_rows = load_live_rows(wal, table_id, schema);
-    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+    let mut rows_by_id = AHashMap::with_capacity(live_rows.len());
 
     for (row_id, row_map) in live_rows {
         rows_by_id.insert(row_id, row_map);
     }
 
-    let mut row_ids_by_field_value = HashMap::<String, HashMap<Vec<u8>, Vec<u64>>>::new();
+    let mut row_ids_by_field_value = AHashMap::<String, AHashMap<Vec<u8>, Vec<u64>>>::new();
     row_ids_by_field_value.insert(
         field_name.to_string(),
         build_postings_for_field(&rows_by_id, field_name),

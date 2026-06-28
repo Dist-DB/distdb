@@ -373,10 +373,12 @@ impl RuntimeIndexStore {
                 let mut warm_fields = tracked_indexes
                     .iter()
                     .flat_map(|index| {
-                        if index.field_names.is_empty() && !index.field_name.is_empty() {
+                        if index.field_names.len() == 1 {
+                            vec![index.field_names[0].clone()]
+                        } else if index.field_names.is_empty() && !index.field_name.is_empty() {
                             vec![index.field_name.clone()]
                         } else {
-                            index.field_names.clone()
+                            Vec::new()
                         }
                     })
                     .filter(|field_name| !field_name.is_empty())
