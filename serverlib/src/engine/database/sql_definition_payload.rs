@@ -1,4 +1,6 @@
 
+use super::transaction_payload::TransactionPayloadCodec;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SqlObjectKind {
     View,
@@ -26,11 +28,11 @@ pub struct SqlDefinitionPayload {
 impl SqlDefinitionPayload {
     
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
-        bincode::serialize(self).map_err(|_| "failed to serialize sql definition payload")
+        <Self as TransactionPayloadCodec>::encode_payload(self)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, &'static str> {
-        bincode::deserialize(payload).map_err(|_| "failed to deserialize sql definition payload")
+        <Self as TransactionPayloadCodec>::decode_payload(payload)
     }
 
 }

@@ -1,3 +1,5 @@
+use crate::{compare_stored_field_values, render_stored_field_value};
+
 use regex::RegexBuilder;
 
 use super::SelectComparisonOp;
@@ -15,8 +17,10 @@ pub fn compare_like_value(
     case_insensitive: bool,
     escape_char: Option<char>,
 ) -> bool {
-    let actual_text = String::from_utf8_lossy(actual);
-    let pattern_text = String::from_utf8_lossy(pattern);
+    let actual_rendered = render_stored_field_value(actual);
+    let pattern_rendered = render_stored_field_value(pattern);
+    let actual_text = String::from_utf8_lossy(&actual_rendered);
+    let pattern_text = String::from_utf8_lossy(&pattern_rendered);
 
     let actual_chars = actual_text.chars().collect::<Vec<_>>();
     let pattern_chars = pattern_text.chars().collect::<Vec<_>>();
@@ -129,8 +133,10 @@ pub fn validate_regex_pattern(pattern: &[u8]) -> Result<(), String> {
 
 pub fn compare_regex_value(actual: &[u8], pattern: &[u8], case_insensitive: bool) -> bool {
     
-    let actual_text = String::from_utf8_lossy(actual);
-    let pattern_text = String::from_utf8_lossy(pattern);
+    let actual_rendered = render_stored_field_value(actual);
+    let pattern_rendered = render_stored_field_value(pattern);
+    let actual_text = String::from_utf8_lossy(&actual_rendered);
+    let pattern_text = String::from_utf8_lossy(&pattern_rendered);
 
     let mut builder = RegexBuilder::new(&pattern_text);
     builder.case_insensitive(case_insensitive);
@@ -144,7 +150,7 @@ pub fn compare_regex_value(actual: &[u8], pattern: &[u8], case_insensitive: bool
 
 pub fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp) -> bool {
     
-    let ordering = compare_scalar_bytes(actual, expected);
+    let ordering = compare_stored_field_values(actual, expected);
 
     match op {
         SelectComparisonOp::Eq => ordering == std::cmp::Ordering::Equal,
@@ -156,22 +162,12 @@ pub fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp
     }
 
 }
-
-fn compare_scalar_bytes(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
-
-    let left_text = String::from_utf8_lossy(left);
-    let right_text = String::from_utf8_lossy(right);
-
-    match (left_text.parse::<i128>(), right_text.parse::<i128>()) {
-        (Ok(lhs), Ok(rhs)) => lhs.cmp(&rhs),
-        _ => left_text.cmp(&right_text),
-    }
-
-}
-
 #[cfg(test)]
 mod tests {
-    use super::compare_like_value;
+    use super::{compare_like_value, compare_row_value};
+    use crate::{FieldType, TypeConversionPolicy};
+    use crate::engine::database::schema_migration::convert_value_to_field_type;
+    use crate::SelectComparisonOp;
 
     #[test]
     fn compare_like_value_supports_escape_character() {
@@ -191,5 +187,18 @@ mod tests {
             false,
             Some('!'),
         ));
+    }
+
+    #[test]
+    fn compare_row_value_supports_native_numeric_storage() {
+        let actual = convert_value_to_field_type(
+            b"42",
+            &FieldType::UInt(64),
+            TypeConversionPolicy::Safe,
+        )
+        .expect("numeric field should encode");
+
+        assert!(compare_row_value(&actual, b"42", &SelectComparisonOp::Eq));
+        assert!(compare_row_value(&actual, b"7", &SelectComparisonOp::Gt));
     }
 }

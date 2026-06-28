@@ -36,6 +36,7 @@ pub mod transaction;
 pub mod transaction_id;
 pub mod transaction_kind;
 pub mod transaction_log;
+pub mod transaction_payload;
 pub mod transaction_record;
 pub mod trigger;
 pub mod view;

@@ -1,4 +1,5 @@
 use super::table_schema::TableSchema;
+use super::transaction_payload::TransactionPayloadCodec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TableLifecycleAction {
@@ -18,12 +19,11 @@ pub struct TableLifecyclePayload {
 impl TableLifecyclePayload {
 
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
-        bincode::serialize(self).map_err(|_| "failed to serialize table lifecycle payload")
+        <Self as TransactionPayloadCodec>::encode_payload(self)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, &'static str> {
-        bincode::deserialize(payload)
-            .map_err(|_| "failed to deserialize table lifecycle payload")
+        <Self as TransactionPayloadCodec>::decode_payload(payload)
     }
     
 }

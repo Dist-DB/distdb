@@ -1,5 +1,6 @@
 
 use super::*;
+use crate::render_stored_field_value;
 
 use crate::engine::database::transaction::TransactionLog;
 use crate::{
@@ -177,9 +178,12 @@ fn build_joined_row_tuples_supports_all_join_kinds() {
     .expect("left join should succeed");
 
     assert_eq!(left_rows.len(), 3);
-    assert!(left_rows
-        .iter()
-        .any(|row| { row.value("u.id") == Some(&b"2".to_vec()) && row.value("p.name").is_none() }));
+    assert!(left_rows.iter().any(|row| {
+        row.value("u.id")
+            .map(|value| render_stored_field_value(value))
+            == Some(b"2".to_vec())
+            && row.value("p.name").is_none()
+    }));
 
     let right_rows = build_joined_row_tuples(
         &catalog,
@@ -254,7 +258,11 @@ fn build_joined_row_tuples_supports_non_field_comparison_join_conditions() {
     .expect("non-field-comparison join ON condition should be supported");
 
     assert_eq!(rows.len(), 3);
-    assert!(rows.iter().all(|row| row.value("u.id") == Some(&b"1".to_vec())));
+    assert!(rows.iter().all(|row| {
+        row.value("u.id")
+            .map(|value| render_stored_field_value(value))
+            == Some(b"1".to_vec())
+    }));
 }
 
 #[test]
@@ -348,5 +356,9 @@ fn build_joined_row_tuples_supports_and_field_comparison_join_conditions() {
     .expect("and field comparison join condition should succeed");
 
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|row| row.value("u.id") == Some(&b"1".to_vec())));
+    assert!(rows.iter().all(|row| {
+        row.value("u.id")
+            .map(|value| render_stored_field_value(value))
+            == Some(b"1".to_vec())
+    }));
 }

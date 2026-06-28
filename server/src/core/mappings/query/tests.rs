@@ -289,6 +289,79 @@ fn union_query_executes_and_deduplicates_rows() {
 }
 
 #[test]
+fn create_database_with_aes_option_enables_at_rest_encryption() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let response = handle_query_command(
+        "req-create-db-aes",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create database analytics --aes".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        std::path::Path::new("."),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.result, ConnectorResult::Mutation(_)));
+
+    let catalog = catalogs
+        .values()
+        .find(|catalog| catalog.database_name() == "analytics")
+        .expect("created analytics catalog should exist");
+
+    assert!(catalog.at_rest_encryption_enabled());
+    assert_eq!(catalog.at_rest_encryption_key_version(), 1);
+
+    let key_ref = catalog
+        .at_rest_encryption_key_ref()
+        .expect("encryption key reference should be set");
+    assert!(key_ref.starts_with("enc:analytics:"));
+}
+
+#[test]
+fn create_database_with_explicit_aes_key_ref_sets_metadata() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let response = handle_query_command(
+        "req-create-db-aes-explicit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create database billing --aes=enc:node1:billing".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        std::path::Path::new("."),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.result, ConnectorResult::Mutation(_)));
+
+    let catalog = catalogs
+        .values()
+        .find(|catalog| catalog.database_name() == "billing")
+        .expect("created billing catalog should exist");
+
+    assert!(catalog.at_rest_encryption_enabled());
+    assert_eq!(catalog.at_rest_encryption_key_version(), 1);
+    assert_eq!(
+        catalog.at_rest_encryption_key_ref(),
+        Some("enc:node1:billing")
+    );
+}
+
+#[test]
 fn except_query_executes_with_distinct_semantics() {
     let mut catalogs = HashMap::new();
     let wal = ConcurrentWalManager::in_memory();

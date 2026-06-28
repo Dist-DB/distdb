@@ -7,7 +7,7 @@ use crate::{
     ConcurrentWalManager, DatabaseCatalog, DatabaseTable, FieldDef, FieldIndex, FieldType,
     RelationAccessPlan, RuntimeIndexStore, SelectCondition, SelectJoin,
     SelectJoinKind, SelectProjectionItem, SelectReadPlan, SelectRelation, TableSchema,
-    primary_key_index,
+    primary_key_index, render_stored_field_value,
 };
 use crate::engine::sql::{
     evaluate_sql_function_with_lookup, expression_references_column,
@@ -308,7 +308,7 @@ where
                 match projection_item {
 
                     SelectProjectionItem::Column { field_name, .. } => Ok(match row_map.get(field_name) {
-                        Some(value) => value.clone(),
+                        Some(value) => render_stored_field_value(value),
                         None if columns[projection_idx].nullable => b"NULL".to_vec(),
                         None => Vec::new(),
                     }),
@@ -325,7 +325,9 @@ where
                         } else {
                             evaluate_sql_function_with_lookup(
                                 function,
-                                &mut |field_name| row_map.get(field_name).cloned(),
+                                &mut |field_name| row_map
+                                    .get(field_name)
+                                    .map(|value| render_stored_field_value(value)),
                             )
                             .map(|value| value.unwrap_or_else(|| b"NULL".to_vec()))
                             .map_err(|err| {
@@ -340,13 +342,13 @@ where
                         else_value,
                         ..
                     } => Ok(
-                        evaluate_case_projection(
+                        render_stored_field_value(&evaluate_case_projection(
                             &row_map,
                             operand.as_ref(),
                             branches,
                             else_value.as_ref(),
                         )?
-                            .unwrap_or_else(|| b"NULL".to_vec()),
+                            .unwrap_or_else(|| b"NULL".to_vec())),
                     ),
 
                     SelectProjectionItem::Wildcard { .. } => Ok(Vec::new()),
@@ -539,7 +541,7 @@ where
                 match projection_item {
 
                     SelectProjectionItem::Column { field_name, .. } => Ok(match row_tuple.value(field_name) {
-                        Some(value) => value.clone(),
+                        Some(value) => render_stored_field_value(value),
                         None if columns[projection_idx].nullable => b"NULL".to_vec(),
                         None => Vec::new(),
                     }),
@@ -556,7 +558,9 @@ where
                         } else {
                             evaluate_sql_function_with_lookup(
                                 function,
-                                &mut |field_name| row_tuple.value(field_name).cloned(),
+                                &mut |field_name| row_tuple
+                                    .value(field_name)
+                                    .map(|value| render_stored_field_value(value)),
                             )
                             .map(|value| value.unwrap_or_else(|| b"NULL".to_vec()))
                             .map_err(|err| {
@@ -571,13 +575,13 @@ where
                         else_value,
                         ..
                     } => Ok(
-                        evaluate_case_projection(
+                        render_stored_field_value(&evaluate_case_projection(
                             &row_tuple,
                             operand.as_ref(),
                             branches,
                             else_value.as_ref(),
                         )?
-                            .unwrap_or_else(|| b"NULL".to_vec()),
+                            .unwrap_or_else(|| b"NULL".to_vec())),
                     ),
 
                     SelectProjectionItem::Wildcard { .. } => Ok(Vec::new()),

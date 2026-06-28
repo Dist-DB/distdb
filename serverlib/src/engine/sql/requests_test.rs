@@ -97,6 +97,17 @@ fn create_database_operation_parses_object_name() {
 }
 
 #[test]
+fn create_database_with_aes_suffix_parses_object_name() {
+    let requests = parse_mysql8_sql_requests("create database analytics --aes", "main")
+        .expect("create database with aes suffix should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Create);
+    assert_eq!(requests[0].operation, SqlOperation::CreateDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("analytics"));
+}
+
+#[test]
 fn create_schema_operation_maps_to_create_database() {
     let requests = parse_mysql8_sql_requests("create schema analytics", "main")
         .expect("create schema should parse");

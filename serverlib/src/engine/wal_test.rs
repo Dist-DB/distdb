@@ -209,3 +209,105 @@ fn ephemeral_stream_in_file_mode_keeps_data_in_memory_only() {
 
     let _ = std::fs::remove_dir_all(temp_root);
 }
+
+#[test]
+fn encoded_storage_record_roundtrip_handles_large_payloads() {
+    let actor = UserId::from_username("tester");
+    let record = TransactionRecord {
+        id: TransactionId(1),
+        groupid: None,
+        refid: None,
+        timestamp_epoch_ms: 1,
+        actor,
+        kind: TransactionKind::Insert,
+        payload: vec![b'x'; 8192],
+    };
+
+    let stored = super::encode_record_for_storage(&record).expect("record should encode");
+    let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
+    let raw = bincode::serialize(&record).expect("record should serialize");
+
+    assert_eq!(decoded, record);
+    assert!(stored.len() < raw.len());
+}
+
+#[test]
+fn decode_storage_record_accepts_legacy_uncompressed_bytes() {
+    let actor = UserId::from_username("tester");
+    let record = TransactionRecord {
+        id: TransactionId(7),
+        groupid: None,
+        refid: None,
+        timestamp_epoch_ms: 7,
+        actor,
+        kind: TransactionKind::Update,
+        payload: vec![1, 2, 3],
+    };
+
+    let legacy_raw = bincode::serialize(&record).expect("legacy record should serialize");
+    let decoded =
+        super::decode_record_from_storage(&legacy_raw).expect("legacy record should decode");
+
+    assert_eq!(decoded, record);
+}
+
+#[test]
+fn encoded_storage_record_compresses_small_non_encrypted_payloads() {
+    let actor = UserId::from_username("tester");
+    let record = TransactionRecord {
+        id: TransactionId(8),
+        groupid: None,
+        refid: None,
+        timestamp_epoch_ms: 8,
+        actor,
+        kind: TransactionKind::Insert,
+        payload: b"ip_lookup:UNITED STATES".to_vec(),
+    };
+
+    let stored = super::encode_record_for_storage(&record).expect("record should encode");
+    let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
+    let stored_record: TransactionRecord =
+        bincode::deserialize(&stored).expect("stored record should deserialize");
+
+    assert_ne!(stored, bincode::serialize(&record).expect("record should serialize"));
+    assert!(!stored_record
+        .payload
+        .starts_with(&super::WAL_PAYLOAD_COMPRESSION_MAGIC));
+    assert!(
+        stored_record
+            .payload
+            .starts_with(&[0x78])
+    );
+    assert_eq!(decoded, record);
+}
+
+#[test]
+fn encoded_storage_record_skips_compression_for_encrypted_mutation_payloads() {
+    let actor = UserId::from_username("tester");
+    let encrypted_payload = crate::engine::database::row_payload::
+        encode_encrypted_row_payload_envelope(
+            1,
+            vec![7; 12],
+            vec![9; 16],
+            std::iter::repeat_n(b'x', 16384).collect(),
+        )
+        .expect("encrypted payload should encode");
+
+    let record = TransactionRecord {
+        id: TransactionId(9),
+        groupid: None,
+        refid: None,
+        timestamp_epoch_ms: 9,
+        actor,
+        kind: TransactionKind::Insert,
+        payload: encrypted_payload,
+    };
+
+    let raw = bincode::serialize(&record).expect("record should serialize");
+    let stored = super::encode_record_for_storage(&record).expect("record should encode");
+    let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
+
+    assert_eq!(stored, raw);
+    assert_eq!(decoded, record);
+}
+

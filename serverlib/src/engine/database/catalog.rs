@@ -23,6 +23,7 @@ use super::table_lifecycle_payload::{TableLifecycleAction, TableLifecyclePayload
 use super::table_schema::{FieldIndex, TableSchema};
 use super::trigger::DatabaseTrigger;
 use super::transaction::{
+    DecodedTransactionPayload,
     EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
     SqlObjectKind, TransactionKind, TransactionLog,
 };
@@ -36,6 +37,10 @@ pub struct DatabaseCatalog {
     pub database_id: DatabaseId,
     #[serde(default)]
     database_name: String,
+    #[serde(default)]
+    at_rest_encryption_key_ref: Option<String>,
+    #[serde(default)]
+    at_rest_encryption_key_version: u32,
     status: ObjectStatus,
     #[serde(default)]
     schema_epoch: u64,
@@ -75,6 +80,8 @@ impl DatabaseCatalog {
         Self {
             database_id,
             database_name: String::new(),
+            at_rest_encryption_key_ref: None,
+            at_rest_encryption_key_version: 0,
             status: ObjectStatus::Load,
             schema_epoch: 0,
             active_schema_change: None,
@@ -906,35 +913,42 @@ impl DatabaseCatalog {
         for record in log.since(wal_id, None) {
 
             match record.kind {
-                
-                TransactionKind::SchemaChange => {
-                    let payload = SchemaChangePayload::decode(&record.payload)
-                        .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
-                    self.apply_schema_change(payload)?;
-                    applied += 1;
-                }
-                
-                TransactionKind::TableLifecycle => {
-                    let payload = TableLifecyclePayload::decode(&record.payload)
-                        .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
-                    self.apply_table_lifecycle(payload)?;
-                    applied += 1;
-                }
-                
-                TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
-                    let payload = EntityMetadataPayload::decode(&record.payload)
-                        .map_err(|_| DatabaseError::MetadataPayloadDeserialize)?;
-                    self.apply_entity_metadata(payload)?;
-                    applied += 1;
-                }
+                TransactionKind::SchemaChange
+                | TransactionKind::TableLifecycle
+                | TransactionKind::MetadataChange
+                | TransactionKind::SecurityChange
+                | TransactionKind::SqlDefinitionChange => {
+                    let decoded = DecodedTransactionPayload::decode(record.kind, &record.payload)
+                        .map_err(|_| match record.kind {
+                            TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
+                                DatabaseError::SchemaPayloadDeserialize
+                            }
+                            TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
+                                DatabaseError::MetadataPayloadDeserialize
+                            }
+                            TransactionKind::SqlDefinitionChange => {
+                                DatabaseError::SqlDefinitionPayloadDeserialize
+                            }
+                            _ => unreachable!("payload decode dispatch should only map structured transaction kinds"),
+                        })?;
 
-                TransactionKind::SqlDefinitionChange => {
-                    let payload = SqlDefinitionPayload::decode(&record.payload)
-                        .map_err(|_| DatabaseError::SqlDefinitionPayloadDeserialize)?;
-                    self.apply_sql_definition(payload)?;
+                    match decoded {
+                        DecodedTransactionPayload::SchemaChange(payload) => {
+                            self.apply_schema_change(payload)?;
+                        }
+                        DecodedTransactionPayload::TableLifecycle(payload) => {
+                            self.apply_table_lifecycle(payload)?;
+                        }
+                        DecodedTransactionPayload::EntityMetadata(payload) => {
+                            self.apply_entity_metadata(payload)?;
+                        }
+                        DecodedTransactionPayload::SqlDefinition(payload) => {
+                            self.apply_sql_definition(payload)?;
+                        }
+                    }
+
                     applied += 1;
                 }
-
                 _ => {}
             
             }
@@ -1222,6 +1236,12 @@ impl DatabaseCatalog {
             catalog.database_name = catalog.database_id.0.clone();
         }
 
+        if catalog.at_rest_encryption_key_ref.is_some()
+            && catalog.at_rest_encryption_key_version == 0
+        {
+            catalog.at_rest_encryption_key_version = 1;
+        }
+
         catalog.normalize_loaded_entities()?;
         
         Ok(catalog)
@@ -1235,6 +1255,40 @@ impl DatabaseCatalog {
 
     pub fn database_name(&self) -> &str {
         &self.database_name
+    }
+
+    pub fn at_rest_encryption_enabled(&self) -> bool {
+        self.at_rest_encryption_key_ref.is_some()
+    }
+
+    pub fn at_rest_encryption_key_ref(&self) -> Option<&str> {
+        self.at_rest_encryption_key_ref.as_deref()
+    }
+
+    pub fn at_rest_encryption_key_version(&self) -> u32 {
+        self.at_rest_encryption_key_version
+    }
+
+    pub fn configure_at_rest_encryption_key_ref(
+        &mut self,
+        key_ref: impl Into<String>,
+    ) -> DatabaseResult<()> {
+        let normalized = key_ref.into().trim().to_string();
+        if normalized.is_empty() {
+            return Err(DatabaseError::InvalidEncryptionKeyRef);
+        }
+
+        match self.at_rest_encryption_key_ref.as_deref() {
+            Some(current) if current == normalized => Ok(()),
+            Some(_) => Err(DatabaseError::ImmutableEncryptionConfiguration),
+            None => {
+                self.at_rest_encryption_key_ref = Some(normalized);
+                if self.at_rest_encryption_key_version == 0 {
+                    self.at_rest_encryption_key_version = 1;
+                }
+                Ok(())
+            }
+        }
     }
 
     pub fn set_database_name(&mut self, name: &str) {

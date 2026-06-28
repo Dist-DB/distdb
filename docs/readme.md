@@ -105,5 +105,7 @@ The implementation should:
 
 - SELECT architecture assumptions and implementation notes:
 	- [select-architecture.md](select-architecture.md)
+- Optional enterprise at-rest encryption direction:
+	- [at-rest-encryption.md](at-rest-encryption.md)
 
 

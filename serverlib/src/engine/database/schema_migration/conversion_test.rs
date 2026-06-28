@@ -5,7 +5,9 @@ use super::*;
 fn convert_numeric_string_to_int() {
     let result =
         convert_value_to_field_type(b"42", &FieldType::Int(64), TypeConversionPolicy::Safe);
-    assert_eq!(result, Ok(b"42".to_vec()));
+    let stored = result.expect("int conversion should succeed");
+    assert_ne!(stored, b"42".to_vec());
+    assert_eq!(render_stored_field_value(&stored), b"42".to_vec());
 }
 
 #[test]
@@ -25,7 +27,8 @@ fn convert_invalid_to_int_force_mode_coerces() {
         &FieldType::Int(32),
         TypeConversionPolicy::Force,
     );
-    assert_eq!(result, Ok(b"0".to_vec()));
+    let stored = result.expect("forced int conversion should succeed");
+    assert_eq!(render_stored_field_value(&stored), b"0".to_vec());
 }
 
 #[test]

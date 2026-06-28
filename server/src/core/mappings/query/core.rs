@@ -1384,9 +1384,27 @@ fn execute_create_database_impl(
         );
     };
 
+    let encryption_key_ref = parse_create_database_encryption_key_ref(&statement.sql, database_name);
+
     match DatabaseCatalog::create_new_database(database_name, node_data_dir) {
 
-        Ok(catalog) => {
+        Ok(mut catalog) => {
+            if let Some(key_ref) = encryption_key_ref {
+                if let Err(err) = catalog.configure_at_rest_encryption_key_ref(key_ref) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("create database encryption configuration failed: {err}"),
+                    );
+                }
+
+                if let Err(err) = catalog.save_in_directory(node_data_dir) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("create database persistence failed: {err}"),
+                    );
+                }
+            }
+
             catalogs.insert(catalog.database_id.0.clone(), catalog);
             ConnectorResponse::applied(
                 request_id.to_string(),
@@ -1401,6 +1419,43 @@ fn execute_create_database_impl(
 
     }
 
+}
+
+fn parse_create_database_encryption_key_ref(sql: &str, database_name: &str) -> Option<String> {
+    let tokens = sql
+        .split_whitespace()
+        .map(|token| token.trim_matches(';'))
+        .collect::<Vec<_>>();
+
+    for (idx, token) in tokens.iter().enumerate() {
+        let lower = token.to_ascii_lowercase();
+
+        if lower == "--aes" {
+            if let Some(next) = tokens.get(idx + 1) {
+                let candidate = next.trim_matches(';');
+                if !candidate.is_empty() && !candidate.starts_with("--") {
+                    return Some(candidate.to_string());
+                }
+            }
+
+            return Some(default_create_database_encryption_key_ref(database_name));
+        }
+
+        if let Some(value) = lower.strip_prefix("--aes=") {
+            if value.is_empty() {
+                return Some(default_create_database_encryption_key_ref(database_name));
+            }
+
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn default_create_database_encryption_key_ref(database_name: &str) -> String {
+    let normalized_name = common::normalize_identifier!(database_name);
+    format!("enc:{}:{}", normalized_name, common::helpers::utils::unique_id())
 }
 
 fn execute_create_table_impl(
@@ -2139,41 +2194,6 @@ fn execute_insert_locked(
 
                 }
 
-                if let Some((pk_index_id, pk_fields)) = primary_key_details.as_ref() {
-                    
-                    pk_checks = pk_checks.saturating_add(1);
-
-                    let incoming_pk = pk_fields
-                        .iter()
-                        .map(|pk| payload_row.get(*pk).cloned().unwrap_or_default())
-                        .collect::<Vec<_>>();
-
-                    let pk_runtime = runtime_indexes.index(pk_index_id);
-
-                    if pk_runtime
-                        .map(|idx| idx.contains(&incoming_pk))
-                        .unwrap_or(false)
-                        || staged_pk_keys.contains(&incoming_pk)
-                    {
-                        
-                        let pk_display = pk_fields
-                            .iter()
-                            .zip(incoming_pk.iter())
-                            .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-
-                        return ConnectorResponse::rejected(
-                            request_id.to_string(),
-                            format!("insert failed: duplicate primary key ({})", pk_display),
-                        );
-
-                    }
-
-                    staged_pk_keys.insert(incoming_pk);
-
-                }
-
                 let encoded = match encode_row_payload(schema, &payload_row) {
                     
                     Ok(encoded) => encoded,
@@ -2187,10 +2207,51 @@ fn execute_insert_locked(
 
                 };
 
+                let canonical_row = match decode_row_payload(schema, &encoded) {
+                    Ok(row) => row,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("insert payload decode failed: {err}"),
+                        );
+                    }
+                };
+
+                if let Some((pk_index_id, pk_fields)) = primary_key_details.as_ref() {
+                    pk_checks = pk_checks.saturating_add(1);
+
+                    let incoming_pk = pk_fields
+                        .iter()
+                        .map(|pk| canonical_row.get(*pk).cloned().unwrap_or_default())
+                        .collect::<Vec<_>>();
+
+                    let pk_runtime = runtime_indexes.index(pk_index_id);
+
+                    if pk_runtime
+                        .map(|idx| idx.contains(&incoming_pk))
+                        .unwrap_or(false)
+                        || staged_pk_keys.contains(&incoming_pk)
+                    {
+                        let pk_display = pk_fields
+                            .iter()
+                            .zip(incoming_pk.iter())
+                            .map(|(name, val)| format!("{}={}", name, serverlib::display_stored_field_value(val)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("insert failed: duplicate primary key ({})", pk_display),
+                        );
+                    }
+
+                    staged_pk_keys.insert(incoming_pk);
+                }
+
                 staged_payloads.push(encoded);
 
                 if track_runtime_indexes_for_insert {
-                    staged_row_maps.push(payload_row);
+                    staged_row_maps.push(canonical_row);
                 }
 
                 affected_rows = affected_rows.saturating_add(1);
@@ -2571,6 +2632,26 @@ fn execute_update_locked(
                     }
                 }
 
+                let insert_payload = match encode_row_payload(schema, &updated_row) {
+                    Ok(encoded) => encoded,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("update insert payload encode failed: {err}"),
+                        );
+                    }
+                };
+
+                let updated_row = match decode_row_payload(schema, &insert_payload) {
+                    Ok(row) => row,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("update insert payload decode failed: {err}"),
+                        );
+                    }
+                };
+
                 if let Some(pk_index) = primary_key {
 
                     let old_pk = old_pk.expect("primary key tuple should exist when primary key index is present");
@@ -2582,7 +2663,7 @@ fn execute_update_locked(
                             .expect("primary key fields should exist when primary key index is present")
                             .iter()
                             .zip(new_pk.iter())
-                            .map(|(name, val)| format!("{}={}", name, String::from_utf8_lossy(val)))
+                            .map(|(name, val)| format!("{}={}", name, serverlib::display_stored_field_value(val)))
                             .collect::<Vec<_>>()
                             .join(", ");
 
@@ -2614,16 +2695,6 @@ fn execute_update_locked(
                         format!("update delete WAL append failed: {err}"),
                     );
                 }
-
-                let insert_payload = match encode_row_payload(schema, &updated_row) {
-                    Ok(encoded) => encoded,
-                    Err(err) => {
-                        return ConnectorResponse::rejected(
-                            request_id.to_string(),
-                            format!("update insert payload encode failed: {err}"),
-                        );
-                    }
-                };
 
                 if let Err(err) = append_row_payload_record(
                     wal,

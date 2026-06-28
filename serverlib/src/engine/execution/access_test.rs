@@ -457,10 +457,17 @@ fn runtime_index_bootstrap_uses_latest_live_row_keys() {
         .find(|index| !index.is_primary_key())
         .expect("secondary index should exist");
 
+    let stored_pk = convert_value_to_field_type(
+        b"1",
+        &FieldType::UInt(64),
+        TypeConversionPolicy::Safe,
+    )
+    .expect("pk value should encode");
+
     assert!(runtime_indexes
         .index(&pk_index.index_id.0)
         .expect("pk runtime index should exist")
-        .contains(&[b"1".to_vec()]));
+        .contains(&[stored_pk]));
     
     assert!(runtime_indexes
         .index(&email_index.index_id.0)

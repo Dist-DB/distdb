@@ -1129,6 +1129,219 @@ fn active_session_transaction_stages_queries_until_commit() {
 }
 
 #[test]
+fn transaction_commit_rejects_duplicate_insert_during_validation() {
+
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-tx-duplicate-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-tx-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    );
+
+    let create_table_response = app.handle_connector_request(&create_table);
+    assert_eq!(create_table_response.status, ResponseStatus::Applied);
+
+    let seed_insert = ConnectorRequest::new(
+        "req-seed-user",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id) values (1)".to_string(),
+            },
+        },
+    );
+
+    let seed_insert_response = app.handle_connector_request(&seed_insert);
+    assert_eq!(seed_insert_response.status, ResponseStatus::Applied);
+
+    let begin = ConnectorRequest::new(
+        "req-begin-tx-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "start transaction".to_string(),
+            },
+        },
+    );
+
+    let begin_response = app.handle_connector_request_for_session(&begin, "session-a");
+    assert_eq!(begin_response.status, ResponseStatus::Applied);
+
+    let staged_query = ConnectorRequest::new(
+        "req-staged-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id) values (1)".to_string(),
+            },
+        },
+    );
+
+    let staged_response = app.handle_connector_request_for_session(&staged_query, "session-a");
+    assert_eq!(staged_response.status, ResponseStatus::Applied);
+
+    let commit_request = ConnectorRequest::new(
+        "req-commit-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+
+    let commit_response = app.handle_connector_request_for_session(&commit_request, "session-a");
+    assert_eq!(commit_response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = commit_response.result else {
+        panic!("expected duplicate insert validation error");
+    };
+
+    assert!(message.contains("transaction validation failed at staged statement 1"));
+    assert!(message.contains("duplicate primary key"));
+
+}
+
+#[test]
+fn lightweight_import_commit_failure_clears_transaction_state_for_followup_reads() {
+
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-session-import-duplicate-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-import-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&create_table).status, ResponseStatus::Applied);
+
+    let seed_insert = ConnectorRequest::new(
+        "req-seed-user-import-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id) values (1)".to_string(),
+            },
+        },
+    );
+    assert_eq!(app.handle_connector_request(&seed_insert).status, ResponseStatus::Applied);
+
+    let begin = ConnectorRequest::new(
+        "req-begin-import-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "begin /*distdb_import*/".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&begin, "session-a").status,
+        ResponseStatus::Applied
+    );
+
+    let staged_query = ConnectorRequest::new(
+        "req-staged-import-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "insert into users (id) values (1)".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&staged_query, "session-a").status,
+        ResponseStatus::Applied
+    );
+
+    let commit_request = ConnectorRequest::new(
+        "req-commit-import-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "commit".to_string(),
+            },
+        },
+    );
+
+    let commit_response = app.handle_connector_request_for_session(&commit_request, "session-a");
+    assert_eq!(commit_response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(commit_error) = &commit_response.result else {
+        panic!("expected lightweight import commit failure message");
+    };
+
+    assert!(commit_error.contains("transaction validation failed at staged statement 1"));
+    assert!(commit_error.contains("duplicate primary key"));
+
+    let followup_read = ConnectorRequest::new(
+        "req-followup-read-import-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select id from users where id=1".to_string(),
+            },
+        },
+    );
+
+    let followup_response = app.handle_connector_request_for_session(&followup_read, "session-a");
+    assert_eq!(followup_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = followup_response.result else {
+        panic!("expected query result after failed lightweight import commit");
+    };
+
+    let _ = result;
+
+    let rollback_request = ConnectorRequest::new(
+        "req-rollback-import-duplicate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "rollback".to_string(),
+            },
+        },
+    );
+
+    let rollback_response = app.handle_connector_request_for_session(&rollback_request, "session-a");
+    assert_eq!(rollback_response.status, ResponseStatus::Rejected);
+}
+
+#[test]
 fn explicit_transaction_rejects_non_dml_schema_statements() {
 
     let unique_suffix = common::epoch_nanos!();

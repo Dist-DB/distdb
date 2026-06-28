@@ -402,7 +402,12 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
     let rewritten = load_records_from_path(&wal_path).expect("rewritten wal should load");
     let out_row: HashMap<String, Vec<u8>> =
         bincode::deserialize(&rewritten[0].payload).expect("payload should decode");
-    assert_eq!(out_row.get("age"), Some(&b"0".to_vec()));
+    assert_eq!(
+        out_row
+            .get("age")
+            .map(|value| render_stored_field_value(value)),
+        Some(b"0".to_vec())
+    );
 
     let _ = std::fs::remove_dir_all(temp_root);
 }

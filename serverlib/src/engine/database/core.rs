@@ -15,10 +15,15 @@ pub use super::entity_object_ref::DatabaseObjectRef;
 pub use super::entity_object_type::DatabaseObjectType;
 pub use super::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin, IndexId};
 pub use super::relationship::DatabaseRelationship;
-pub use super::row_payload::{decode_row_field_value, decode_row_payload, encode_row_payload};
+pub use super::row_payload::{
+	decode_encrypted_row_payload_envelope, decode_row_field_value, decode_row_payload,
+	encode_encrypted_row_payload_envelope, encode_row_payload,
+	EncryptedRowPayloadEnvelope, ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION,
+};
 pub use super::schema_change_tx::SchemaChangeTx;
 pub use super::schema_change_state::{ActiveSchemaChange, SchemaChangePhase};
 pub use super::schema_migration::{
+	compare_stored_field_values, display_stored_field_value, render_stored_field_value,
 	run_schema_migration, DiskToMemorySchemaMigrationExecutor, NoopSchemaMigrationExecutor, 
 	SchemaMigrationExecutor, SchemaMigrationProgress, FieldTypeChangeRule, SchemaMutationRuleSet,
 	TypeConversionPolicy,

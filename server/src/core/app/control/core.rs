@@ -257,6 +257,7 @@ impl ServerApp {
             };
 
             let staged_count = staged_queries.len();
+            let has_snapshot = self.tx_snapshot_by_session.contains_key(session_id);
             let snapshot_epoch_ms = self
                 .tx_begin_epoch_ms_by_session
                 .get(session_id)
@@ -271,14 +272,27 @@ impl ServerApp {
             ) {
                 Ok(total) => total,
                 Err(err) => {
-                    if let Err(restore_err) = self
-                        .transaction_coordinator
-                        .restore_after_failed_commit(session_id, staged_queries)
-                    {
-                        log::error!(
-                            "failed to restore staged transaction after commit error: {}",
-                            restore_err
-                        );
+                    if has_snapshot {
+                        if let Err(restore_err) = self
+                            .transaction_coordinator
+                            .restore_after_failed_commit(session_id, staged_queries)
+                        {
+                            log::error!(
+                                "failed to restore staged transaction after commit error: {}",
+                                restore_err
+                            );
+                        }
+                    } else {
+                        if let Err(rollback_err) = self.transaction_coordinator.rollback(session_id) {
+                            log::error!(
+                                "failed to rollback snapshotless transaction after commit error: {}",
+                                rollback_err
+                            );
+                        }
+
+                        self.tx_begin_epoch_ms_by_session.remove(session_id);
+                        self.tx_snapshot_by_session.remove(session_id);
+                        self.tx_read_observations_by_session.remove(session_id);
                     }
 
                     if let Err(marker_err) = self.append_session_tx_marker(
@@ -482,73 +496,75 @@ impl ServerApp {
     ) -> Result<(), String> {
         let validation_start = Instant::now();
 
-        if let Some((table_ids, insert_only)) = Self::staged_query_validation_plan(staged_queries)
-            && insert_only {
-                let total_ms = validation_start.elapsed().as_millis() as u64;
-                log::info!(
-                    "transaction validation setup request_id={} session_id={} mode=insert_only_skip_dry_run tables={} index_clone_ms=0 wal_seed_ms=0 snapshot_setup_ms=0",
-                    request_id,
-                    session_id,
-                    table_ids.len(),
-                );
-                log::info!(
-                    "transaction validation timing request_id={} session_id={} staged_queries={} snapshot_setup_ms=0 dry_run_ms=0 total_ms={}",
-                    request_id,
-                    session_id,
-                    staged_queries.len(),
-                    total_ms,
-                );
-                return Ok(());
-            }
+        let validation_plan = Self::staged_query_validation_plan(staged_queries);
 
         let snapshot_start = Instant::now();
-
-        let Some(snapshot) = self.tx_snapshot_by_session.get(session_id) else {
-            return Err("missing transaction snapshot for validation".to_string());
-        };
-
-        let mut sandbox_catalogs = snapshot.catalogs.clone();
-        let sandbox_wal = ConcurrentWalManager::new();
 
         let mut setup_mode = "fallback_full";
         let mut setup_table_count = 0usize;
         let index_clone_ms;
         let wal_seed_ms;
 
-        let mut sandbox_indexes = if let Some((table_ids, skip_wal_seed)) = Self::staged_query_validation_plan(staged_queries) {
+        let (mut sandbox_catalogs, snapshot_runtime_indexes, snapshot_wal) =
+            if let Some(snapshot) = self.tx_snapshot_by_session.get(session_id) {
+                (
+                    snapshot.catalogs.clone(),
+                    snapshot.runtime_indexes.clone(),
+                    Some(&snapshot.wal),
+                )
+            } else if let Some((table_ids, insert_only)) = &validation_plan {
+                if !insert_only {
+                    return Err("missing transaction snapshot for validation".to_string());
+                }
+
+                setup_mode = "current_state_insert_only";
+                setup_table_count = table_ids.len();
+                (
+                    self.catalogs.clone(),
+                    self.runtime_indexes.clone(),
+                    None,
+                )
+            } else {
+                return Err("missing transaction snapshot for validation".to_string());
+            };
+
+        let sandbox_wal = ConcurrentWalManager::new();
+
+        let mut sandbox_indexes = if let Some((table_ids, skip_wal_seed)) = validation_plan {
             setup_table_count = table_ids.len();
 
             let index_clone_start = Instant::now();
-            let scoped_indexes = snapshot
-                .runtime_indexes
-                .clone_for_tables(&snapshot.catalogs, &table_ids);
+            let scoped_indexes = snapshot_runtime_indexes.clone_for_tables(&sandbox_catalogs, &table_ids);
             index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
 
             if skip_wal_seed {
-                setup_mode = "table_scoped_insert_only";
+                if setup_mode != "current_state_insert_only" {
+                    setup_mode = "table_scoped_insert_only";
+                }
                 wal_seed_ms = 0;
             } else {
                 setup_mode = "table_scoped";
                 let wal_seed_start = Instant::now();
-                self.seed_sandbox_wal_from_source_for_tables(
-                    &sandbox_catalogs,
-                    &snapshot.wal,
-                    &sandbox_wal,
-                    &table_ids,
-                )
-                .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
+                let Some(source_wal) = snapshot_wal else {
+                    return Err("missing transaction snapshot for validation".to_string());
+                };
+                self.seed_sandbox_wal_from_source_for_tables(&sandbox_catalogs, source_wal, &sandbox_wal, &table_ids)
+                    .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
                 wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
             }
 
             scoped_indexes
         } else {
             let wal_seed_start = Instant::now();
-            self.seed_sandbox_wal_from_source(&sandbox_catalogs, &snapshot.wal, &sandbox_wal)
+            let Some(source_wal) = snapshot_wal else {
+                return Err("missing transaction snapshot for validation".to_string());
+            };
+            self.seed_sandbox_wal_from_source(&sandbox_catalogs, source_wal, &sandbox_wal)
                 .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
             wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
 
             let index_clone_start = Instant::now();
-            let cloned = snapshot.runtime_indexes.clone();
+            let cloned = snapshot_runtime_indexes.clone();
             index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
 
             cloned

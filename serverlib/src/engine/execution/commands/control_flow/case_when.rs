@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use crate::engine::sql::{
     evaluate_sql_function_with_lookup, SelectCaseWhen, SelectExpression,
 };
+use crate::{compare_row_value, render_stored_field_value, SelectComparisonOp};
 
 use super::super::super::{
     row_matches_condition_with_result, ConditionValueProvider,
@@ -34,7 +35,7 @@ pub fn evaluate_case_projection(
 
             SelectCaseWhen::Equals(expected) => {
                 let resolved_expected = resolve_case_value(provider, expected)?;
-                matches!((&resolved_operand, resolved_expected), (Some(left), Some(right)) if *left == right)
+                matches!((&resolved_operand, resolved_expected), (Some(left), Some(right)) if compare_row_value(left, &right, &SelectComparisonOp::Eq))
             }
             
         };
@@ -63,11 +64,15 @@ fn resolve_case_value(
 
         SelectExpression::Literal(value) => Ok(Some(value.clone())),
 
-        SelectExpression::Column { field_name } => Ok(provider.value(field_name).cloned()),
+        SelectExpression::Column { field_name } => Ok(provider
+            .value(field_name)
+            .map(|value| render_stored_field_value(value))),
 
         SelectExpression::InbuiltFunction { function } => evaluate_sql_function_with_lookup(
             function,
-            &mut |field_name| provider.value(field_name).cloned(),
+            &mut |field_name| provider
+                .value(field_name)
+                .map(|value| render_stored_field_value(value)),
         )
             .map_err(|err| format!("case evaluation function failed: {err}")),
 

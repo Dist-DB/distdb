@@ -30,6 +30,8 @@ pub enum DatabaseError {
     StoredProcedureNotFound,
     EntityNotFound,
     UnsupportedSqlObjectKind,
+    InvalidEncryptionKeyRef,
+    ImmutableEncryptionConfiguration,
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -67,6 +69,8 @@ impl std::fmt::Display for DatabaseError {
             Self::StoredProcedureNotFound           => write!(f, "stored procedure not found in database catalog"),
             Self::EntityNotFound                    => write!(f, "entity not found in database catalog"),
             Self::UnsupportedSqlObjectKind          => write!(f, "sql object kind is not yet supported by this catalog"),
+            Self::InvalidEncryptionKeyRef           => write!(f, "encryption key reference must not be empty"),
+            Self::ImmutableEncryptionConfiguration  => write!(f, "database encryption configuration is immutable once set"),
 
         }
 

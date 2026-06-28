@@ -397,7 +397,6 @@ dependencies = [
 name = "common"
 version = "0.1.0"
 dependencies = [
- "base64",
  "bincode",
  "chrono",
  "libp2p",

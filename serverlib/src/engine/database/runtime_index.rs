@@ -90,11 +90,13 @@ impl RuntimeIndexStore {
     }
 
     pub fn should_track_index(&self, index: &DatabaseIndex) -> bool {
+        
         if index.is_temporary() {
             return false;
         }
 
         true
+        
     }
 
     pub fn index(&self, index_id: &str) -> Option<&RuntimeIndexState> {

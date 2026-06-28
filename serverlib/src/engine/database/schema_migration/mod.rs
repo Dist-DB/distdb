@@ -3,7 +3,10 @@ pub mod executor;
 pub mod io;
 pub mod types;
 
-pub use conversion::{apply_schema_rules_to_payload, convert_value_to_field_type};
+pub use conversion::{
+    apply_schema_rules_to_payload, compare_stored_field_values,
+    convert_value_to_field_type, display_stored_field_value, render_stored_field_value,
+};
 pub use executor::{DiskToMemorySchemaMigrationExecutor, NoopSchemaMigrationExecutor};
 pub use io::{frame_records_as_wal_file, load_records_from_path, stream_key_for_table};
 pub use types::{FieldTypeChangeRule, SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet, TypeConversionPolicy};

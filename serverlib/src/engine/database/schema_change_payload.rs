@@ -1,4 +1,5 @@
 use super::table_schema::TableSchema;
+use super::transaction_payload::TransactionPayloadCodec;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SchemaChangePayload {
@@ -12,11 +13,11 @@ pub struct SchemaChangePayload {
 impl SchemaChangePayload {
     
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
-        bincode::serialize(self).map_err(|_| "failed to serialize schema change payload")
+        <Self as TransactionPayloadCodec>::encode_payload(self)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, &'static str> {
-        bincode::deserialize(payload).map_err(|_| "failed to deserialize schema change payload")
+        <Self as TransactionPayloadCodec>::decode_payload(payload)
     }
 
 }

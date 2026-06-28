@@ -4,6 +4,8 @@ use std::path::Path;
 use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE};
 use common::helpers::{read_bytes, stable_id};
 
+use crate::engine::wal::{decode_record_from_storage, encode_record_for_storage};
+
 use super::super::core::{DatabaseError, DatabaseResult};
 use super::super::transaction::TransactionRecord;
 
@@ -47,7 +49,7 @@ pub fn load_records_from_path(path: &Path) -> DatabaseResult<Vec<TransactionReco
             return Err(DatabaseError::CatalogDeserialize);
         }
 
-        let record = bincode::deserialize::<TransactionRecord>(&bytes[pos..pos + len])
+        let record = decode_record_from_storage(&bytes[pos..pos + len])
             .map_err(|_| DatabaseError::CatalogDeserialize)?;
         records.push(record);
         pos += len;
@@ -63,7 +65,7 @@ pub fn frame_records_as_wal_file(records: &[TransactionRecord]) -> Result<Vec<u8
     file.extend_from_slice(&make_header(FileKind::Data));
 
     for record in records {
-        let encoded = bincode::serialize(record).map_err(|_| "serialize record")?;
+        let encoded = encode_record_for_storage(record).map_err(|_| "serialize record")?;
         file.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
         file.extend_from_slice(&encoded);
     }

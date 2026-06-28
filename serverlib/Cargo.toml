@@ -14,3 +14,4 @@ rcgen = { version = "0.13", features = ["x509-parser"] }
 chrono = "*"
 regex = "1"
 ahash = "0.8"
+flate2 = "1"

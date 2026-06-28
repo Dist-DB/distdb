@@ -316,7 +316,11 @@ pub fn row_matches_condition_with_result(
             } => {
                 let found = provider
                     .value(field_name)
-                    .map(|actual| values.iter().any(|candidate| candidate == actual))
+                    .map(|actual| {
+                        values
+                            .iter()
+                            .any(|candidate| compare_row_value(actual, candidate, &SelectComparisonOp::Eq))
+                    })
                     .unwrap_or(false);
                 if *negated {
                     !found
@@ -344,7 +348,9 @@ pub fn row_matches_condition_with_result(
                 };
 
                 let values = subquery_values(provider, subquery)?;
-                let found = values.contains(actual);
+                let found = values
+                    .iter()
+                    .any(|candidate| compare_row_value(actual, candidate, &SelectComparisonOp::Eq));
 
                 if *negated {
                     !found

@@ -1,18 +1,37 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
+use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use flate2::Compression;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+
 use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE};
 use common::helpers::{read_bytes, stable_id, write_bytes};
 
 use crate::core::identity::UserId;
+use crate::engine::database::row_payload::looks_like_encrypted_row_payload;
 use crate::engine::database::transaction::{TransactionId, TransactionLog, TransactionRecord};
 use crate::TransactionKind;
+
+const WAL_PAYLOAD_COMPRESSION_MAGIC: [u8; 4] = *b"wpc1";
+const WAL_PAYLOAD_COMPRESSION_VERSION: u8 = 1;
+const WAL_PAYLOAD_COMPRESSION_CODEC_ZLIB: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LegacyCompressedWalPayloadEnvelope {
+    magic: [u8; 4],
+    version: u8,
+    codec: u8,
+    original_len: u32,
+    payload: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalStreamMode {
@@ -508,7 +527,7 @@ impl TransactionLog for ConcurrentWalManager {
 
 fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
 
-    let encoded = bincode::serialize(record).map_err(|_| "failed to serialize WAL record")?;
+    let encoded = encode_record_for_storage(record)?;
     let len = encoded.len() as u64;
     let mut frame = Vec::with_capacity(8 + encoded.len());
 
@@ -519,21 +538,143 @@ fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
 
 }
 
-fn append_record_frame_to_buffer(
+pub(crate) fn encode_record_for_storage(
     record: &TransactionRecord,
-    out: &mut Vec<u8>,
-    scratch: &mut Vec<u8>,
-) -> Result<(), &'static str> {
-    scratch.clear();
+) -> Result<Vec<u8>, &'static str> {
+    let mut record_for_storage = record.clone();
+    record_for_storage.payload = maybe_compress_record_payload_bytes(
+        &record_for_storage.payload,
+        should_skip_payload_compression(record),
+    )?;
 
-    bincode::serialize_into(&mut *scratch, record)
-        .map_err(|_| "failed to serialize WAL record")?;
+    bincode::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record")
+}
 
-    let len = scratch.len() as u64;
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(scratch);
+pub(crate) fn decode_record_from_storage(
+    encoded: &[u8],
+) -> Result<TransactionRecord, &'static str> {
+    let record = bincode::deserialize::<TransactionRecord>(encoded)
+        .map_err(|_| "failed to deserialize WAL record")?;
 
-    Ok(())
+    decode_record_payload_if_needed(record)
+}
+
+fn should_skip_payload_compression(record: &TransactionRecord) -> bool {
+    matches!(
+        record.kind,
+        TransactionKind::Insert | TransactionKind::Update | TransactionKind::Delete
+    ) && looks_like_encrypted_row_payload(&record.payload)
+}
+
+fn maybe_compress_record_payload_bytes(
+    payload: &[u8],
+    skip_compression: bool,
+) -> Result<Vec<u8>, &'static str> {
+
+    if skip_compression
+        || looks_like_compressed_payload_envelope(payload)
+    {
+        return Ok(payload.to_vec());
+    }
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(payload)
+        .map_err(|_| "failed to compress WAL payload")?;
+
+    let compressed = encoder
+        .finish()
+        .map_err(|_| "failed to finish WAL payload compression")?;
+
+    Ok(compressed)
+    
+}
+
+fn decode_record_payload_if_needed(
+    mut record: TransactionRecord,
+) -> Result<TransactionRecord, &'static str> {
+    if let Some(decoded_payload) = maybe_decode_compressed_payload_bytes(&record.payload)? {
+        record.payload = decoded_payload;
+    }
+
+    Ok(record)
+}
+
+fn maybe_decode_compressed_payload_bytes(
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, &'static str> {
+    if looks_like_zlib_payload(payload) {
+        if let Some(decoded) = try_zlib_decode_payload(payload) {
+            return Ok(Some(decoded));
+        }
+
+        return Err("failed to decompress WAL payload");
+    }
+
+    if looks_like_compressed_payload_envelope(payload) {
+        let compressed = &payload[WAL_PAYLOAD_COMPRESSION_MAGIC.len()..];
+        if let Some(decoded) = try_zlib_decode_payload(compressed) {
+            return Ok(Some(decoded));
+        }
+
+        return Err("failed to decompress WAL payload");
+    }
+
+    if let Some(decoded_legacy) = try_decode_legacy_enveloped_payload(payload)? {
+        return Ok(Some(decoded_legacy));
+    }
+
+    Ok(None)
+}
+
+fn try_zlib_decode_payload(compressed: &[u8]) -> Option<Vec<u8>> {
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed).ok()?;
+    Some(decompressed)
+}
+
+fn looks_like_zlib_payload(payload: &[u8]) -> bool {
+    if payload.len() < 2 || payload[0] != 0x78 {
+        return false;
+    }
+
+    let header = u16::from(payload[0]) << 8 | u16::from(payload[1]);
+    header % 31 == 0
+}
+
+fn try_decode_legacy_enveloped_payload(
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, &'static str> {
+    let Ok(envelope) = bincode::deserialize::<LegacyCompressedWalPayloadEnvelope>(payload) else {
+        return Ok(None);
+    };
+
+    if envelope.magic != WAL_PAYLOAD_COMPRESSION_MAGIC {
+        return Ok(None);
+    }
+
+    if envelope.version != WAL_PAYLOAD_COMPRESSION_VERSION {
+        return Err("unsupported WAL payload envelope version");
+    }
+
+    if envelope.codec != WAL_PAYLOAD_COMPRESSION_CODEC_ZLIB {
+        return Err("unsupported WAL payload envelope codec");
+    }
+
+    let Some(decompressed) = try_zlib_decode_payload(envelope.payload.as_slice()) else {
+        return Err("failed to decompress WAL payload");
+    };
+
+    if decompressed.len() != envelope.original_len as usize {
+        return Err("decompressed WAL payload length mismatch");
+    }
+
+    Ok(Some(decompressed))
+}
+
+fn looks_like_compressed_payload_envelope(payload: &[u8]) -> bool {
+    payload.starts_with(&WAL_PAYLOAD_COMPRESSION_MAGIC)
 }
 
 fn write_timestamp_if_data_write(record: &TransactionRecord) -> Option<u64> {
@@ -594,7 +735,7 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
             break;
         }
         
-        match bincode::deserialize::<TransactionRecord>(&bytes[pos..pos + len]) {
+        match decode_record_from_storage(&bytes[pos..pos + len]) {
             Ok(record) => records.push(record),
             Err(e) => {
                 log::error!("failed to deserialize WAL frame at byte {}: {}", pos, e);
@@ -944,17 +1085,15 @@ fn spawn_worker(
 
                             if let Some(ref path) = wal_path {
                                 let mut frames = Vec::new();
-                                let mut scratch = Vec::new();
                                 let mut frame_error: Option<&'static str> = None;
 
                                 for record in &records {
-                                    if let Err(e) = append_record_frame_to_buffer(
-                                        record,
-                                        &mut frames,
-                                        &mut scratch,
-                                    ) {
-                                        frame_error = Some(e);
-                                        break;
+                                    match frame_record(record) {
+                                        Ok(frame) => frames.extend_from_slice(&frame),
+                                        Err(e) => {
+                                            frame_error = Some(e);
+                                            break;
+                                        }
                                     }
                                 }
 

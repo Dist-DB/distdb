@@ -21,6 +21,43 @@ fn empty_database_name_is_rejected() {
 }
 
 #[test]
+fn at_rest_encryption_key_reference_can_be_set_once() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    assert!(!catalog.at_rest_encryption_enabled());
+    assert_eq!(catalog.at_rest_encryption_key_ref(), None);
+    assert_eq!(catalog.at_rest_encryption_key_version(), 0);
+
+    catalog
+        .configure_at_rest_encryption_key_ref("enc:node-main:db-main")
+        .expect("first key reference set should succeed");
+
+    assert!(catalog.at_rest_encryption_enabled());
+    assert_eq!(
+        catalog.at_rest_encryption_key_ref(),
+        Some("enc:node-main:db-main")
+    );
+    assert_eq!(catalog.at_rest_encryption_key_version(), 1);
+}
+
+#[test]
+fn at_rest_encryption_key_reference_is_immutable_after_set() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    catalog
+        .configure_at_rest_encryption_key_ref("enc:node-main:db-main")
+        .expect("first key reference set should succeed");
+
+    let second = catalog.configure_at_rest_encryption_key_ref("enc:node-main:db-alt");
+    assert!(matches!(
+        second,
+        Err(DatabaseError::ImmutableEncryptionConfiguration)
+    ));
+}
+
+#[test]
 fn duplicate_table_registration_is_rejected() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");

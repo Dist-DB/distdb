@@ -1,8 +1,106 @@
 use std::collections::HashMap;
 
+use super::schema_migration::{convert_value_to_field_type, TypeConversionPolicy};
 use super::table_schema::TableSchema;
 
 type OrdinalRowPayload = Vec<Option<Vec<u8>>>;
+
+const ENCRYPTED_ROW_PAYLOAD_MAGIC: [u8; 4] = *b"dbrw";
+pub const ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION: u8 = 1;
+const ENCRYPTED_ROW_PAYLOAD_NONCE_SIZE_BYTES: usize = 12;
+const ENCRYPTED_ROW_PAYLOAD_AUTH_TAG_SIZE_BYTES: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EncryptedRowPayloadEnvelope {
+    pub key_version: u32,
+    pub nonce: Vec<u8>,
+    pub auth_tag: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LegacyEncryptedRowPayloadEnvelope {
+    magic: [u8; 4],
+    version: u8,
+    key_version: u32,
+    nonce: Vec<u8>,
+    auth_tag: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+impl EncryptedRowPayloadEnvelope {
+    pub fn new(key_version: u32, nonce: Vec<u8>, auth_tag: Vec<u8>, ciphertext: Vec<u8>) -> Self {
+        Self {
+            key_version,
+            nonce,
+            auth_tag,
+            ciphertext,
+        }
+    }
+}
+
+pub fn encode_encrypted_row_payload_envelope(
+    key_version: u32,
+    nonce: Vec<u8>,
+    auth_tag: Vec<u8>,
+    ciphertext: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let envelope = EncryptedRowPayloadEnvelope::new(key_version, nonce, auth_tag, ciphertext);
+    bincode::serialize(&envelope).map_err(|err| err.to_string())
+}
+
+pub fn decode_encrypted_row_payload_envelope(
+    payload: &[u8],
+) -> Result<Option<EncryptedRowPayloadEnvelope>, String> {
+
+    if let Ok(envelope) = bincode::deserialize::<EncryptedRowPayloadEnvelope>(payload) {
+        if looks_like_valid_encrypted_payload_envelope(&envelope) {
+            return Ok(Some(envelope));
+        }
+    }
+
+    let Ok(legacy_envelope) = bincode::deserialize::<LegacyEncryptedRowPayloadEnvelope>(payload) else {
+        return Ok(None);
+    };
+
+    if legacy_envelope.magic != ENCRYPTED_ROW_PAYLOAD_MAGIC {
+        return Ok(None);
+    }
+
+    if legacy_envelope.version != ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION {
+        return Err(format!(
+            "unsupported encrypted row payload version {}",
+            legacy_envelope.version
+        ));
+    }
+
+    let envelope = EncryptedRowPayloadEnvelope {
+        key_version: legacy_envelope.key_version,
+        nonce: legacy_envelope.nonce,
+        auth_tag: legacy_envelope.auth_tag,
+        ciphertext: legacy_envelope.ciphertext,
+    };
+
+    if !looks_like_valid_encrypted_payload_envelope(&envelope) {
+        return Ok(None);
+    }
+
+    Ok(Some(envelope))
+    
+}
+
+pub fn looks_like_encrypted_row_payload(payload: &[u8]) -> bool {
+    matches!(decode_encrypted_row_payload_envelope(payload), Ok(Some(_)))
+}
+
+fn looks_like_valid_encrypted_payload_envelope(
+    envelope: &EncryptedRowPayloadEnvelope,
+) -> bool {
+    envelope.key_version > 0
+        && envelope.nonce.len() == ENCRYPTED_ROW_PAYLOAD_NONCE_SIZE_BYTES
+        && envelope.auth_tag.len() == ENCRYPTED_ROW_PAYLOAD_AUTH_TAG_SIZE_BYTES
+        && !envelope.ciphertext.is_empty()
+}
 
 fn field_names_by_ordinal(schema: &TableSchema) -> Vec<String> {
     
@@ -35,7 +133,21 @@ pub fn encode_row_payload(
 
     let payload = ordered_field_names
         .into_iter()
-        .map(|field_name| row_map.get(&field_name).cloned())
+        .map(|field_name| {
+            row_map.get(&field_name).map(|value| {
+                schema
+                    .field(&field_name)
+                    .and_then(|field| {
+                        convert_value_to_field_type(
+                            value,
+                            &field.field_type,
+                            TypeConversionPolicy::Safe,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_else(|| value.clone())
+            })
+        })
         .collect::<OrdinalRowPayload>();
 
     bincode::serialize(&payload).map_err(|err| err.to_string())
@@ -46,6 +158,12 @@ pub fn decode_row_payload(
     schema: &TableSchema,
     payload: &[u8],
 ) -> Result<HashMap<String, Vec<u8>>, String> {
+
+    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
+        return Err(
+            "row payload is encrypted at rest and must be decrypted before decode".to_string(),
+        );
+    }
     
     let ordered_field_names = field_names_by_ordinal(schema);
 
@@ -88,6 +206,12 @@ pub fn decode_row_field_value(
     payload: &[u8],
     field_name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
+
+    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
+        return Err(
+            "row payload is encrypted at rest and must be decrypted before field decode".to_string(),
+        );
+    }
 
     let ordered_field_names = field_names_by_ordinal(schema);
 

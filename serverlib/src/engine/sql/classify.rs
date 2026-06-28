@@ -449,6 +449,12 @@ pub(super) fn classify_text_fallback(
             object_name,
         )),
 
+        ("create", "database") | ("create", "schema") => Some((
+            SqlDirective::Create,
+            SqlOperation::CreateDatabase,
+            object_name,
+        )),
+
         // Intentionally unsupported for now.
         ("create", "function") | ("drop", "function") => None,
         
