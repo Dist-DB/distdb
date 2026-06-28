@@ -1,4 +1,6 @@
 
+use std::borrow::Cow;
+
 use crate::core::identity::UserId;
 use common::helpers::base64::{b64_decode, b64_encode_bytes};
 
@@ -151,15 +153,18 @@ impl TransactionPayloadResolver for ChainedTransactionPayloadResolver {
             return Ok(None);
         };
 
-        let mut current = payload.to_vec();
+        let mut current = Cow::Borrowed(payload);
 
         for transform in &self.transforms {
-            if let Some(transformed) = transform.transform_payload(&current, context)? {
-                current = transformed;
+            if let Some(transformed) = transform.transform_payload(current.as_ref(), context)? {
+                current = Cow::Owned(transformed);
             }
         }
 
-        Ok(Some(current))
+        match current {
+            Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
+            Cow::Owned(bytes) => Ok(Some(bytes)),
+        }
     }
 }
 
@@ -201,17 +206,20 @@ impl ChainedTransactionPayloadWriter {
             return Ok(None);
         };
 
-        let mut current = payload.to_vec();
+        let mut current = Cow::Borrowed(payload);
 
         for transform in &self.transforms {
             if let Some(transformed) =
-                transform.transform_payload_for_write(record, &current, context)?
+                transform.transform_payload_for_write(record, current.as_ref(), context)?
             {
-                current = transformed;
+                current = Cow::Owned(transformed);
             }
         }
 
-        Ok(Some(current))
+        match current {
+            Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
+            Cow::Owned(bytes) => Ok(Some(bytes)),
+        }
     }
 }
 

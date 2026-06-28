@@ -4,10 +4,22 @@ use std::collections::hash_map::Entry;
 use std::time::Instant;
 
 use super::table::DatabaseTable;
+use crate::engine::execution::access::load_live_rows_in_place;
 use crate::{
-    load_live_rows, warm_equality_cache_from_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
+    warm_equality_cache_from_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
     TransactionKind,
 };
+
+const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: usize = 250_000;
+const RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS: usize = 32;
+
+fn runtime_index_parallel_build_max_workers() -> usize {
+    std::env::var("DISTDB_RUNTIME_INDEX_BUILD_WORKERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS)
+}
 
 /// In-memory state for a single index.
 /// Each entry is a composite key tuple in the index's field order.
@@ -290,7 +302,7 @@ impl RuntimeIndexStore {
 
         let bootstrap_started_at = Instant::now();
         log::info!(
-            "runtime index bootstrap mode materialize_non_primary={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
+            "runtime index bootstrap mode materialize_non_primary={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
             if self.non_primary_field_allowlist.is_empty() {
                 "<none>".to_string()
@@ -349,7 +361,7 @@ impl RuntimeIndexStore {
                 }
 
                 let live_rows_started_at = Instant::now();
-                let live_rows = load_live_rows(wal, &table_id, &table.schema);
+                let live_rows = load_live_rows_in_place(wal, &table_id, &table.schema);
                 let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
 
                 let latest_tx_id = wal
@@ -369,6 +381,7 @@ impl RuntimeIndexStore {
                     .filter(|field_name| !field_name.is_empty())
                     .map(|field_name| common::normalize_identifier!(field_name))
                     .collect::<Vec<_>>();
+
                 warm_fields.sort();
                 warm_fields.dedup();
 
@@ -390,22 +403,7 @@ impl RuntimeIndexStore {
                     );
                 }
 
-                let mut rebuilt = tracked_indexes
-                    .iter()
-                    .map(|index| {
-                        (
-                            index.index_id.0.clone(),
-                            index.clone(),
-                            AHashSet::with_capacity(live_rows.len()),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                for (_, row_map) in &live_rows {
-                    for (_, index, entries) in &mut rebuilt {
-                        entries.insert(index_value_tuple(index, row_map));
-                    }
-                }
+                let rebuilt = build_bootstrap_index_entries(&tracked_indexes, &live_rows);
 
                 for (index_id, index, entries) in rebuilt {
                     let state = self.index_mut(&index_id);
@@ -469,7 +467,9 @@ impl RuntimeIndexStore {
         let mut scoped = Self::new();
 
         for catalog in catalogs.values() {
+            
             for table_id in catalog.table_ids() {
+
                 if !table_ids.contains(&table_id) {
                     continue;
                 }
@@ -483,13 +483,90 @@ impl RuntimeIndexStore {
                         scoped.indexes.insert(index.index_id.0.clone(), state.clone());
                     }
                 }
+
             }
+
         }
 
         scoped
         
     }
 
+}
+
+fn build_bootstrap_index_entries(
+    tracked_indexes: &[DatabaseIndex],
+    live_rows: &[(u64, HashMap<String, Vec<u8>>)],
+) -> Vec<(String, DatabaseIndex, AHashSet<Vec<Vec<u8>>>)> {
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let should_parallel = available > 1
+        && tracked_indexes.len() > 1
+        && live_rows.len() >= RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS;
+
+    if !should_parallel {
+        return tracked_indexes
+            .iter()
+            .map(|index| {
+                let mut entries = AHashSet::with_capacity(live_rows.len());
+                for (_, row_map) in live_rows {
+                    entries.insert(index_value_tuple(index, row_map));
+                }
+                (index.index_id.0.clone(), index.clone(), entries)
+            })
+            .collect();
+    }
+
+    let workers = std::cmp::min(
+        std::cmp::min(available, runtime_index_parallel_build_max_workers()),
+        tracked_indexes.len(),
+    );
+    let chunk_size = tracked_indexes.len().div_ceil(workers);
+
+    let mut chunks = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+
+        for worker_idx in 0..workers {
+            let start = worker_idx * chunk_size;
+            if start >= tracked_indexes.len() {
+                break;
+            }
+
+            let end = std::cmp::min(start + chunk_size, tracked_indexes.len());
+            let indexes = &tracked_indexes[start..end];
+
+            handles.push(scope.spawn(move || {
+                let mut chunk = Vec::with_capacity(indexes.len());
+                for index in indexes {
+                    let mut entries = AHashSet::with_capacity(live_rows.len());
+                    for (_, row_map) in live_rows {
+                        entries.insert(index_value_tuple(index, row_map));
+                    }
+                    chunk.push((index.index_id.0.clone(), index.clone(), entries));
+                }
+                (start, chunk)
+            }));
+        }
+
+        let mut out = Vec::with_capacity(handles.len());
+        for handle in handles {
+            if let Ok(chunk) = handle.join() {
+                out.push(chunk);
+            }
+        }
+        out
+    });
+
+    chunks.sort_by_key(|(start, _)| *start);
+
+    let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
+    for (_, mut chunk) in chunks {
+        rebuilt.append(&mut chunk);
+    }
+
+    rebuilt
 }
 
 impl Default for RuntimeIndexStore {
@@ -519,6 +596,7 @@ fn runtime_index_non_primary_index_allowlist() -> AHashSet<String> {
 }
 
 fn parse_runtime_index_allowlist_env(var_name: &str) -> AHashSet<String> {
+
     let Some(value) = std::env::var(var_name).ok() else {
         return AHashSet::new();
     };
@@ -529,9 +607,11 @@ fn parse_runtime_index_allowlist_env(var_name: &str) -> AHashSet<String> {
         .filter(|entry| !entry.is_empty())
         .map(|entry| common::normalize_identifier!(entry))
         .collect()
+
 }
 
 pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) -> Vec<Vec<u8>> {
+
     let mut values = Vec::with_capacity(if index.field_names.is_empty() { 1 } else { index.field_names.len() });
 
     if index.field_names.is_empty() && !index.field_name.is_empty() {
@@ -548,6 +628,7 @@ pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8
 }
 
 pub fn primary_key_index(table: &DatabaseTable) -> Option<&DatabaseIndex> {
+
     table
         .indexes
         .values()
@@ -558,6 +639,7 @@ pub fn primary_key_index(table: &DatabaseTable) -> Option<&DatabaseIndex> {
                 .values()
                 .find(|index| index.index_id.0.to_ascii_lowercase().starts_with("pri:"))
         })
+        
 }
 
 

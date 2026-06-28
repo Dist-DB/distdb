@@ -638,6 +638,7 @@ pub async fn maybe_show_entities_response(
         let mut discovered_catalogs = Vec::<DatabaseCatalog>::new();
 
         for catalog_path in discovered_catalog_paths {
+
             let stem = catalog_path
                 .file_stem()
                 .and_then(|value| value.to_str())
@@ -662,6 +663,7 @@ pub async fn maybe_show_entities_response(
             }
 
             discovered_catalogs.push(catalog);
+
         }
 
         discovered_catalogs.sort_by(|left, right| left.database_id.0.cmp(&right.database_id.0));
@@ -725,6 +727,7 @@ pub async fn maybe_show_entities_response(
             {
                 append_catalog_entity_rows(&mut rows, &resolved_database_id, catalog, false);
             }
+            
         }
 
         let response = ConnectorResponse::applied(

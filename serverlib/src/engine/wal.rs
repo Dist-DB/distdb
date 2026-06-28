@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::borrow::Cow;
 use std::fs;
 use std::io::ErrorKind;
 use std::io::Read;
@@ -8,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -24,8 +26,7 @@ use crate::engine::database::row_payload::{
     UnconfiguredRowPayloadEncryptionProvider,
 };
 use crate::engine::database::transaction::transaction_record::{
-    ChainedTransactionPayloadResolver, ChainedTransactionPayloadWriter,
-    PayloadTransformError, TransactionPayloadContext, TransactionPayloadResolver,
+    PayloadTransformError, TransactionPayloadContext,
     TransactionPayloadTransform, TransactionPayloadWriteTransform,
 };
 use crate::engine::database::transaction::{TransactionId, TransactionLog, TransactionRecord};
@@ -62,13 +63,36 @@ impl TransactionPayloadTransform for WalCompressionPayloadTransform {
     }
 }
 
-fn wal_storage_payload_resolver() -> ChainedTransactionPayloadResolver {
-    ChainedTransactionPayloadResolver::new()
-        .with_transform(WalCompressionPayloadTransform)
-        .with_transform(RowPayloadDecryptionTransform::new(
-            UnconfiguredRowPayloadDecryptionProvider,
-        ))
-        .with_transform(EncryptedRowPayloadTransform::preserve_opaque())
+fn resolve_wal_storage_payload(
+    raw_payload: Option<&[u8]>,
+    context: &TransactionPayloadContext,
+) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+    let Some(payload) = raw_payload else {
+        return Ok(None);
+    };
+
+    let compression = WalCompressionPayloadTransform;
+    let decrypt = RowPayloadDecryptionTransform::new(UnconfiguredRowPayloadDecryptionProvider);
+    let preserve_opaque = EncryptedRowPayloadTransform::preserve_opaque();
+
+    let mut current = Cow::Borrowed(payload);
+
+    if let Some(decoded) = compression.transform_payload(current.as_ref(), context)? {
+        current = Cow::Owned(decoded);
+    }
+
+    if let Some(decoded) = decrypt.transform_payload(current.as_ref(), context)? {
+        current = Cow::Owned(decoded);
+    }
+
+    if let Some(decoded) = preserve_opaque.transform_payload(current.as_ref(), context)? {
+        current = Cow::Owned(decoded);
+    }
+
+    match current {
+        Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
+        Cow::Owned(bytes) => Ok(Some(bytes)),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -102,13 +126,43 @@ impl TransactionPayloadWriteTransform for WalCompressionPayloadWriteTransform {
     }
 }
 
-fn wal_storage_payload_writer() -> ChainedTransactionPayloadWriter {
-    ChainedTransactionPayloadWriter::new()
-        .with_transform(RowPayloadEncryptionWriteTransform::new(
-            UnconfiguredRowPayloadEncryptionProvider,
-        ))
-        .with_transform(EncryptedRowPayloadTransform::preserve_opaque())
-        .with_transform(WalCompressionPayloadWriteTransform)
+fn write_wal_storage_payload(
+    record: &TransactionRecord,
+    raw_payload: Option<&[u8]>,
+    context: &TransactionPayloadContext,
+) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+    let Some(payload) = raw_payload else {
+        return Ok(None);
+    };
+
+    let encrypt = RowPayloadEncryptionWriteTransform::new(UnconfiguredRowPayloadEncryptionProvider);
+    let preserve_opaque = EncryptedRowPayloadTransform::preserve_opaque();
+    let compression = WalCompressionPayloadWriteTransform;
+
+    let mut current = Cow::Borrowed(payload);
+
+    if let Some(transformed) =
+        encrypt.transform_payload_for_write(record, current.as_ref(), context)?
+    {
+        current = Cow::Owned(transformed);
+    }
+
+    if let Some(transformed) =
+        preserve_opaque.transform_payload_for_write(record, current.as_ref(), context)?
+    {
+        current = Cow::Owned(transformed);
+    }
+
+    if let Some(transformed) =
+        compression.transform_payload_for_write(record, current.as_ref(), context)?
+    {
+        current = Cow::Owned(transformed);
+    }
+
+    match current {
+        Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
+        Cow::Owned(bytes) => Ok(Some(bytes)),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +223,19 @@ impl ConcurrentWalManager {
 
     pub fn cache_scope_id(&self) -> usize {
         self.cache_scope_id
+    }
+
+    pub fn with_records<T, F>(&self, wal_id: &str, func: F) -> Option<T>
+    where
+        F: FnOnce(&[TransactionRecord]) -> T,
+    {
+        let stream_key = obfuscated_stream_key(wal_id).ok()?;
+
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
+
+        let store = self.storage.lock().ok()?;
+        let entries = store.get(&stream_key)?;
+        Some(func(entries.as_slice()))
     }
 
     fn hydrate_stream_if_needed(&self, wal_id: &str, stream_key: &str) {
@@ -542,13 +609,16 @@ impl ConcurrentWalManager {
         from: Option<TransactionId>,
         context: &TransactionPayloadContext,
     ) -> Result<Vec<TransactionRecord>, &'static str> {
+        if context == &TransactionPayloadContext::default() {
+            return Ok(self.since(wal_id, from));
+        }
+
         let mut records = self.since(wal_id, from);
-        let resolver = wal_storage_payload_resolver();
 
         for record in &mut records {
-            record
-                .resolve_payload_with_context(&resolver, context)
+            let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), context)
                 .map_err(map_payload_transform_error)?;
+            record.set_payload(resolved_payload);
         }
 
         Ok(records)
@@ -689,9 +759,7 @@ pub(crate) fn encode_record_for_storage_with_context(
 ) -> Result<Vec<u8>, &'static str> {
 
     let mut record_for_storage = record.clone();
-    let writer = wal_storage_payload_writer();
-    let stored_payload = writer
-        .write_payload_with_context(record, record_for_storage.payload_raw(), context)
+    let stored_payload = write_wal_storage_payload(record, record_for_storage.payload_raw(), context)
         .map_err(map_payload_write_transform_error)?;
     record_for_storage.set_payload(stored_payload);
 
@@ -704,7 +772,15 @@ pub(crate) fn decode_record_from_storage(
 ) -> Result<TransactionRecord, &'static str> {
 
     let context = TransactionPayloadContext::default();
-    decode_record_from_storage_with_context(encoded, &context)
+    let mut record = bincode::deserialize::<TransactionRecord>(encoded)
+        .map_err(|_| "failed to deserialize WAL record")?;
+
+    let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), &context)
+        .map_err(map_payload_transform_error)?;
+
+    record.set_payload(resolved_payload);
+
+    Ok(record)
 
 }
 
@@ -716,11 +792,9 @@ pub(crate) fn decode_record_from_storage_with_context(
     let mut record = bincode::deserialize::<TransactionRecord>(encoded)
         .map_err(|_| "failed to deserialize WAL record")?;
 
-    let resolver = wal_storage_payload_resolver();
-    
-    record
-        .resolve_payload_with_context(&resolver, context)
-        .map_err(map_payload_transform_error)?;
+    let resolved_payload =
+        resolve_wal_storage_payload(record.payload_raw(), context).map_err(map_payload_transform_error)?;
+    record.set_payload(resolved_payload);
 
     Ok(record)
 
@@ -849,21 +923,130 @@ fn obfuscated_stream_key(wal_id: &str) -> Result<String, &'static str> {
 
 }
 
+const WAL_PARALLEL_DECODE_MIN_FRAMES: usize = 100_000;
+const WAL_PARALLEL_DECODE_MAX_WORKERS: usize = 32;
+
+fn wal_parallel_decode_max_workers() -> usize {
+    std::env::var("DISTDB_WAL_PARALLEL_DECODE_WORKERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(WAL_PARALLEL_DECODE_MAX_WORKERS)
+}
+
+#[derive(Debug)]
+struct WalDecodeChunkResult {
+    start_frame_idx: usize,
+    records: Vec<TransactionRecord>,
+    first_error: Option<(usize, &'static str)>,
+}
+
+fn decode_records_sequential(
+    bytes: &[u8],
+    frame_ranges: &[(usize, usize)],
+) -> Vec<TransactionRecord> {
+    let mut records = Vec::with_capacity(frame_ranges.len());
+
+    for &(offset, len) in frame_ranges {
+        match decode_record_from_storage(&bytes[offset..offset + len]) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                log::error!("failed to deserialize WAL frame at byte {}: {}", offset, e);
+                break;
+            }
+        }
+    }
+
+    records
+}
+
+fn decode_records_parallel(
+    bytes: &[u8],
+    frame_ranges: &[(usize, usize)],
+    workers: usize,
+) -> Vec<TransactionRecord> {
+    let chunk_size = frame_ranges.len().div_ceil(workers);
+
+    let mut chunks = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+
+        for worker_idx in 0..workers {
+            let start = worker_idx * chunk_size;
+            if start >= frame_ranges.len() {
+                break;
+            }
+
+            let end = std::cmp::min(start + chunk_size, frame_ranges.len());
+            let ranges = &frame_ranges[start..end];
+
+            handles.push(scope.spawn(move || {
+                let mut records = Vec::with_capacity(ranges.len());
+                let mut first_error = None;
+
+                for &(offset, len) in ranges {
+                    match decode_record_from_storage(&bytes[offset..offset + len]) {
+                        Ok(record) => records.push(record),
+                        Err(e) => {
+                            first_error = Some((offset, e));
+                            break;
+                        }
+                    }
+                }
+
+                WalDecodeChunkResult {
+                    start_frame_idx: start,
+                    records,
+                    first_error,
+                }
+            }));
+        }
+
+        let mut decoded = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.join() {
+                Ok(chunk) => decoded.push(chunk),
+                Err(_) => {
+                    log::error!("parallel WAL decode worker panicked; falling back to partial results");
+                }
+            }
+        }
+
+        decoded
+    });
+
+    chunks.sort_by_key(|chunk| chunk.start_frame_idx);
+
+    let mut records = Vec::with_capacity(frame_ranges.len());
+    for chunk in chunks {
+        records.extend(chunk.records);
+        if let Some((offset, err)) = chunk.first_error {
+            log::error!("failed to deserialize WAL frame at byte {}: {}", offset, err);
+            break;
+        }
+    }
+
+    records
+}
+
 fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
+
+    let started_at = Instant::now();
+    let read_started_at = Instant::now();
 
     let bytes = match read_bytes(path) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
+    let read_elapsed_ms = read_started_at.elapsed().as_millis();
 
     if let Err(e) = verify_header(FileKind::Data, &bytes) {
         log::error!("invalid WAL header in '{}': {}", path.display(), e);
         return Vec::new();
     }
 
-    let mut records = Vec::new();
     let mut pos = HEADER_SIZE;
-    
+    let mut frame_ranges: Vec<(usize, usize)> = Vec::new();
+
     while pos + 8 <= bytes.len() {
 
         let len = u64::from_le_bytes(
@@ -871,22 +1054,49 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
                 .try_into()
                 .expect("slice is exactly 8 bytes"),
         ) as usize;
-        
+
         pos += 8;
         if pos + len > bytes.len() {
             log::warn!("truncated WAL frame at byte offset {}, stopping replay", pos);
             break;
         }
-        
-        match decode_record_from_storage(&bytes[pos..pos + len]) {
-            Ok(record) => records.push(record),
-            Err(e) => {
-                log::error!("failed to deserialize WAL frame at byte {}: {}", pos, e);
-                break;
-            }
-        }
-        pos += len;
 
+        frame_ranges.push((pos, len));
+        pos += len;
+    }
+
+    let decode_started_at = Instant::now();
+
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let should_parallel_decode =
+        available > 1 && frame_ranges.len() >= WAL_PARALLEL_DECODE_MIN_FRAMES;
+
+    let records = if should_parallel_decode {
+        let max_workers = wal_parallel_decode_max_workers();
+        let workers = std::cmp::min(
+            std::cmp::min(available, max_workers),
+            frame_ranges.len(),
+        );
+        decode_records_parallel(&bytes, &frame_ranges, workers)
+    } else {
+        decode_records_sequential(&bytes, &frame_ranges)
+    };
+
+    let decode_elapsed_ms = decode_started_at.elapsed().as_millis();
+    let total_elapsed_ms = started_at.elapsed().as_millis();
+
+    if total_elapsed_ms >= 1_000 {
+        log::info!(
+            "wal file load timing path={} records={} bytes={} read_ms={} decode_ms={} total_ms={}",
+            path.display(),
+            records.len(),
+            bytes.len(),
+            read_elapsed_ms,
+            decode_elapsed_ms,
+            total_elapsed_ms,
+        );
     }
     
     records
@@ -1155,6 +1365,7 @@ fn spawn_worker(
                             let mut insert_pos = entries
                                 .binary_search_by_key(&record.id.0, |existing| existing.id.0)
                                 .unwrap_or_else(|idx| idx);
+
                             while insert_pos < entries.len()
                                 && entries[insert_pos].id.0 <= record.id.0
                             {
@@ -1182,7 +1393,9 @@ fn spawn_worker(
                                 "out-of-order transaction accepted and merged for stream={}",
                                 stream_key
                             );
+                            
                             let _ = ack.send(Ok(()));
+
                         }
 
                     } else {
@@ -1191,7 +1404,9 @@ fn spawn_worker(
                             "failed to acquire WAL storage lock for stream={}",
                             stream_key
                         );
+                        
                         let _ = ack.send(Err("failed to lock WAL storage"));
+                        
                         break;
                     }
                 },
@@ -1211,6 +1426,7 @@ fn spawn_worker(
                             state.insert(stream_key.clone(), Vec::new());
                             state.get_mut(&stream_key).expect("WAL stream entry should exist")
                         };
+
                         let mut expected_next_id = entries
                             .last()
                             .map(|last| last.id.0.saturating_add(1))
@@ -1229,6 +1445,7 @@ fn spawn_worker(
                         if ordered {
 
                             if let Some(ref path) = wal_path {
+                                
                                 let mut frames = Vec::new();
                                 let mut frame_error: Option<&'static str> = None;
 
@@ -1268,6 +1485,7 @@ fn spawn_worker(
 
                         let mut batch_error: Option<&'static str> = None;
                         let reserve_hint = records.len().saturating_add(records.len() / 2);
+
                         entries.reserve(reserve_hint);
 
                         for record in records {
@@ -1305,6 +1523,7 @@ fn spawn_worker(
 
                                 entries.push(record);
                                 continue;
+                                
                             }
 
                             if entries.contains(&record) {
@@ -1314,6 +1533,7 @@ fn spawn_worker(
                             let mut insert_pos = entries
                                 .binary_search_by_key(&record.id.0, |existing| existing.id.0)
                                 .unwrap_or_else(|idx| idx);
+
                             while insert_pos < entries.len() && entries[insert_pos].id.0 <= record.id.0 {
                                 insert_pos += 1;
                             }
@@ -1334,6 +1554,7 @@ fn spawn_worker(
                             if let Some(ref path) = wal_path {
                                 append_file = open_wal_append_file(path).ok();
                             }
+
                         }
 
                         if let Some(err) = batch_error {
@@ -1353,9 +1574,12 @@ fn spawn_worker(
                             "failed to acquire WAL storage lock for batch stream={}",
                             stream_key
                         );
+                        
                         let _ = ack.send(Err("failed to lock WAL storage"));
+
                         break;
                     }
+
                 },
 
                 WalCommand::CompactToLatestSchemaAndMetadata {
@@ -1363,13 +1587,16 @@ fn spawn_worker(
                     timestamp_epoch_ms,
                     ack,
                 } => {
+
                     if let Ok(mut state) = storage.lock() {
+
                         let entries = if let Some(entries) = state.get_mut(&stream_key) {
                             entries
                         } else {
                             state.insert(stream_key.clone(), Vec::new());
                             state.get_mut(&stream_key).expect("WAL stream entry should exist")
                         };
+
                         compact_entries_to_latest_schema_and_metadata(
                             entries,
                             actor,
@@ -1392,6 +1619,7 @@ fn spawn_worker(
                         }
 
                         let _ = ack.send(Ok(()));
+
                     } else {
                         log::error!(
                             "failed to acquire WAL storage lock during compact for stream={}",
@@ -1400,6 +1628,7 @@ fn spawn_worker(
                         let _ = ack.send(Err("failed to lock WAL storage"));
                         break;
                     }
+
                 },
 
                 WalCommand::Shutdown => {

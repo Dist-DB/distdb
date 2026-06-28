@@ -599,7 +599,7 @@ fn materialize_relation_rows_supports_full_scan_and_equality_probe() {
 }
 
 #[test]
-fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_misses() {
+fn materialize_relation_rows_returns_empty_when_runtime_lookup_key_misses() {
     let wal = ConcurrentWalManager::in_memory();
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
@@ -614,6 +614,36 @@ fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_misses() {
     runtime_indexes
         .index_mut(&index.index_id.0)
         .insert(vec![b"999".to_vec()]);
+
+    let rows = materialize_relation_rows(
+        &wal,
+        table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::RuntimeIndexLookup {
+                index_id: index.index_id.0.clone(),
+                lookup_key: vec![b"1".to_vec()],
+            },
+        },
+    );
+
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_state_missing() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let filters = HashMap::from([("id".to_string(), b"1".to_vec())]);
+    let (index, _) =
+        choose_index_lookup(table, &filters).expect("an index lookup should be selected");
+
+    let runtime_indexes = RuntimeIndexStore::new();
 
     let rows = materialize_relation_rows(
         &wal,

@@ -280,7 +280,7 @@ fn encoded_storage_record_compresses_small_non_encrypted_payloads() {
 }
 
 #[test]
-fn decoded_storage_record_preserves_raw_payload_and_exposes_resolved_payload() {
+fn decoded_storage_record_collapses_to_logical_payload_on_default_decode() {
     let actor = UserId::from_username("tester");
     let record = TransactionRecord::with_payload(
         TransactionId(9),
@@ -296,7 +296,7 @@ fn decoded_storage_record_preserves_raw_payload_and_exposes_resolved_payload() {
     let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
 
     assert_eq!(decoded.payload(), Some(&b"ip_lookup:CANADA"[..]));
-    assert_ne!(decoded.payload_raw(), Some(&b"ip_lookup:CANADA"[..]));
+    assert_eq!(decoded.payload_raw(), Some(&b"ip_lookup:CANADA"[..]));
 }
 
 #[test]

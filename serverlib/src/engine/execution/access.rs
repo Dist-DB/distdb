@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+use ahash::{AHashMap, AHashSet};
 
 use crate::engine::database::transaction::TransactionLog;
 use crate::engine::database::runtime_index::derived_indexes_for_table;
@@ -8,6 +11,7 @@ use crate::{
     TransactionPayloadContext,
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
     SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
+    TransactionRecord,
 };
 
 use super::MaterializedRelationRow;
@@ -24,6 +28,119 @@ struct EqualityTableCacheEntry {
 
 static EQUALITY_TABLE_CACHE: OnceLock<Mutex<HashMap<(usize, String), EqualityTableCacheEntry>>> =
     OnceLock::new();
+
+const LIVE_ROW_APPLY_PARALLEL_MIN_RECORDS: usize = 500_000;
+const LIVE_ROW_APPLY_PARALLEL_CHUNK_SIZE: usize = 200_000;
+const LIVE_ROW_APPLY_PARALLEL_MAX_WORKERS: usize = 32;
+
+fn live_row_apply_max_workers() -> usize {
+    std::env::var("DISTDB_LIVE_ROW_APPLY_WORKERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(LIVE_ROW_APPLY_PARALLEL_MAX_WORKERS)
+}
+
+#[inline]
+fn record_visible_for_live_row_apply(
+    record: &TransactionRecord,
+    committed_groups: &AHashSet<u64>,
+    aborted_groups: &AHashSet<u64>,
+) -> bool {
+    if let Some(group_id) = record.groupid {
+        let group_id = group_id.0;
+
+        if aborted_groups.contains(&group_id) {
+            return false;
+        }
+
+        if !committed_groups.contains(&group_id)
+            && !matches!(record.kind, TransactionKind::WriteCommit | TransactionKind::WriteAbort)
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn decode_live_row_chunk(
+    chunk: &[TransactionRecord],
+    schema: &TableSchema,
+    committed_groups: &AHashSet<u64>,
+    aborted_groups: &AHashSet<u64>,
+    workers: usize,
+) -> Vec<Option<HashMap<String, Vec<u8>>>> {
+    if workers <= 1 || chunk.len() < 2 {
+        let mut decoded = vec![None; chunk.len()];
+        for (idx, record) in chunk.iter().enumerate() {
+            if !record_visible_for_live_row_apply(record, committed_groups, aborted_groups) {
+                continue;
+            }
+
+            if matches!(record.kind, TransactionKind::Insert | TransactionKind::Update)
+                && let Some(payload) = record.payload_logical()
+                && let Ok(row_map) = decode_row_payload(schema, payload)
+            {
+                decoded[idx] = Some(row_map);
+            }
+        }
+
+        return decoded;
+    }
+
+    let chunk_size = chunk.len().div_ceil(workers);
+
+    let partials = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+
+        for worker_idx in 0..workers {
+            let start = worker_idx * chunk_size;
+            if start >= chunk.len() {
+                break;
+            }
+
+            let end = std::cmp::min(start + chunk_size, chunk.len());
+            let sub_chunk = &chunk[start..end];
+
+            handles.push(scope.spawn(move || {
+                let mut local = Vec::new();
+
+                for (offset, record) in sub_chunk.iter().enumerate() {
+                    if !record_visible_for_live_row_apply(record, committed_groups, aborted_groups) {
+                        continue;
+                    }
+
+                    if matches!(record.kind, TransactionKind::Insert | TransactionKind::Update)
+                        && let Some(payload) = record.payload_logical()
+                        && let Ok(row_map) = decode_row_payload(schema, payload)
+                    {
+                        local.push((start + offset, row_map));
+                    }
+                }
+
+                local
+            }));
+        }
+
+        let mut all = Vec::with_capacity(handles.len());
+        for handle in handles {
+            if let Ok(local) = handle.join() {
+                all.push(local);
+            }
+        }
+        all
+    });
+
+    let mut decoded = vec![None; chunk.len()];
+    for local in partials {
+        for (idx, row_map) in local {
+            decoded[idx] = Some(row_map);
+        }
+    }
+
+    decoded
+}
 
 fn build_postings_for_field(
     rows_by_id: &HashMap<u64, HashMap<String, Vec<u8>>>,
@@ -72,24 +189,30 @@ pub fn warm_equality_cache_from_live_rows(
     live_rows: &[(u64, HashMap<String, Vec<u8>>) ],
     field_names: &[String],
 ) {
+    
     if field_names.is_empty() {
         return;
     }
 
     let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+    
     for (row_id, row_map) in live_rows {
         rows_by_id.insert(*row_id, row_map.clone());
     }
 
     let mut row_ids_by_field_value = HashMap::<String, HashMap<Vec<u8>, Vec<u64>>>::new();
+    
     for field_name in field_names {
+
         if field_name.is_empty() {
             continue;
         }
+
         row_ids_by_field_value.insert(
             field_name.clone(),
             build_postings_for_field(&rows_by_id, field_name),
         );
+
     }
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -103,6 +226,7 @@ pub fn warm_equality_cache_from_live_rows(
             },
         );
     }
+
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +292,7 @@ pub fn collect_indexable_equality_filters_for_schema(
 ) -> bool {
 
     match condition {
+
         SelectCondition::And(children) => children
             .iter()
             .all(|child| collect_indexable_equality_filters_for_schema(schema, child, filters)),
@@ -238,6 +363,7 @@ pub fn build_relation_probe_index(
     }
 
     probe_index
+
 }
 
 pub fn load_live_rows(
@@ -245,26 +371,52 @@ pub fn load_live_rows(
     table_id: &str,
     schema: &TableSchema,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
     let context = TransactionPayloadContext::default();
+    
     load_live_rows_with_context(wal, table_id, schema, &context).unwrap_or_default()
+
 }
 
-pub fn load_live_rows_with_context(
+pub fn load_live_rows_in_place(
     wal: &ConcurrentWalManager,
     table_id: &str,
     schema: &TableSchema,
-    context: &TransactionPayloadContext,
-) -> Result<Vec<(u64, HashMap<String, Vec<u8>>)>, String> {
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
-    let wal_records = wal
-        .since_with_context(table_id, None, context)
-        .map_err(str::to_string)?;
-    let mut live_rows = HashMap::new();
-    let mut row_order = Vec::new();
-    let mut committed_groups = HashSet::new();
-    let mut aborted_groups = HashSet::new();
+    let started_at = Instant::now();
+    let wal_fetch_started_at = Instant::now();
 
-    for record in &wal_records {
+    wal.with_records(table_id, |records| {
+        let wal_fetch_elapsed_ms = wal_fetch_started_at.elapsed().as_millis();
+        collect_live_rows_from_records(
+            table_id,
+            schema,
+            records,
+            wal_fetch_elapsed_ms,
+            started_at,
+        )
+    })
+    .unwrap_or_default()
+
+}
+
+fn collect_live_rows_from_records(
+    table_id: &str,
+    schema: &TableSchema,
+    wal_records: &[TransactionRecord],
+    wal_fetch_elapsed_ms: u128,
+    started_at: Instant,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    let mut live_rows = AHashMap::with_capacity(wal_records.len());
+    let mut row_order = Vec::with_capacity(wal_records.len());
+    let mut committed_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
+    let mut aborted_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
+
+    let group_scan_started_at = Instant::now();
+
+    for record in wal_records {
         match record.kind {
             TransactionKind::WriteCommit => {
                 if let Some(group_id) = record.groupid {
@@ -280,55 +432,137 @@ pub fn load_live_rows_with_context(
         }
     }
 
-    for record in &wal_records {
-        if let Some(group_id) = record.groupid {
-            let group_id = group_id.0;
-            if aborted_groups.contains(&group_id) {
-                continue;
-            }
+    let group_scan_elapsed_ms = group_scan_started_at.elapsed().as_millis();
 
-            if !committed_groups.contains(&group_id)
-                && !matches!(record.kind, TransactionKind::WriteCommit | TransactionKind::WriteAbort)
-            {
-                continue;
+    let apply_started_at = Instant::now();
+
+    let available_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let apply_workers = std::cmp::min(available_workers, live_row_apply_max_workers());
+    let should_parallel_apply =
+        apply_workers > 1 && wal_records.len() >= LIVE_ROW_APPLY_PARALLEL_MIN_RECORDS;
+
+    if should_parallel_apply {
+        for chunk in wal_records.chunks(LIVE_ROW_APPLY_PARALLEL_CHUNK_SIZE) {
+            let mut decoded_chunk = decode_live_row_chunk(
+                chunk,
+                schema,
+                &committed_groups,
+                &aborted_groups,
+                apply_workers,
+            );
+
+            for (offset, record) in chunk.iter().enumerate() {
+                if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                    continue;
+                }
+
+                match record.kind {
+                    TransactionKind::Ignore => {}
+
+                    TransactionKind::Insert | TransactionKind::Update => {
+                        if let Some(row_map) = decoded_chunk[offset].take() {
+                            row_order.push(record.id.0);
+                            live_rows.insert(record.id.0, row_map);
+                        }
+                    }
+
+                    TransactionKind::Delete => {
+                        if let Some(refid) = record.refid {
+                            live_rows.remove(&refid.0);
+                        }
+                    }
+
+                    _ => {}
+                }
             }
         }
+    } else {
+        for record in wal_records {
+            if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                continue;
+            }
 
-        match record.kind {
+            match record.kind {
+                TransactionKind::Ignore => {}
 
-            TransactionKind::Ignore => {}
+                TransactionKind::Insert | TransactionKind::Update => {
+                    let Some(payload) = record.payload_logical() else {
+                        continue;
+                    };
 
-            TransactionKind::Insert | TransactionKind::Update => {
-                let Some(payload) = record.payload_logical() else {
-                    continue;
-                };
-
-                match decode_row_payload(schema, payload) {
-                Ok(row_map) => {
-                    row_order.push(record.id.0);
-                    live_rows.insert(record.id.0, row_map);
+                    match decode_row_payload(schema, payload) {
+                        Ok(row_map) => {
+                            row_order.push(record.id.0);
+                            live_rows.insert(record.id.0, row_map);
+                        }
+                        Err(_) => continue,
+                    }
                 }
-                Err(_) => continue,
+
+                TransactionKind::Delete => {
+                    if let Some(refid) = record.refid {
+                        live_rows.remove(&refid.0);
+                    }
                 }
-            },
 
-            TransactionKind::Delete => {
-                if let Some(refid) = record.refid {
-                    live_rows.remove(&refid.0);
-                }
-            },
-
-            _ => {}
-
+                _ => {}
+            }
         }
     }
 
+    let apply_elapsed_ms = apply_started_at.elapsed().as_millis();
+
+    let finalize_started_at = Instant::now();
     let rows = row_order
         .into_iter()
         .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
         .collect::<Vec<_>>();
 
-    Ok(rows)
+    let finalize_elapsed_ms = finalize_started_at.elapsed().as_millis();
+
+    let total_elapsed_ms = started_at.elapsed().as_millis();
+
+    if total_elapsed_ms >= 1_000 {
+        log::info!(
+            "live row load timing table={} wal_records={} live_rows={} wal_fetch_ms={} group_scan_ms={} apply_ms={} finalize_ms={} total_ms={}",
+            table_id,
+            wal_records.len(),
+            rows.len(),
+            wal_fetch_elapsed_ms,
+            group_scan_elapsed_ms,
+            apply_elapsed_ms,
+            finalize_elapsed_ms,
+            total_elapsed_ms,
+        );
+    }
+
+    rows
+}
+
+pub fn load_live_rows_with_context(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+    schema: &TableSchema,
+    context: &TransactionPayloadContext,
+) -> Result<Vec<(u64, HashMap<String, Vec<u8>>)>, String> {
+
+    let started_at = Instant::now();
+
+    let wal_fetch_started_at = Instant::now();
+    let wal_records = wal
+        .since_with_context(table_id, None, context)
+        .map_err(str::to_string)?;
+    let wal_fetch_elapsed_ms = wal_fetch_started_at.elapsed().as_millis();
+
+    Ok(collect_live_rows_from_records(
+        table_id,
+        schema,
+        &wal_records,
+        wal_fetch_elapsed_ms,
+        started_at,
+    ))
 
 }
 
@@ -341,26 +575,31 @@ pub fn load_live_rows_by_equality(
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     let cache_scope_id = wal.cache_scope_id();
+
     let latest_tx_id = wal
         .latest_transaction_id(table_id)
         .map(|tx| tx.0)
         .unwrap_or(0);
+
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
     if let Ok(mut cache_guard) = cache.lock()
         && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
-        && entry.latest_tx_id == latest_tx_id {
-            if !entry.row_ids_by_field_value.contains_key(field_name) {
-                entry.row_ids_by_field_value.insert(
-                    field_name.to_string(),
-                    build_postings_for_field(&entry.rows_by_id, field_name),
-                );
-            }
-
-            return rows_for_field_value(entry, field_name, lookup_value);
+        && entry.latest_tx_id == latest_tx_id
+    {
+        if !entry.row_ids_by_field_value.contains_key(field_name) {
+            entry.row_ids_by_field_value.insert(
+                field_name.to_string(),
+                build_postings_for_field(&entry.rows_by_id, field_name),
+            );
         }
+
+        return rows_for_field_value(entry, field_name, lookup_value);
+    }
 
     let live_rows = load_live_rows(wal, table_id, schema);
     let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+
     for (row_id, row_map) in live_rows {
         rows_by_id.insert(row_id, row_map);
     }
@@ -400,44 +639,40 @@ pub fn load_live_row_count(
 
     let cache = LIVE_ROW_COUNT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(cache_guard) = cache.lock()
-        && let Some((cached_latest_tx_id, cached_count)) = cache_guard.get(&(cache_scope_id, table_id.to_string()))
-        && *cached_latest_tx_id == latest_tx_id {
-            return *cached_count;
-        }
+        && let Some((cached_latest_tx_id, cached_count)) =
+            cache_guard.get(&(cache_scope_id, table_id.to_string()))
+        && *cached_latest_tx_id == latest_tx_id
+    {
+        return *cached_count;
+    }
 
     let wal_records = wal.since(table_id, None);
-    let mut live_row_ids = HashSet::new();
-    let mut committed_groups = HashSet::new();
-    let mut aborted_groups = HashSet::new();
+    let mut live_row_ids = AHashSet::with_capacity(wal_records.len());
+    let mut committed_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
+    let mut aborted_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
 
     for record in &wal_records {
-
         match record.kind {
-
             TransactionKind::WriteCommit => {
                 if let Some(group_id) = record.groupid {
                     committed_groups.insert(group_id.0);
                 }
-            },
+            }
 
             TransactionKind::WriteAbort => {
                 if let Some(group_id) = record.groupid {
                     aborted_groups.insert(group_id.0);
                 }
-            },
+            }
 
             _ => {}
-
         }
-
     }
 
     for record in &wal_records {
-
         if let Some(group_id) = record.groupid {
-            
             let group_id = group_id.0;
-            
+
             if aborted_groups.contains(&group_id) {
                 continue;
             }
@@ -447,25 +682,21 @@ pub fn load_live_row_count(
             {
                 continue;
             }
-
         }
 
         match record.kind {
-
             TransactionKind::Insert | TransactionKind::Update => {
                 live_row_ids.insert(record.id.0);
-            },
+            }
 
             TransactionKind::Delete => {
                 if let Some(refid) = record.refid {
                     live_row_ids.remove(&refid.0);
                 }
-            },
-            
+            }
+
             _ => {}
-
         }
-
     }
 
     let count = live_row_ids.len();
@@ -485,17 +716,17 @@ pub fn plan_relation_access(
 ) -> RelationAccessPlan {
 
     if allow_index_short_circuit
-        && let Some((index, lookup_key)) = choose_index_lookup(table, &index_filter_map) {
-            return RelationAccessPlan {
-                strategy: RelationAccessStrategy::RuntimeIndexLookup {
-                    index_id: index.index_id.0.clone(),
-                    lookup_key,
-                },
-            };
-        }
+        && let Some((index, lookup_key)) = choose_index_lookup(table, &index_filter_map)
+    {
+        return RelationAccessPlan {
+            strategy: RelationAccessStrategy::RuntimeIndexLookup {
+                index_id: index.index_id.0.clone(),
+                lookup_key,
+            },
+        };
+    }
 
     if index_filter_map.len() == 1 {
-
         let (field_name, lookup_value) = index_filter_map
             .into_iter()
             .next()
@@ -529,49 +760,72 @@ pub fn materialize_relation_rows(
     runtime_indexes: &RuntimeIndexStore,
     access_plan: &RelationAccessPlan,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
-    
-    match &access_plan.strategy {
 
+    match &access_plan.strategy {
         RelationAccessStrategy::RuntimeIndexLookup {
             index_id,
             lookup_key,
         } => {
             if let Some(state) = runtime_indexes.index(index_id) {
                 if state.cardinality() == 0 {
-                    return load_live_rows(wal, &table.table_id, schema);
+                    log::debug!(
+                        "relation runtime index lookup table={} index_id={} state_cardinality=0 -> empty result",
+                        table.table_id,
+                        index_id,
+                    );
+                    return Vec::new();
                 }
 
                 if !state.contains(lookup_key) {
-                    return load_live_rows(wal, &table.table_id, schema);
+                    log::debug!(
+                        "relation runtime index lookup table={} index_id={} key_present=false -> empty result",
+                        table.table_id,
+                        index_id,
+                    );
+                    return Vec::new();
                 }
-                }
+
+                log::debug!(
+                    "relation runtime index lookup table={} index_id={} key_present=true",
+                    table.table_id,
+                    index_id,
+                );
+            } else {
+                log::debug!(
+                    "relation runtime index lookup table={} index_id={} state_missing -> fallback_scan",
+                    table.table_id,
+                    index_id,
+                );
+                return load_live_rows(wal, &table.table_id, schema);
+            }
 
             if lookup_key.len() == 1
-                && let Some(index) = table.indexes.values().find(|index| index.index_id.0 == *index_id) {
+                && let Some(index) = table
+                    .indexes
+                    .values()
+                    .find(|index| index.index_id.0 == *index_id)
+            {
+                let single_field_name = if index.field_names.len() == 1 {
+                    Some(index.field_names[0].as_str())
+                } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+                    Some(index.field_name.as_str())
+                } else {
+                    None
+                };
 
-                    let single_field_name = if index.field_names.len() == 1 {
-                        Some(index.field_names[0].as_str())
-                    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
-                        Some(index.field_name.as_str())
-                    } else {
-                        None
-                    };
-
-                    if let Some(single_field_name) = single_field_name {
-                        return load_live_rows_by_equality(
-                            wal,
-                            &table.table_id,
-                            schema,
-                            single_field_name,
-                            &lookup_key[0],
-                        );
-                    }
-
+                if let Some(single_field_name) = single_field_name {
+                    return load_live_rows_by_equality(
+                        wal,
+                        &table.table_id,
+                        schema,
+                        single_field_name,
+                        &lookup_key[0],
+                    );
                 }
+            }
 
             load_live_rows(wal, &table.table_id, schema)
-
-        },
+        }
 
         RelationAccessStrategy::EqualityProbe {
             field_name,
@@ -595,14 +849,12 @@ pub fn materialize_relation_rows(
                 field_name,
                 lookup_value,
             )
-        },
+        }
 
         RelationAccessStrategy::FullScan => load_live_rows(wal, &table.table_id, schema),
-    
     }
 
 }
-
 pub fn collect_indexable_equality_filters(
     condition: &SelectCondition,
     filters: &mut HashMap<String, Vec<u8>>,
@@ -651,19 +903,29 @@ pub fn choose_index_lookup<'a>(
     for index in derived_indexes_for_table(table) {
 
         let mut lookup_key = Vec::new();
+        
         let all_present = if !index.field_names.is_empty() {
+            
             lookup_key.reserve(index.field_names.len());
             let mut present = true;
+            
             for field_name in &index.field_names {
+                
                 match filters.get(field_name.as_str()) {
+
                     Some(value) => lookup_key.push(value.clone()),
+
                     None => {
                         present = false;
                         break;
                     }
+                    
                 }
+
             }
+            
             present
+
         } else if !index.field_name.is_empty() {
             match filters.get(index.field_name.as_str()) {
                 Some(value) => {
@@ -672,8 +934,11 @@ pub fn choose_index_lookup<'a>(
                 }
                 None => false,
             }
+
         } else {
+            
             false
+
         };
 
         if !all_present {
