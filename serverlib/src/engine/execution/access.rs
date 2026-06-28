@@ -45,18 +45,22 @@ fn rows_for_field_value(
     field_name: &str,
     lookup_value: &[u8],
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
-    entry
-        .row_ids_by_field_value
-        .get(field_name)
-        .and_then(|row_ids_by_value| row_ids_by_value.get(lookup_value).cloned())
-        .unwrap_or_default()
-        .into_iter()
+    let Some(row_ids_by_value) = entry.row_ids_by_field_value.get(field_name) else {
+        return Vec::new();
+    };
+
+    let Some(row_ids) = row_ids_by_value.get(lookup_value) else {
+        return Vec::new();
+    };
+
+    row_ids
+        .iter()
         .filter_map(|row_id| {
             entry
                 .rows_by_id
-                .get(&row_id)
+                .get(row_id)
                 .cloned()
-                .map(|row_map| (row_id, row_map))
+                .map(|row_map| (*row_id, row_map))
         })
         .collect()
 }
@@ -131,7 +135,7 @@ impl RelationAccessPlan {
     pub fn runtime_index_lookup<'a>(
         &'a self,
         table: &'a DatabaseTable,
-    ) -> Option<(&'a DatabaseIndex, Vec<Vec<u8>>)> {
+    ) -> Option<(&'a DatabaseIndex, &'a [Vec<u8>])> {
 
         let RelationAccessStrategy::RuntimeIndexLookup {
             index_id,
@@ -143,7 +147,7 @@ impl RelationAccessPlan {
         table.indexes
             .values()
             .find(|index| index.index_id.0 == *index_id)
-            .map(|index| (index, lookup_key.clone()))
+            .map(|index| (index, lookup_key.as_slice()))
     
     }
 
@@ -209,29 +213,27 @@ pub fn collect_indexable_equality_filters_for_schema(
 }
 pub fn field_has_single_column_index(table: &DatabaseTable, field_name: &str) -> bool {
     table.indexes.values().any(|index| {
-        let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
-            vec![index.field_name.clone()]
+        if !index.field_names.is_empty() {
+            index.field_names.len() == 1 && index.field_names[0] == field_name
         } else {
-            index.field_names.clone()
-        };
-
-        field_names.len() == 1 && field_names[0] == field_name
+            !index.field_name.is_empty() && index.field_name == field_name
+        }
     })
 }
 
 pub fn build_relation_probe_index(
     rows: &[MaterializedRelationRow],
     field_name: &str,
-) -> HashMap<Vec<u8>, Vec<MaterializedRelationRow>> {
+) -> HashMap<Vec<u8>, Vec<usize>> {
 
     let mut probe_index = HashMap::new();
 
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
         if let Some(value) = row.row_map.get(field_name) {
             probe_index
                 .entry(value.clone())
                 .or_insert_with(Vec::new)
-                .push(row.clone());
+                .push(index);
         }
     }
 
@@ -546,19 +548,21 @@ pub fn materialize_relation_rows(
 
             if lookup_key.len() == 1
                 && let Some(index) = table.indexes.values().find(|index| index.index_id.0 == *index_id) {
-                    
-                    let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
-                        vec![index.field_name.clone()]
+
+                    let single_field_name = if index.field_names.len() == 1 {
+                        Some(index.field_names[0].as_str())
+                    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+                        Some(index.field_name.as_str())
                     } else {
-                        index.field_names.clone()
+                        None
                     };
 
-                    if field_names.len() == 1 {
+                    if let Some(single_field_name) = single_field_name {
                         return load_live_rows_by_equality(
                             wal,
                             &table.table_id,
                             schema,
-                            &field_names[0],
+                            single_field_name,
                             &lookup_key[0],
                         );
                     }
@@ -646,33 +650,37 @@ pub fn choose_index_lookup<'a>(
 
     for index in derived_indexes_for_table(table) {
 
-        let field_names = if index.field_names.is_empty() && !index.field_name.is_empty() {
-            vec![index.field_name.clone()]
-        } else {
-            index.field_names.clone()
-        };
-
-        if field_names.is_empty() {
-            continue;
-        }
-
-        let mut lookup_key = Vec::with_capacity(field_names.len());
-        let mut all_present = true;
-        for field_name in &field_names {
-            match filters.get(field_name) {
-                Some(value) => lookup_key.push(value.clone()),
-                None => {
-                    all_present = false;
-                    break;
+        let mut lookup_key = Vec::new();
+        let all_present = if !index.field_names.is_empty() {
+            lookup_key.reserve(index.field_names.len());
+            let mut present = true;
+            for field_name in &index.field_names {
+                match filters.get(field_name.as_str()) {
+                    Some(value) => lookup_key.push(value.clone()),
+                    None => {
+                        present = false;
+                        break;
+                    }
                 }
             }
-        }
+            present
+        } else if !index.field_name.is_empty() {
+            match filters.get(index.field_name.as_str()) {
+                Some(value) => {
+                    lookup_key.push(value.clone());
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
 
         if !all_present {
             continue;
         }
 
-        let score = field_names.len();
+        let score = lookup_key.len();
         let should_replace = selected
             .as_ref()
             .map(|(_, _, best_score)| score > *best_score)

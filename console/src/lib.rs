@@ -16,6 +16,7 @@ pub const TEMP_CONNECT_USER: &str = "root";
 const AUTH_FALLBACK_DATABASE: &str = "main";
 const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
 const IMPORT_TRANSPORT_RETRY_LIMIT: usize = 3;
+const SQL_TRANSPORT_RETRY_LIMIT: usize = 3;
 const IMPORT_TRANSACTION_BATCH_SIZE: usize = 500;
 const IMPORT_TRANSACTION_BATCH_MAX_AGE_MS: u128 = 500;
 const IMPORT_BEGIN_STATEMENT: &str = "begin /*distdb_import*/";
@@ -300,14 +301,49 @@ impl ConsoleSession {
 
         let request = ConnectorRequest::new(request_id.clone(), command);
 
-        let client = ConnectorClient::new(self.runtime.transport().clone());
-        let request_start = std::time::Instant::now();
-        let mut response = client.execute(&request)?;
-        let round_trip_ms = request_start.elapsed().as_millis() as u64;
+        let mut response = None;
 
-        if let ConnectorResult::Query(result) = &mut response.result {
-            result.timings.network_round_trip_ms = Some(round_trip_ms);
+        for attempt in 0..=SQL_TRANSPORT_RETRY_LIMIT {
+            let client = ConnectorClient::new(self.runtime.transport().clone());
+            let request_start = std::time::Instant::now();
+
+            match client.execute(&request) {
+                Ok(mut current_response) => {
+                    let round_trip_ms = request_start.elapsed().as_millis() as u64;
+                    if let ConnectorResult::Query(result) = &mut current_response.result {
+                        result.timings.network_round_trip_ms = Some(round_trip_ms);
+                    }
+
+                    response = Some(current_response);
+                    break;
+                }
+
+                Err(err) => {
+                    let message = err.to_string();
+                    let is_retryable = import_transport_error_is_retryable(&message);
+
+                    if !is_retryable || attempt >= SQL_TRANSPORT_RETRY_LIMIT {
+                        return Err(err.into());
+                    }
+
+                    log::warn!(
+                        "sql transport retry {}/{} after request_id={}: {}",
+                        attempt + 1,
+                        SQL_TRANSPORT_RETRY_LIMIT,
+                        request_id,
+                        message
+                    );
+
+                    self
+                        .recover_import_transport()
+                        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+                }
+            }
         }
+
+        let response = response.ok_or_else(|| {
+            std::io::Error::other("sql transport retry loop exhausted")
+        })?;
 
         if let Some(token) = auth_token_for_session {
             if response.status == ResponseStatus::Rejected {
@@ -489,7 +525,19 @@ impl ConsoleSession {
                 }
             }
 
-            self.execute_import_statement(database_id, statement, transaction_state)?;
+            match self.execute_import_statement(database_id, statement, transaction_state) {
+                Ok(()) => {}
+                Err(err) => {
+                    if transaction_state.active && import_duplicate_key_error_is_skippable(&err) {
+                        let _ = self.execute_import_statement(database_id, "rollback", transaction_state);
+                        transaction_state.active = false;
+                        transaction_state.dml_statements_in_batch = 0;
+                        transaction_state.batch_started_at = None;
+                    }
+
+                    return Err(err);
+                }
+            }
 
             if transaction_state.active {
                 transaction_state.dml_statements_in_batch += 1;
@@ -1279,14 +1327,12 @@ fn should_skip_import_error(statement: &str, error: &str) -> bool {
     let normalized_statement = statement.trim_start();
     let normalized_error = error.to_ascii_lowercase();
 
-    if starts_with_ascii_case_insensitive(normalized_statement, "drop table")
-        && normalized_error.contains("not found") {
+    if import_duplicate_key_error_is_skippable(error) {
         return true;
     }
 
-    if starts_with_ascii_case_insensitive(normalized_statement, "insert ")
-        && import_duplicate_key_error_is_skippable(error)
-    {
+    if starts_with_ascii_case_insensitive(normalized_statement, "drop table")
+        && normalized_error.contains("not found") {
         return true;
     }
 

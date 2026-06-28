@@ -1,7 +1,7 @@
 use sqlparser::ast::{Expr, SetExpr, Statement, UnaryOperator, Value};
 
 use super::{
-    evaluate_sql_function, parse_mysql_statements, parse_select_read_plan_from_statement,
+    evaluate_sql_function, parse_mysql_statements,
     InsertRowsPlan, InsertRowsSource, SqlParseError,
 };
 
@@ -72,7 +72,10 @@ pub fn parse_insert_rows_from_parsed_statement(
         },
 
         SetExpr::Select(_) => {
-            let select_plan = parse_select_read_plan_from_statement(&source.to_string())?;
+            let select_plan = super::select_plan::parse_select_read_plan_from_query(
+                source.as_ref(),
+                false,
+            )?;
             InsertRowsSource::Select(select_plan)
         },
 

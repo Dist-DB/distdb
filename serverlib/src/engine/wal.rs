@@ -621,6 +621,45 @@ impl TransactionLog for ConcurrentWalManager {
             .unwrap_or_default()
 
     }
+
+    fn since_kinds(
+        &self,
+        wal_id: &str,
+        from: Option<TransactionId>,
+        kinds: &[TransactionKind],
+    ) -> Vec<TransactionRecord> {
+
+        if kinds.is_empty() {
+            return Vec::new();
+        }
+
+        let stream_key = match obfuscated_stream_key(wal_id) {
+            Ok(k) => k,
+            Err(_) => return Vec::new(),
+        };
+
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
+
+        let store = match self.storage.lock() {
+            Ok(store) => store,
+            Err(_) => return Vec::new(),
+        };
+
+        store
+            .get(&stream_key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        from.map(|min_id| entry.id.0 > min_id.0).unwrap_or(true)
+                            && kinds.contains(&entry.kind)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+
+    }
     
 }
 
@@ -949,11 +988,11 @@ fn compact_entries_to_latest_schema_and_metadata(
         .cloned();
 
     let mut retained_ids = std::collections::HashSet::new();
-    if let Some(schema) = latest_schema.clone() {
+    if let Some(schema) = latest_schema.as_ref() {
         retained_ids.insert(schema.id.0);
     }
 
-    if let Some(metadata) = latest_metadata.clone() {
+    if let Some(metadata) = latest_metadata.as_ref() {
         retained_ids.insert(metadata.id.0);
     }
 

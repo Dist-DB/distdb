@@ -103,7 +103,8 @@ impl DatabaseIndex {
 			.map(|field_name| common::normalize_identifier!(field_name))
 			.collect::<Vec<_>>();
 		let field_name = field_names.first().cloned().unwrap_or_default();
-		let index_id = Self::compose_index_id(kind, origin, temp_id.as_deref(), &field_names);
+		let index_id =
+			Self::compose_index_id(&table_id, kind, origin, temp_id.as_deref(), &field_names);
 
 		Self {
 			index_id,
@@ -147,7 +148,14 @@ impl DatabaseIndex {
 			.collect::<Vec<_>>();
 		
 		self.field_name = self.field_names.first().cloned().unwrap_or_default();
-		self.index_id = Self::compose_index_id(self.kind, self.origin, self.temp_id.as_deref(), &self.field_names);
+		self.table_id = common::normalize_identifier!(&self.table_id);
+		self.index_id = Self::compose_index_id(
+			&self.table_id,
+			self.kind,
+			self.origin,
+			self.temp_id.as_deref(),
+			&self.field_names,
+		);
 
 	}
 
@@ -164,6 +172,7 @@ impl DatabaseIndex {
 	}
 
 	fn compose_index_id(
+		table_id: &str,
 		kind: DatabaseIndexKind,
 		origin: DatabaseIndexOrigin,
 		temp_id: Option<&str>,
@@ -174,13 +183,30 @@ impl DatabaseIndex {
 		
 		match origin {
 			
-			DatabaseIndexOrigin::Derived => IndexId(format!("{}:{}", kind.prefix(), field_list)),
+			DatabaseIndexOrigin::Derived => {
+				IndexId(format!("{}:{}:{}", kind.prefix(), table_id, field_list))
+			}
 
-			DatabaseIndexOrigin::Relationship => IndexId(format!("{}:{}:{}", origin.prefix(), kind.prefix(), field_list)),
+			DatabaseIndexOrigin::Relationship => {
+				IndexId(format!(
+					"{}:{}:{}:{}",
+					origin.prefix(),
+					kind.prefix(),
+					table_id,
+					field_list
+				))
+			}
 
 			DatabaseIndexOrigin::Temporary => {
 				let temp_id = temp_id.unwrap_or("temp");
-				IndexId(format!("{}:{}:{}:{}", origin.prefix(), temp_id, kind.prefix(), field_list))
+				IndexId(format!(
+					"{}:{}:{}:{}:{}",
+					origin.prefix(),
+					temp_id,
+					kind.prefix(),
+					table_id,
+					field_list
+				))
 			}
 
 		}

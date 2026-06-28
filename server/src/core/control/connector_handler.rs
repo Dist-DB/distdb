@@ -21,7 +21,9 @@ use serverlib::p2p::protocol::{
     TransactionsSinceResponse,
 };
 use serverlib::{
-    AffinityProcessor, DatabaseId, ServerP2pEvent, ServerP2pRuntime, encode_wal_frame,
+    AffinityProcessor, ConcurrentWalManager, DatabaseCatalog, DatabaseEntity,
+    DatabaseEntityAspect, DatabaseEntityKind, DatabaseId, ServerP2pEvent, ServerP2pRuntime,
+    encode_wal_frame,
     import_p2p_ca_pem_if_missing, sign_tls_enrollment_csr,
 };
 use common::helpers::p2p::{
@@ -42,6 +44,115 @@ const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
 const SERVER_BOOTSTRAP_STATUS_SQL: &str = "__distdb_bootstrap_status__";
 const SERVER_SHOW_ENTITIES_SQL: &str = "__distdb_show_entities__";
 const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
+
+fn entity_kind_name(kind: DatabaseEntityKind) -> &'static str {
+    match kind {
+        DatabaseEntityKind::Table => "table",
+        DatabaseEntityKind::View => "view",
+        DatabaseEntityKind::Relationship => "relationship",
+        DatabaseEntityKind::Trigger => "trigger",
+        DatabaseEntityKind::StoredProcedure => "stored_procedure",
+    }
+}
+
+fn append_catalog_entity_rows(
+    rows: &mut Vec<Vec<Vec<u8>>>,
+    resolved_database_id: &str,
+    catalog: &DatabaseCatalog,
+    bootstrap_ready: bool,
+) {
+    let mut catalog_status = catalog.status().to_string().to_ascii_lowercase();
+    if !bootstrap_ready && catalog_status == "load" {
+        catalog_status = "indexing".to_string();
+    }
+
+    rows.push(vec![
+        resolved_database_id.as_bytes().to_vec(),
+        catalog.database_name().as_bytes().to_vec(),
+        b"database".to_vec(),
+        resolved_database_id.as_bytes().to_vec(),
+        catalog_status.into_bytes(),
+        if bootstrap_ready {
+            b"loaded".to_vec()
+        } else {
+            b"loading".to_vec()
+        },
+        b"n/a".to_vec(),
+    ]);
+
+    let mut entities = catalog.entities_iter().collect::<Vec<_>>();
+    entities.sort_by(|(left_id, _), (right_id, _)| left_id.cmp(right_id));
+
+    for (_entity_id, entity) in entities {
+        let mut entity_status = entity.status().to_string().to_ascii_lowercase();
+        if !bootstrap_ready && entity_status == "load" {
+            entity_status = "indexing".to_string();
+        }
+        if bootstrap_ready && entity_status == "load" {
+            entity_status = "ready".to_string();
+        }
+
+        match entity {
+            DatabaseEntity::Table(table) => {
+                rows.push(vec![
+                    resolved_database_id.as_bytes().to_vec(),
+                    catalog.database_name().as_bytes().to_vec(),
+                    b"table".to_vec(),
+                    table.table_id.clone().into_bytes(),
+                    entity_status.into_bytes(),
+                    if bootstrap_ready {
+                        b"loaded".to_vec()
+                    } else {
+                        b"loading".to_vec()
+                    },
+                    table.indexes.len().to_string().into_bytes(),
+                ]);
+
+                let mut indexes = table
+                    .indexes
+                    .values()
+                    .map(|index| index.index_id.0.clone())
+                    .collect::<Vec<_>>();
+                indexes.sort();
+
+                for index_id in indexes {
+                    rows.push(vec![
+                        resolved_database_id.as_bytes().to_vec(),
+                        catalog.database_name().as_bytes().to_vec(),
+                        b"index".to_vec(),
+                        index_id.into_bytes(),
+                        if bootstrap_ready {
+                            b"ready".to_vec()
+                        } else {
+                            b"load".to_vec()
+                        },
+                        if bootstrap_ready {
+                            b"loaded".to_vec()
+                        } else {
+                            b"loading".to_vec()
+                        },
+                        b"n/a".to_vec(),
+                    ]);
+                }
+            }
+            _ => {
+                rows.push(vec![
+                    resolved_database_id.as_bytes().to_vec(),
+                    catalog.database_name().as_bytes().to_vec(),
+                    entity_kind_name(entity.kind()).as_bytes().to_vec(),
+                    entity.name().as_bytes().to_vec(),
+                    entity_status.into_bytes(),
+                    if bootstrap_ready {
+                        b"loaded".to_vec()
+                    } else {
+                        b"loading".to_vec()
+                    },
+                    b"n/a".to_vec(),
+                ]);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CatalogWorkerStats {
@@ -512,7 +623,7 @@ pub async fn maybe_show_entities_response(
     };
 
     let Some(app) = app_guard else {
-        let discovered_catalog_ids = list_files(node_data_dir)
+        let discovered_catalog_paths = list_files(node_data_dir)
             .ok()
             .into_iter()
             .flat_map(|files| files.into_iter())
@@ -521,16 +632,49 @@ pub async fn maybe_show_entities_response(
                     .and_then(|value| value.to_str())
                     == Some(FileKind::Catalog.extension())
             })
-            .filter_map(|file| file.file_stem().and_then(|value| value.to_str()).map(str::to_string))
-            .map(|catalog_id| common::normalize_identifier!(catalog_id))
             .collect::<Vec<_>>();
 
-        let mut catalog_ids = discovered_catalog_ids;
-        catalog_ids.sort();
-        catalog_ids.dedup();
+        let wal = ConcurrentWalManager::with_data_dir(node_data_dir.to_path_buf());
+        let mut discovered_catalogs = Vec::<DatabaseCatalog>::new();
+
+        for catalog_path in discovered_catalog_paths {
+            let stem = catalog_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(|value| common::normalize_identifier!(value));
+
+            let Some(stem) = stem else {
+                continue;
+            };
+
+            let mut catalog = match DatabaseCatalog::load_from_path(&catalog_path) {
+                Ok(catalog) => catalog,
+                Err(_) => DatabaseCatalog::from_file_stem(&stem),
+            };
+
+            let wal_id = catalog.database_id.0.clone();
+            if let Err(err) = catalog.replay_entity_construction_from_log(&wal_id, &wal) {
+                log::debug!(
+                    "show entities bootstrap fallback replay failed for database_id={} err={}",
+                    wal_id,
+                    err
+                );
+            }
+
+            discovered_catalogs.push(catalog);
+        }
+
+        discovered_catalogs.sort_by(|left, right| left.database_id.0.cmp(&right.database_id.0));
+        discovered_catalogs.dedup_by(|left, right| left.database_id.0 == right.database_id.0);
+
+        let catalog_ids = discovered_catalogs
+            .iter()
+            .map(|catalog| catalog.database_id.0.clone())
+            .collect::<Vec<_>>();
 
         if database_filter.is_empty() {
-            if catalog_ids.is_empty() {
+            
+            if discovered_catalogs.is_empty() {
                 rows.push(vec![
                     b"*".to_vec(),
                     Vec::new(),
@@ -541,19 +685,14 @@ pub async fn maybe_show_entities_response(
                     b"n/a".to_vec(),
                 ]);
             } else {
-                for catalog_id in catalog_ids {
-                    rows.push(vec![
-                        catalog_id.clone().into_bytes(),
-                        catalog_id.clone().into_bytes(),
-                        b"database".to_vec(),
-                        catalog_id.into_bytes(),
-                        b"load".to_vec(),
-                        b"loading".to_vec(),
-                        b"n/a".to_vec(),
-                    ]);
+                for catalog in discovered_catalogs {
+                    let catalog_id = catalog.database_id.0.clone();
+                    append_catalog_entity_rows(&mut rows, &catalog_id, &catalog, false);
                 }
             }
+
         } else {
+
             let matches_filter = if catalog_ids.iter().any(|id| id == &database_filter) {
                 true
             } else {
@@ -570,15 +709,22 @@ pub async fn maybe_show_entities_response(
                 ));
             }
 
-            rows.push(vec![
-                database_filter.clone().into_bytes(),
-                database_filter.clone().into_bytes(),
-                b"database".to_vec(),
-                database_filter.clone().into_bytes(),
-                b"load".to_vec(),
-                b"loading".to_vec(),
-                b"n/a".to_vec(),
-            ]);
+            let resolved_database_id = if catalog_ids.iter().any(|id| id == &database_filter) {
+                database_filter.clone()
+            } else {
+                DatabaseId::from_database_name(&database_filter)
+                    .ok()
+                    .map(|id| id.0)
+                    .filter(|id| catalog_ids.iter().any(|catalog_id| catalog_id == id))
+                    .unwrap_or_else(|| database_filter.clone())
+            };
+
+            if let Some(catalog) = discovered_catalogs
+                .iter()
+                .find(|catalog| catalog.database_id.0 == resolved_database_id)
+            {
+                append_catalog_entity_rows(&mut rows, &resolved_database_id, catalog, false);
+            }
         }
 
         let response = ConnectorResponse::applied(
@@ -693,74 +839,7 @@ pub async fn maybe_show_entities_response(
             continue;
         };
 
-        rows.push(vec![
-            resolved_database_id.clone().into_bytes(),
-            catalog.database_name().as_bytes().to_vec(),
-            b"database".to_vec(),
-            resolved_database_id.clone().into_bytes(),
-            catalog.status().to_string().to_ascii_lowercase().into_bytes(),
-            if bootstrap_ready {
-                b"loaded".to_vec()
-            } else {
-                b"loading".to_vec()
-            },
-            b"n/a".to_vec(),
-        ]);
-
-        let mut table_ids = catalog.table_ids();
-        table_ids.sort();
-
-        for table_id in table_ids {
-            let Some(table) = catalog.table(&table_id) else {
-                continue;
-            };
-
-            let mut table_status = table.status().to_string().to_ascii_lowercase();
-            if bootstrap_ready && table_status == "load" {
-                table_status = "ready".to_string();
-            }
-
-            rows.push(vec![
-                resolved_database_id.clone().into_bytes(),
-                catalog.database_name().as_bytes().to_vec(),
-                b"table".to_vec(),
-                table_id.clone().into_bytes(),
-                table_status.into_bytes(),
-                if bootstrap_ready {
-                    b"loaded".to_vec()
-                } else {
-                    b"loading".to_vec()
-                },
-                table.indexes.len().to_string().into_bytes(),
-            ]);
-
-            let mut indexes = table
-                .indexes
-                .values()
-                .map(|index| index.index_id.0.clone())
-                .collect::<Vec<_>>();
-            indexes.sort();
-
-            for index_id in indexes {
-                rows.push(vec![
-                    resolved_database_id.clone().into_bytes(),
-                    catalog.database_name().as_bytes().to_vec(),
-                    b"index".to_vec(),
-                    index_id.into_bytes(),
-                    if bootstrap_ready {
-                        b"ready".to_vec()
-                    } else {
-                        b"load".to_vec()
-                    },
-                    if bootstrap_ready {
-                        b"loaded".to_vec()
-                    } else {
-                        b"loading".to_vec()
-                    },
-                    b"n/a".to_vec(),
-                ]);
-            }
-        }
+        append_catalog_entity_rows(&mut rows, &resolved_database_id, catalog, bootstrap_ready);
     }
 
     let response = ConnectorResponse::applied(

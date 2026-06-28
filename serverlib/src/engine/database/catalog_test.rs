@@ -1363,3 +1363,37 @@ fn object_by_index_returns_untyped_object_by_id() {
 
     assert!(catalog.object_by_id("missing_object").is_none());
 }
+
+#[test]
+fn index_in_table_scopes_lookup_to_target_table() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![crate::FieldDef {
+        seqno: 1,
+        field_name: "email".to_string(),
+        field_type: crate::FieldType::Text,
+        nullable: false,
+        indexed: FieldIndex::Indexed,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table register should succeed");
+    catalog
+        .register_table("admins", schema)
+        .expect("admins table register should succeed");
+
+    let users_email_index_id = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["email".to_string()],
+    )
+    .index_id
+    .0;
+
+    assert!(catalog.index_in_table("users", &users_email_index_id).is_some());
+    assert!(catalog.index_in_table("admins", &users_email_index_id).is_none());
+}

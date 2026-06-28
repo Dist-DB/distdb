@@ -1,6 +1,6 @@
 use common::helpers::format::FileKind;
 use common::helpers::list_files;
-use serverlib::DatabaseCatalog;
+use serverlib::{DatabaseCatalog, DatabaseId};
 use std::time::Instant;
 
 use crate::core::app::ServerApp;
@@ -65,7 +65,16 @@ impl ServerApp {
             
         }
 
-        if !self.catalogs.contains_key(DEFAULT_SYSTEM_DATABASE) {
+        let default_system_database_loaded = self.catalogs.contains_key(DEFAULT_SYSTEM_DATABASE)
+            || DatabaseId::from_database_name(DEFAULT_SYSTEM_DATABASE)
+                .ok()
+                .is_some_and(|database_id| self.catalogs.contains_key(&database_id.0))
+            || self
+                .catalogs
+                .values()
+                .any(|catalog| catalog.database_name() == DEFAULT_SYSTEM_DATABASE);
+
+        if !default_system_database_loaded {
             let catalog = DatabaseCatalog::create_new_database(
                 DEFAULT_SYSTEM_DATABASE,
                 &self.node_data_dir,
@@ -84,6 +93,11 @@ impl ServerApp {
             );
 
             self.catalogs.insert(catalog.database_id.0.clone(), catalog);
+        } else {
+            log::info!(
+                "default system catalog '{}' already present in loaded catalogs",
+                DEFAULT_SYSTEM_DATABASE,
+            );
         }
 
         Ok(())

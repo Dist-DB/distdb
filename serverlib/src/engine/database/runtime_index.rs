@@ -99,6 +99,40 @@ impl RuntimeIndexStore {
         
     }
 
+    fn should_materialize_index_for_bootstrap(&self, index: &DatabaseIndex) -> bool {
+
+        if index.is_primary_key() {
+            return true;
+        }
+
+        if self.materialize_non_primary {
+            return true;
+        }
+
+        if self
+            .non_primary_index_allowlist
+            .contains(&common::normalize_identifier!(&index.index_id.0))
+        {
+            return true;
+        }
+
+        if index.field_names.is_empty() {
+            return !index.field_name.is_empty()
+                && self
+                    .non_primary_field_allowlist
+                    .contains(&common::normalize_identifier!(&index.field_name));
+        }
+
+        index
+            .field_names
+            .iter()
+            .any(|field_name| {
+                self.non_primary_field_allowlist
+                    .contains(&common::normalize_identifier!(field_name))
+            })
+
+    }
+
     pub fn index(&self, index_id: &str) -> Option<&RuntimeIndexState> {
         self.indexes.get(index_id)
     }
@@ -299,7 +333,10 @@ impl RuntimeIndexStore {
                 let tracked_indexes = table
                     .indexes
                     .values()
-                    .filter(|index| self.should_track_index(index))
+                    .filter(|index| {
+                        self.should_track_index(index)
+                            && self.should_materialize_index_for_bootstrap(index)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
 
@@ -307,7 +344,7 @@ impl RuntimeIndexStore {
                     continue;
                 }
 
-                for index in table.indexes.values() {
+                for index in &tracked_indexes {
                     self.register_index(index.clone());
                 }
 

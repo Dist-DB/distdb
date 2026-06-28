@@ -270,6 +270,11 @@ impl DatabaseCatalog {
         }
     }
 
+    pub fn index_in_table(&self, table_id: &str, index_id: &str) -> Option<&DatabaseIndex> {
+        self.table(table_id)
+            .and_then(|table| table.indexes.get(index_id))
+    }
+
     pub fn object(&self, object_type: DatabaseObjectType, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
 
         let entity_key = self.resolve_entity_key(object_id);
@@ -406,10 +411,26 @@ impl DatabaseCatalog {
     }
 
     pub fn transition_status(&mut self, next: ObjectStatus) -> DatabaseResult<()> {
-        if !self.status.can_transition_to(next) {
+        let current = self.status;
+
+        if !current.can_transition_to(next) {
+            log::warn!(
+                "database catalog status transition rejected: database_id={} current={} next={}",
+                self.database_id.0,
+                current,
+                next,
+            );
             return Err(DatabaseError::InvalidStatusTransition);
         }
+
         self.status = next;
+        log::info!(
+            "database catalog status changed: database_id={} previous={} next={}",
+            self.database_id.0,
+            current,
+            next,
+        );
+
         Ok(())
     }
 
@@ -884,11 +905,7 @@ impl DatabaseCatalog {
 
         let mut applied = 0usize;
 
-        for record in log.since(wal_id, None) {
-
-            if record.kind != TransactionKind::SchemaChange {
-                continue;
-            }
+        for record in log.since_kinds(wal_id, None, &[TransactionKind::SchemaChange]) {
 
             let payload = SchemaChangePayload::decode(
                 record
@@ -914,7 +931,17 @@ impl DatabaseCatalog {
         
         let mut applied = 0usize;
 
-        for record in log.since(wal_id, None) {
+        for record in log.since_kinds(
+            wal_id,
+            None,
+            &[
+                TransactionKind::SchemaChange,
+                TransactionKind::TableLifecycle,
+                TransactionKind::MetadataChange,
+                TransactionKind::SecurityChange,
+                TransactionKind::SqlDefinitionChange,
+            ],
+        ) {
 
             match record.kind {
                 TransactionKind::SchemaChange
@@ -1015,6 +1042,12 @@ impl DatabaseCatalog {
                 _ => None,
             })
             .collect()
+    }
+
+    pub fn entities_iter(&self) -> impl Iterator<Item = (&str, &DatabaseEntity)> {
+        self.entities
+            .iter()
+            .map(|(entity_id, entity)| (entity_id.as_str(), entity))
     }
 
     /// Register a view definition with a pre-derived schema. The schema is

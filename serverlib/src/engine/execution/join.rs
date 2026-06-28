@@ -193,7 +193,11 @@ where
                 };
 
                 if let Some(matches) = right_probe_index.as_ref().and_then(|index| index.get(left_value)) {
-                    for right_row in matches {
+                    for right_row_index in matches {
+                        let Some(right_row) = right_rows.get(*right_row_index) else {
+                            continue;
+                        };
+
                         let provider = JoinedRowCandidateProvider {
                             left: &left_row,
                             right_relation: &join.relation,

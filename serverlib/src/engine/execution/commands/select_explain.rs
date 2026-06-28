@@ -9,7 +9,7 @@ use super::super::select::SelectExecutionResult;
 pub fn explain_select_plan_result(
     table_id: &str,
     filter_count: usize,
-    index_lookup: Option<(&DatabaseIndex, Vec<Vec<u8>>)>,
+    index_lookup: Option<(&DatabaseIndex, &[Vec<u8>])>,
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
 ) -> SelectExecutionResult {
@@ -115,7 +115,7 @@ pub fn explain_select_plan_result(
 
             let state = runtime_indexes.index(&index.index_id.0);
 
-            let hit = state.map(|s| s.contains(&key)).unwrap_or(false);
+            let hit = state.map(|s| s.contains(key)).unwrap_or(false);
             let card = state.map(|s| s.cardinality()).unwrap_or(0);
 
             let key_text = key

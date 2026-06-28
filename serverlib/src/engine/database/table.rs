@@ -107,11 +107,27 @@ impl DatabaseTable {
 
     fn transition(&mut self, next: ObjectStatus) -> DatabaseResult<()> {
 
-        if !self.status.can_transition_to(next) {
+        let current = self.status;
+
+        if !current.can_transition_to(next) {
+            log::warn!(
+                "database entity status transition rejected: kind=table entity_id={} table_id={} current={} next={}",
+                self.entity_id,
+                self.table_id,
+                current,
+                next,
+            );
             return Err(DatabaseError::InvalidStatusTransition);
         }
 
         self.status = next;
+        log::info!(
+            "database entity status changed: kind=table entity_id={} table_id={} previous={} next={}",
+            self.entity_id,
+            self.table_id,
+            current,
+            next,
+        );
         Ok(())
         
     }

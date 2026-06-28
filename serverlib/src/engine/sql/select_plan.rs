@@ -55,12 +55,14 @@ pub fn parse_select_read_plan_from_statement(
     parse_select_read_plan_from_query(query, is_explain)
 }
 
-fn parse_select_read_plan_from_query(
+pub(super) fn parse_select_read_plan_from_query(
     query: &Query,
     is_explain: bool,
 ) -> Result<SelectReadPlan, SqlParseError> {
 
-    let ctes = parse_cte_plans_from_query(query)?;
+    let query_sql = query.to_string();
+
+    let ctes = parse_cte_plans_from_query(query, &query_sql)?;
 
     if !query.limit_by.is_empty() {
         return Err(SqlParseError::UnsupportedStatement(
@@ -126,12 +128,12 @@ fn parse_select_read_plan_from_query(
 
     let relation_bindings = parse_relation_bindings_from_table_with_joins(
         select.from.first(),
-        &query.to_string(),
+        &query_sql,
     )?;
 
     let joins = parse_joins_from_table_with_joins(
         select.from.first(),
-        &query.to_string(),
+        &query_sql,
         &relation_bindings,
     )?;
 
@@ -186,7 +188,7 @@ fn parse_select_read_plan_from_query(
             if projection_is_wildcard {
                 return Err(SqlParseError::MissingIdentifier {
                     keyword: "from",
-                    statement: query.to_string(),
+                    statement: query_sql.clone(),
                 });
             }
 
@@ -198,7 +200,7 @@ fn parse_select_read_plan_from_query(
             } else {
                 return Err(SqlParseError::MissingIdentifier {
                     keyword: "from",
-                    statement: query.to_string(),
+                    statement: query_sql,
                 });
             }
         }
@@ -263,7 +265,10 @@ fn parse_select_read_plan_from_query(
 
 }
 
-fn parse_cte_plans_from_query(query: &Query) -> Result<Vec<SelectCtePlan>, SqlParseError> {
+fn parse_cte_plans_from_query(
+    query: &Query,
+    query_sql: &str,
+) -> Result<Vec<SelectCtePlan>, SqlParseError> {
 
     let Some(with) = query.with.as_ref() else {
         return Ok(Vec::new());
@@ -289,7 +294,7 @@ fn parse_cte_plans_from_query(query: &Query) -> Result<Vec<SelectCtePlan>, SqlPa
         if cte_table_id.is_empty() {
             return Err(SqlParseError::MissingIdentifier {
                 keyword: "with",
-                statement: query.to_string(),
+                statement: query_sql.to_string(),
             });
         }
 
