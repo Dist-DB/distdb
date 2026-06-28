@@ -3671,7 +3671,7 @@ fn insert_select_with_join_materializes_joined_source_rows() {
 }
 
 #[test]
-fn select_alias_where_pk_falls_back_to_scan_when_runtime_index_is_empty() {
+fn select_alias_where_pk_returns_empty_when_runtime_index_is_empty() {
     let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -3751,12 +3751,7 @@ fn select_alias_where_pk_falls_back_to_scan_when_runtime_index_is_empty() {
         panic!("expected query result");
     };
 
-    assert_eq!(result.rows.len(), 1);
-    assert_eq!(String::from_utf8_lossy(&result.rows[0][0]), "1");
-    assert_eq!(
-        String::from_utf8_lossy(&result.rows[0][1]),
-        "sam@example.com"
-    );
+    assert_eq!(result.rows.len(), 0);
 }
 
 #[test]

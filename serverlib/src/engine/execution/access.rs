@@ -184,6 +184,132 @@ fn normalize_distinct_field_names(field_names: &[String]) -> Vec<String> {
     fields
 }
 
+fn build_warm_equality_cache_serial(
+    fields: &[String],
+    live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
+) -> EqualityTableCacheEntry {
+    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+    let mut postings_by_field = (0..fields.len())
+        .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
+        .collect::<Vec<_>>();
+
+    for (row_id, row_map) in live_rows {
+        for (field_idx, field_name) in fields.iter().enumerate() {
+            if let Some(value) = row_map.get(field_name) {
+                postings_by_field[field_idx]
+                    .entry(value.clone())
+                    .or_default()
+                    .push(row_id);
+            }
+        }
+
+        rows_by_id.insert(row_id, row_map);
+    }
+
+    let row_ids_by_field_value = fields
+        .iter()
+        .cloned()
+        .zip(postings_by_field)
+        .collect::<HashMap<_, _>>();
+
+    EqualityTableCacheEntry {
+        latest_tx_id: 0,
+        rows_by_id,
+        row_ids_by_field_value,
+    }
+}
+
+fn build_warm_equality_cache_parallel(
+    fields: &[String],
+    live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
+    workers: usize,
+) -> EqualityTableCacheEntry {
+    let live_row_count = live_rows.len();
+    let chunk_size = live_row_count.div_ceil(workers);
+    let mut chunks = Vec::with_capacity(workers);
+    let mut iter = live_rows.into_iter();
+
+    loop {
+        let mut chunk = Vec::with_capacity(chunk_size);
+        for _ in 0..chunk_size {
+            let Some(row) = iter.next() else {
+                break;
+            };
+            chunk.push(row);
+        }
+
+        if chunk.is_empty() {
+            break;
+        }
+
+        chunks.push(chunk);
+    }
+
+    let partials = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(chunks.len());
+
+        for chunk in chunks {
+            handles.push(scope.spawn(move || {
+                let mut local_rows_by_id = HashMap::with_capacity(chunk.len());
+                let mut local_postings_by_field = (0..fields.len())
+                    .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
+                    .collect::<Vec<_>>();
+
+                for (row_id, row_map) in chunk {
+                    for (field_idx, field_name) in fields.iter().enumerate() {
+                        if let Some(value) = row_map.get(field_name) {
+                            local_postings_by_field[field_idx]
+                                .entry(value.clone())
+                                .or_default()
+                                .push(row_id);
+                        }
+                    }
+
+                    local_rows_by_id.insert(row_id, row_map);
+                }
+
+                (local_rows_by_id, local_postings_by_field)
+            }));
+        }
+
+        let mut out = Vec::with_capacity(handles.len());
+        for handle in handles {
+            if let Ok(partial) = handle.join() {
+                out.push(partial);
+            }
+        }
+        out
+    });
+
+    let mut rows_by_id = HashMap::with_capacity(live_row_count);
+    let mut postings_by_field = (0..fields.len())
+        .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
+        .collect::<Vec<_>>();
+
+    for (local_rows_by_id, local_postings_by_field) in partials {
+        rows_by_id.extend(local_rows_by_id);
+
+        for (field_idx, mut local_postings) in local_postings_by_field.into_iter().enumerate() {
+            let global_postings = &mut postings_by_field[field_idx];
+            for (value, mut row_ids) in local_postings.drain() {
+                global_postings.entry(value).or_default().append(&mut row_ids);
+            }
+        }
+    }
+
+    let row_ids_by_field_value = fields
+        .iter()
+        .cloned()
+        .zip(postings_by_field)
+        .collect::<HashMap<_, _>>();
+
+    EqualityTableCacheEntry {
+        latest_tx_id: 0,
+        rows_by_id,
+        row_ids_by_field_value,
+    }
+}
+
 fn rows_for_field_value(
     entry: &EqualityTableCacheEntry,
     field_name: &str,
@@ -226,38 +352,24 @@ pub fn warm_equality_cache_from_live_rows(
         return;
     }
 
-    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
-    let mut postings_by_field = (0..fields.len())
-        .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
-        .collect::<Vec<_>>();
+    let available_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let warm_workers = std::cmp::min(available_workers, equality_warm_max_workers());
 
-    for (row_id, row_map) in live_rows {
-        for (field_idx, field_name) in fields.iter().enumerate() {
-            if let Some(value) = row_map.get(field_name) {
-                postings_by_field[field_idx]
-                    .entry(value.clone())
-                    .or_default()
-                    .push(row_id);
-            }
-        }
+    let mut entry = if warm_workers > 1 && live_rows.len() >= EQUALITY_WARM_PARALLEL_MIN_ROWS {
+        build_warm_equality_cache_parallel(&fields, live_rows, warm_workers)
+    } else {
+        build_warm_equality_cache_serial(&fields, live_rows)
+    };
 
-        rows_by_id.insert(row_id, row_map);
-    }
-
-    let row_ids_by_field_value = fields
-        .into_iter()
-        .zip(postings_by_field)
-        .collect::<HashMap<_, _>>();
+    entry.latest_tx_id = latest_tx_id;
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut cache_guard) = cache.lock() {
         cache_guard.insert(
             (cache_scope_id, table_id.to_string()),
-            EqualityTableCacheEntry {
-                latest_tx_id,
-                rows_by_id,
-                row_ids_by_field_value,
-            },
+            entry,
         );
     }
 
