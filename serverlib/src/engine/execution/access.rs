@@ -32,6 +32,8 @@ static EQUALITY_TABLE_CACHE: OnceLock<Mutex<HashMap<(usize, String), EqualityTab
 const LIVE_ROW_APPLY_PARALLEL_MIN_RECORDS: usize = 500_000;
 const LIVE_ROW_APPLY_PARALLEL_CHUNK_SIZE: usize = 200_000;
 const LIVE_ROW_APPLY_PARALLEL_MAX_WORKERS: usize = 32;
+const EQUALITY_WARM_PARALLEL_MIN_ROWS: usize = 250_000;
+const EQUALITY_WARM_PARALLEL_MAX_WORKERS: usize = 32;
 
 fn live_row_apply_max_workers() -> usize {
     std::env::var("DISTDB_LIVE_ROW_APPLY_WORKERS")
@@ -39,6 +41,14 @@ fn live_row_apply_max_workers() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(LIVE_ROW_APPLY_PARALLEL_MAX_WORKERS)
+}
+
+fn equality_warm_max_workers() -> usize {
+    std::env::var("DISTDB_RUNTIME_INDEX_WARM_WORKERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(EQUALITY_WARM_PARALLEL_MAX_WORKERS)
 }
 
 #[inline]
@@ -157,6 +167,23 @@ fn build_postings_for_field(
     row_ids_by_value
 }
 
+fn normalize_distinct_field_names(field_names: &[String]) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut seen = AHashSet::with_capacity(field_names.len());
+
+    for field_name in field_names {
+        if field_name.is_empty() {
+            continue;
+        }
+
+        if seen.insert(field_name.clone()) {
+            fields.push(field_name.clone());
+        }
+    }
+
+    fields
+}
+
 fn rows_for_field_value(
     entry: &EqualityTableCacheEntry,
     field_name: &str,
@@ -186,7 +213,7 @@ pub fn warm_equality_cache_from_live_rows(
     cache_scope_id: usize,
     table_id: &str,
     latest_tx_id: u64,
-    live_rows: &[(u64, HashMap<String, Vec<u8>>) ],
+    live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
     field_names: &[String],
 ) {
     
@@ -194,26 +221,33 @@ pub fn warm_equality_cache_from_live_rows(
         return;
     }
 
-    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
-    
-    for (row_id, row_map) in live_rows {
-        rows_by_id.insert(*row_id, row_map.clone());
+    let fields = normalize_distinct_field_names(field_names);
+    if fields.is_empty() {
+        return;
     }
 
-    let mut row_ids_by_field_value = HashMap::<String, HashMap<Vec<u8>, Vec<u64>>>::new();
-    
-    for field_name in field_names {
+    let mut rows_by_id = HashMap::with_capacity(live_rows.len());
+    let mut postings_by_field = (0..fields.len())
+        .map(|_| HashMap::<Vec<u8>, Vec<u64>>::new())
+        .collect::<Vec<_>>();
 
-        if field_name.is_empty() {
-            continue;
+    for (row_id, row_map) in live_rows {
+        for (field_idx, field_name) in fields.iter().enumerate() {
+            if let Some(value) = row_map.get(field_name) {
+                postings_by_field[field_idx]
+                    .entry(value.clone())
+                    .or_default()
+                    .push(row_id);
+            }
         }
 
-        row_ids_by_field_value.insert(
-            field_name.clone(),
-            build_postings_for_field(&rows_by_id, field_name),
-        );
-
+        rows_by_id.insert(row_id, row_map);
     }
+
+    let row_ids_by_field_value = fields
+        .into_iter()
+        .zip(postings_by_field)
+        .collect::<HashMap<_, _>>();
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut cache_guard) = cache.lock() {

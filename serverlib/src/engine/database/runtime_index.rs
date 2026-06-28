@@ -363,6 +363,7 @@ impl RuntimeIndexStore {
                 let live_rows_started_at = Instant::now();
                 let live_rows = load_live_rows_in_place(wal, &table_id, &table.schema);
                 let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
+                let live_row_count = live_rows.len();
 
                 let latest_tx_id = wal
                     .latest_transaction_id(&table_id)
@@ -385,25 +386,19 @@ impl RuntimeIndexStore {
                 warm_fields.sort();
                 warm_fields.dedup();
 
-                warm_equality_cache_from_live_rows(
-                    wal.cache_scope_id(),
-                    &table_id,
-                    latest_tx_id,
-                    &live_rows,
-                    &warm_fields,
-                );
-
                 if live_rows_elapsed_ms >= 1_000 {
                     log::info!(
                         "runtime index bootstrap live-row materialization database={} table={} live_rows={} elapsed_ms={}",
                         database_id,
                         table_id,
-                        live_rows.len(),
+                        live_row_count,
                         live_rows_elapsed_ms,
                     );
                 }
 
+                let rebuild_started_at = Instant::now();
                 let rebuilt = build_bootstrap_index_entries(&tracked_indexes, &live_rows);
+                let rebuild_elapsed_ms = rebuild_started_at.elapsed().as_millis();
 
                 for (index_id, index, entries) in rebuilt {
                     let state = self.index_mut(&index_id);
@@ -411,26 +406,38 @@ impl RuntimeIndexStore {
                     state.index = Some(index);
                 }
 
+                let warm_started_at = Instant::now();
+                warm_equality_cache_from_live_rows(
+                    wal.cache_scope_id(),
+                    &table_id,
+                    latest_tx_id,
+                    live_rows,
+                    &warm_fields,
+                );
+                let warm_elapsed_ms = warm_started_at.elapsed().as_millis();
+
                 bootstrapped_tables += 1;
                 bootstrapped_indexes += tracked_indexes.len();
-                bootstrapped_rows += live_rows.len();
+                bootstrapped_rows += live_row_count;
 
                 log::debug!(
                     "runtime index bootstrapped database={} table={} indexes={} live_rows={}",
                     database_id,
                     table_id,
                     tracked_indexes.len(),
-                    live_rows.len(),
+                    live_row_count,
                 );
 
                 let table_elapsed_ms = table_started_at.elapsed().as_millis();
                 log::info!(
-                    "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} live_row_materialization_ms={} elapsed_ms={}",
+                    "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} live_row_materialization_ms={} index_rebuild_ms={} equality_warm_ms={} elapsed_ms={}",
                     database_id,
                     table_id,
                     tracked_indexes.len(),
-                    live_rows.len(),
+                    live_row_count,
                     live_rows_elapsed_ms,
+                    rebuild_elapsed_ms,
+                    warm_elapsed_ms,
                     table_elapsed_ms,
                 );
 
