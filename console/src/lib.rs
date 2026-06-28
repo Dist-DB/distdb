@@ -18,8 +18,6 @@ const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
 const IMPORT_TRANSPORT_RETRY_LIMIT: usize = 3;
 const IMPORT_TRANSACTION_BATCH_SIZE: usize = 500;
 const IMPORT_TRANSACTION_BATCH_MAX_AGE_MS: u128 = 500;
-const IMPORT_PROGRESS_EVERY_STATEMENTS: usize = 5_000;
-const IMPORT_PROGRESS_EVERY_MS: u128 = 2_000;
 const IMPORT_BEGIN_STATEMENT: &str = "begin /*distdb_import*/";
 const SHOW_PEERS_REQUEST_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const SHOW_PEERS_REQUEST_TIMEOUT_SECS_ENV: &str = "DISTDB_CONSOLE_SHOW_PEERS_TIMEOUT_SECS";
@@ -47,21 +45,6 @@ pub enum ConsoleCommand {
     UseDatabase(String),
     ImportFile(String),
     Sql(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ImportStats {
-    executed_statements: usize,
-    skipped_use_statements: usize,
-    skipped_dump_directives: usize,
-    skipped_non_fatal_errors: usize,
-    committed_batches: usize,
-    source_statements: usize,
-    emitted_statement_chunks: usize,
-    local_overhead_ms: u128,
-    parser_scan_ms: u128,
-    max_pending_bytes: usize,
-    max_source_statement_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,7 +194,7 @@ impl ConsoleSession {
                 let peers = self.runtime.transport().discovered_peers();
                 let active_peer_id = self.runtime.transport().active_peer_id();
                 if peers.is_empty() {
-                    println!("no peers discovered");
+                    log::info!("no peers discovered");
                 } else {
                     for peer in peers {
                         let marker = if Some(peer.peer_id.as_str()) == active_peer_id {
@@ -219,7 +202,7 @@ impl ConsoleSession {
                         } else {
                             " "
                         };
-                        println!(
+                        log::info!(
                             "{} peer={} addrs={}",
                             marker,
                             peer.peer_id,
@@ -234,14 +217,14 @@ impl ConsoleSession {
             ConsoleCommand::ConnectPeer { user, peer_id } => {
                 self.runtime.transport_mut().select_peer(&peer_id)?;
                 self.runtime.transport_mut().connect_active_peer()?;
-                println!(
+                log::info!(
                     "notification: connection to {} is successful (session {}@{})",
                     peer_id, user, peer_id
                 );
                 match self.runtime.transport().session_id() {
-                    Ok(Some(token)) => println!("session_id={}", token),
-                    Ok(None) => println!("session_id=<none>"),
-                    Err(_) => println!("session_id=<unavailable>"),
+                    Ok(Some(token)) => log::info!("session_id={}", token),
+                    Ok(None) => log::info!("session_id=<none>"),
+                    Err(_) => log::warn!("session_id=<unavailable>"),
                 }
                 self.push_log(format!("connected peer={} as user={}", peer_id, user));
                 Ok(true)
@@ -249,7 +232,7 @@ impl ConsoleSession {
 
             ConsoleCommand::Disconnect => {
                 self.runtime.transport().disconnect_active_peer();
-                println!("disconnected active peer session");
+                log::info!("disconnected active peer session");
                 self.push_log("active peer disconnected".to_string());
                 Ok(true)
             },
@@ -271,7 +254,7 @@ impl ConsoleSession {
 
                 self.current_database = Some(database);
 
-                println!(
+                log::info!(
                     "database switched to {}",
                     self.current_database.as_deref().unwrap_or("<none>")
                 );
@@ -359,7 +342,7 @@ impl ConsoleSession {
         let file = std::fs::File::open(path)
             .map_err(|err| format!("failed to open import file '{}': {}", path.display(), err))?;
 
-        println!(
+        log::info!(
             "import started: file={} target_database={}",
             path.display(),
             database_id
@@ -381,7 +364,7 @@ impl ConsoleSession {
             max_statement_bytes: 0,
         };
 
-        let mut stats = execute_import_from_reader(
+        execute_import_from_reader(
             BufReader::new(file),
             &database_id,
             &mut transaction_state,
@@ -395,46 +378,24 @@ impl ConsoleSession {
             .finalize_import_batching(&database_id, &mut transaction_state)
             .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
 
-        stats.committed_batches = transaction_state.committed_batches;
-
-        println!(
-            "import completed: executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={} max_stmt_kind={} max_stmt_bytes={}",
-            stats.executed_statements,
-            stats.skipped_use_statements
-            ,stats.skipped_dump_directives
-            ,stats.skipped_non_fatal_errors
-            ,stats.committed_batches
-            ,stats.source_statements
-            ,stats.emitted_statement_chunks
-            ,stats.local_overhead_ms
-            ,stats.parser_scan_ms
-            ,stats.max_pending_bytes
-            ,stats.max_source_statement_bytes
-            ,transaction_state.execute_statement_ms
-            ,transaction_state.begin_statement_ms
-            ,transaction_state.commit_statement_ms
-            ,transaction_state.query_statement_ms
-            ,transaction_state.statement_calls
-            ,transaction_state.max_statement_ms
-            ,transaction_state.max_statement_kind.map(|kind| kind.as_str()).unwrap_or("<none>")
-            ,transaction_state.max_statement_bytes
+        log::info!(
+            "import completed: committed_batches={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={} max_stmt_kind={} max_stmt_bytes={}",
+            transaction_state.committed_batches,
+            transaction_state.execute_statement_ms,
+            transaction_state.begin_statement_ms,
+            transaction_state.commit_statement_ms,
+            transaction_state.query_statement_ms,
+            transaction_state.statement_calls,
+            transaction_state.max_statement_ms,
+            transaction_state.max_statement_kind.map(|kind| kind.as_str()).unwrap_or("<none>"),
+            transaction_state.max_statement_bytes,
         );
 
         self.push_log(format!(
-            "import file={} db={} executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={} max_stmt_kind={} max_stmt_bytes={}",
+            "import file={} db={} committed_batches={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={} max_stmt_kind={} max_stmt_bytes={}",
             path.display(),
             database_id,
-            stats.executed_statements,
-            stats.skipped_use_statements,
-            stats.skipped_dump_directives,
-            stats.skipped_non_fatal_errors,
-            stats.committed_batches,
-            stats.source_statements,
-            stats.emitted_statement_chunks,
-            stats.local_overhead_ms,
-            stats.parser_scan_ms,
-            stats.max_pending_bytes,
-            stats.max_source_statement_bytes,
+            transaction_state.committed_batches,
             transaction_state.execute_statement_ms,
             transaction_state.begin_statement_ms,
             transaction_state.commit_statement_ms,
@@ -793,50 +754,50 @@ impl ConsoleSession {
             connector::ConnectorDiscoveryMode::Kademlia => "kademlia",
         };
 
-        println!("connector p2p:");
-        println!("  mode={mode}");
-        println!("  protocol={}", transport.protocol());
+        log::info!("connector p2p:");
+        log::info!("  mode={mode}");
+        log::info!("  protocol={}", transport.protocol());
         
         let tls_mode = transport.tls_mode().as_str();
 
-        println!("  tls_mode={tls_mode}");
+        log::info!("  tls_mode={tls_mode}");
         if let Some(ca_path) = transport.tls_ca_path() {
-            println!("  tls_ca={}", ca_path.display());
+            log::info!("  tls_ca={}", ca_path.display());
         } else {
-            println!("  tls_ca=<none>");
+            log::info!("  tls_ca=<none>");
         }
 
         if transport.bootstrap_peers().is_empty() {
-            println!("  bootstrap_peers=<none>");
+            log::info!("  bootstrap_peers=<none>");
         } else {
-            println!(
+            log::info!(
                 "  bootstrap_peers={}",
                 transport.bootstrap_peers().join(", ")
             );
         }
 
-        println!("  discovered_peer_count={}", transport.discovered_peers().len());
-        println!(
+        log::info!("  discovered_peer_count={}", transport.discovered_peers().len());
+        log::info!(
             "  active_peer={}",
             transport.active_peer_id().unwrap_or("<none>")
         );
-        println!("  active_connection={}", transport.has_live_connection());
-        println!("  queued_response_count={}", transport.queued_response_count());
-        println!("server p2p:");
-        println!(
+        log::info!("  active_connection={}", transport.has_live_connection());
+        log::info!("  queued_response_count={}", transport.queued_response_count());
+        log::info!("server p2p:");
+        log::info!(
             "  visibility=not exposed by connector API yet (request/response path is active)"
         );
 
         match transport.session_auth_token() {
-            Ok(Some(_)) => println!("  auth_token=<set>"),
-            Ok(None) => println!("  auth_token=<none>"),
-            Err(_) => println!("  auth_token=<unavailable>"),
+            Ok(Some(_)) => log::info!("  auth_token=<set>"),
+            Ok(None) => log::info!("  auth_token=<none>"),
+            Err(_) => log::warn!("  auth_token=<unavailable>"),
         }
 
         match transport.session_id() {
-            Ok(Some(_)) => println!("  session_id=<set>"),
-            Ok(None) => println!("  session_id=<none>"),
-            Err(_) => println!("  session_id=<unavailable>"),
+            Ok(Some(_)) => log::info!("  session_id=<set>"),
+            Ok(None) => log::info!("  session_id=<none>"),
+            Err(_) => log::warn!("  session_id=<unavailable>"),
         }
 
     }
@@ -852,12 +813,12 @@ impl ConsoleSession {
     fn print_log(&self) {
 
         if self.log_entries.is_empty() {
-            println!("no console log entries");
+            log::info!("no console log entries");
             return;
         }
 
         for entry in &self.log_entries {
-            println!("[{}] {}", entry.seqno, entry.message);
+            log::info!("[{}] {}", entry.seqno, entry.message);
         }
 
     }
@@ -909,7 +870,7 @@ fn record_import_statement_timing(
         transaction_state.max_statement_kind = Some(kind);
         transaction_state.max_statement_bytes = statement_bytes;
 
-        println!(
+        log::debug!(
             "import new max statement: kind={} bytes={} elapsed_ms={}",
             kind.as_str(),
             statement_bytes,
@@ -1132,66 +1093,14 @@ fn execute_import_from_reader<R, F>(
     database_id: &str,
     transaction_state: &mut ImportTransactionState,
     mut execute_statement: F,
-) -> Result<ImportStats, String>
+) -> Result<(), String>
 where
     R: BufRead,
     F: FnMut(&str, &str, &mut ImportTransactionState) -> Result<(), String>,
 {
 
     let mut parser = SqlStatementParser::default();
-    let mut import_stats = ImportStats {
-        executed_statements: 0,
-        skipped_use_statements: 0,
-        skipped_dump_directives: 0,
-        skipped_non_fatal_errors: 0,
-        committed_batches: 0,
-        source_statements: 0,
-        emitted_statement_chunks: 0,
-        local_overhead_ms: 0,
-        parser_scan_ms: 0,
-        max_pending_bytes: 0,
-        max_source_statement_bytes: 0,
-    };
-
-    let import_started_at = std::time::Instant::now();
-    let mut last_progress_output_at = std::time::Instant::now();
     let mut pending_bytes = Vec::<u8>::new();
-
-    let mut emit_progress_if_due = |force: bool, stats: &ImportStats, tx: &ImportTransactionState| {
-        
-        let elapsed_ms = import_started_at.elapsed().as_millis();
-        let due = elapsed_ms > 0
-            && elapsed_ms % IMPORT_PROGRESS_EVERY_MS == 0;
-
-        if !force && !due && last_progress_output_at.elapsed().as_millis() < IMPORT_PROGRESS_EVERY_MS {
-            return;
-        }
-
-        // println!(
-        //     "import progress: executed={} skipped_use={} skipped_dump_directives={} skipped_non_fatal_errors={} committed_batches={} source_statements={} emitted_chunks={} elapsed_s={} local_overhead_ms={} parser_scan_ms={} max_pending_bytes={} max_source_statement_bytes={} exec_ms={} begin_ms={} commit_ms={} query_ms={} stmt_calls={} max_stmt_ms={}",
-        //     stats.executed_statements,
-        //     stats.skipped_use_statements,
-        //     stats.skipped_dump_directives,
-        //     stats.skipped_non_fatal_errors,
-        //     tx.committed_batches,
-        //     stats.source_statements,
-        //     stats.emitted_statement_chunks,
-        //     import_started_at.elapsed().as_secs(),
-        //     stats.local_overhead_ms,
-        //     stats.parser_scan_ms,
-        //     stats.max_pending_bytes,
-        //     stats.max_source_statement_bytes,
-        //     tx.execute_statement_ms,
-        //     tx.begin_statement_ms,
-        //     tx.commit_statement_ms,
-        //     tx.query_statement_ms,
-        //     tx.statement_calls,
-        //     tx.max_statement_ms,
-        // );
-
-        last_progress_output_at = std::time::Instant::now();
-
-    };
 
     loop {
         let chunk_len = {
@@ -1202,7 +1111,6 @@ where
             }
 
             pending_bytes.extend_from_slice(buffer);
-            import_stats.max_pending_bytes = import_stats.max_pending_bytes.max(pending_bytes.len());
             buffer.len()
         };
 
@@ -1220,89 +1128,46 @@ where
             let chunk_len = match std::str::from_utf8(&pending_bytes) {
 
                 Ok(valid) => {
-
-                    let parser_started_at = std::time::Instant::now();
-                    let mut callback_wall_ms = 0u128;
-                    
                     parser.push_chunk(valid, &mut |statement| {
-
-                        let callback_started_at = std::time::Instant::now();
-                        
                         if statement_starts_with_use(statement) {
-                            callback_wall_ms += callback_started_at.elapsed().as_millis();
-                            import_stats.skipped_use_statements += 1;
                             return Ok(());
                         }
 
                         let normalized_statement = normalize_import_statement(statement);
-                        
-                        import_stats.max_source_statement_bytes = import_stats
-                            .max_source_statement_bytes
-                            .max(normalized_statement.len());
-                        
+
                         if statement_is_import_dump_directive(&normalized_statement) {
-                            callback_wall_ms += callback_started_at.elapsed().as_millis();
-                            import_stats.skipped_dump_directives += 1;
-                            emit_progress_if_due(false, &import_stats, transaction_state);
                             return Ok(());
                         }
 
                         if normalized_statement.len() >= IMPORT_LARGE_STATEMENT_BYTES {
-                            println!(
+                            log::debug!(
                                 "import executing large statement: bytes={} head='{}'",
                                 normalized_statement.len(),
                                 statement_head_token(&normalized_statement)
                             );
                         }
 
-                        import_stats.source_statements += 1;
-                        
-                        let statement_started_at = std::time::Instant::now();
-                        let execute_ms_before = transaction_state.execute_statement_ms;
-                        let mut emitted_chunks = 0usize;
-
                         stream_import_insert_values_statements(
                             &normalized_statement,
                             import_insert_chunk_target_bytes(),
                             import_insert_chunk_max_tuples(),
                             |import_statement| {
-
-                                emitted_chunks += 1;
                                 if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
                                     if should_skip_import_error(&import_statement, &err) {
-                                        import_stats.skipped_non_fatal_errors += 1;
                                         return Ok(());
                                     }
 
                                     return Err(err);
                                 }
 
-                                import_stats.executed_statements += 1;
-
-                                if import_stats.executed_statements % IMPORT_PROGRESS_EVERY_STATEMENTS == 0 {
-                                    emit_progress_if_due(true, &import_stats, transaction_state);
-                                }
-
-                                emit_progress_if_due(false, &import_stats, transaction_state);
                                 Ok(())
 
                             },
                         )?;
 
-                        import_stats.emitted_statement_chunks += emitted_chunks;
-                        let wall_ms = statement_started_at.elapsed().as_millis();
-                        let execute_ms = transaction_state.execute_statement_ms.saturating_sub(execute_ms_before);
-                        import_stats.local_overhead_ms += wall_ms.saturating_sub(execute_ms);
-                        callback_wall_ms += callback_started_at.elapsed().as_millis();
-
                         Ok(())
 
                     })?;
-
-                    import_stats.parser_scan_ms += parser_started_at
-                        .elapsed()
-                        .as_millis()
-                        .saturating_sub(callback_wall_ms);
 
                     pending_bytes.clear();
                     
@@ -1322,155 +1187,87 @@ where
             let valid_chunk = std::str::from_utf8(&pending_bytes[..chunk_len])
                 .map_err(|err| err.to_string())?;
 
-            let parser_started_at = std::time::Instant::now();
-            let mut callback_wall_ms = 0u128;
             parser.push_chunk(valid_chunk, &mut |statement| {
-                let callback_started_at = std::time::Instant::now();
                 if statement_starts_with_use(statement) {
-                    callback_wall_ms += callback_started_at.elapsed().as_millis();
-                    import_stats.skipped_use_statements += 1;
                     return Ok(());
                 }
 
                 let normalized_statement = normalize_import_statement(statement);
-                import_stats.max_source_statement_bytes = import_stats
-                    .max_source_statement_bytes
-                    .max(normalized_statement.len());
                 if statement_is_import_dump_directive(&normalized_statement) {
-                    callback_wall_ms += callback_started_at.elapsed().as_millis();
-                    import_stats.skipped_dump_directives += 1;
-                    emit_progress_if_due(false, &import_stats, transaction_state);
                     return Ok(());
                 }
 
                 if normalized_statement.len() >= IMPORT_LARGE_STATEMENT_BYTES {
-                    println!(
+                    log::debug!(
                         "import executing large statement: bytes={} head='{}'",
                         normalized_statement.len(),
                         statement_head_token(&normalized_statement)
                     );
                 }
 
-                import_stats.source_statements += 1;
-                let statement_started_at = std::time::Instant::now();
-                let execute_ms_before = transaction_state.execute_statement_ms;
-                let mut emitted_chunks = 0usize;
-
                 stream_import_insert_values_statements(
                     &normalized_statement,
                     import_insert_chunk_target_bytes(),
                     import_insert_chunk_max_tuples(),
                     |import_statement| {
-                        emitted_chunks += 1;
                         if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
                             if should_skip_import_error(&import_statement, &err) {
-                                import_stats.skipped_non_fatal_errors += 1;
                                 return Ok(());
                             }
 
                             return Err(err);
                         }
 
-                        import_stats.executed_statements += 1;
-
-                        if import_stats.executed_statements % IMPORT_PROGRESS_EVERY_STATEMENTS == 0 {
-                            emit_progress_if_due(true, &import_stats, transaction_state);
-                        }
-
-                        emit_progress_if_due(false, &import_stats, transaction_state);
                         Ok(())
                     },
                 )?;
 
-                import_stats.emitted_statement_chunks += emitted_chunks;
-                let wall_ms = statement_started_at.elapsed().as_millis();
-                let execute_ms = transaction_state.execute_statement_ms.saturating_sub(execute_ms_before);
-                import_stats.local_overhead_ms += wall_ms.saturating_sub(execute_ms);
-                callback_wall_ms += callback_started_at.elapsed().as_millis();
-
                 Ok(())
         })?;
-            import_stats.parser_scan_ms += parser_started_at
-                .elapsed()
-                .as_millis()
-                .saturating_sub(callback_wall_ms);
 
             pending_bytes.drain(..chunk_len);
         }
     }
 
-    let parser_started_at = std::time::Instant::now();
-    let mut callback_wall_ms = 0u128;
     parser.flush(&mut |statement| {
-        let callback_started_at = std::time::Instant::now();
         if statement_starts_with_use(statement) {
-            callback_wall_ms += callback_started_at.elapsed().as_millis();
-            import_stats.skipped_use_statements += 1;
             return Ok(());
         }
 
         let normalized_statement = normalize_import_statement(statement);
-        import_stats.max_source_statement_bytes = import_stats
-            .max_source_statement_bytes
-            .max(normalized_statement.len());
         if statement_is_import_dump_directive(&normalized_statement) {
-            callback_wall_ms += callback_started_at.elapsed().as_millis();
-            import_stats.skipped_dump_directives += 1;
-            emit_progress_if_due(false, &import_stats, transaction_state);
             return Ok(());
         }
 
         if normalized_statement.len() >= IMPORT_LARGE_STATEMENT_BYTES {
-            println!(
+            log::debug!(
                 "import executing large statement: bytes={} head='{}'",
                 normalized_statement.len(),
                 statement_head_token(&normalized_statement)
             );
         }
 
-        import_stats.source_statements += 1;
-        let statement_started_at = std::time::Instant::now();
-        let execute_ms_before = transaction_state.execute_statement_ms;
-        let mut emitted_chunks = 0usize;
-
         stream_import_insert_values_statements(
             &normalized_statement,
             import_insert_chunk_target_bytes(),
             import_insert_chunk_max_tuples(),
             |import_statement| {
-            emitted_chunks += 1;
             if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
                 if should_skip_import_error(&import_statement, &err) {
-                    import_stats.skipped_non_fatal_errors += 1;
                     return Ok(());
                 }
 
                 return Err(err);
             }
 
-            import_stats.executed_statements += 1;
-            emit_progress_if_due(false, &import_stats, transaction_state);
             Ok(())
         },
         )?;
 
-        import_stats.emitted_statement_chunks += emitted_chunks;
-        let wall_ms = statement_started_at.elapsed().as_millis();
-        let execute_ms = transaction_state.execute_statement_ms.saturating_sub(execute_ms_before);
-        import_stats.local_overhead_ms += wall_ms.saturating_sub(execute_ms);
-        callback_wall_ms += callback_started_at.elapsed().as_millis();
-
         Ok(())
     })?;
-    import_stats.parser_scan_ms += parser_started_at
-        .elapsed()
-        .as_millis()
-        .saturating_sub(callback_wall_ms);
 
-    import_stats.committed_batches = transaction_state.committed_batches;
-    emit_progress_if_due(true, &import_stats, transaction_state);
-
-    Ok(import_stats)
+    Ok(())
 
 }
 
@@ -2291,7 +2088,7 @@ mod tests {
             max_statement_bytes: 0,
         };
 
-        let stats = execute_import_from_reader(
+        execute_import_from_reader(
             BufReader::new(input.as_bytes()),
             "main",
             &mut transaction_state,
@@ -2302,11 +2099,7 @@ mod tests {
         )
         .expect("import reader should succeed");
 
-        assert_eq!(stats.executed_statements, 2);
-        assert_eq!(stats.skipped_use_statements, 1);
-        assert_eq!(stats.skipped_dump_directives, 0);
-        assert_eq!(stats.skipped_non_fatal_errors, 0);
-        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(transaction_state.committed_batches, 0);
         assert_eq!(executed.len(), 2);
         assert!(executed[0].contains("create table people"));
         assert!(executed[1].contains("insert into people"));
@@ -2339,7 +2132,7 @@ mod tests {
             max_statement_bytes: 0,
         };
 
-        let stats = execute_import_from_reader(
+        execute_import_from_reader(
             BufReader::new(input.as_bytes()),
             "main",
             &mut transaction_state,
@@ -2370,10 +2163,7 @@ mod tests {
         )
         .expect("import reader should succeed");
 
-        assert_eq!(stats.executed_statements, 5);
-        assert_eq!(stats.skipped_dump_directives, 0);
-        assert_eq!(stats.skipped_non_fatal_errors, 0);
-        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(transaction_state.committed_batches, 0);
         assert_eq!(row_counts.get("users"), Some(&2));
         assert_eq!(row_counts.get("regions"), Some(&1));
     }
@@ -2403,7 +2193,7 @@ mod tests {
             max_statement_bytes: 0,
         };
 
-        let stats = execute_import_from_reader(
+        execute_import_from_reader(
             BufReader::new(input.as_bytes()),
             "main",
             &mut transaction_state,
@@ -2419,10 +2209,7 @@ mod tests {
         )
         .expect("import reader should continue past non-fatal drop errors");
 
-        assert_eq!(stats.executed_statements, 2);
-        assert_eq!(stats.skipped_dump_directives, 1);
-        assert_eq!(stats.skipped_non_fatal_errors, 0);
-        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(transaction_state.committed_batches, 0);
         assert_eq!(executed.len(), 2);
     }
 
@@ -2456,7 +2243,8 @@ mod tests {
             max_statement_bytes: 0,
         };
 
-        let stats = execute_import_from_reader(
+        let mut executed_count = 0usize;
+        execute_import_from_reader(
             BufReader::new(input.as_bytes()),
             "main",
             &mut transaction_state,
@@ -2465,14 +2253,15 @@ mod tests {
                     return Err("statement still contains unsupported USING BTREE".to_string());
                 }
 
+                executed_count += 1;
+
                 Ok(())
             },
         )
         .expect("import reader should normalize unsupported USING clauses");
 
-        assert_eq!(stats.executed_statements, 1);
-        assert_eq!(stats.skipped_dump_directives, 0);
-        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(executed_count, 1);
+        assert_eq!(transaction_state.committed_batches, 0);
     }
 
     #[test]
@@ -2501,7 +2290,7 @@ mod tests {
             max_statement_bytes: 0,
         };
 
-        let stats = execute_import_from_reader(
+        execute_import_from_reader(
             BufReader::new(input.as_bytes()),
             "main",
             &mut transaction_state,
@@ -2512,9 +2301,7 @@ mod tests {
         )
         .expect("import reader should skip dump directives");
 
-        assert_eq!(stats.executed_statements, 1);
-        assert_eq!(stats.skipped_dump_directives, 3);
-        assert_eq!(stats.committed_batches, 0);
+        assert_eq!(transaction_state.committed_batches, 0);
         assert_eq!(executed, vec!["insert into ip_lookup values (1)"]);
     }
 

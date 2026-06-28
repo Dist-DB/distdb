@@ -1,5 +1,213 @@
+use super::*;
 use std::cmp::Ordering;
 use std::collections::HashSet;
+
+pub(super) fn execute_union_query_impl(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let (steps, order_by, limit, offset) =
+        match serverlib::parse_union_select_read_plans_from_statement(&statement.sql) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("union query execution failed: {err}"),
+                )
+            }
+        };
+
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let mut set_stack = Vec::<serverlib::SelectExecutionResult>::new();
+
+    for step in steps {
+        match step {
+            serverlib::SelectSetQueryStep::Branch(plan) => {
+                let result = if !plan.ctes.is_empty() {
+                    match execute_select_with_ctes(catalog, wal, runtime_indexes, &plan) {
+                        Ok(result) => result,
+                        Err(message) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("set query execution failed: {message}"),
+                            )
+                        }
+                    }
+                } else {
+                    match execute_select_plan_result(catalog, wal, runtime_indexes, &plan) {
+                        Ok(result) => result,
+                        Err(message) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("set query execution failed: {message}"),
+                            )
+                        }
+                    }
+                };
+
+                set_stack.push(result);
+            }
+
+            serverlib::SelectSetQueryStep::BoundaryOperation(boundary_operation) => {
+                let Some(right_result) = set_stack.pop() else {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        "set query execution failed: missing right branch for set operation"
+                            .to_string(),
+                    );
+                };
+
+                let Some(mut left_result) = set_stack.pop() else {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        "set query execution failed: missing left branch for set operation"
+                            .to_string(),
+                    );
+                };
+
+                if left_result.columns.len() != right_result.columns.len() {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        "set query execution failed: all set-operation branches must return the same number of columns"
+                            .to_string(),
+                    );
+                }
+
+                if let Err(message) =
+                    reconcile_union_column_types(&mut left_result.columns, &right_result.columns)
+                {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("set query execution failed: {message}"),
+                    );
+                }
+
+                let rows = apply_set_boundary_operation(
+                    left_result.rows,
+                    right_result.rows,
+                    boundary_operation,
+                    &left_result.columns,
+                );
+
+                left_result.rows = rows;
+                set_stack.push(left_result);
+            }
+        }
+    }
+
+    let Some(set_result) = set_stack.pop() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "set query execution failed: no branch results were produced".to_string(),
+        );
+    };
+
+    if !set_stack.is_empty() {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "set query execution failed: invalid set-operation evaluation state".to_string(),
+        );
+    }
+
+    let columns = set_result.columns;
+    let mut rows = set_result.rows;
+
+    if !order_by.is_empty() {
+        let mut order_indexes = Vec::with_capacity(order_by.len());
+        const UNION_ORDER_BY_ORDINAL_PREFIX: &str = "__union_order_by_ordinal__";
+
+        for item in &order_by {
+            let index = if let Some(raw_ordinal) =
+                item.field_name.strip_prefix(UNION_ORDER_BY_ORDINAL_PREFIX)
+            {
+                let ordinal = match raw_ordinal.parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!(
+                                "union query execution failed: invalid ORDER BY ordinal '{}'",
+                                raw_ordinal
+                            ),
+                        )
+                    }
+                };
+
+                if ordinal == 0 || ordinal > columns.len() {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!(
+                            "union query execution failed: ORDER BY ordinal {} is out of range for {} output columns",
+                            ordinal,
+                            columns.len()
+                        ),
+                    );
+                }
+
+                ordinal - 1
+            } else {
+                let Some(index) = columns
+                    .iter()
+                    .position(|column| column.field_name == item.field_name)
+                else {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!(
+                            "union query execution failed: ORDER BY column '{}' is not present in UNION output",
+                            item.field_name
+                        ),
+                    );
+                };
+
+                index
+            };
+
+            order_indexes.push((index, item.descending));
+        }
+
+        rows.sort_by(|left, right| {
+            for (index, descending) in &order_indexes {
+                let ordering = compare_union_cell_values(
+                    left.get(*index),
+                    right.get(*index),
+                    columns.get(*index),
+                );
+
+                if ordering != Ordering::Equal {
+                    return if *descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    };
+                }
+            }
+
+            Ordering::Equal
+        });
+    }
+
+    rows = apply_union_row_window(rows, limit, offset);
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Query(QueryResult {
+            columns: connector_field_defs(columns),
+            rows,
+            timings: empty_query_timings(),
+        }),
+    )
+}
 
 pub(super) fn apply_set_boundary_operation(
     mut left_rows: Vec<Vec<Vec<u8>>>,
