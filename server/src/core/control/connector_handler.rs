@@ -17,6 +17,7 @@ use serverlib::core::cluster::NodeDescriptor;
 use serverlib::core::identity::NodeId;
 use serverlib::p2p::protocol::{
     AffinityJoinResponse, DataSnapshotResponse, SchemaCatalogResponse, ServiceMessage,
+    TableLockState,
     TlsCertEnrollResponse,
     TransactionsSinceResponse,
 };
@@ -44,6 +45,115 @@ const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
 const SERVER_BOOTSTRAP_STATUS_SQL: &str = "__distdb_bootstrap_status__";
 const SERVER_SHOW_ENTITIES_SQL: &str = "__distdb_show_entities__";
 const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
+
+async fn rollback_active_session_transaction(
+    app: &Arc<Mutex<ServerApp>>,
+    p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    local_node: &NodeDescriptor,
+    session_id: &str,
+) {
+
+    let mut app = app.lock().await;
+    let rolled_back = app.rollback_session_transaction(session_id);
+    drop(app);
+
+    if rolled_back {
+
+        log::info!(
+            "rolled back active transaction due to disconnect session_id={}",
+            session_id
+        );
+
+        let payload = TableLockState {
+            owner_node_id: local_node.id.0.clone(),
+            owner_session_id: session_id.to_string(),
+            database_id: String::new(),
+            table_ids: Vec::new(),
+            locked: false,
+        };
+
+        let mut runtime = p2p_runtime.lock().await;
+        
+        for peer in runtime.network().discover_peers() {
+            for peer_addr in peer.addrs {
+                let _ = runtime
+                    .network_mut()
+                    .send_message(&peer_addr, ServiceMessage::TableLockState(payload.clone()));
+            }
+        }
+    
+    }
+
+}
+
+fn parse_lock_table_ids(sql: &str) -> Vec<String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    let prefix = if lowered.starts_with("lock tables ") {
+        "lock tables "
+    } else if lowered.starts_with("lock table ") {
+        "lock table "
+    } else {
+        return Vec::new();
+    };
+
+    let Some(remainder) = trimmed.get(prefix.len()..) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+
+    for segment in remainder.split(',') {
+
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+
+        let table_token = segment.split_whitespace().next().unwrap_or("").trim();
+        if table_token.is_empty() {
+            continue;
+        }
+
+        let table_token = table_token.trim_matches('`').trim_matches('"');
+        let table_id = table_token
+            .split('.')
+            .next_back()
+            .unwrap_or(table_token)
+            .trim_matches('`')
+            .trim_matches('"');
+
+        let normalized = common::normalize_identifier!(table_id);
+        if !normalized.is_empty() && !out.iter().any(|existing| existing == &normalized) {
+            out.push(normalized);
+        }
+    }
+
+    out
+
+}
+
+fn table_lock_update_from_request(request: &ConnectorRequest) -> Option<(bool, String, Vec<String>)> {
+
+    let ConnectorCommand::Query { query } = &request.command else {
+        return None;
+    };
+
+    let normalized = query.sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+
+    if normalized.starts_with("lock table") || normalized.starts_with("lock tables") {
+        return Some((true, query.database_id.clone(), parse_lock_table_ids(&query.sql)));
+    }
+
+    if normalized.starts_with("unlock table") || normalized.starts_with("unlock tables") {
+        return Some((false, query.database_id.clone(), Vec::new()));
+    }
+
+    None
+    
+}
 
 fn entity_kind_name(kind: DatabaseEntityKind) -> &'static str {
     match kind {
@@ -1056,16 +1166,6 @@ pub async fn handle_connector_stream(
 
     let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
 
-    async fn rollback_active_session_transaction(app: &Arc<Mutex<ServerApp>>, session_id: &str) {
-        let mut app = app.lock().await;
-        if app.rollback_session_transaction(session_id) {
-            log::info!(
-                "rolled back active transaction due to disconnect session_id={}",
-                session_id
-            );
-        }
-    }
-
     if let Err(err) = write_response_frame(
         &mut stream,
         ConnectorResponse::rejected(
@@ -1075,7 +1175,7 @@ pub async fn handle_connector_stream(
     )
     .await
     {
-        rollback_active_session_transaction(&app, &session.session_id).await;
+        rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
         return Err(err);
     }
 
@@ -1084,23 +1184,26 @@ pub async fn handle_connector_stream(
         let mut len_buf = [0u8; 4];
 
         if let Err(err) = stream.read_exact(&mut len_buf).await {
+            
             if matches!(
                 err.kind(),
                 std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
             ) {
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Ok(());
             }
-            rollback_active_session_transaction(&app, &session.session_id).await;
+            
+            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
             return Err(Box::new(err));
+
         }
 
         let frame_len = u32::from_le_bytes(len_buf) as usize;
         let mut payload = vec![0u8; frame_len];
 
         if let Err(err) = stream.read_exact(&mut payload).await {
-            rollback_active_session_transaction(&app, &session.session_id).await;
+            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
             return Err(Box::new(err));
         }
 
@@ -1150,7 +1253,7 @@ pub async fn handle_connector_stream(
             );
 
             session.mark_disconnect();
-            rollback_active_session_transaction(&app, &session.session_id).await;
+            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
             return Ok(());
         }
 
@@ -1204,7 +1307,7 @@ pub async fn handle_connector_stream(
                 }
 
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 
                 return Ok(());
 
@@ -1213,6 +1316,7 @@ pub async fn handle_connector_stream(
             if let ServiceMessage::TlsCertEnrollRequest(enroll_req) = &message_for_fanout {
 
                 if !ca_root_enabled {
+
                     let response_message = ServiceMessage::TlsCertEnrollResponse(
                         TlsCertEnrollResponse {
                             request_id: enroll_req.request_id.clone(),
@@ -1234,8 +1338,10 @@ pub async fn handle_connector_stream(
                     }
 
                     session.mark_disconnect();
-                    rollback_active_session_transaction(&app, &session.session_id).await;
+                    
+                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                     return Ok(());
+
                 }
                 
                 let node_data_dir = {
@@ -1270,7 +1376,7 @@ pub async fn handle_connector_stream(
                 }
 
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 
                 return Ok(());
 
@@ -1304,7 +1410,7 @@ pub async fn handle_connector_stream(
                 );
 
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Ok(());
             }
 
@@ -1391,7 +1497,7 @@ pub async fn handle_connector_stream(
                 );
 
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 
                 return Ok(());
 
@@ -1468,7 +1574,7 @@ pub async fn handle_connector_stream(
                 );
 
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Ok(());
 
             }
@@ -1507,7 +1613,7 @@ pub async fn handle_connector_stream(
                 );
 
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 
                 return Ok(());
 
@@ -1589,8 +1695,33 @@ pub async fn handle_connector_stream(
                 );
 
                 session.mark_disconnect();
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 
+                return Ok(());
+
+            }
+
+            if let ServiceMessage::TableLockState(lock_state) = &message_for_fanout {
+
+                let mut app_guard = app.lock().await;
+                app_guard.apply_remote_table_lock_state(
+                    &lock_state.owner_node_id,
+                    &lock_state.owner_session_id,
+                    &lock_state.table_ids,
+                    lock_state.locked,
+                );
+
+                log::debug!(
+                    "applied remote table lock state owner_node_id={} owner_session_id={} locked={} tables={}",
+                    lock_state.owner_node_id,
+                    lock_state.owner_session_id,
+                    lock_state.locked,
+                    lock_state.table_ids.join(",")
+                );
+
+                session.mark_disconnect();
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+
                 return Ok(());
 
             }
@@ -1653,7 +1784,7 @@ pub async fn handle_connector_stream(
             }
 
             session.mark_disconnect();
-            rollback_active_session_transaction(&app, &session.session_id).await;
+            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
 
             return Ok(());
 
@@ -1662,7 +1793,7 @@ pub async fn handle_connector_stream(
         let request = match bincode::deserialize::<ConnectorRequest>(&payload) {
             Ok(request) => request,
             Err(_) => {
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Err("invalid connector or p2p frame payload".into());
             }
         };
@@ -1677,7 +1808,7 @@ pub async fn handle_connector_stream(
             maybe_server_peer_discovery_response(&request, &p2p_runtime, &local_node, &service_registry).await
         {
             if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Err(err);
             }
             continue;
@@ -1688,7 +1819,7 @@ pub async fn handle_connector_stream(
             bootstrap_ready.load(Ordering::SeqCst),
         ) {
             if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Err(err);
             }
             continue;
@@ -1703,7 +1834,7 @@ pub async fn handle_connector_stream(
         .await
         {
             if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Err(err);
             }
             continue;
@@ -1717,7 +1848,7 @@ pub async fn handle_connector_stream(
         .await
         {
             if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Err(err);
             }
             continue;
@@ -1750,7 +1881,7 @@ pub async fn handle_connector_stream(
             };
 
             if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Err(err);
             }
 
@@ -1767,7 +1898,7 @@ pub async fn handle_connector_stream(
             );
 
             if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &session.session_id).await;
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
                 return Err(err);
             }
 
@@ -1802,8 +1933,42 @@ pub async fn handle_connector_stream(
             execute_app_request_for_session(&app, &request, &session.session_id, connection_id).await
         };
 
+        if matches!(response.status, connector::ResponseStatus::Applied)
+            && let Some((locked, database_id, table_ids)) = table_lock_update_from_request(&request)
+        {
+
+            let payload = TableLockState {
+                owner_node_id: local_node.id.0.clone(),
+                owner_session_id: session.session_id.clone(),
+                database_id,
+                table_ids,
+                locked,
+            };
+
+            let mut runtime = p2p_runtime.lock().await;
+
+            for peer in runtime.network().discover_peers() {
+
+                for peer_addr in peer.addrs {
+
+                    if let Err(err) = runtime
+                        .network_mut()
+                        .send_message(&peer_addr, ServiceMessage::TableLockState(payload.clone()))
+                    {
+                        log::debug!(
+                            "failed to propagate table lock state to {}: {}",
+                            peer_addr,
+                            err
+                        );
+                    }
+                }
+
+            }
+
+        }
+
         if let Err(err) = write_response_frame(&mut stream, response).await {
-            rollback_active_session_transaction(&app, &session.session_id).await;
+            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
             return Err(err);
         }
 

@@ -17,6 +17,104 @@ use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
 
+    fn finalize_group_table_writes(&mut self, table_ids: &HashSet<String>) -> Result<(), String> {
+        for table_id in table_ids {
+            for catalog in self.catalogs.values_mut() {
+                let should_finalize = catalog
+                    .table(table_id)
+                    .is_some_and(|table| table.status() == serverlib::ObjectStatus::Lock);
+
+                if !should_finalize {
+                    continue;
+                }
+
+                catalog
+                    .finalize_table_write(table_id)
+                    .map_err(|err| format!("table write finalize failed table='{}': {}", table_id, err))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn abort_group_table_writes(&mut self, table_ids: &HashSet<String>) {
+        for table_id in table_ids {
+            for catalog in self.catalogs.values_mut() {
+                let should_abort = catalog
+                    .table(table_id)
+                    .is_some_and(|table| table.status() == serverlib::ObjectStatus::Lock);
+
+                if should_abort {
+                    let _ = catalog.abort_table_write(table_id);
+                }
+            }
+        }
+    }
+
+    fn parse_lock_table_ids(sql: &str) -> Vec<String> {
+        let trimmed = sql.trim().trim_end_matches(';').trim();
+        let lowered = trimmed.to_ascii_lowercase();
+
+        let prefix = if lowered.starts_with("lock tables ") {
+            "lock tables "
+        } else if lowered.starts_with("lock table ") {
+            "lock table "
+        } else {
+            return Vec::new();
+        };
+
+        let Some(remainder) = trimmed.get(prefix.len()..) else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+
+        for segment in remainder.split(',') {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+
+            let table_token = segment.split_whitespace().next().unwrap_or("").trim();
+            if table_token.is_empty() {
+                continue;
+            }
+
+            let table_token = table_token.trim_matches('`').trim_matches('"');
+            let table_id = table_token
+                .split('.')
+                .next_back()
+                .unwrap_or(table_token)
+                .trim_matches('`')
+                .trim_matches('"');
+
+            let normalized = common::normalize_identifier!(table_id);
+            if !normalized.is_empty() && !out.iter().any(|existing| existing == &normalized) {
+                out.push(normalized);
+            }
+        }
+
+        out
+    }
+
+    pub fn apply_remote_table_lock_state(
+        &mut self,
+        owner_node_id: &str,
+        owner_session_id: &str,
+        table_ids: &[String],
+        locked: bool,
+    ) {
+        let owner_id = format!("remote:{}:{}", owner_node_id, owner_session_id);
+
+        if locked {
+            self.transaction_coordinator
+                .apply_remote_table_locks(&owner_id, table_ids.to_vec());
+        } else {
+            self.transaction_coordinator
+                .release_remote_table_locks(&owner_id, table_ids.to_vec());
+        }
+    }
+
     fn staged_query_validation_plan(
         staged_queries: &[connector::DataQuery],
     ) -> Option<(HashSet<String>, bool)> {
@@ -193,6 +291,7 @@ impl ServerApp {
         session_id: &str,
         query: &connector::DataQuery,
     ) -> Option<ConnectorResponse> {
+
         let normalized = query
             .sql
             .trim()
@@ -200,15 +299,32 @@ impl ServerApp {
             .trim()
             .to_ascii_lowercase();
 
-        if normalized.starts_with("begin") || normalized.starts_with("start transaction") {
-            if let Err(err) = self.transaction_coordinator.begin(session_id) {
+        let is_lock_tables =
+            normalized.starts_with("lock table") || normalized.starts_with("lock tables");
+
+        let is_unlock_tables =
+            normalized.starts_with("unlock table") || normalized.starts_with("unlock tables");
+
+        if normalized.starts_with("begin")
+            || normalized.starts_with("start transaction")
+            || is_lock_tables
+        {
+            if is_lock_tables {
+                let table_ids = Self::parse_lock_table_ids(&query.sql);
+                if let Err(err) = self
+                    .transaction_coordinator
+                    .begin_with_table_locks(session_id, table_ids)
+                {
+                    return Some(ConnectorResponse::rejected(request_id.to_string(), err));
+                }
+            } else if let Err(err) = self.transaction_coordinator.begin(session_id) {
                 return Some(ConnectorResponse::rejected(request_id.to_string(), err));
             }
 
             self.tx_begin_epoch_ms_by_session
                 .insert(session_id.to_string(), common::epoch_nanos!());
 
-            let is_lightweight_import_begin = normalized.contains("distdb_import");
+            let is_lightweight_import_begin = normalized.contains("distdb_import") || is_lock_tables;
 
             if !is_lightweight_import_begin {
                 let snapshot_wal = ConcurrentWalManager::new();
@@ -246,9 +362,11 @@ impl ServerApp {
                 request_id.to_string(),
                 ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
             ));
+
         }
 
-        if normalized.starts_with("commit") {
+        if normalized.starts_with("commit") || is_unlock_tables {
+
             let staged_queries = match self.transaction_coordinator.take_for_commit(session_id) {
                 Ok(staged) => staged,
                 Err(err) => {
@@ -273,13 +391,10 @@ impl ServerApp {
                 Ok(total) => total,
                 Err(err) => {
                     if has_snapshot {
-                        if let Err(restore_err) = self
-                            .transaction_coordinator
-                            .restore_after_failed_commit(session_id, staged_queries)
-                        {
+                        if let Err(rollback_err) = self.transaction_coordinator.rollback(session_id) {
                             log::error!(
-                                "failed to restore staged transaction after commit error: {}",
-                                restore_err
+                                "failed to rollback transaction after commit error: {}",
+                                rollback_err
                             );
                         }
                     } else {
@@ -312,6 +427,13 @@ impl ServerApp {
             self.tx_snapshot_by_session.remove(session_id);
             self.tx_read_observations_by_session.remove(session_id);
 
+            if let Err(err) = self.transaction_coordinator.finalize_commit(session_id) {
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("failed to finalize transaction lock release: {}", err),
+                ));
+            }
+
             if let Err(err) = self.append_session_tx_marker(
                 session_id,
                 request_id,
@@ -327,9 +449,11 @@ impl ServerApp {
                     affected_rows: total_affected_rows,
                 }),
             ));
+
         }
 
         if normalized.starts_with("rollback") {
+
             let rolled_back = match self.transaction_coordinator.rollback(session_id) {
                 Ok(result) => result,
                 Err(err) => {
@@ -361,9 +485,11 @@ impl ServerApp {
                 request_id.to_string(),
                 ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
             ));
+
         }
 
         None
+        
     }
 
     fn commit_staged_queries(
@@ -457,6 +583,7 @@ impl ServerApp {
                 &touched_tables,
                 write_group_id,
             );
+                self.abort_group_table_writes(&touched_tables);
             let total_ms = commit_start.elapsed().as_millis() as u64;
             log::debug!(
                 "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=failed",
@@ -470,6 +597,11 @@ impl ServerApp {
                 total_ms,
             );
             return Err(format!("transaction commit marker append failed: {err}"));
+        }
+
+        if let Err(err) = self.finalize_group_table_writes(&touched_tables) {
+            self.abort_group_table_writes(&touched_tables);
+            return Err(err);
         }
 
         let total_ms = commit_start.elapsed().as_millis() as u64;
@@ -589,17 +721,26 @@ impl ServerApp {
             .unwrap_or((0, None));
 
         let mut dry_run_total_ms = 0u64;
+        let validation_write_group_id = TransactionId(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(common::epoch_nanos!()),
+        );
+        let mut validation_touched_tables = std::collections::HashSet::new();
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
             let staged_query_start = Instant::now();
             let dry_run_request_id = format!("{}::dryrun{}", request_id, idx + 1);
-            let response = handle_query_command(
+            let response = handle_query_command_in_write_group(
                 &dry_run_request_id,
                 staged_query,
                 &mut sandbox_catalogs,
                 &sandbox_wal,
                 &self.node_data_dir,
                 &mut sandbox_indexes,
+                validation_write_group_id,
+                &mut validation_touched_tables,
                 session_id,
                 connection_id,
                 session_user.clone(),

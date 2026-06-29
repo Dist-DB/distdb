@@ -94,6 +94,7 @@ pub(super) fn execute_insert_impl(
         catalogs,
         &query.database_id,
         &plan.table_id,
+        external_write_group_id.is_some(),
         |catalog| {
         execute_insert_locked(
             request_id,
@@ -570,6 +571,7 @@ pub(super) fn execute_update_impl(
         catalogs,
         &query.database_id,
         &plan.table_id,
+        external_write_group_id.is_some(),
         |catalog| {
         execute_update_locked(
             request_id,
@@ -878,6 +880,7 @@ pub(super) fn execute_delete_impl(
         catalogs,
         &query.database_id,
         &plan.table_id,
+        external_write_group_id.is_some(),
         |catalog| {
         execute_delete_locked(
             request_id,
@@ -1023,11 +1026,13 @@ fn with_table_write_guard<F>(
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     database_id: &str,
     table_id: &str,
+    defer_finalize: bool,
     execute: F,
 ) -> ConnectorResponse
 where
     F: FnOnce(&mut DatabaseCatalog) -> ConnectorResponse,
 {
+    
     let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -1035,7 +1040,13 @@ where
         );
     };
 
-    if let Err(err) = catalog.begin_table_write(table_id) {
+    let already_locked = catalog
+        .table(table_id)
+        .is_some_and(|table| table.status() == ObjectStatus::Lock);
+
+    if !already_locked
+        && let Err(err) = catalog.begin_table_write(table_id)
+    {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("table write lock failed: {err}"),
@@ -1045,6 +1056,10 @@ where
     let response = execute(catalog);
 
     if matches!(response.status, connector::ResponseStatus::Applied) {
+
+        if defer_finalize {
+            return response;
+        }
 
         match catalog.finalize_table_write(table_id) {
 
@@ -1061,7 +1076,9 @@ where
         }
 
     } else {
-        let _ = catalog.abort_table_write(table_id);
+        if !already_locked {
+            let _ = catalog.abort_table_write(table_id);
+        }
         response
     }
 

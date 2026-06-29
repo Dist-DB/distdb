@@ -1350,7 +1350,7 @@ fn statement_is_import_dump_directive(statement: &str) -> bool {
     starts_with_ascii_case_insensitive(normalized, "lock tables ")
         || starts_with_ascii_case_insensitive(normalized, "unlock tables")
     || starts_with_ascii_case_insensitive(normalized, "drop table ")
-        || starts_with_ascii_case_insensitive(normalized, "delimiter ")
+        || starts_with_keyword_ascii_case_insensitive(normalized, "delimiter")
         || starts_with_ascii_case_insensitive(normalized, "set ")
         || normalized.starts_with("/*!")
 }
@@ -1371,6 +1371,12 @@ fn normalize_import_statement(statement: &str) -> String {
     // Removing them keeps structural intent while allowing first-pass CREATE parsing.
     normalized = remove_case_insensitive_all(&normalized, " USING BTREE");
     normalized = remove_case_insensitive_all(&normalized, " USING HASH");
+
+    // MySQL column definitions often use UNSIGNED numeric modifiers, which the parser
+    // currently rejects in CREATE TABLE statements.
+    if starts_with_ascii_case_insensitive(normalized.trim_start(), "create table ") {
+        normalized = remove_case_insensitive_word_outside_quotes(&normalized, "unsigned");
+    }
 
     normalized
 }
@@ -1520,6 +1526,18 @@ fn starts_with_ascii_case_insensitive(input: &str, prefix: &str) -> bool {
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
 }
 
+fn starts_with_keyword_ascii_case_insensitive(input: &str, keyword: &str) -> bool {
+    if !starts_with_ascii_case_insensitive(input, keyword) {
+        return false;
+    }
+
+    let Some(next) = input.as_bytes().get(keyword.len()) else {
+        return true;
+    };
+
+    !(*next).is_ascii_alphanumeric() && *next != b'_'
+}
+
 fn extract_insert_value_tuples(values_tail: &str) -> Vec<&str> {
     let mut tuples = Vec::<&str>::new();
 
@@ -1613,6 +1631,88 @@ fn remove_case_insensitive_all(input: &str, needle: &str) -> String {
 
     output.push_str(&input[index..]);
     output
+}
+
+fn remove_case_insensitive_word_outside_quotes(input: &str, word: &str) -> String {
+    if word.is_empty() {
+        return input.to_string();
+    }
+
+    let bytes = input.as_bytes();
+    let word_bytes = word.as_bytes();
+    let mut output = String::with_capacity(input.len());
+
+    let mut index = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick_quote = false;
+    let mut escape_next = false;
+
+    while index < bytes.len() {
+        let current = bytes[index] as char;
+
+        if (in_single_quote || in_double_quote) && escape_next {
+            escape_next = false;
+            output.push(current);
+            index += 1;
+            continue;
+        }
+
+        if (in_single_quote || in_double_quote) && current == '\\' {
+            escape_next = true;
+            output.push(current);
+            index += 1;
+            continue;
+        }
+
+        if !in_double_quote && !in_backtick_quote && current == '\'' {
+            in_single_quote = !in_single_quote;
+            output.push(current);
+            index += 1;
+            continue;
+        }
+
+        if !in_single_quote && !in_backtick_quote && current == '"' {
+            in_double_quote = !in_double_quote;
+            output.push(current);
+            index += 1;
+            continue;
+        }
+
+        if !in_single_quote && !in_double_quote && current == '`' {
+            in_backtick_quote = !in_backtick_quote;
+            output.push(current);
+            index += 1;
+            continue;
+        }
+
+        if in_single_quote || in_double_quote || in_backtick_quote {
+            output.push(current);
+            index += 1;
+            continue;
+        }
+
+        let end = index + word_bytes.len();
+        let before_ok = index == 0 || !is_identifier_byte(bytes[index - 1]);
+        let after_ok = end >= bytes.len() || !is_identifier_byte(bytes[end]);
+        if end <= bytes.len()
+            && bytes[index..end].eq_ignore_ascii_case(word_bytes)
+            && before_ok
+            && after_ok
+        {
+            index = end;
+            continue;
+        }
+
+        output.push(current);
+        index += 1;
+    }
+
+    output
+}
+
+fn is_identifier_byte(ch: u8) -> bool {
+    ch.is_ascii_alphanumeric() || ch == b'_'
 }
 
 #[derive(Default)]
@@ -2311,7 +2411,25 @@ mod tests {
     }
 
     #[test]
+    fn normalize_import_statement_removes_unsigned_modifier_for_create_table() {
+        let statement = "create table t (`is_deleted` tinyint unsigned not null default '0')";
+        let normalized = normalize_import_statement(statement);
+
+        assert!(!normalized.to_ascii_lowercase().contains(" unsigned"));
+        assert!(normalized.to_ascii_lowercase().contains("tinyint"));
+    }
+
+    #[test]
+    fn normalize_import_statement_keeps_unsigned_in_non_create_text() {
+        let statement = "insert into t values ('unsigned value')";
+        let normalized = normalize_import_statement(statement);
+
+        assert_eq!(normalized, statement);
+    }
+
+    #[test]
     fn import_reader_skips_mysql_dump_directives() {
+        
         let input = "\
             set @old_foreign_key_checks=@@foreign_key_checks;\n\
             lock tables `ip_lookup` write;\n\
@@ -2346,6 +2464,42 @@ mod tests {
             },
         )
         .expect("import reader should skip dump directives");
+
+        assert_eq!(transaction_state.committed_batches, 0);
+        assert_eq!(executed, vec!["insert into ip_lookup values (1)"]);
+    }
+
+    #[test]
+    fn import_reader_skips_delimiter_directive_without_space() {
+        let input = "DELIMITER$$;insert into ip_lookup values (1);";
+
+        let mut executed = Vec::<String>::new();
+        let mut transaction_state = ImportTransactionState {
+            enabled: false,
+            active: false,
+            dml_statements_in_batch: 0,
+            committed_batches: 0,
+            batch_started_at: None,
+            statement_calls: 0,
+            execute_statement_ms: 0,
+            begin_statement_ms: 0,
+            commit_statement_ms: 0,
+            query_statement_ms: 0,
+            max_statement_ms: 0,
+            max_statement_kind: None,
+            max_statement_bytes: 0,
+        };
+
+        execute_import_from_reader(
+            BufReader::new(input.as_bytes()),
+            "main",
+            &mut transaction_state,
+            |_db, statement, _transaction_state| {
+                executed.push(statement.trim().to_string());
+                Ok(())
+            },
+        )
+        .expect("import reader should skip delimiter directives with or without a trailing space");
 
         assert_eq!(transaction_state.committed_batches, 0);
         assert_eq!(executed, vec!["insert into ip_lookup values (1)"]);

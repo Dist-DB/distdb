@@ -31,6 +31,7 @@ use serverlib::{
     EntityMetadata, EntityMetadataPayload, SchemaChangePayload, SelectCondition,
     SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind, SqlOperation, SqlRequest,
     TableLifecycleAction, TableLifecyclePayload, TableSchema, TransactionId, TransactionKind,
+    ObjectStatus,
     TransactionRecord, UserId,
 };
 

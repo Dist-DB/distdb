@@ -151,6 +151,16 @@ pub struct ServiceAnnounce {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableLockState {
+    pub owner_node_id: String,
+    pub owner_session_id: String,
+    pub database_id: String,
+    #[serde(default)]
+    pub table_ids: Vec<String>,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ServiceMessage {
     NodeAnnounce(NodeDescriptor),
     Publication {
@@ -173,6 +183,7 @@ pub enum ServiceMessage {
     TlsCertEnrollRequest(TlsCertEnrollRequest),
     TlsCertEnrollResponse(TlsCertEnrollResponse),
     ServiceAnnounce(ServiceAnnounce),
+    TableLockState(TableLockState),
 }
 
 impl ServiceMessage {
