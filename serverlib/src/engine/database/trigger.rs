@@ -1,9 +1,10 @@
 
-use super::core::ObjectStatus;
-use super::entity_aspect::DatabaseEntityAspect;
-use super::entity_kind::DatabaseEntityKind;
-use super::entity_metadata::EntityMetadata;
-use super::table_schema::TableSchema;
+use crate::engine::database::core::ObjectStatus;
+use crate::engine::database::entity::aspect::DatabaseEntityAspect;
+use crate::engine::database::entity::kind::DatabaseEntityKind;
+use crate::engine::database::entity::metadata::EntityMetadata;
+use crate::engine::database::table::schema::TableSchema;
+
 use crate::engine::sql::{
     parse_trigger_invocation_binding_from_create_trigger_statement,
     TriggerInvocationBinding,

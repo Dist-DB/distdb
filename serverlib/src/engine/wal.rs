@@ -25,7 +25,7 @@ use crate::engine::database::row_payload::{
     UnconfiguredRowPayloadDecryptionProvider,
     UnconfiguredRowPayloadEncryptionProvider,
 };
-use crate::engine::database::transaction::transaction_record::{
+use crate::engine::database::transaction::record::{
     PayloadTransformError, TransactionPayloadContext,
     TransactionPayloadTransform, TransactionPayloadWriteTransform,
 };

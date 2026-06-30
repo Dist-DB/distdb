@@ -1,11 +1,11 @@
 
-use super::entity_object_type::DatabaseObjectType;
-use super::index::DatabaseIndex;
-use super::relationship::DatabaseRelationship;
-use super::stored_procedure::DatabaseStoredProcedure;
-use super::table::DatabaseTable;
-use super::trigger::DatabaseTrigger;
-use super::view::DatabaseView;
+use crate::engine::database::entity::object_type::DatabaseObjectType;
+use crate::engine::database::index::DatabaseIndex;
+use crate::engine::database::relationship::DatabaseRelationship;
+use crate::engine::database::stored_procedure::DatabaseStoredProcedure;
+use crate::engine::database::table::DatabaseTable;
+use crate::engine::database::trigger::DatabaseTrigger;
+use crate::engine::database::view::DatabaseView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseObjectRef<'a> {

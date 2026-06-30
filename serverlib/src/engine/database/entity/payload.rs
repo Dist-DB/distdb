@@ -1,6 +1,6 @@
 
-use super::entity_metadata::EntityMetadata;
-use super::transaction::transaction_payload::TransactionPayloadCodec;
+use crate::engine::database::entity::metadata::EntityMetadata;
+use crate::engine::database::transaction::payload::TransactionPayloadCodec;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EntityMetadataPayload {

@@ -1,7 +1,7 @@
 use super::*;
 use crate::core::identity::UserId;
 use crate::engine::database::core::ObjectStatus;
-use crate::engine::database::table_schema::TableSchema;
+use crate::engine::database::table::schema::TableSchema;
 use crate::engine::database::transaction::{TransactionId, TransactionKind, TransactionRecord};
 use common::helpers::format::FileKind;
 use common::helpers::write_bytes;
@@ -268,7 +268,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
 
 #[test]
 fn disk_executor_safe_type_change_rejects_invalid_value() {
-    use crate::engine::database::table_schema::FieldType;
+    use crate::engine::database::table::schema::FieldType;
 
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
@@ -338,7 +338,7 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
 
 #[test]
 fn disk_executor_force_type_change_coerces_invalid_value() {
-    use crate::engine::database::table_schema::FieldType;
+    use crate::engine::database::table::schema::FieldType;
 
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");

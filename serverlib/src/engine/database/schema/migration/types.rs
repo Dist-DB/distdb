@@ -1,6 +1,6 @@
-use super::super::catalog::DatabaseCatalog;
-use super::super::core::DatabaseResult;
-use super::super::table_schema::FieldType;
+use crate::engine::database::catalog::DatabaseCatalog;
+use crate::engine::database::core::DatabaseResult;
+use crate::engine::database::table::schema::FieldType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaMigrationProgress {

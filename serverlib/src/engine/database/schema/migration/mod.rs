@@ -11,9 +11,9 @@ pub use executor::{DiskToMemorySchemaMigrationExecutor, NoopSchemaMigrationExecu
 pub use io::{frame_records_as_wal_file, load_records_from_path, stream_key_for_table};
 pub use types::{FieldTypeChangeRule, SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet, TypeConversionPolicy};
 
-use super::catalog::DatabaseCatalog;
-use super::core::{DatabaseError, DatabaseResult};
-use super::schema_change_state::SchemaChangePhase;
+use crate::engine::database::catalog::DatabaseCatalog;
+use crate::engine::database::core::{DatabaseError, DatabaseResult};
+use crate::engine::database::schema::change_state::SchemaChangePhase;
 
 pub fn run_schema_migration<E: SchemaMigrationExecutor>(
     catalog: &mut DatabaseCatalog,

@@ -1,6 +1,7 @@
 
 use super::*;
-use crate::EntityMetadata;
+use crate::engine::database::entity::metadata::EntityMetadata;
+
 use std::path::PathBuf;
 
 #[test]
@@ -241,10 +242,10 @@ fn schema_change_tx_commit_applies_schema_and_returns_ready() {
 
     assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Lock));
 
-    tx.add_field(crate::engine::database::table_schema::FieldDef {
+    tx.add_field(crate::engine::database::table::schema::FieldDef {
         seqno: 1,
         field_name: "email".to_string(),
-        field_type: crate::engine::database::table_schema::FieldType::Text,
+        field_type: crate::engine::database::table::schema::FieldType::Text,
         nullable: false,
         indexed: FieldIndex::Indexed,
         default_value: None,
@@ -276,10 +277,10 @@ fn schema_change_tx_abort_returns_table_to_ready_without_schema_change() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
-    let initial_schema = TableSchema::new(vec![crate::engine::database::table_schema::FieldDef {
+    let initial_schema = TableSchema::new(vec![crate::engine::database::table::schema::FieldDef {
         seqno: 1,
         field_name: "name".to_string(),
-        field_type: crate::engine::database::table_schema::FieldType::Text,
+        field_type: crate::engine::database::table::schema::FieldType::Text,
         nullable: false,
         indexed: FieldIndex::None,
         default_value: None,
@@ -610,10 +611,10 @@ fn schema_replay_uses_latest_transaction_payload() {
     let wal = crate::engine::wal::ConcurrentWalManager::new();
     let actor = crate::core::identity::UserId::from_username("schema-tester");
 
-    let first_schema = TableSchema::new(vec![crate::engine::database::table_schema::FieldDef {
+    let first_schema = TableSchema::new(vec![crate::engine::database::table::schema::FieldDef {
         seqno: 1,
         field_name: "name".to_string(),
-        field_type: crate::engine::database::table_schema::FieldType::Text,
+        field_type: crate::engine::database::table::schema::FieldType::Text,
         nullable: false,
         indexed: FieldIndex::None,
         default_value: None,

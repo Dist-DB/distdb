@@ -1,5 +1,5 @@
 
-use super::transaction::transaction_payload::TransactionPayloadCodec;
+use super::transaction::payload::TransactionPayloadCodec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SqlObjectKind {

@@ -1,7 +1,7 @@
 
-use super::transaction_id::TransactionId;
-use super::transaction_kind::TransactionKind;
-use super::transaction_record::TransactionRecord;
+use super::id::TransactionId;
+use super::kind::TransactionKind;
+use super::record::TransactionRecord;
 
 pub trait TransactionLog {
 

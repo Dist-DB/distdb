@@ -6,7 +6,7 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::engine::database::transaction::TransactionLog;
 use crate::engine::database::runtime_index::derived_indexes_for_table;
-use crate::engine::database::schema_migration::{convert_value_to_field_type, TypeConversionPolicy};
+use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::{
     TransactionPayloadContext,
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,

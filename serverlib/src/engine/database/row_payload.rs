@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use super::schema_migration::{convert_value_to_field_type, TypeConversionPolicy};
-use super::table_schema::TableSchema;
-use super::transaction::transaction_record::{
+use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
+use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::transaction::record::{
     PayloadTransformError, TransactionPayloadContext, TransactionPayloadTransform,
     TransactionPayloadWriteTransform,
 };
-use super::transaction::transaction_kind::TransactionKind;
+use crate::engine::database::transaction::kind::TransactionKind;
 
 type OrdinalRowPayload = Vec<Option<Vec<u8>>>;
 
@@ -78,7 +78,7 @@ impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
 impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
     fn transform_payload_for_write(
         &self,
-        _record: &super::transaction::transaction_record::TransactionRecord,
+        _record: &super::transaction::record::TransactionRecord,
         payload: &[u8],
         _context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
@@ -170,7 +170,7 @@ impl<P: RowPayloadEncryptionProvider> TransactionPayloadWriteTransform
 {
     fn transform_payload_for_write(
         &self,
-        record: &super::transaction::transaction_record::TransactionRecord,
+        record: &super::transaction::record::TransactionRecord,
         payload: &[u8],
         context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {

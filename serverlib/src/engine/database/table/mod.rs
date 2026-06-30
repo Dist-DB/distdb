@@ -1,9 +1,14 @@
 
-use super::core::{DatabaseError, DatabaseResult, ObjectStatus};
-use super::entity_aspect::DatabaseEntityAspect;
-use super::entity_kind::DatabaseEntityKind;
-use super::entity_metadata::EntityMetadata;
-use super::table_schema::TableSchema;
+pub mod lifecycle_payload;
+pub mod schema;
+pub mod schema_def;
+pub mod schema_revision;
+
+use crate::engine::database::core::{DatabaseError, DatabaseResult, ObjectStatus};
+use crate::engine::database::entity::aspect::DatabaseEntityAspect;
+use crate::engine::database::entity::kind::DatabaseEntityKind;
+use crate::engine::database::entity::metadata::EntityMetadata;
+use crate::engine::database::table::schema::TableSchema;
 
 use std::collections::HashMap;
 

@@ -1,5 +1,5 @@
 
-use super::table_schema_def::TableSchema;
+use super::schema_def::TableSchema;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableSchemaRevision {

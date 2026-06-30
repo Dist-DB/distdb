@@ -3,14 +3,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use super::super::catalog::DatabaseCatalog;
-use super::super::core::{DatabaseError, DatabaseResult};
-use super::super::transaction::{TransactionKind, TransactionRecord};
+use crate::engine::database::catalog::DatabaseCatalog;
+use crate::engine::database::core::{DatabaseError, DatabaseResult};
+use crate::engine::database::transaction::{TransactionKind, TransactionRecord};
 use super::conversion::apply_schema_rules_to_payload;
+
 use super::io::{
     frame_records_as_wal_file_with_context, load_records_from_path_with_context,
     map_io_error_to_catalog_error, payload_context_for_table, stream_key_for_table,
 };
+
 use super::types::{SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet};
 
 #[derive(Debug, Clone, Copy)]

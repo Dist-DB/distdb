@@ -5,29 +5,31 @@ use std::path::Path;
 use common::helpers::format::FileKind;
 use common::helpers::{read_bytes, write_bytes};
 
-use super::core::{DatabaseError, DatabaseResult, ObjectStatus};
-use super::entity::DatabaseEntity;
-use super::entity_aspect::DatabaseEntityAspect;
-use super::entity_kind::DatabaseEntityKind;
-use super::entity_object_ref::DatabaseObjectRef;
-use super::entity_object_type::DatabaseObjectType;
-use super::id::DatabaseId;
-use super::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin};
-use super::relationship::DatabaseRelationship;
-use super::schema_change_tx::SchemaChangeTx;
-use super::schema_migration::{run_schema_migration, SchemaMigrationExecutor};
-use super::schema_change_state::{ActiveSchemaChange, SchemaChangePhase};
-use super::stored_procedure::DatabaseStoredProcedure;
-use super::table::DatabaseTable;
-use super::table_lifecycle_payload::{TableLifecycleAction, TableLifecyclePayload};
-use super::table_schema::{FieldIndex, TableSchema};
-use super::trigger::DatabaseTrigger;
-use super::transaction::{
+use crate::engine::database::core::{DatabaseError, DatabaseResult, ObjectStatus};
+use crate::engine::database::entity::database_entity::DatabaseEntity;
+use crate::engine::database::entity::aspect::DatabaseEntityAspect;
+use crate::engine::database::entity::kind::DatabaseEntityKind;
+use crate::engine::database::entity::object_ref::DatabaseObjectRef;
+use crate::engine::database::entity::object_type::DatabaseObjectType;
+use crate::engine::database::id::DatabaseId;
+use crate::engine::database::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin};
+use crate::engine::database::relationship::DatabaseRelationship;
+use crate::engine::database::schema::change_tx::SchemaChangeTx;
+use crate::engine::database::schema::migration::{run_schema_migration, SchemaMigrationExecutor};
+use crate::engine::database::schema::change_state::{ActiveSchemaChange, SchemaChangePhase};
+use crate::engine::database::stored_procedure::DatabaseStoredProcedure;
+use crate::engine::database::table::DatabaseTable;
+use crate::engine::database::table::lifecycle_payload::{TableLifecycleAction, TableLifecyclePayload};
+use crate::engine::database::table::schema::{FieldIndex, TableSchema};
+use crate::engine::database::trigger::DatabaseTrigger;
+
+use crate::engine::database::transaction::{
     DecodedTransactionPayload,
     EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
     SqlObjectKind, TransactionKind, TransactionLog,
 };
-use super::view::DatabaseView;
+
+use crate::engine::database::view::DatabaseView;
 use crate::engine::sql::{TriggerEventKind, TriggerTiming};
 
 
@@ -362,7 +364,7 @@ impl DatabaseCatalog {
         self.entity(entity_id).map(DatabaseEntityAspect::status)
     }
 
-    pub fn entity_metadata(&self, entity_id: &str) -> Option<&super::entity_metadata::EntityMetadata> {
+    pub fn entity_metadata(&self, entity_id: &str) -> Option<&crate::engine::database::entity::metadata::EntityMetadata> {
         self.entity(entity_id).map(DatabaseEntityAspect::metadata)
     }
 
@@ -731,7 +733,7 @@ impl DatabaseCatalog {
     pub fn set_entity_metadata(
         &mut self,
         entity_id: impl Into<String>,
-        metadata: super::entity_metadata::EntityMetadata,
+        metadata: crate::engine::database::entity::metadata::EntityMetadata,
     ) -> DatabaseResult<()> {
 
         let payload = EntityMetadataPayload {

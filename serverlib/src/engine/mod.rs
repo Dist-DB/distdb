@@ -22,10 +22,12 @@ pub use affinity::{
 	DatabaseSchemaSummary, ReplicationSecuritySummary,
 };
 
-pub use database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
+pub use database::table::schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
 pub use database::transaction::{TransactionId, TransactionKind, TransactionRecord};
+
 pub use database::transaction::{
 	EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
 	SqlObjectKind, TableLifecycleAction, TableLifecyclePayload,
 };
+
 pub use wal::{ConcurrentWalManager, WalStreamMode};

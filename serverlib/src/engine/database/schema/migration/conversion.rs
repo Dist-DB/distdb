@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use super::super::core::DatabaseError;
-use super::super::row_payload::{decode_row_payload, encode_row_payload};
-use super::super::table_schema::TableSchema;
-use super::super::table_schema::FieldType;
+use crate::engine::database::core::DatabaseError;
+use crate::engine::database::row_payload::{decode_row_payload, encode_row_payload};
+use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::table::schema::FieldType;
 use super::types::{SchemaMutationRuleSet, TypeConversionPolicy};
 
 const STORED_I8_TAG: u8 = 0x01;
@@ -42,7 +42,7 @@ pub fn apply_schema_rules_to_payload(
 
         if let Some(current) = row.get(&key).cloned() {
             let converted = convert_value_to_field_type(&current, &rule.target_type, rules.conversion_policy)
-                .map_err(|_| DatabaseError::SchemaChange(super::super::schema_error::SchemaError::InvalidFieldType))?;
+                .map_err(|_| DatabaseError::SchemaChange(crate::engine::database::schema::error::SchemaError::InvalidFieldType))?;
             row.insert(key, converted);
         }
     }

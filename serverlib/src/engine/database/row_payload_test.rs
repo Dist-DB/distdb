@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::engine::database::table_schema::{FieldDef, FieldIndex, FieldType};
+use crate::engine::database::table::schema::{FieldDef, FieldIndex, FieldType};
 use crate::render_stored_field_value;
 
 fn test_schema() -> TableSchema {

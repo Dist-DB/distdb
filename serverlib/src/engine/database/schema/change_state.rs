@@ -78,5 +78,5 @@ impl ActiveSchemaChange {
 
 
 #[cfg(test)]
-#[path = "schema_change_state_test.rs"]
-mod tests;
+#[path = "change_state_test.rs"]
+mod change_state_test;

@@ -1,9 +1,9 @@
 
-use super::core::DatabaseResult;
-use super::catalog::DatabaseCatalog;
-use super::schema_change_state::SchemaChangePhase;
-use super::table_schema::{FieldDef, TableSchema};
-use super::transaction::SchemaChangePayload;
+use crate::engine::database::core::DatabaseResult;
+use crate::engine::database::catalog::DatabaseCatalog;
+use crate::engine::database::schema::change_state::SchemaChangePhase;
+use crate::engine::database::table::schema::{FieldDef, TableSchema};
+use crate::engine::database::transaction::SchemaChangePayload;
 
 /// An in-progress schema change transaction. Obtained from
 /// [`DatabaseCatalog::begin_schema_change`]; the table is held in `Lock` state
@@ -51,7 +51,7 @@ impl SchemaChangeTx {
         
         self.pending_schema
             .add_field(field)
-            .map_err(super::core::DatabaseError::SchemaChange)
+            .map_err(crate::engine::database::core::DatabaseError::SchemaChange)
 
     }
 
@@ -59,7 +59,7 @@ impl SchemaChangeTx {
 
         self.pending_schema
             .remove_field(name)
-            .map_err(super::core::DatabaseError::SchemaChange)
+            .map_err(crate::engine::database::core::DatabaseError::SchemaChange)
 
     }
 
@@ -67,7 +67,7 @@ impl SchemaChangeTx {
 
         self.pending_schema
             .update_field(field)
-            .map_err(super::core::DatabaseError::SchemaChange)
+            .map_err(crate::engine::database::core::DatabaseError::SchemaChange)
 
     }
 
@@ -79,7 +79,7 @@ impl SchemaChangeTx {
     pub fn commit<E, F>(self, catalog: &mut DatabaseCatalog, persist: F) -> Result<(), E>
     where
         F: FnOnce(&SchemaChangePayload) -> Result<(), E>,
-        E: From<super::core::DatabaseError>,
+        E: From<crate::engine::database::core::DatabaseError>,
     {
 
         catalog.transition_schema_change_phase(&self.table_id, SchemaChangePhase::Rewriting)?;

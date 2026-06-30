@@ -18,7 +18,7 @@ pub enum DatabaseError {
     MetadataPayloadDeserialize,
     SqlDefinitionPayloadDeserialize,
     SchemaRevisionOutOfOrder,
-    SchemaChange(super::schema_error::SchemaError),
+    SchemaChange(crate::engine::database::schema::error::SchemaError),
     SchemaChangeInProgress,
     TableNotLocked,
     DuplicateView,

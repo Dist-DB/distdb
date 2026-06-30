@@ -1,9 +1,9 @@
 
-use super::core::ObjectStatus;
-use super::entity_aspect::DatabaseEntityAspect;
-use super::entity_kind::DatabaseEntityKind;
-use super::table_schema::TableSchema;
-use super::entity_metadata::EntityMetadata;
+use crate::engine::database::core::ObjectStatus;
+use crate::engine::database::entity::aspect::DatabaseEntityAspect;
+use crate::engine::database::entity::kind::DatabaseEntityKind;
+use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::entity::metadata::EntityMetadata;
 
 /// A named, stored SQL query. Views are never writable; their schema is
 /// derived once at definition time and stored so schema inspection does not

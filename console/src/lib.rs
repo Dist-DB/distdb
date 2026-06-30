@@ -1939,6 +1939,7 @@ pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, Stri
     }
 
     let import_prefix = "import";
+
     if lowered.starts_with(import_prefix)
         && command_text
             .chars()
@@ -1947,6 +1948,7 @@ pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, Stri
             .unwrap_or(true)
     {
         let file_name = command_text[import_prefix.len()..].trim();
+
         if file_name.is_empty() {
             return Err("import requires a file name".to_string());
         }
@@ -1964,12 +1966,17 @@ pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, Stri
     }
 
     if let Some(target) = command_text.strip_prefix("connect ") {
+
         let target = target.trim();
+        
         if target.is_empty() {
             return Err("connect requires a peer id".to_string());
         }
+        
         let (user, peer_id) = parse_connect_target(target)?;
+        
         return Ok(Some(ConsoleCommand::ConnectPeer { user, peer_id }));
+    
     }
 
     let sql = command_text.trim();
@@ -2312,6 +2319,7 @@ mod tests {
         assert_eq!(transaction_state.committed_batches, 0);
         assert_eq!(row_counts.get("users"), Some(&2));
         assert_eq!(row_counts.get("regions"), Some(&1));
+
     }
 
     #[test]

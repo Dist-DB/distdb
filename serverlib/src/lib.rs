@@ -102,7 +102,8 @@ pub use engine::execution::{
 		show_tables_result,
 };
 
-pub use engine::database::table_schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
+pub use engine::database::table::schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
+
 pub use engine::database::transaction::
 	{EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
 	SqlObjectKind, TableLifecycleAction, TableLifecyclePayload,
@@ -118,8 +119,10 @@ pub use engine::affinity::{
 	AffinityProcessorError, AffinityProcessorState, AffinitySyncPhase, AffinitySyncStep,
 	CheckpointMetadata, DatabaseSchemaSummary, ReplicationSecuritySummary,
 };
+
 pub use engine::affinity::storage::AffinityStorage;
 pub use engine::replication_executor::ReplicationPhaseExecutor;
+
 pub use engine::sql::{
 	create_table_schema_from_statement, 
 	parse_mysql8_sql_requests, 

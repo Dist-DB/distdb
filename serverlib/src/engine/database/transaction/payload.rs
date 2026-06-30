@@ -1,11 +1,11 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::engine::database::entity_metadata_payload::EntityMetadataPayload;
-use crate::engine::database::schema_change_payload::SchemaChangePayload;
+use crate::engine::database::entity::payload::EntityMetadataPayload;
+use crate::engine::database::schema::change_payload::SchemaChangePayload;
 use crate::engine::database::sql_definition_payload::SqlDefinitionPayload;
-use crate::engine::database::table_lifecycle_payload::TableLifecyclePayload;
-use super::transaction_kind::TransactionKind;
+use crate::engine::database::table::lifecycle_payload::TableLifecyclePayload;
+use super::kind::TransactionKind;
 
 
 pub trait TransactionPayloadCodec: Sized {
@@ -91,7 +91,7 @@ impl DecodedTransactionPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EntityMetadata, FieldDef, FieldIndex, FieldType, TableSchema};
+    use crate::{engine::database::entity::metadata::EntityMetadata, FieldDef, FieldIndex, FieldType, TableSchema};
 
     #[test]
     fn schema_change_payload_round_trips_through_common_codec() {

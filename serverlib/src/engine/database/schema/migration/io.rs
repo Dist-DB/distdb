@@ -9,10 +9,10 @@ use crate::engine::wal::{
     encode_record_for_storage, encode_record_for_storage_with_context,
 };
 
-use super::super::core::{DatabaseError, DatabaseResult};
-use super::super::catalog::DatabaseCatalog;
-use super::super::transaction::TransactionRecord;
-use super::super::transaction::TransactionPayloadContext;
+use crate::engine::database::core::{DatabaseError, DatabaseResult};
+use crate::engine::database::catalog::DatabaseCatalog;
+use crate::engine::database::transaction::TransactionRecord;
+use crate::engine::database::transaction::TransactionPayloadContext;
 
 pub fn stream_key_for_table(table_id: &str) -> DatabaseResult<String> {
     let normalized = common::normalize_identifier!(table_id);

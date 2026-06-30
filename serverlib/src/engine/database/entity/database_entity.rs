@@ -1,14 +1,16 @@
 
-use super::core::ObjectStatus;
-use super::entity_aspect::DatabaseEntityAspect;
-use super::entity_kind::DatabaseEntityKind;
-use super::entity_metadata::EntityMetadata;
-use super::relationship::DatabaseRelationship;
-use super::stored_procedure::DatabaseStoredProcedure;
-use super::table::DatabaseTable;
-use super::table_schema::TableSchema;
-use super::trigger::DatabaseTrigger;
-use super::view::DatabaseView;
+use crate::engine::database::entity::aspect::DatabaseEntityAspect;
+use crate::engine::database::entity::kind::DatabaseEntityKind;
+use crate::engine::database::entity::metadata::EntityMetadata;
+
+use crate::engine::database::core::ObjectStatus;
+use crate::engine::database::relationship::DatabaseRelationship;
+use crate::engine::database::stored_procedure::DatabaseStoredProcedure;
+use crate::engine::database::table::DatabaseTable;
+use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::trigger::DatabaseTrigger;
+use crate::engine::database::view::DatabaseView;
+
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DatabaseEntity {

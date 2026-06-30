@@ -1,14 +1,15 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatabaseEntityKind {
+pub enum DatabaseObjectType {
     Table,
     View,
     Relationship,
     Trigger,
     StoredProcedure,
+    Index,
 }
 
 
 #[cfg(test)]
-#[path = "entity_kind_test.rs"]
-mod tests;
+#[path = "object_type_test.rs"]
+mod object_type_test;

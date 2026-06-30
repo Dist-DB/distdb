@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use crate::core::identity::UserId;
 use common::helpers::base64::{b64_decode, b64_encode_bytes};
 
-use super::transaction_id::TransactionId;
-use super::transaction_kind::TransactionKind;
+use super::id::TransactionId;
+use super::kind::TransactionKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PayloadTransformError {

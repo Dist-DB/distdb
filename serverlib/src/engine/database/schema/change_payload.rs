@@ -1,5 +1,5 @@
-use super::table_schema::TableSchema;
-use super::transaction::transaction_payload::TransactionPayloadCodec;
+use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::transaction::payload::TransactionPayloadCodec;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SchemaChangePayload {

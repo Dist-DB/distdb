@@ -2,8 +2,8 @@
 use common::schema::{normalize_field_name, validate_field_kind};
 use std::collections::HashSet;
 
-use super::field_def::FieldDef;
-use super::schema_error::{SchemaError, SchemaResult};
+use crate::engine::database::field_def::FieldDef;
+use crate::engine::database::schema::error::{SchemaError, SchemaResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
@@ -123,5 +123,5 @@ impl TableSchema {
 
 
 #[cfg(test)]
-#[path = "table_schema_def_test.rs"]
-mod tests;
+#[path = "schema_def_test.rs"]
+mod schema_def_test;

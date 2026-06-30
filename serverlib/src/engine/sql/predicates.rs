@@ -166,7 +166,7 @@ pub fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp
 mod tests {
     use super::{compare_like_value, compare_row_value};
     use crate::{FieldType, TypeConversionPolicy};
-    use crate::engine::database::schema_migration::convert_value_to_field_type;
+    use crate::engine::database::schema::migration::convert_value_to_field_type;
     use crate::SelectComparisonOp;
 
     #[test]
