@@ -5,6 +5,7 @@ use super::{
 pub fn parse_if_else_end_plan_from_statement(
     statement: &str,
 ) -> Result<IfElseEndPlan, SqlParseError> {
+    
     let mut remaining = statement.trim().trim_end_matches(';').trim();
     let lowered = remaining.to_ascii_lowercase();
 
@@ -19,6 +20,7 @@ pub fn parse_if_else_end_plan_from_statement(
     let mut branches = Vec::new();
 
     loop {
+
         let lower = remaining.to_ascii_lowercase();
         let then_index = lower.find(" then ").ok_or_else(|| {
             SqlParseError::UnsupportedStatement(
@@ -51,14 +53,15 @@ pub fn parse_if_else_end_plan_from_statement(
         });
 
         match split.next_clause {
+
             NextClause::ElseIf => {
                 remaining = branch_tail[split.next_clause_index + "elseif ".len()..].trim_start();
-            }
+            },
 
             NextClause::ElseIfSpaced => {
                 remaining =
                     branch_tail[split.next_clause_index + "else if ".len()..].trim_start();
-            }
+            },
 
             NextClause::Else => {
                 let else_tail = branch_tail[split.next_clause_index + "else ".len()..].trim_start();
@@ -92,21 +95,25 @@ pub fn parse_if_else_end_plan_from_statement(
                     branches,
                     else_action_sql: Some(else_action_sql),
                 });
-            }
+            },
 
             NextClause::EndIf => {
                 return Ok(IfElseEndPlan {
                     branches,
                     else_action_sql: None,
                 });
-            }
+            },
+
         }
+
     }
+
 }
 
 pub fn parse_if_else_end_plan_from_create_procedure_statement(
     statement: &str,
 ) -> Result<Option<IfElseEndPlan>, SqlParseError> {
+
     let body = extract_create_procedure_body(statement)?;
     let trimmed_body = body.trim().trim_end_matches(';').trim();
 
@@ -119,9 +126,11 @@ pub fn parse_if_else_end_plan_from_create_procedure_statement(
     }
 
     parse_if_else_end_plan_from_statement(trimmed_body).map(Some)
+
 }
 
 fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError> {
+
     let trimmed = statement.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
 
@@ -155,9 +164,11 @@ fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError>
     })?;
 
     Ok(body_and_end[..end_index].trim())
+
 }
 
 fn parse_if_branch_condition(condition_sql: &str) -> Result<crate::SelectCondition, SqlParseError> {
+
     let wrapped = format!("select id from __if_eval where {condition_sql}");
     let plan = parse_select_read_plan_from_statement(&wrapped)?;
 
@@ -166,6 +177,7 @@ fn parse_if_branch_condition(condition_sql: &str) -> Result<crate::SelectConditi
             "IF/ELSE/END branch condition could not be parsed".to_string(),
         )
     })
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +196,7 @@ struct ClauseSplit {
 }
 
 fn split_action_and_next_clause(branch_tail: &str) -> Result<ClauseSplit, SqlParseError> {
+
     let lowered = branch_tail.to_ascii_lowercase();
 
     let candidates = [
@@ -217,6 +230,7 @@ fn split_action_and_next_clause(branch_tail: &str) -> Result<ClauseSplit, SqlPar
         next_clause: clause,
         next_clause_index: index + 1,
     })
+
 }
 
 #[cfg(test)]

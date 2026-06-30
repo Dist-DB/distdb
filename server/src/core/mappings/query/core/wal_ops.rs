@@ -155,11 +155,20 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
     let wal_append_start = Instant::now();
     wal.append(wal_id, record).map_err(|e| e.to_string())?;
     let wal_append_ms = wal_append_start.elapsed().as_millis() as u64;
+    let latest_tx_id = next_id.0;
 
     let index_apply_start = Instant::now();
 
     if let Some(row_map) = row_map.as_ref() {
         runtime_indexes.apply_table_row_mutation(derived_indexes.iter().copied(), kind, row_map);
+        serverlib::apply_equality_cache_row_mutation(
+            wal.cache_scope_id(),
+            &table.table_id,
+            latest_tx_id,
+            kind,
+            next_id.0,
+            row_map,
+        );
     }
 
     let index_apply_ms = index_apply_start.elapsed().as_millis() as u64;
@@ -202,7 +211,8 @@ pub(super) fn append_row_payload_records_batch(
     let payload_count = payloads.len();
 
     let last_id = wal.latest_transaction_id(wal_id);
-    let mut next_id = last_id.map(|id| id.0.saturating_add(1)).unwrap_or(1);
+    let first_row_id = last_id.map(|id| id.0.saturating_add(1)).unwrap_or(1);
+    let mut next_id = first_row_id;
     let mut refid = last_id;
     let actor = UserId::from_username("server");
 
@@ -245,6 +255,7 @@ pub(super) fn append_row_payload_records_batch(
     wal.append_batch(wal_id, records)
         .map_err(|err| err.to_string())?;
     let wal_append_us = wal_append_start.elapsed().as_micros() as u64;
+    let latest_tx_id = next_id.saturating_sub(1);
 
     let index_apply_start = Instant::now();
 
@@ -260,6 +271,15 @@ pub(super) fn append_row_payload_records_batch(
 
             _ => {}
         }
+
+        serverlib::apply_equality_cache_row_mutation_batch(
+            wal.cache_scope_id(),
+            &table.table_id,
+            latest_tx_id,
+            kind,
+            first_row_id,
+            &row_maps,
+        );
     }
 
     let index_apply_us = index_apply_start.elapsed().as_micros() as u64;

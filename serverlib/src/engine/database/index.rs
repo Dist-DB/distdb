@@ -73,6 +73,7 @@ impl DatabaseIndex {
 			None,
 			vec![common::normalize_identifier!(&field.field_name)],
 		)
+
 	}
 
 	pub fn from_table_fields(
@@ -80,6 +81,7 @@ impl DatabaseIndex {
 		kind: DatabaseIndexKind,
 		field_names: Vec<String>,
 	) -> Self {
+		
 		Self::from_table_fields_with_origin(
 			table_id,
 			kind,
@@ -87,6 +89,7 @@ impl DatabaseIndex {
 			None,
 			field_names,
 		)
+
 	}
 
 	pub fn from_table_fields_with_origin(
@@ -149,6 +152,7 @@ impl DatabaseIndex {
 		
 		self.field_name = self.field_names.first().cloned().unwrap_or_default();
 		self.table_id = common::normalize_identifier!(&self.table_id);
+
 		self.index_id = Self::compose_index_id(
 			&self.table_id,
 			self.kind,
@@ -210,6 +214,7 @@ impl DatabaseIndex {
 			}
 
 		}
+		
 	}
 
 }

@@ -8,6 +8,7 @@ use crate::{
 
 use super::access::{
     build_relation_probe_index, collect_indexable_equality_filters_for_schema,
+    collect_indexable_like_filter_for_schema,
     field_has_single_column_index, materialize_relation_rows, plan_relation_access,
     EqualityProbeSource,
 };
@@ -49,6 +50,9 @@ where
 
     let primary_condition = pushdown_conditions.first().and_then(|condition| condition.as_ref());
     let mut primary_filter_map = HashMap::new();
+    let primary_like_filter = primary_condition
+        .as_ref()
+        .and_then(|condition| collect_indexable_like_filter_for_schema(primary_schema, condition));
     let primary_allow_index_short_circuit = primary_condition
         .as_ref()
         .map(|condition| {
@@ -64,6 +68,7 @@ where
         primary_table,
         primary_allow_index_short_circuit,
         primary_filter_map,
+        primary_like_filter,
     );
 
     let mut joined_rows = materialize_relation_rows(
@@ -105,6 +110,9 @@ where
             .get(join_index + 1)
             .and_then(|condition| condition.as_ref());
         let mut right_filter_map = HashMap::new();
+        let right_like_filter = right_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_like_filter_for_schema(right_schema, condition));
         let right_allow_index_short_circuit = right_condition
             .as_ref()
             .map(|condition| {
@@ -120,6 +128,7 @@ where
             right_table,
             right_allow_index_short_circuit,
             right_filter_map,
+            right_like_filter,
         );
 
         let right_rows = materialize_relation_rows(

@@ -3,10 +3,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use ahash::{AHashMap, AHashSet};
+use common::helpers::tphashset::TPHashSet;
 
 use crate::engine::database::transaction::TransactionLog;
 use crate::engine::database::runtime_index::derived_indexes_for_table;
 use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
+use crate::engine::sql::compare_like_value;
 use crate::{
     TransactionPayloadContext,
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
@@ -24,6 +26,7 @@ struct EqualityTableCacheEntry {
     latest_tx_id: u64,
     rows_by_id: AHashMap<u64, HashMap<String, Vec<u8>>>,
     row_ids_by_field_value: AHashMap<String, AHashMap<Vec<u8>, Vec<u64>>>,
+    string_index_by_field: AHashMap<String, TPHashSet<Vec<u64>>>,
 }
 
 static EQUALITY_TABLE_CACHE: OnceLock<Mutex<AHashMap<(usize, String), EqualityTableCacheEntry>>> =
@@ -216,6 +219,7 @@ fn build_warm_equality_cache_serial(
         latest_tx_id: 0,
         rows_by_id,
         row_ids_by_field_value,
+        string_index_by_field: AHashMap::new(),
     }
 }
 
@@ -307,7 +311,115 @@ fn build_warm_equality_cache_parallel(
         latest_tx_id: 0,
         rows_by_id,
         row_ids_by_field_value,
+        string_index_by_field: AHashMap::new(),
     }
+}
+
+fn build_string_index_for_field(
+    rows_by_id: &AHashMap<u64, HashMap<String, Vec<u8>>>,
+    field_name: &str,
+) -> TPHashSet<Vec<u64>> {
+
+    let mut grouped = AHashMap::<String, Vec<u64>>::new();
+
+    for (row_id, row_map) in rows_by_id {
+        if let Some(value) = row_map.get(field_name) {
+            let key = String::from_utf8_lossy(value).into_owned();
+            grouped.entry(key).or_default().push(*row_id);
+        }
+    }
+
+    let mut index = TPHashSet::new();
+    for (key, row_ids) in grouped {
+        index.insert(key, row_ids);
+    }
+
+    index
+
+}
+
+fn build_string_index_from_postings(
+    postings: &AHashMap<Vec<u8>, Vec<u64>>,
+) -> TPHashSet<Vec<u64>> {
+
+    let mut index = TPHashSet::new();
+
+    for (value, row_ids) in postings {
+        index.insert(String::from_utf8_lossy(value).into_owned(), row_ids.clone());
+    }
+
+    index
+
+}
+
+fn field_supports_text_like(schema: &TableSchema, field_name: &str) -> bool {
+    let Some(field) = schema.field(field_name) else {
+        return false;
+    };
+
+    matches!(
+        field.field_type,
+        common::schema::FieldKind::StringFixed(_)
+            | common::schema::FieldKind::Text
+            | common::schema::FieldKind::Enum(_)
+    )
+}
+
+fn warm_string_like_accessors(
+    entry: &mut EqualityTableCacheEntry,
+    fields: &[String],
+    schema: &TableSchema,
+) {
+
+    for field_name in fields {
+        if !field_supports_text_like(schema, field_name) {
+            continue;
+        }
+
+        if entry.string_index_by_field.contains_key(field_name) {
+            continue;
+        }
+
+        if let Some(postings) = entry.row_ids_by_field_value.get(field_name) {
+            entry.string_index_by_field.insert(
+                field_name.clone(),
+                build_string_index_from_postings(postings),
+            );
+        }
+    }
+
+}
+
+fn rows_for_field_string_like(
+    entry: &mut EqualityTableCacheEntry,
+    field_name: &str,
+    pattern: &str,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if !entry.string_index_by_field.contains_key(field_name) {
+        let index = build_string_index_for_field(&entry.rows_by_id, field_name);
+        entry
+            .string_index_by_field
+            .insert(field_name.to_string(), index);
+    }
+
+    let Some(index) = entry.string_index_by_field.get(field_name) else {
+        return Vec::new();
+    };
+
+    index
+        .search_like(pattern)
+        .into_iter()
+        .flat_map(|(_, row_ids)| row_ids.iter().copied())
+        .filter_map(|row_id| {
+            entry
+                .rows_by_id
+                .get(&row_id)
+                .cloned()
+                .map(|row_map| (row_id, row_map))
+        })
+        .collect()
+
 }
 
 fn rows_for_field_value(
@@ -338,6 +450,7 @@ fn rows_for_field_value(
 pub fn warm_equality_cache_from_live_rows(
     cache_scope_id: usize,
     table_id: &str,
+    schema: &TableSchema,
     latest_tx_id: u64,
     live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
     field_names: &[String],
@@ -363,6 +476,8 @@ pub fn warm_equality_cache_from_live_rows(
         build_warm_equality_cache_serial(&fields, live_rows)
     };
 
+    warm_string_like_accessors(&mut entry, &fields, schema);
+
     entry.latest_tx_id = latest_tx_id;
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
@@ -375,6 +490,162 @@ pub fn warm_equality_cache_from_live_rows(
 
 }
 
+fn remove_row_id_from_postings(postings: &mut AHashMap<Vec<u8>, Vec<u64>>, value: &[u8], row_id: u64) {
+    let mut should_remove_key = false;
+
+    if let Some(row_ids) = postings.get_mut(value) {
+        row_ids.retain(|existing| *existing != row_id);
+        should_remove_key = row_ids.is_empty();
+    }
+
+    if should_remove_key {
+        postings.remove(value);
+    }
+}
+
+fn remove_row_id_from_string_index(index: &mut TPHashSet<Vec<u64>>, key: &str, row_id: u64) {
+    let Some(existing_row_ids) = index.get(key).cloned() else {
+        return;
+    };
+
+    let mut updated = existing_row_ids;
+    updated.retain(|existing| *existing != row_id);
+
+    if updated.is_empty() {
+        index.remove(key);
+    } else {
+        index.insert(key.to_string(), updated);
+    }
+}
+
+fn apply_cached_row_insert(
+    entry: &mut EqualityTableCacheEntry,
+    row_id: u64,
+    row_map: &HashMap<String, Vec<u8>>,
+) {
+    entry.rows_by_id.insert(row_id, row_map.clone());
+
+    let tracked_fields = entry
+        .row_ids_by_field_value
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for field_name in tracked_fields {
+        let Some(value) = row_map.get(&field_name).cloned() else {
+            continue;
+        };
+
+        if let Some(postings) = entry.row_ids_by_field_value.get_mut(&field_name) {
+            postings.entry(value.clone()).or_default().push(row_id);
+        }
+
+        if let Some(index) = entry.string_index_by_field.get_mut(&field_name) {
+            let key = String::from_utf8_lossy(&value).into_owned();
+            let mut updated = index.get(&key).cloned().unwrap_or_default();
+            updated.push(row_id);
+            index.insert(key, updated);
+        }
+    }
+}
+
+fn apply_cached_row_delete(
+    entry: &mut EqualityTableCacheEntry,
+    row_id: u64,
+    row_map: &HashMap<String, Vec<u8>>,
+) {
+    entry.rows_by_id.remove(&row_id);
+
+    let tracked_fields = entry
+        .row_ids_by_field_value
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for field_name in tracked_fields {
+        let Some(value) = row_map.get(&field_name) else {
+            continue;
+        };
+
+        if let Some(postings) = entry.row_ids_by_field_value.get_mut(&field_name) {
+            remove_row_id_from_postings(postings, value, row_id);
+        }
+
+        if let Some(index) = entry.string_index_by_field.get_mut(&field_name) {
+            let key = String::from_utf8_lossy(value).into_owned();
+            remove_row_id_from_string_index(index, &key, row_id);
+        }
+    }
+}
+
+pub fn apply_equality_cache_row_mutation(
+    cache_scope_id: usize,
+    table_id: &str,
+    latest_tx_id: u64,
+    kind: TransactionKind,
+    row_id: u64,
+    row_map: &HashMap<String, Vec<u8>>,
+) {
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+    {
+        entry.latest_tx_id = latest_tx_id;
+
+        match kind {
+            TransactionKind::Insert | TransactionKind::Update => {
+                apply_cached_row_insert(entry, row_id, row_map);
+            }
+
+            TransactionKind::Delete => {
+                apply_cached_row_delete(entry, row_id, row_map);
+            }
+
+            _ => {}
+        }
+    }
+}
+
+pub fn apply_equality_cache_row_mutation_batch(
+    cache_scope_id: usize,
+    table_id: &str,
+    latest_tx_id: u64,
+    kind: TransactionKind,
+    first_row_id: u64,
+    row_maps: &[HashMap<String, Vec<u8>>],
+) {
+    if row_maps.is_empty() {
+        return;
+    }
+
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+    {
+        entry.latest_tx_id = latest_tx_id;
+
+        match kind {
+            TransactionKind::Insert | TransactionKind::Update => {
+                for (offset, row_map) in row_maps.iter().enumerate() {
+                    let row_id = first_row_id.saturating_add(offset as u64);
+                    apply_cached_row_insert(entry, row_id, row_map);
+                }
+            }
+
+            TransactionKind::Delete => {
+                for (offset, row_map) in row_maps.iter().enumerate() {
+                    let row_id = first_row_id.saturating_add(offset as u64);
+                    apply_cached_row_delete(entry, row_id, row_map);
+                }
+            }
+
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RelationAccessStrategy {
     FullScan,
@@ -385,6 +656,18 @@ pub enum RelationAccessStrategy {
     EqualityProbe {
         field_name: String,
         lookup_value: Vec<u8>,
+        source: EqualityProbeSource,
+    },
+    PrefixLikeProbe {
+        field_name: String,
+        prefix: Vec<u8>,
+        case_insensitive: bool,
+        source: EqualityProbeSource,
+    },
+    StringLikeProbe {
+        field_name: String,
+        pattern: Vec<u8>,
+        case_insensitive: bool,
         source: EqualityProbeSource,
     },
 }
@@ -423,6 +706,14 @@ impl RelationAccessPlan {
 
     pub fn equality_probe_source(&self) -> Option<EqualityProbeSource> {
         let RelationAccessStrategy::EqualityProbe { source, .. } = self.strategy else {
+            return None;
+        };
+
+        Some(source)
+    }
+
+    pub fn string_like_probe_source(&self) -> Option<EqualityProbeSource> {
+        let RelationAccessStrategy::StringLikeProbe { source, .. } = self.strategy else {
             return None;
         };
 
@@ -481,6 +772,240 @@ pub fn collect_indexable_equality_filters_for_schema(
 
     }
 
+}
+
+pub fn collect_indexable_prefix_like_filter_for_schema(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+) -> Option<(String, Vec<u8>, bool)> {
+
+    let mut prefix_filter: Option<(String, Vec<u8>, bool)> = None;
+
+    if collect_indexable_prefix_like_filter_into(schema, condition, &mut prefix_filter) {
+        prefix_filter
+    } else {
+        None
+    }
+
+}
+
+pub fn collect_indexable_like_filter_for_schema(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+) -> Option<(String, Vec<u8>, bool)> {
+
+    let mut like_filter: Option<(String, Vec<u8>, bool)> = None;
+
+    if collect_indexable_like_filter_into(schema, condition, &mut like_filter) {
+        like_filter
+    } else {
+        None
+    }
+
+}
+
+fn collect_indexable_like_filter_into(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+    like_filter: &mut Option<(String, Vec<u8>, bool)>,
+) -> bool {
+
+    match condition {
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| collect_indexable_like_filter_into(schema, child, like_filter)),
+
+        SelectCondition::Predicate(SelectPredicate::Like {
+            field_name,
+            pattern,
+            negated,
+            case_insensitive,
+            escape_char,
+        }) => {
+            if *negated || escape_char.is_some() {
+                return true;
+            }
+
+            let resolved_field_name = if schema.field(field_name).is_some() {
+                field_name.clone()
+            } else {
+                field_name
+                    .rsplit('.')
+                    .next()
+                    .filter(|candidate| schema.field(candidate).is_some())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| field_name.clone())
+            };
+
+            if !pattern.is_empty() {
+                let normalized_pattern = schema
+                    .field(&resolved_field_name)
+                    .and_then(|field| {
+                        convert_value_to_field_type(
+                            pattern,
+                            &field.field_type,
+                            TypeConversionPolicy::Safe,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_else(|| pattern.clone());
+
+                merge_like_probe(
+                    like_filter,
+                    resolved_field_name,
+                    normalized_pattern,
+                    *case_insensitive,
+                )
+            } else {
+                true
+            }
+        }
+
+        SelectCondition::Predicate(_) => true,
+
+        SelectCondition::Or(_) | SelectCondition::Not(_) => false,
+    }
+
+}
+
+fn merge_like_probe(
+    slot: &mut Option<(String, Vec<u8>, bool)>,
+    field_name: String,
+    pattern: Vec<u8>,
+    case_insensitive: bool,
+) -> bool {
+
+    let Some((existing_field, existing_pattern, existing_case_insensitive)) = slot.as_mut() else {
+        *slot = Some((field_name, pattern, case_insensitive));
+        return true;
+    };
+
+    if *existing_case_insensitive != case_insensitive || *existing_field != field_name {
+        return false;
+    }
+
+    if pattern.starts_with(existing_pattern) || existing_pattern.starts_with(&pattern) {
+        if pattern.len() > existing_pattern.len() {
+            *existing_pattern = pattern;
+        }
+        return true;
+    }
+
+    false
+
+}
+
+fn collect_indexable_prefix_like_filter_into(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+    prefix_filter: &mut Option<(String, Vec<u8>, bool)>,
+) -> bool {
+
+    match condition {
+
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| collect_indexable_prefix_like_filter_into(schema, child, prefix_filter)),
+
+        SelectCondition::Predicate(SelectPredicate::Like {
+            field_name,
+            pattern,
+            negated,
+            case_insensitive,
+            escape_char,
+        }) => {
+            if *negated || escape_char.is_some() {
+                return true;
+            }
+
+            let Some(raw_prefix) = simple_like_prefix(pattern) else {
+                return true;
+            };
+
+            if raw_prefix.is_empty() {
+                return true;
+            }
+
+            let resolved_field_name = if schema.field(field_name).is_some() {
+                field_name.clone()
+            } else {
+                field_name
+                    .rsplit('.')
+                    .next()
+                    .filter(|candidate| schema.field(candidate).is_some())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| field_name.clone())
+            };
+
+            let normalized_prefix = schema
+                .field(&resolved_field_name)
+                .and_then(|field| {
+                    convert_value_to_field_type(
+                        &raw_prefix,
+                        &field.field_type,
+                        TypeConversionPolicy::Safe,
+                    )
+                    .ok()
+                })
+                .unwrap_or(raw_prefix);
+
+            merge_prefix_probe(
+                prefix_filter,
+                resolved_field_name,
+                normalized_prefix,
+                *case_insensitive,
+            )
+        }
+
+        SelectCondition::Predicate(_) => true,
+
+        SelectCondition::Or(_) | SelectCondition::Not(_) => false,
+
+    }
+
+}
+
+fn merge_prefix_probe(
+    slot: &mut Option<(String, Vec<u8>, bool)>,
+    field_name: String,
+    prefix: Vec<u8>,
+    case_insensitive: bool,
+) -> bool {
+
+    let Some((existing_field, existing_prefix, existing_case_insensitive)) = slot.as_mut() else {
+        *slot = Some((field_name, prefix, case_insensitive));
+        return true;
+    };
+
+    if *existing_case_insensitive != case_insensitive || *existing_field != field_name {
+        return false;
+    }
+
+    if prefix.starts_with(existing_prefix) {
+        *existing_prefix = prefix;
+        return true;
+    }
+
+    existing_prefix.starts_with(&prefix)
+
+}
+
+fn simple_like_prefix(pattern: &[u8]) -> Option<Vec<u8>> {
+    if pattern.is_empty() {
+        return None;
+    }
+
+    if !pattern.ends_with(b"%") {
+        return None;
+    }
+
+    let prefix = &pattern[..pattern.len() - 1];
+
+    if prefix.iter().any(|ch| *ch == b'%' || *ch == b'_') {
+        return None;
+    }
+
+    Some(prefix.to_vec())
 }
 pub fn field_has_single_column_index(table: &DatabaseTable, field_name: &str) -> bool {
     table.indexes.values().any(|index| {
@@ -760,6 +1285,7 @@ pub fn load_live_rows_by_equality(
         latest_tx_id,
         rows_by_id,
         row_ids_by_field_value,
+        string_index_by_field: AHashMap::new(),
     };
 
     let result = rows_for_field_value(&entry, field_name, lookup_value);
@@ -769,6 +1295,246 @@ pub fn load_live_rows_by_equality(
     }
 
     result
+
+}
+
+pub fn load_live_rows_by_prefix(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    prefix: &[u8],
+    case_insensitive: bool,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    let cache_scope_id = wal.cache_scope_id();
+
+    let latest_tx_id = wal
+        .latest_transaction_id(table_id)
+        .map(|tx| tx.0)
+        .unwrap_or(0);
+
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && entry.latest_tx_id == latest_tx_id
+    {
+        if !entry.row_ids_by_field_value.contains_key(field_name) {
+            entry.row_ids_by_field_value.insert(
+                field_name.to_string(),
+                build_postings_for_field(&entry.rows_by_id, field_name),
+            );
+        }
+
+        if !case_insensitive && !entry.string_index_by_field.contains_key(field_name) {
+            entry.string_index_by_field.insert(
+                field_name.to_string(),
+                build_string_index_for_field(&entry.rows_by_id, field_name),
+            );
+        }
+
+        return rows_for_field_prefix(entry, field_name, prefix, case_insensitive);
+    }
+
+    let live_rows = load_live_rows(wal, table_id, schema);
+    let mut rows_by_id = AHashMap::with_capacity(live_rows.len());
+
+    for (row_id, row_map) in live_rows {
+        rows_by_id.insert(row_id, row_map);
+    }
+
+    let mut row_ids_by_field_value = AHashMap::<String, AHashMap<Vec<u8>, Vec<u64>>>::new();
+    row_ids_by_field_value.insert(
+        field_name.to_string(),
+        build_postings_for_field(&rows_by_id, field_name),
+    );
+
+    let mut string_index_by_field = AHashMap::new();
+    if !case_insensitive {
+        string_index_by_field.insert(
+            field_name.to_string(),
+            build_string_index_for_field(&rows_by_id, field_name),
+        );
+    }
+
+    let entry = EqualityTableCacheEntry {
+        latest_tx_id,
+        rows_by_id,
+        row_ids_by_field_value,
+        string_index_by_field,
+    };
+
+    let result = rows_for_field_prefix(&entry, field_name, prefix, case_insensitive);
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+    }
+
+    result
+
+}
+
+pub fn load_live_rows_by_string_like(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    pattern: &[u8],
+    case_insensitive: bool,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if case_insensitive {
+        return load_live_rows(wal, table_id, schema)
+            .into_iter()
+            .filter(|(_, row_map)| {
+                row_map
+                    .get(field_name)
+                    .map(|value| compare_like_value(value, pattern, true, None))
+                    .unwrap_or(false)
+            })
+            .collect();
+    }
+
+    let cache_scope_id = wal.cache_scope_id();
+    let latest_tx_id = wal
+        .latest_transaction_id(table_id)
+        .map(|tx| tx.0)
+        .unwrap_or(0);
+
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && entry.latest_tx_id == latest_tx_id
+    {
+        if !entry.string_index_by_field.contains_key(field_name) {
+            let index = build_string_index_for_field(&entry.rows_by_id, field_name);
+            entry
+                .string_index_by_field
+                .insert(field_name.to_string(), index);
+        }
+
+        if let Some(index) = entry.string_index_by_field.get(field_name) {
+            return index
+                .search_like(&String::from_utf8_lossy(pattern))
+                .into_iter()
+                .flat_map(|(_, row_ids)| row_ids.iter().copied())
+                .filter_map(|row_id| {
+                    entry
+                        .rows_by_id
+                        .get(&row_id)
+                        .cloned()
+                        .map(|row_map| (row_id, row_map))
+                })
+                .collect();
+        }
+    }
+
+    let live_rows = load_live_rows(wal, table_id, schema);
+    let mut rows_by_id = AHashMap::with_capacity(live_rows.len());
+
+    for (row_id, row_map) in live_rows {
+        rows_by_id.insert(row_id, row_map);
+    }
+
+    let mut row_ids_by_field_value = AHashMap::<String, AHashMap<Vec<u8>, Vec<u64>>>::new();
+    row_ids_by_field_value.insert(
+        field_name.to_string(),
+        build_postings_for_field(&rows_by_id, field_name),
+    );
+
+    let mut string_index_by_field = AHashMap::new();
+    string_index_by_field.insert(
+        field_name.to_string(),
+        build_string_index_for_field(&rows_by_id, field_name),
+    );
+
+    let entry = EqualityTableCacheEntry {
+        latest_tx_id,
+        rows_by_id,
+        row_ids_by_field_value,
+        string_index_by_field,
+    };
+
+    let pattern_text = String::from_utf8_lossy(pattern).to_string();
+    let result = entry
+        .string_index_by_field
+        .get(field_name)
+        .map(|index| {
+            index
+                .search_like(&pattern_text)
+                .into_iter()
+                .flat_map(|(_, row_ids)| row_ids.iter().copied())
+                .filter_map(|row_id| {
+                    entry
+                        .rows_by_id
+                        .get(&row_id)
+                        .cloned()
+                        .map(|row_map| (row_id, row_map))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+    }
+
+    result
+
+}
+
+fn rows_for_field_prefix(
+    entry: &EqualityTableCacheEntry,
+    field_name: &str,
+    prefix: &[u8],
+    case_insensitive: bool,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if !case_insensitive
+        && let Some(index) = entry.string_index_by_field.get(field_name)
+    {
+        let prefix_text = String::from_utf8_lossy(prefix);
+        return index
+            .search_prefix(prefix_text.as_ref())
+            .into_iter()
+            .flat_map(|(_, row_ids)| row_ids.iter().copied())
+            .filter_map(|row_id| {
+                entry
+                    .rows_by_id
+                    .get(&row_id)
+                    .cloned()
+                    .map(|row_map| (row_id, row_map))
+            })
+            .collect();
+    }
+
+    let Some(postings) = entry.row_ids_by_field_value.get(field_name) else {
+        return Vec::new();
+    };
+
+    postings
+        .iter()
+        .filter(|(value, _)| {
+            if case_insensitive {
+                value
+                    .get(..prefix.len())
+                    .map(|head| head.eq_ignore_ascii_case(prefix))
+                    .unwrap_or(false)
+            } else {
+                value.starts_with(prefix)
+            }
+        })
+        .flat_map(|(_, row_ids)| row_ids.iter().copied())
+        .filter_map(|row_id| {
+            entry
+                .rows_by_id
+                .get(&row_id)
+                .cloned()
+                .map(|row_map| (row_id, row_map))
+        })
+        .collect()
 
 }
 
@@ -859,6 +1625,7 @@ pub fn plan_relation_access(
     table: &DatabaseTable,
     allow_index_short_circuit: bool,
     index_filter_map: HashMap<String, Vec<u8>>,
+    like_filter: Option<(String, Vec<u8>, bool)>,
 ) -> RelationAccessPlan {
 
     if allow_index_short_circuit
@@ -888,6 +1655,42 @@ pub fn plan_relation_access(
             strategy: RelationAccessStrategy::EqualityProbe {
                 field_name,
                 lookup_value,
+                source,
+            },
+        };
+    }
+
+    if let Some((field_name, pattern, case_insensitive)) = like_filter {
+        let source = if field_has_single_column_index(table, &field_name) {
+            EqualityProbeSource::ExistingIndex
+        } else {
+            EqualityProbeSource::TemporaryIndex
+        };
+
+        if let Some(prefix) = simple_like_prefix(&pattern)
+            .or_else(|| {
+                if pattern.iter().all(|ch| *ch != b'%' && *ch != b'_') {
+                    Some(pattern.clone())
+                } else {
+                    None
+                }
+            })
+        {
+            return RelationAccessPlan {
+                strategy: RelationAccessStrategy::PrefixLikeProbe {
+                    field_name,
+                    prefix,
+                    case_insensitive,
+                    source,
+                },
+            };
+        }
+
+        return RelationAccessPlan {
+            strategy: RelationAccessStrategy::StringLikeProbe {
+                field_name,
+                pattern,
+                case_insensitive,
                 source,
             },
         };
@@ -994,6 +1797,62 @@ pub fn materialize_relation_rows(
                 schema,
                 field_name,
                 lookup_value,
+            )
+        }
+
+        RelationAccessStrategy::PrefixLikeProbe {
+            field_name,
+            prefix,
+            case_insensitive,
+            source,
+        } => {
+            log::debug!(
+                "relation access table={} field={} prefix={} strategy={} case_insensitive={}",
+                table.table_id,
+                field_name,
+                String::from_utf8_lossy(prefix),
+                match source {
+                    EqualityProbeSource::ExistingIndex => "existing_index",
+                    EqualityProbeSource::TemporaryIndex => "temporary_index",
+                },
+                case_insensitive,
+            );
+
+            load_live_rows_by_prefix(
+                wal,
+                &table.table_id,
+                schema,
+                field_name,
+                prefix,
+                *case_insensitive,
+            )
+        }
+
+        RelationAccessStrategy::StringLikeProbe {
+            field_name,
+            pattern,
+            case_insensitive,
+            source,
+        } => {
+            log::debug!(
+                "relation access table={} field={} like_pattern={} strategy={} case_insensitive={}",
+                table.table_id,
+                field_name,
+                String::from_utf8_lossy(pattern),
+                match source {
+                    EqualityProbeSource::ExistingIndex => "existing_index",
+                    EqualityProbeSource::TemporaryIndex => "temporary_index",
+                },
+                case_insensitive,
+            );
+
+            load_live_rows_by_string_like(
+                wal,
+                &table.table_id,
+                schema,
+                field_name,
+                pattern,
+                *case_insensitive,
             )
         }
 

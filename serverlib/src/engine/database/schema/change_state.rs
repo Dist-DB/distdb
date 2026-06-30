@@ -10,6 +10,7 @@ pub enum SchemaChangePhase {
 impl SchemaChangePhase {
 
     pub fn can_transition_to(self, next: Self) -> bool {
+
         matches!(
             (self, next),
             (Self::Locked, Self::Rewriting)
@@ -22,6 +23,7 @@ impl SchemaChangePhase {
                 | (Self::Reindexing, Self::Reindexing)
                 | (Self::Syncing, Self::Syncing)
         )
+        
     }
     
 }

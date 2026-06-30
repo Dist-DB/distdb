@@ -218,7 +218,7 @@ impl RuntimeIndexStore {
 
             let key = index_value_tuple(index, row_map);
             self.index_mut(&index.index_id.0).remove(&key);
-            
+
         }
     }
 
@@ -445,6 +445,7 @@ impl RuntimeIndexStore {
                 warm_equality_cache_from_live_rows(
                     wal.cache_scope_id(),
                     &table_id,
+                    &table.schema,
                     latest_tx_id,
                     live_rows,
                     &warm_fields,
@@ -576,6 +577,7 @@ fn build_bootstrap_index_entries(
         let mut handles = Vec::new();
 
         for worker_idx in 0..workers {
+            
             let start = worker_idx * chunk_size;
             if start >= tracked_indexes.len() {
                 break;
@@ -595,6 +597,7 @@ fn build_bootstrap_index_entries(
                 }
                 (start, chunk)
             }));
+
         }
 
         let mut out = Vec::with_capacity(handles.len());

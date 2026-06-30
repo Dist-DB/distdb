@@ -114,6 +114,7 @@ pub fn parse_alter_table_change_plan_from_statement(
         match operation {
 
             AlterTableOperation::AddColumn { column_def, .. } => {
+
                 let nullable = !column_def
                     .options
                     .iter()
@@ -153,11 +154,12 @@ pub fn parse_alter_table_change_plan_from_statement(
                     default_value,
                     metadata: extract_field_metadata(column_def),
                 }));
-            }
+
+            },
 
             AlterTableOperation::DropColumn { column_name, .. } => {
                 plan_ops.push(AlterTableChangeOp::DropField(column_name.value.clone()));
-            }
+            },
 
             AlterTableOperation::RenameColumn {
                 old_column_name,
@@ -167,13 +169,13 @@ pub fn parse_alter_table_change_plan_from_statement(
                     from: old_column_name.value.clone(),
                     to: new_column_name.value.clone(),
                 });
-            }
+            },
 
             _ => {
                 return Err(SqlParseError::UnsupportedStatement(format!(
                     "unsupported ALTER TABLE operation: {operation}"
                 )));
-            }
+            },
 
         }
 
@@ -194,6 +196,7 @@ fn derive_indexed_fields_from_constraints(
     let mut indexed = HashSet::new();
 
     for constraint in constraints {
+
         let rendered = constraint.to_string();
         let lowered = rendered.to_ascii_lowercase();
         let Some(columns) = extract_constraint_columns(&rendered) else {
@@ -216,6 +219,7 @@ fn derive_indexed_fields_from_constraints(
         {
             indexed.extend(columns);
         }
+
     }
 
     (primary, indexed)
@@ -247,6 +251,7 @@ fn extract_constraint_columns(constraint: &str) -> Option<Vec<String>> {
     } else {
         Some(columns)
     }
+
 }
 
 fn map_sql_data_type(data_type: &DataType) -> FieldType {
@@ -274,6 +279,7 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
     }
 
     if lowered.contains("unsigned") {
+
         if lowered.contains("bigint") {
             return FieldType::UInt(64);
         }
@@ -287,6 +293,7 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
         }
 
         return FieldType::UInt(32);
+
     }
 
     if lowered.contains("bigint") {
@@ -356,7 +363,9 @@ fn parse_enum_variants(sql_type: &str) -> Option<Vec<String>> {
     let mut chars = sql_type[start + 1..end].chars().peekable();
 
     while let Some(ch) = chars.next() {
+
         if in_quote {
+            
             if ch == '\'' {
                 if matches!(chars.peek(), Some('\'')) {
                     current.push('\'');
@@ -368,19 +377,23 @@ fn parse_enum_variants(sql_type: &str) -> Option<Vec<String>> {
             } else {
                 current.push(ch);
             }
+
             continue;
+
         }
 
         if ch == '\'' {
             in_quote = true;
         }
+
     }
 
     if in_quote || variants.is_empty() {
-        return None;
+        None
+    } else {
+        Some(variants)
     }
 
-    Some(variants)
 }
 
 fn parse_sql_type_len(lowered_type: &str, marker: &str) -> Option<usize> {

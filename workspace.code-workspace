@@ -54,7 +54,8 @@
         "matchCommandLine": true
       },
       "command": true,
-      "cargo llvm-cov": true
+      "cargo llvm-cov": true,
+      "printf": true
     }
   }
 }

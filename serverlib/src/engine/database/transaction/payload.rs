@@ -76,6 +76,7 @@ impl DecodedTransactionPayload {
     pub fn decode(kind: TransactionKind, payload: &[u8]) -> Result<Self, &'static str> {
 
         match kind {
+            
             TransactionKind::SchemaChange => SchemaChangePayload::decode_payload(payload)
                 .map(Self::SchemaChange),
 
@@ -124,11 +125,12 @@ mod tests {
         let decoded = SchemaChangePayload::decode_payload(&encoded).expect("payload should decode");
 
         assert_eq!(decoded, payload);
-        
+
     }
 
     #[test]
     fn kind_dispatch_decodes_entity_metadata_payload() {
+
         let payload = EntityMetadataPayload {
             entity_id: "users".to_string(),
             metadata: EntityMetadata::default(),
@@ -139,5 +141,7 @@ mod tests {
             .expect("dispatch should decode metadata payload");
 
         assert_eq!(decoded, DecodedTransactionPayload::EntityMetadata(payload));
+    
     }
+
 }

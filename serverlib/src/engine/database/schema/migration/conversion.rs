@@ -130,7 +130,7 @@ pub fn convert_value_to_field_type(
                 TypeConversionPolicy::Force => Ok(String::from_utf8_lossy(&render_stored_field_value(value)).into_owned().into_bytes()),
                 TypeConversionPolicy::Safe => Err(()),
             },
-            
+
         },
 
         FieldType::Blob | FieldType::Spatial => Ok(value.to_vec()),
@@ -140,12 +140,19 @@ pub fn convert_value_to_field_type(
 }
 
 pub fn render_stored_field_value(value: &[u8]) -> Vec<u8> {
+    
     match decode_numeric_value(value) {
+        
         Some(StoredNumericValue::Signed(v)) => v.to_string().into_bytes(),
+
         Some(StoredNumericValue::Unsigned(v)) => v.to_string().into_bytes(),
+
         Some(StoredNumericValue::Float(v)) => v.to_string().into_bytes(),
+
         None => value.to_vec(),
+
     }
+
 }
 
 pub fn display_stored_field_value(value: &[u8]) -> String {
@@ -153,6 +160,7 @@ pub fn display_stored_field_value(value: &[u8]) -> String {
 }
 
 pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+
     let left_numeric = decode_numeric_value(left);
     let right_numeric = decode_numeric_value(right);
 
@@ -168,36 +176,44 @@ pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Order
             left_text.cmp(&right_text)
         }
     }
+
 }
 
 fn compare_mixed_numeric_values(
     left: StoredNumericValue,
     right: StoredNumericValue,
 ) -> std::cmp::Ordering {
+
     match (left, right) {
+
         (StoredNumericValue::Signed(lhs), StoredNumericValue::Unsigned(rhs)) => {
             if lhs < 0 {
                 std::cmp::Ordering::Less
             } else {
                 (lhs as u128).cmp(&rhs)
             }
-        }
+        },
+
         (StoredNumericValue::Unsigned(lhs), StoredNumericValue::Signed(rhs)) => {
             if rhs < 0 {
                 std::cmp::Ordering::Greater
             } else {
                 lhs.cmp(&(rhs as u128))
             }
-        }
+        },
+
         (lhs, rhs) => {
             let lhs = numeric_as_f64(lhs);
             let rhs = numeric_as_f64(rhs);
             lhs.partial_cmp(&rhs).unwrap_or(std::cmp::Ordering::Equal)
         }
+
     }
+
 }
 
 fn encode_signed_numeric(target_type: FieldType, value: i128) -> Result<Vec<u8>, ()> {
+
     match target_type {
         FieldType::Int(8) => i8::try_from(value).map(|v| vec![STORED_I8_TAG, v as u8]).map_err(|_| ()),
         FieldType::Int(16) => i16::try_from(value).map(|v| tagged_bytes(STORED_I16_TAG, &v.to_le_bytes())).map_err(|_| ()),
@@ -206,9 +222,11 @@ fn encode_signed_numeric(target_type: FieldType, value: i128) -> Result<Vec<u8>,
         FieldType::Int(_) => Ok(tagged_bytes(STORED_I128_TAG, &value.to_le_bytes())),
         _ => Err(()),
     }
+
 }
 
 fn encode_unsigned_numeric(target_type: FieldType, value: u128) -> Result<Vec<u8>, ()> {
+
     match target_type {
         FieldType::UInt(8) => u8::try_from(value).map(|v| vec![STORED_U8_TAG, v]).map_err(|_| ()),
         FieldType::UInt(16) => u16::try_from(value).map(|v| tagged_bytes(STORED_U16_TAG, &v.to_le_bytes())).map_err(|_| ()),
@@ -217,14 +235,17 @@ fn encode_unsigned_numeric(target_type: FieldType, value: u128) -> Result<Vec<u8
         FieldType::UInt(_) => Ok(tagged_bytes(STORED_U128_TAG, &value.to_le_bytes())),
         _ => Err(()),
     }
+
 }
 
 fn encode_float_numeric(target_type: FieldType, value: f64) -> Result<Vec<u8>, ()> {
+    
     match target_type {
         FieldType::Float(bits) if bits <= 32 => Ok(tagged_bytes(STORED_F32_TAG, &(value as f32).to_le_bytes())),
         FieldType::Float(_) => Ok(tagged_bytes(STORED_F64_TAG, &value.to_le_bytes())),
         _ => Err(()),
     }
+
 }
 
 fn tagged_bytes(tag: u8, bytes: &[u8]) -> Vec<u8> {
@@ -235,6 +256,7 @@ fn tagged_bytes(tag: u8, bytes: &[u8]) -> Vec<u8> {
 }
 
 fn decode_numeric_value(value: &[u8]) -> Option<StoredNumericValue> {
+
     match value {
         [STORED_I8_TAG, byte] => Some(StoredNumericValue::Signed(i8::from_le_bytes([*byte]) as i128)),
         [STORED_I16_TAG, bytes @ ..] if bytes.len() == 2 => Some(StoredNumericValue::Signed(i16::from_le_bytes(bytes.try_into().ok()?) as i128)),
@@ -250,9 +272,11 @@ fn decode_numeric_value(value: &[u8]) -> Option<StoredNumericValue> {
         [STORED_F64_TAG, bytes @ ..] if bytes.len() == 8 => Some(StoredNumericValue::Float(f64::from_le_bytes(bytes.try_into().ok()?))),
         _ => decode_legacy_numeric_value(value),
     }
+
 }
 
 fn decode_legacy_numeric_value(value: &[u8]) -> Option<StoredNumericValue> {
+
     if let Ok(v) = parse_i128_bytes(value) {
         return Some(StoredNumericValue::Signed(v));
     }
@@ -269,6 +293,7 @@ fn decode_legacy_numeric_value(value: &[u8]) -> Option<StoredNumericValue> {
 }
 
 fn numeric_as_i128(value: StoredNumericValue) -> Option<i128> {
+
     match value {
         StoredNumericValue::Signed(v) => Some(v),
         StoredNumericValue::Unsigned(v) => i128::try_from(v).ok(),
@@ -280,9 +305,11 @@ fn numeric_as_i128(value: StoredNumericValue) -> Option<i128> {
             }
         }
     }
+
 }
 
 fn numeric_as_u128(value: StoredNumericValue) -> Option<u128> {
+
     match value {
         StoredNumericValue::Signed(v) if v >= 0 => Some(v as u128),
         StoredNumericValue::Signed(_) => None,
@@ -295,14 +322,17 @@ fn numeric_as_u128(value: StoredNumericValue) -> Option<u128> {
             }
         }
     }
+
 }
 
 fn numeric_as_f64(value: StoredNumericValue) -> f64 {
+
     match value {
         StoredNumericValue::Signed(v) => v as f64,
         StoredNumericValue::Unsigned(v) => v as f64,
         StoredNumericValue::Float(v) => v,
     }
+    
 }
 
 #[expect(clippy::result_unit_err, reason="the error context is sufficiently conveyed by the variant and additional information would not be helpful for handling the error")]

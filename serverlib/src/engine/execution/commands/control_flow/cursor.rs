@@ -5,7 +5,8 @@ use crate::engine::execution::{
     row_matches_select_condition_result, ConditionValueProvider,
 };
 use crate::{
-    collect_indexable_equality_filters_for_schema, execute_joined_select_plan,
+    collect_indexable_equality_filters_for_schema, collect_indexable_like_filter_for_schema,
+    execute_joined_select_plan,
     execute_projection_only_select_plan, execute_relation_select_plan,
     plan_relation_access,
     ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, SelectReadPlan,
@@ -115,6 +116,12 @@ impl SelectReadPlanCursorSource {
                 .ok_or_else(|| format!("cursor source select failed: table '{}' not found", table_id))?;
 
             let mut index_filter_map = HashMap::new();
+            let like_filter = read_plan
+                .where_condition
+                .as_ref()
+                .and_then(|condition| {
+                    collect_indexable_like_filter_for_schema(schema, condition)
+                });
 
             let allow_index_short_circuit = read_plan
                 .where_condition
@@ -128,7 +135,12 @@ impl SelectReadPlanCursorSource {
                 })
                 .unwrap_or(true);
 
-            let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+            let access_plan = plan_relation_access(
+                table,
+                allow_index_short_circuit,
+                index_filter_map,
+                like_filter,
+            );
 
             execute_relation_select_plan(
                 wal,

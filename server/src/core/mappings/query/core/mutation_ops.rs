@@ -463,6 +463,12 @@ fn materialize_insert_source_rows<'a>(
                 })?;
 
                 let mut index_filter_map = HashMap::new();
+                let like_filter = read_plan
+                    .where_condition
+                    .as_ref()
+                    .and_then(|condition| {
+                        collect_indexable_like_filter_for_schema(schema, condition)
+                    });
 
                 let allow_index_short_circuit = read_plan
                     .where_condition
@@ -477,7 +483,12 @@ fn materialize_insert_source_rows<'a>(
                     .unwrap_or(true);
 
                 let access_plan =
-                    plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+                    plan_relation_access(
+                        table,
+                        allow_index_short_circuit,
+                        index_filter_map,
+                        like_filter,
+                    );
 
                 serverlib::execute_relation_select_plan(
                     wal,

@@ -218,22 +218,65 @@ fn plan_relation_access_selects_equality_probe_and_full_scan() {
     let mut filters = HashMap::new();
     filters.insert("email".to_string(), b"sam@example.com".to_vec());
 
-    let equality_plan = plan_relation_access(table, false, filters.clone());
+    let equality_plan = plan_relation_access(table, false, filters.clone(), None);
     assert!(matches!(
         equality_plan.strategy,
         RelationAccessStrategy::EqualityProbe { .. }
     ));
 
-    let full_scan_plan = plan_relation_access(table, false, HashMap::new());
+    let full_scan_plan = plan_relation_access(table, false, HashMap::new(), None);
     assert!(matches!(
         full_scan_plan.strategy,
         RelationAccessStrategy::FullScan
     ));
 
-    let short_circuit_plan = plan_relation_access(table, true, filters);
+    let short_circuit_plan = plan_relation_access(table, true, filters, None);
     assert!(matches!(
         short_circuit_plan.strategy,
         RelationAccessStrategy::RuntimeIndexLookup { .. }
+    ));
+}
+
+#[test]
+fn collect_indexable_prefix_like_filter_for_schema_extracts_simple_prefix() {
+    let schema = table_schema(vec![
+        ("email", 1, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    let condition = SelectCondition::Predicate(SelectPredicate::Like {
+        field_name: "email".to_string(),
+        pattern: b"sam%".to_vec(),
+        negated: false,
+        case_insensitive: false,
+        escape_char: None,
+    });
+
+    let probe = collect_indexable_prefix_like_filter_for_schema(&schema, &condition)
+        .expect("prefix-like predicate should be extracted");
+
+    assert_eq!(probe.0, "email");
+    assert_eq!(probe.1, b"sam".to_vec());
+    assert!(!probe.2);
+}
+
+#[test]
+fn plan_relation_access_selects_prefix_like_probe_when_available() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_users_table(&mut catalog, &wal);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let prefix_plan = plan_relation_access(
+        table,
+        false,
+        HashMap::new(),
+        Some(("email".to_string(), b"sam".to_vec(), false)),
+    );
+
+    assert!(matches!(
+        prefix_plan.strategy,
+        RelationAccessStrategy::PrefixLikeProbe { .. }
     ));
 }
 

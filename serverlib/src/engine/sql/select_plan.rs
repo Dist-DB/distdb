@@ -167,6 +167,7 @@ pub(super) fn parse_select_read_plan_from_query(
         let mut items = Vec::new();
 
         for item in &select.projection {
+
             let projection_item = parse_select_projection_item(item, &relation_bindings)?;
 
             if let SelectProjectionItem::Column { field_name, .. } = &projection_item {
@@ -174,6 +175,7 @@ pub(super) fn parse_select_read_plan_from_query(
             }
 
             items.push(projection_item);
+            
         }
 
         (Some(fields), items)

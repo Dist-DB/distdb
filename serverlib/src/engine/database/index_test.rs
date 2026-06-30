@@ -26,6 +26,7 @@ fn index_id_is_normalized_from_kind_and_field() {
 
 #[test]
 fn primary_key_index_uses_pri_prefix() {
+    
     let field = FieldDef {
         seqno: 1,
         field_name: "Uid".to_string(),

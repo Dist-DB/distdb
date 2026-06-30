@@ -11,25 +11,434 @@ enum LikeToken {
     Literal(char),
 }
 
+enum LikeFastPath {
+    Exact(String),
+    Prefix(String),
+}
+
+enum LikeAsciiFastPath {
+    Exact(Vec<u8>),
+    Prefix(Vec<u8>),
+}
+
 pub fn compare_like_value(
     actual: &[u8],
     pattern: &[u8],
     case_insensitive: bool,
     escape_char: Option<char>,
 ) -> bool {
+
     let actual_rendered = render_stored_field_value(actual);
     let pattern_rendered = render_stored_field_value(pattern);
+
+    if let Some(matched) = compare_like_by_literal_segments(
+        &actual_rendered,
+        &pattern_rendered,
+        case_insensitive,
+        escape_char,
+    ) {
+        return matched;
+    }
+
+    if let Some(fast_path) = classify_like_ascii_fast_path(&pattern_rendered, escape_char) {
+        return apply_like_ascii_fast_path(&actual_rendered, &fast_path, case_insensitive);
+    }
+
     let actual_text = String::from_utf8_lossy(&actual_rendered);
     let pattern_text = String::from_utf8_lossy(&pattern_rendered);
+
+    if let Some(fast_path) = classify_like_fast_path(&pattern_text, escape_char) {
+        return apply_like_fast_path(&actual_text, fast_path, case_insensitive);
+    }
 
     let actual_chars = actual_text.chars().collect::<Vec<_>>();
     let pattern_chars = pattern_text.chars().collect::<Vec<_>>();
     let tokens = compile_like_tokens(&pattern_chars, escape_char);
 
     like_matches(&actual_chars, &tokens, case_insensitive)
+
+}
+
+fn compare_like_by_literal_segments(
+    actual: &[u8],
+    pattern: &[u8],
+    case_insensitive: bool,
+    escape_char: Option<char>,
+) -> Option<bool> {
+
+    let (segments, leading_wildcard, trailing_wildcard) =
+        parse_like_literal_segments(pattern, escape_char)?;
+
+    if segments.is_empty() {
+        return Some(true);
+    }
+
+    let first_segment = &segments[0];
+    let candidate_starts = if leading_wildcard {
+        find_all_segment_occurrences(actual, first_segment, case_insensitive)
+    } else if matches_segment_at(actual, 0, first_segment, case_insensitive) {
+        vec![0]
+    } else {
+        return Some(false);
+    };
+
+    for start in candidate_starts {
+        let mut cursor = start + first_segment.len();
+        let mut matched = true;
+
+        for segment in &segments[1..] {
+            let Some(next_start) = find_segment_from(actual, segment, cursor, case_insensitive) else {
+                matched = false;
+                break;
+            };
+
+            cursor = next_start + segment.len();
+        }
+
+        if matched && (trailing_wildcard || cursor == actual.len()) {
+            return Some(true);
+        }
+    }
+
+    Some(false)
+
+}
+
+fn parse_like_literal_segments(
+    pattern: &[u8],
+    escape_char: Option<char>,
+) -> Option<(Vec<Vec<u8>>, bool, bool)> {
+
+    let escape_byte = match escape_char {
+        Some(ch) if ch.is_ascii() => Some(ch as u8),
+        Some(_) => return None,
+        None => None,
+    };
+
+    let mut segments = Vec::new();
+    let mut current_segment = Vec::new();
+    let mut leading_wildcard = false;
+    let mut trailing_wildcard = false;
+    let mut index = 0usize;
+
+    while index < pattern.len() {
+
+        let current = pattern[index];
+
+        if let Some(escape) = escape_byte
+            && current == escape
+        {
+            if index + 1 < pattern.len() {
+                let escaped = pattern[index + 1];
+                if !escaped.is_ascii() {
+                    return None;
+                }
+
+                current_segment.push(escaped);
+                index += 2;
+                trailing_wildcard = false;
+                continue;
+            }
+
+            current_segment.push(current);
+            index += 1;
+            trailing_wildcard = false;
+            continue;
+        }
+
+        if !current.is_ascii() {
+            return None;
+        }
+
+        match current {
+            b'_' => return None,
+
+            b'%' => {
+                if segments.is_empty() && current_segment.is_empty() {
+                    leading_wildcard = true;
+                }
+
+                if !current_segment.is_empty() {
+                    segments.push(std::mem::take(&mut current_segment));
+                }
+
+                trailing_wildcard = true;
+            }
+
+            literal => {
+                current_segment.push(literal);
+                trailing_wildcard = false;
+            }
+        }
+
+        index += 1;
+
+    }
+
+    if !current_segment.is_empty() {
+        segments.push(current_segment);
+    }
+
+    Some((segments, leading_wildcard, trailing_wildcard))
+
+}
+
+fn find_all_segment_occurrences(
+    actual: &[u8],
+    segment: &[u8],
+    case_insensitive: bool,
+) -> Vec<usize> {
+
+    if segment.is_empty() || segment.len() > actual.len() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+
+    for start in 0..=actual.len() - segment.len() {
+        if matches_segment_at(actual, start, segment, case_insensitive) {
+            candidates.push(start);
+        }
+    }
+
+    candidates
+
+}
+
+fn find_segment_from(
+    actual: &[u8],
+    segment: &[u8],
+    start: usize,
+    case_insensitive: bool,
+) -> Option<usize> {
+
+    if segment.is_empty() {
+        return Some(start);
+    }
+
+    if start > actual.len() || segment.len() > actual.len().saturating_sub(start) {
+        return None;
+    }
+
+    for candidate_start in start..=actual.len() - segment.len() {
+        if matches_segment_at(actual, candidate_start, segment, case_insensitive) {
+            return Some(candidate_start);
+        }
+    }
+
+    None
+
+}
+
+fn matches_segment_at(
+    actual: &[u8],
+    start: usize,
+    segment: &[u8],
+    case_insensitive: bool,
+) -> bool {
+
+    actual
+        .get(start..start.saturating_add(segment.len()))
+        .map(|window| {
+            if case_insensitive {
+                window.eq_ignore_ascii_case(segment)
+            } else {
+                window == segment
+            }
+        })
+        .unwrap_or(false)
+
+}
+
+fn classify_like_ascii_fast_path(
+    pattern: &[u8],
+    escape_char: Option<char>,
+) -> Option<LikeAsciiFastPath> {
+
+    let escape_byte = match escape_char {
+        Some(ch) if ch.is_ascii() => Some(ch as u8),
+        Some(_) => return None,
+        None => None,
+    };
+
+    let mut literal = Vec::with_capacity(pattern.len());
+    let mut index = 0usize;
+    let mut has_trailing_many = false;
+
+    while index < pattern.len() {
+
+        let current = pattern[index];
+
+        if let Some(escape) = escape_byte {
+            if current == escape {
+                if index + 1 < pattern.len() {
+                    let escaped = pattern[index + 1];
+                    if !escaped.is_ascii() {
+                        return None;
+                    }
+                    literal.push(escaped);
+                    index += 2;
+                    continue;
+                }
+
+                literal.push(current);
+                index += 1;
+                continue;
+            }
+        }
+
+        if !current.is_ascii() {
+            return None;
+        }
+
+        match current {
+
+            b'_' => return None,
+
+            b'%' => {
+                if index + 1 < pattern.len() || has_trailing_many {
+                    return None;
+                }
+                has_trailing_many = true;
+            }
+
+            _ => {
+                if has_trailing_many {
+                    return None;
+                }
+                literal.push(current);
+            }
+
+        }
+
+        index += 1;
+
+    }
+
+    if has_trailing_many {
+        Some(LikeAsciiFastPath::Prefix(literal))
+    } else {
+        Some(LikeAsciiFastPath::Exact(literal))
+    }
+
+}
+
+fn apply_like_ascii_fast_path(
+    actual: &[u8],
+    fast_path: &LikeAsciiFastPath,
+    case_insensitive: bool,
+) -> bool {
+
+    match fast_path {
+
+        LikeAsciiFastPath::Exact(expected) => {
+            if case_insensitive {
+                actual.eq_ignore_ascii_case(expected)
+            } else {
+                actual == expected
+            }
+        },
+
+        LikeAsciiFastPath::Prefix(prefix) => {
+            if case_insensitive {
+                actual
+                    .get(..prefix.len())
+                    .map(|head| head.eq_ignore_ascii_case(prefix))
+                    .unwrap_or(false)
+            } else {
+                actual.starts_with(prefix)
+            }
+        }
+
+    }
+
+}
+
+fn classify_like_fast_path(pattern: &str, escape_char: Option<char>) -> Option<LikeFastPath> {
+
+    let mut literal = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    let mut escaped = false;
+    let mut has_trailing_many = false;
+
+    while let Some(ch) = chars.next() {
+
+        if escaped {
+            literal.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if escape_char.is_some_and(|escape| ch == escape) {
+            escaped = true;
+            continue;
+        }
+
+        match ch {
+
+            '_' => return None,
+
+            '%' => {
+                if chars.peek().is_some() || has_trailing_many {
+                    return None;
+                }
+                has_trailing_many = true;
+            },
+
+            _ => {
+                if has_trailing_many {
+                    return None;
+                }
+                literal.push(ch);
+            }
+            
+        }
+
+    }
+
+    if escaped {
+        if let Some(escape) = escape_char {
+            literal.push(escape);
+        }
+    }
+
+    if has_trailing_many {
+        Some(LikeFastPath::Prefix(literal))
+    } else {
+        Some(LikeFastPath::Exact(literal))
+    }
+
+}
+
+fn apply_like_fast_path(actual: &str, fast_path: LikeFastPath, case_insensitive: bool) -> bool {
+
+    match fast_path {
+
+        LikeFastPath::Exact(expected) => {
+            if case_insensitive {
+                actual.eq_ignore_ascii_case(&expected)
+            } else {
+                actual == expected
+            }
+        },
+
+        LikeFastPath::Prefix(prefix) => {
+            if case_insensitive {
+                actual
+                    .get(..prefix.len())
+                    .map(|head| head.eq_ignore_ascii_case(&prefix))
+                    .unwrap_or(false)
+            } else {
+                actual.starts_with(&prefix)
+            }
+        }
+
+    }
+
 }
 
 fn compile_like_tokens(pattern: &[char], escape_char: Option<char>) -> Vec<LikeToken> {
+
     let mut tokens = Vec::with_capacity(pattern.len());
     let mut index = 0usize;
 
@@ -58,6 +467,7 @@ fn compile_like_tokens(pattern: &[char], escape_char: Option<char>) -> Vec<LikeT
     }
 
     tokens
+
 }
 
 fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) -> bool {
@@ -101,6 +511,7 @@ fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) 
         }
 
         return false;
+
     }
 
     while pattern_index < pattern.len()
@@ -110,14 +521,17 @@ fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) 
     }
 
     pattern_index == pattern.len()
+
 }
 
 fn like_char_eq(actual: char, pattern: char, case_insensitive: bool) -> bool {
+
     if case_insensitive {
         actual.to_ascii_lowercase() == pattern.to_ascii_lowercase()
     } else {
         actual == pattern
     }
+
 }
 
 pub fn validate_regex_pattern(pattern: &[u8]) -> Result<(), String> {
@@ -162,8 +576,10 @@ pub fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp
     }
 
 }
+
 #[cfg(test)]
 mod tests {
+    
     use super::{compare_like_value, compare_row_value};
     use crate::{FieldType, TypeConversionPolicy};
     use crate::engine::database::schema::migration::convert_value_to_field_type;
@@ -190,6 +606,48 @@ mod tests {
     }
 
     #[test]
+    fn compare_like_value_supports_simple_prefix_pattern() {
+        assert!(compare_like_value(
+            b"Amsterdam",
+            b"Ams%",
+            false,
+            None,
+        ));
+        assert!(!compare_like_value(
+            b"Oslo",
+            b"Ams%",
+            false,
+            None,
+        ));
+    }
+
+    #[test]
+    fn compare_like_value_supports_case_insensitive_simple_prefix() {
+        assert!(compare_like_value(
+            b"amsterdam",
+            b"Ams%",
+            true,
+            None,
+        ));
+    }
+
+    #[test]
+    fn compare_like_value_supports_ordered_multi_segment_patterns() {
+        assert!(compare_like_value(
+            b"amsterdam",
+            b"%ter%am",
+            false,
+            None,
+        ));
+        assert!(!compare_like_value(
+            b"amsterdam",
+            b"%am%ter",
+            false,
+            None,
+        ));
+    }
+
+    #[test]
     fn compare_row_value_supports_native_numeric_storage() {
         let actual = convert_value_to_field_type(
             b"42",
@@ -201,4 +659,5 @@ mod tests {
         assert!(compare_row_value(&actual, b"42", &SelectComparisonOp::Eq));
         assert!(compare_row_value(&actual, b"7", &SelectComparisonOp::Gt));
     }
+
 }

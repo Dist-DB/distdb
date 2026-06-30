@@ -60,13 +60,16 @@ impl DatabaseCatalog {
         }
 
         if let Some((key, _)) = self.entities.iter().find(|(_, entity)| match entity {
+
             DatabaseEntity::Relationship(relationship) => {
                 let left = &relationship.left_table_id;
                 let right = &relationship.right_table_id;
                 let name = &relationship.relation_name;
                 entity_id == format!("rel:{left}:{right}:{name}")
-            }
+            },
+
             _ => false,
+
         }) {
             return Some(key.clone());
         }
@@ -172,15 +175,23 @@ impl DatabaseCatalog {
     ) -> DatabaseResult<()> {
 
         let Some(resolved_key) = self.resolve_entity_key(object_id) else {
+
             return Err(match object_type {
+                
                 DatabaseObjectType::Table => DatabaseError::TableNotFound,
+                
                 DatabaseObjectType::View => DatabaseError::ViewNotFound,
+                
                 DatabaseObjectType::Trigger => DatabaseError::TriggerNotFound,
+                
                 DatabaseObjectType::StoredProcedure => DatabaseError::StoredProcedureNotFound,
+                
                 DatabaseObjectType::Relationship | DatabaseObjectType::Index => {
                     DatabaseError::EntityNotFound
                 }
+                
             });
+
         };
 
         let removed = match object_type {
@@ -395,6 +406,7 @@ impl DatabaseCatalog {
     }
 
     pub fn relationships(&self) -> Vec<&DatabaseRelationship> {
+
         self.entities
             .values()
             .filter_map(|entity| match entity {
@@ -402,6 +414,7 @@ impl DatabaseCatalog {
                 _ => None,
             })
             .collect()
+
     }
 
     pub fn status(&self) -> ObjectStatus {
@@ -479,6 +492,7 @@ impl DatabaseCatalog {
     }
 
     pub fn complete_indexing(&mut self) -> DatabaseResult<()> {
+
         if self.status == ObjectStatus::Ready {
             for entity in self.entities.values_mut() {
                 if let DatabaseEntity::Table(table) = entity {
@@ -499,6 +513,7 @@ impl DatabaseCatalog {
         }
 
         Ok(())
+
     }
 
     pub fn table_schema(&self, table_id: &str) -> Option<&TableSchema> {
@@ -862,7 +877,7 @@ impl DatabaseCatalog {
                         let procedure = self
                             .stored_procedure_mut(&object_id)
                             .ok_or(DatabaseError::StoredProcedureNotFound)?;
-                        
+
                         procedure.set_sql(payload.sql);
                         procedure.dependencies = normalized_dependencies;
 
@@ -989,29 +1004,40 @@ impl DatabaseCatalog {
                         record
                             .payload_logical()
                             .ok_or_else(|| match record.kind {
+                                
                                 TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
                                     DatabaseError::SchemaPayloadDeserialize
-                                }
+                                },
+
                                 TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
                                     DatabaseError::MetadataPayloadDeserialize
-                                }
+                                },
+                                
                                 TransactionKind::SqlDefinitionChange => {
                                     DatabaseError::SqlDefinitionPayloadDeserialize
-                                }
+                                },
+
                                 _ => unreachable!("payload decode dispatch should only map structured transaction kinds"),
+                            
                             })?,
+
                     )
                         .map_err(|_| match record.kind {
+
                             TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
                                 DatabaseError::SchemaPayloadDeserialize
-                            }
+                            },
+
                             TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
                                 DatabaseError::MetadataPayloadDeserialize
-                            }
+                            },
+
                             TransactionKind::SqlDefinitionChange => {
                                 DatabaseError::SqlDefinitionPayloadDeserialize
-                            }
+                            },
+
                             _ => unreachable!("payload decode dispatch should only map structured transaction kinds"),
+
                         })?;
 
                     match decoded {

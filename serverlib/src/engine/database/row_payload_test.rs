@@ -4,6 +4,7 @@ use crate::engine::database::table::schema::{FieldDef, FieldIndex, FieldType};
 use crate::render_stored_field_value;
 
 fn test_schema() -> TableSchema {
+
     TableSchema::new(vec![
         FieldDef {
             seqno: 2,
@@ -33,11 +34,14 @@ fn test_schema() -> TableSchema {
             metadata: None,
         },
     ])
+
 }
 
 #[test]
 fn encode_uses_seqno_ordinal_and_null_slots() {
+
     let schema = test_schema();
+    
     let mut row = HashMap::new();
     row.insert("id".to_string(), b"1".to_vec());
     row.insert("email".to_string(), b"sam@example.com".to_vec());
@@ -51,6 +55,7 @@ fn encode_uses_seqno_ordinal_and_null_slots() {
     assert_eq!(decoded[0].as_deref().map(render_stored_field_value), Some(b"1".to_vec()));
     assert_eq!(decoded[1], Some(b"sam@example.com".to_vec()));
     assert_eq!(decoded[2], None);
+    
 }
 
 #[test]

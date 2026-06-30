@@ -11,7 +11,8 @@ use crate::{
 use crate::engine::sql::SelectExpression;
 
 use super::{
-    build_joined_row_tuples, collect_indexable_equality_filters_for_schema, materialize_relation_rows,
+    build_joined_row_tuples, collect_indexable_equality_filters_for_schema,
+    collect_indexable_like_filter_for_schema, materialize_relation_rows,
     plan_relation_access, relation_qualifier, row_matches_condition_with_result,
     ConditionValueProvider, JoinedRowTuple,
 };
@@ -142,6 +143,10 @@ fn collect_subquery_exists_with_outer(
         };
 
         let mut index_filter_map = HashMap::new();
+        let like_filter = subquery
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
@@ -154,7 +159,12 @@ fn collect_subquery_exists_with_outer(
             })
             .unwrap_or(true);
 
-        let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+        let access_plan = plan_relation_access(
+            table,
+            allow_index_short_circuit,
+            index_filter_map,
+            like_filter,
+        );
         let qualifier = subquery
             .relations
             .first()
@@ -268,6 +278,10 @@ fn collect_subquery_projection_values_with_outer(
         };
 
         let mut index_filter_map = HashMap::new();
+        let like_filter = subquery
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
@@ -280,7 +294,12 @@ fn collect_subquery_projection_values_with_outer(
             })
             .unwrap_or(true);
 
-        let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+        let access_plan = plan_relation_access(
+            table,
+            allow_index_short_circuit,
+            index_filter_map,
+            like_filter,
+        );
 
         return execute_relation_select_plan(
             wal,
@@ -378,6 +397,10 @@ fn collect_subquery_scalar_value_with_outer(
         };
 
         let mut index_filter_map = HashMap::new();
+        let like_filter = subquery
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
@@ -390,7 +413,12 @@ fn collect_subquery_scalar_value_with_outer(
             })
             .unwrap_or(true);
 
-        let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+        let access_plan = plan_relation_access(
+            table,
+            allow_index_short_circuit,
+            index_filter_map,
+            like_filter,
+        );
 
         return execute_relation_select_plan(
             wal,

@@ -1,5 +1,6 @@
 use crate::{
-    DatabaseIndex, FieldDef, FieldIndex, FieldType, RuntimeIndexStore, SelectCondition,
+    DatabaseIndex, FieldDef, FieldIndex, FieldType, RelationAccessPlan,
+    RelationAccessStrategy, RuntimeIndexStore, SelectCondition,
     SelectJoinKind, SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation,
 };
 
@@ -9,6 +10,7 @@ use super::super::select::SelectExecutionResult;
 pub fn explain_select_plan_result(
     table_id: &str,
     filter_count: usize,
+    access_plan: Option<&RelationAccessPlan>,
     index_lookup: Option<(&DatabaseIndex, &[Vec<u8>])>,
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
@@ -140,8 +142,17 @@ pub fn explain_select_plan_result(
 
         } else {
 
+            let path = match access_plan.map(|plan| &plan.strategy) {
+                Some(RelationAccessStrategy::FullScan) => "full_scan",
+                Some(RelationAccessStrategy::EqualityProbe { .. }) => "equality_probe",
+                Some(RelationAccessStrategy::PrefixLikeProbe { .. }) => "prefix_like_probe",
+                Some(RelationAccessStrategy::StringLikeProbe { .. }) => "string_like_probe",
+                Some(RelationAccessStrategy::RuntimeIndexLookup { .. }) => "index_lookup_then_scan",
+                None => "full_scan",
+            };
+
             (
-                "full_scan".to_string(),
+                path.to_string(),
                 "".to_string(),
                 "".to_string(),
                 "n/a".to_string(),

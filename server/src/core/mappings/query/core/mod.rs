@@ -38,6 +38,7 @@ use serverlib::{
 use serverlib::{
     RuntimeIndexStore, count_condition_predicates,
     collect_indexable_equality_filters_for_schema,
+    collect_indexable_like_filter_for_schema,
     decode_row_payload, encode_row_payload, index_value_tuple,
     load_live_rows_with_context,
     plan_relation_access, primary_key_index,

@@ -44,6 +44,7 @@ pub struct TransactionPayloadContext {
 }
 
 impl TransactionPayloadContext {
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -96,6 +97,7 @@ impl TransactionPayloadContext {
     pub fn at_rest_encryption_enabled(&self) -> bool {
         self.encryption_key_ref.is_some()
     }
+
 }
 
 pub trait TransactionPayloadResolver {
@@ -129,6 +131,7 @@ pub struct ChainedTransactionPayloadResolver {
 }
 
 impl ChainedTransactionPayloadResolver {
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -141,6 +144,7 @@ impl ChainedTransactionPayloadResolver {
     pub fn push_transform<T: TransactionPayloadTransform + 'static>(&mut self, transform: T) {
         self.transforms.push(Box::new(transform));
     }
+    
 }
 
 impl TransactionPayloadResolver for ChainedTransactionPayloadResolver {
@@ -149,6 +153,7 @@ impl TransactionPayloadResolver for ChainedTransactionPayloadResolver {
         raw_payload: Option<&[u8]>,
         context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         let Some(payload) = raw_payload else {
             return Ok(None);
         };
@@ -165,7 +170,9 @@ impl TransactionPayloadResolver for ChainedTransactionPayloadResolver {
             Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
             Cow::Owned(bytes) => Ok(Some(bytes)),
         }
+
     }
+
 }
 
 #[derive(Default)]
@@ -213,11 +220,13 @@ impl ChainedTransactionPayloadWriter {
         let mut current = Cow::Borrowed(payload);
 
         for transform in &self.transforms {
+
             if let Some(transformed) =
                 transform.transform_payload_for_write(record, current.as_ref(), context)?
             {
                 current = Cow::Owned(transformed);
             }
+
         }
 
         match current {
@@ -398,7 +407,7 @@ impl TransactionRecord {
         self.payload_shadow.is_resolved = true;
 
         Ok(self.payload_shadow.resolved_payload.as_deref())
-        
+
     }
 
     pub fn set_payload(&mut self, payload: Option<Vec<u8>>) {
@@ -512,6 +521,7 @@ mod tests {
 
     #[test]
     fn plain_payload_resolver_returns_raw_bytes_and_caches_once() {
+
         struct CountingResolver<'a> {
             calls: &'a Cell<usize>,
         }
@@ -529,6 +539,7 @@ mod tests {
 
         let calls = Cell::new(0usize);
         let resolver = CountingResolver { calls: &calls };
+
         let mut record = TransactionRecord::with_payload(
             TransactionId(7),
             None,
@@ -548,10 +559,12 @@ mod tests {
         assert!(record.resolved_payload().is_none());
         assert_eq!(record.resolve_payload_with(&resolver).unwrap(), Some(&[1, 2, 3][..]));
         assert_eq!(calls.get(), 2);
+
     }
 
     #[test]
     fn plain_payload_resolver_preserves_none_payload() {
+
         let resolver = PlainTransactionPayloadResolver;
         let mut record = TransactionRecord::without_payload(
             TransactionId(11),
@@ -564,6 +577,7 @@ mod tests {
 
         assert_eq!(record.resolve_payload_with(&resolver).unwrap(), None);
         assert_eq!(record.resolved_payload(), None);
+
     }
 
     #[test]

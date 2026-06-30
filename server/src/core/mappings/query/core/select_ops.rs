@@ -51,6 +51,12 @@ pub(super) fn execute_select_plan_result(
         .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
 
     let mut index_filter_map = HashMap::new();
+    let like_filter = read_plan
+        .where_condition
+        .as_ref()
+        .and_then(|condition| {
+            collect_indexable_like_filter_for_schema(schema, condition)
+        });
     let allow_index_short_circuit = read_plan
         .where_condition
         .as_ref()
@@ -63,7 +69,12 @@ pub(super) fn execute_select_plan_result(
         })
         .unwrap_or(true);
 
-    let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+    let access_plan = plan_relation_access(
+        table,
+        allow_index_short_circuit,
+        index_filter_map,
+        like_filter,
+    );
 
     serverlib::execute_relation_select_plan(
         wal,
@@ -273,6 +284,7 @@ pub(super) fn execute_select_impl(
                         .map(count_condition_predicates)
                         .unwrap_or(0),
                     None,
+                    None,
                     runtime_indexes,
                     &read_plan,
                 ),
@@ -405,6 +417,12 @@ pub(super) fn execute_select_impl(
     };
 
     let mut index_filter_map = HashMap::new();
+    let like_filter = read_plan
+        .where_condition
+        .as_ref()
+        .and_then(|condition| {
+            collect_indexable_like_filter_for_schema(schema, condition)
+        });
     let allow_index_short_circuit = read_plan
         .where_condition
         .as_ref()
@@ -417,7 +435,12 @@ pub(super) fn execute_select_impl(
         })
         .unwrap_or(true);
 
-    let access_plan = plan_relation_access(table, allow_index_short_circuit, index_filter_map);
+    let access_plan = plan_relation_access(
+        table,
+        allow_index_short_circuit,
+        index_filter_map,
+        like_filter,
+    );
     let index_lookup = access_plan.runtime_index_lookup(table);
 
     if read_plan.is_explain {
@@ -430,6 +453,7 @@ pub(super) fn execute_select_impl(
                     .as_ref()
                     .map(count_condition_predicates)
                     .unwrap_or(0),
+                Some(&access_plan),
                 index_lookup,
                 runtime_indexes,
                 &read_plan,
