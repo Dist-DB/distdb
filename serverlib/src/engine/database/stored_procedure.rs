@@ -23,6 +23,7 @@ pub struct DatabaseStoredProcedure {
 impl DatabaseStoredProcedure {
 
     pub fn new(procedure_id: String, sql: String, dependencies: Vec<String>) -> Self {
+
         let mut procedure = Self {
             entity_id: common::helpers::utils::unique_id(),
             procedure_id,
@@ -34,11 +35,14 @@ impl DatabaseStoredProcedure {
 
         procedure.refresh_control_flow_plan_cache();
         procedure
+
     }
 
     pub fn set_sql(&mut self, sql: String) {
+
         self.sql = sql;
         self.refresh_control_flow_plan_cache();
+        
     }
 
     pub fn refresh_control_flow_plan_cache(&mut self) {
@@ -105,7 +109,7 @@ impl DatabaseEntityAspect for DatabaseStoredProcedure {
             .collect();
 
         self.refresh_control_flow_plan_cache();
-        
+
     }
     
 }

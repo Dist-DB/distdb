@@ -218,6 +218,7 @@ impl RuntimeIndexStore {
 
             let key = index_value_tuple(index, row_map);
             self.index_mut(&index.index_id.0).remove(&key);
+            
         }
     }
 
@@ -238,6 +239,7 @@ impl RuntimeIndexStore {
             }
 
             let state = self.index_mut(&index.index_id.0);
+
             state.reserve_entries(row_maps.len());
 
             for row_map in row_maps {
@@ -266,6 +268,7 @@ impl RuntimeIndexStore {
             }
 
             let state = self.index_mut(&index.index_id.0);
+
             for row_map in row_maps {
                 let key = index_value_tuple(index, row_map);
                 state.remove(&key);
@@ -331,6 +334,7 @@ impl RuntimeIndexStore {
         log::info!(
             "runtime index bootstrap mode materialize_non_primary={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
+            
             if self.non_primary_field_allowlist.is_empty() {
                 "<none>".to_string()
             } else {
@@ -340,6 +344,7 @@ impl RuntimeIndexStore {
                     .collect::<Vec<_>>()
                     .join(",")
             },
+            
             if self.non_primary_index_allowlist.is_empty() {
                 "<none>".to_string()
             } else {
@@ -349,6 +354,7 @@ impl RuntimeIndexStore {
                     .collect::<Vec<_>>()
                     .join(",")
             },
+
         );
 
         let mut bootstrapped_tables = 0usize;
@@ -544,6 +550,7 @@ fn build_bootstrap_index_entries(
         && live_rows.len() >= RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS;
 
     if !should_parallel {
+
         return tracked_indexes
             .iter()
             .map(|index| {
@@ -554,6 +561,7 @@ fn build_bootstrap_index_entries(
                 (index.index_id.0.clone(), index.clone(), entries)
             })
             .collect();
+
     }
 
     let workers = std::cmp::min(
@@ -604,6 +612,7 @@ fn build_bootstrap_index_entries(
     chunks.sort_by_key(|(start, _)| *start);
 
     let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
+
     for (_, mut chunk) in chunks {
         rebuilt.append(&mut chunk);
     }
@@ -631,7 +640,7 @@ fn runtime_index_materialize_non_primary() -> bool {
             )
         })
         .unwrap_or(true)
-        
+
 }
 
 fn runtime_index_non_primary_field_allowlist() -> AHashSet<String> {

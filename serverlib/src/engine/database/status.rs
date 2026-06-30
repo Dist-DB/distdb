@@ -14,6 +14,7 @@ pub enum ObjectStatus {
 impl Display for ObjectStatus {
 
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        
         match self {
             Self::Load => write!(f, "Load"),
             Self::Indexing => write!(f, "Indexing"),
@@ -21,6 +22,7 @@ impl Display for ObjectStatus {
             Self::Lock => write!(f, "Lock"),
             Self::Sync => write!(f, "Sync"),
         }
+
     }
 
 }

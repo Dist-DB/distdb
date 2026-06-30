@@ -51,6 +51,7 @@ impl EncryptedRowPayloadTransform {
 }
 
 impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
+    
     fn transform_payload(
         &self,
         payload: &[u8],
@@ -85,6 +86,7 @@ impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
 }
 
 impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
+
     fn transform_payload_for_write(
         &self,
         _record: &super::transaction::record::TransactionRecord,
@@ -116,6 +118,7 @@ impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
         }
 
     }
+
 }
 
 pub trait RowPayloadEncryptionProvider: Send + Sync {
@@ -191,13 +194,14 @@ impl<P> RowPayloadDecryptionTransform<P> {
 impl<P: RowPayloadEncryptionProvider> TransactionPayloadWriteTransform
     for RowPayloadEncryptionWriteTransform<P>
 {
+
     fn transform_payload_for_write(
         &self,
         record: &super::transaction::record::TransactionRecord,
         payload: &[u8],
         context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
-        
+
         if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
             return Ok(None);
         }
@@ -223,11 +227,13 @@ impl<P: RowPayloadEncryptionProvider> TransactionPayloadWriteTransform
 }
 
 impl<P: RowPayloadDecryptionProvider> TransactionPayloadTransform for RowPayloadDecryptionTransform<P> {
+
     fn transform_payload(
         &self,
         payload: &[u8],
         context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         let Some(key_ref) = context.at_rest_encryption_key_ref() else {
             return Ok(None);
         };
@@ -238,11 +244,14 @@ impl<P: RowPayloadDecryptionProvider> TransactionPayloadTransform for RowPayload
         }
 
         match decode_encrypted_row_payload_envelope(payload) {
+
             Ok(Some(envelope)) => self
                 .provider
                 .decrypt_row_payload(context, &envelope)
                 .map(Some),
+
             Ok(None) => Ok(None),
+
             Err(message) => {
                 if message.starts_with("unsupported encrypted row payload version") {
                     Err(PayloadTransformError::UnsupportedFormat)
@@ -250,8 +259,11 @@ impl<P: RowPayloadDecryptionProvider> TransactionPayloadTransform for RowPayload
                     Err(PayloadTransformError::InvalidEncryptedPayload)
                 }
             }
+
         }
+    
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -265,6 +277,7 @@ struct LegacyEncryptedRowPayloadEnvelope {
 }
 
 impl EncryptedRowPayloadEnvelope {
+    
     pub fn new(key_version: u32, nonce: Vec<u8>, auth_tag: Vec<u8>, ciphertext: Vec<u8>) -> Self {
         Self {
             key_version,
@@ -273,6 +286,7 @@ impl EncryptedRowPayloadEnvelope {
             ciphertext,
         }
     }
+
 }
 
 pub fn encode_encrypted_row_payload_envelope(
@@ -281,8 +295,10 @@ pub fn encode_encrypted_row_payload_envelope(
     auth_tag: Vec<u8>,
     ciphertext: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
+    
     let envelope = EncryptedRowPayloadEnvelope::new(key_version, nonce, auth_tag, ciphertext);
     bincode::serialize(&envelope).map_err(|err| err.to_string())
+
 }
 
 pub fn decode_encrypted_row_payload_envelope(
@@ -332,10 +348,12 @@ pub fn looks_like_encrypted_row_payload(payload: &[u8]) -> bool {
 fn looks_like_valid_encrypted_payload_envelope(
     envelope: &EncryptedRowPayloadEnvelope,
 ) -> bool {
+
     envelope.key_version > 0
         && envelope.nonce.len() == ENCRYPTED_ROW_PAYLOAD_NONCE_SIZE_BYTES
         && envelope.auth_tag.len() == ENCRYPTED_ROW_PAYLOAD_AUTH_TAG_SIZE_BYTES
         && !envelope.ciphertext.is_empty()
+
 }
 
 fn field_names_by_ordinal(schema: &TableSchema) -> Vec<String> {

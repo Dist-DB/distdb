@@ -18,9 +18,11 @@ pub fn parse_update_rows_from_statement(statement: &str) -> Result<UpdateRowsPla
         ..
     } = single
     else {
+        
         return Err(SqlParseError::UnsupportedStatement(
             "statement is not UPDATE".to_string(),
         ));
+
     };
 
     let TableFactor::Table { name, .. } = &table.relation else {
