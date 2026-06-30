@@ -35,6 +35,7 @@ pub struct EncryptedRowPayloadTransform {
 }
 
 impl EncryptedRowPayloadTransform {
+
     pub fn preserve_opaque() -> Self {
         Self {
             policy: EncryptedRowPayloadTransformPolicy::PreserveOpaque,
@@ -46,6 +47,7 @@ impl EncryptedRowPayloadTransform {
             policy: EncryptedRowPayloadTransformPolicy::RejectEncrypted,
         }
     }
+
 }
 
 impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
@@ -54,7 +56,9 @@ impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
         payload: &[u8],
         _context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         match decode_encrypted_row_payload_envelope(payload) {
+
             Ok(Some(_)) => match self.policy {
                 EncryptedRowPayloadTransformPolicy::PreserveOpaque => {
                     Ok(Some(payload.to_vec()))
@@ -63,7 +67,9 @@ impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
                     Err(PayloadTransformError::DecryptFailed)
                 }
             },
+
             Ok(None) => Ok(None),
+
             Err(message) => {
                 if message.starts_with("unsupported encrypted row payload version") {
                     Err(PayloadTransformError::UnsupportedFormat)
@@ -71,8 +77,11 @@ impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
                     Err(PayloadTransformError::InvalidEncryptedPayload)
                 }
             }
+
         }
+
     }
+
 }
 
 impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
@@ -82,7 +91,9 @@ impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
         payload: &[u8],
         _context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         match decode_encrypted_row_payload_envelope(payload) {
+
             Ok(Some(_)) => match self.policy {
                 EncryptedRowPayloadTransformPolicy::PreserveOpaque => {
                     Ok(Some(payload.to_vec()))
@@ -91,7 +102,9 @@ impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
                     Err(PayloadTransformError::InvalidEncryptedPayload)
                 }
             },
+
             Ok(None) => Ok(None),
+
             Err(message) => {
                 if message.starts_with("unsupported encrypted row payload version") {
                     Err(PayloadTransformError::UnsupportedFormat)
@@ -99,30 +112,37 @@ impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
                     Err(PayloadTransformError::InvalidEncryptedPayload)
                 }
             }
+
         }
+
     }
 }
 
 pub trait RowPayloadEncryptionProvider: Send + Sync {
+    
     fn encrypt_row_payload(
         &self,
         context: &TransactionPayloadContext,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, PayloadTransformError>;
+
 }
 
 pub trait RowPayloadDecryptionProvider: Send + Sync {
+    
     fn decrypt_row_payload(
         &self,
         context: &TransactionPayloadContext,
         envelope: &EncryptedRowPayloadEnvelope,
     ) -> Result<Vec<u8>, PayloadTransformError>;
+
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnconfiguredRowPayloadEncryptionProvider;
 
 impl RowPayloadEncryptionProvider for UnconfiguredRowPayloadEncryptionProvider {
+    
     fn encrypt_row_payload(
         &self,
         _context: &TransactionPayloadContext,
@@ -130,12 +150,14 @@ impl RowPayloadEncryptionProvider for UnconfiguredRowPayloadEncryptionProvider {
     ) -> Result<Vec<u8>, PayloadTransformError> {
         Err(PayloadTransformError::EncryptionNotConfigured)
     }
+
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnconfiguredRowPayloadDecryptionProvider;
 
 impl RowPayloadDecryptionProvider for UnconfiguredRowPayloadDecryptionProvider {
+    
     fn decrypt_row_payload(
         &self,
         _context: &TransactionPayloadContext,
@@ -143,6 +165,7 @@ impl RowPayloadDecryptionProvider for UnconfiguredRowPayloadDecryptionProvider {
     ) -> Result<Vec<u8>, PayloadTransformError> {
         Err(PayloadTransformError::EncryptionNotConfigured)
     }
+
 }
 
 pub struct RowPayloadEncryptionWriteTransform<P> {
@@ -174,6 +197,7 @@ impl<P: RowPayloadEncryptionProvider> TransactionPayloadWriteTransform
         payload: &[u8],
         context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        
         if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
             return Ok(None);
         }
@@ -193,7 +217,9 @@ impl<P: RowPayloadEncryptionProvider> TransactionPayloadWriteTransform
         self.provider
             .encrypt_row_payload(context, payload)
             .map(Some)
+    
     }
+
 }
 
 impl<P: RowPayloadDecryptionProvider> TransactionPayloadTransform for RowPayloadDecryptionTransform<P> {

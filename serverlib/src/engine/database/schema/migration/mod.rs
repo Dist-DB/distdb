@@ -20,6 +20,7 @@ pub fn run_schema_migration<E: SchemaMigrationExecutor>(
     table_id: &str,
     executor: &E,
 ) -> DatabaseResult<()> {
+
     let table_id = common::normalize_identifier!(table_id);
 
     catalog.transition_schema_change_phase(&table_id, SchemaChangePhase::Rewriting)?;
@@ -39,6 +40,7 @@ pub fn run_schema_migration<E: SchemaMigrationExecutor>(
 
     catalog.transition_schema_change_phase(&table_id, SchemaChangePhase::Cutover)?;
     executor.cutover(catalog, &table_id)
+    
 }
 
 

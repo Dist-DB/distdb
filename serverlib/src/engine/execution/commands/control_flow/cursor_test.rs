@@ -24,15 +24,18 @@ struct TrackingCursorSource {
 }
 
 impl TrackingCursorSource {
+
     fn from_rows(rows: Vec<HashMap<String, Vec<u8>>>) -> Self {
         Self {
             rows,
             ..Self::default()
         }
     }
+
 }
 
 impl SqlCursorSource for TrackingCursorSource {
+
     fn open(&mut self) -> Result<(), String> {
         self.index = 0;
         self.open_count += 1;
@@ -40,6 +43,7 @@ impl SqlCursorSource for TrackingCursorSource {
     }
 
     fn fetch_next(&mut self) -> Result<Option<HashMap<String, Vec<u8>>>, String> {
+
         if self.fail_fetch_at.is_some_and(|idx| idx == self.index) {
             return Err("forced fetch failure".to_string());
         }
@@ -58,6 +62,7 @@ impl SqlCursorSource for TrackingCursorSource {
         self.close_count += 1;
         Ok(())
     }
+
 }
 
 fn row(field_name: &str, value: &str) -> HashMap<String, Vec<u8>> {
@@ -67,6 +72,7 @@ fn row(field_name: &str, value: &str) -> HashMap<String, Vec<u8>> {
 }
 
 fn table_schema(fields: Vec<(&str, u32, FieldType, FieldIndex, bool)>) -> TableSchema {
+
     TableSchema::new(
         fields
             .into_iter()
@@ -81,13 +87,16 @@ fn table_schema(fields: Vec<(&str, u32, FieldType, FieldIndex, bool)>) -> TableS
             })
             .collect(),
     )
+
 }
 
 fn seed_cursor_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
+
     let users_schema = table_schema(vec![
         ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
         ("email", 2, FieldType::Text, FieldIndex::None, false),
     ]);
+
     catalog
         .register_table("users", users_schema.clone())
         .expect("users table should register");
@@ -97,6 +106,7 @@ fn seed_cursor_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
         ("user_id", 2, FieldType::UInt(64), FieldIndex::Indexed, false),
         ("name", 3, FieldType::Text, FieldIndex::None, false),
     ]);
+
     catalog
         .register_table("profiles", profiles_schema.clone())
         .expect("profiles table should register");
@@ -106,6 +116,7 @@ fn seed_cursor_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
     let mut user_row = HashMap::new();
     user_row.insert("id".to_string(), b"1".to_vec());
     user_row.insert("email".to_string(), b"sam@example.com".to_vec());
+    
     wal.append(
         "users",
         TransactionRecord::with_payload(
@@ -124,6 +135,7 @@ fn seed_cursor_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
     let mut other_user_row = HashMap::new();
     other_user_row.insert("id".to_string(), b"2".to_vec());
     other_user_row.insert("email".to_string(), b"alex@example.com".to_vec());
+
     wal.append(
         "users",
         TransactionRecord::with_payload(
@@ -143,6 +155,7 @@ fn seed_cursor_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
     profile_row.insert("id".to_string(), b"10".to_vec());
     profile_row.insert("user_id".to_string(), b"1".to_vec());
     profile_row.insert("name".to_string(), b"Sam".to_vec());
+
     wal.append(
         "profiles",
         TransactionRecord::with_payload(
@@ -157,10 +170,12 @@ fn seed_cursor_rows(catalog: &mut DatabaseCatalog, wal: &ConcurrentWalManager) {
         ),
     )
     .expect("profile row should append");
+
 }
 
 #[test]
 fn execute_sql_cursor_iterates_all_rows_and_sets_not_found() {
+    
     let mut source = VecSqlCursorSource::new(vec![row("id", "1"), row("id", "2")]);
     let mut frame = SqlCursorFrame::new();
     let mut seen = Vec::new();

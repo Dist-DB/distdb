@@ -15,19 +15,24 @@ use crate::engine::database::transaction::TransactionRecord;
 use crate::engine::database::transaction::TransactionPayloadContext;
 
 pub fn stream_key_for_table(table_id: &str) -> DatabaseResult<String> {
+    
     let normalized = common::normalize_identifier!(table_id);
     if normalized.is_empty() {
         return Err(DatabaseError::TableNotFound);
     }
+    
     Ok(stable_id(&[&normalized]))
+
 }
 
 pub fn map_io_error_to_catalog_error(err: std::io::Error) -> DatabaseError {
+
     if err.kind() == ErrorKind::NotFound {
         DatabaseError::CatalogRead
     } else {
         DatabaseError::CatalogWrite
     }
+
 }
 
 pub fn load_records_from_path(path: &Path) -> DatabaseResult<Vec<TransactionRecord>> {
@@ -39,7 +44,9 @@ pub fn payload_context_for_table(
     catalog: &DatabaseCatalog,
     table_id: &str,
 ) -> DatabaseResult<TransactionPayloadContext> {
+    
     let normalized_table_id = common::normalize_identifier!(table_id);
+    
     if normalized_table_id.is_empty() {
         return Err(DatabaseError::TableNotFound);
     }
@@ -58,6 +65,7 @@ pub fn payload_context_for_table(
     }
 
     Ok(context)
+    
 }
 
 pub fn load_records_from_path_with_context(

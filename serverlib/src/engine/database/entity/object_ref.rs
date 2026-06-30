@@ -21,12 +21,12 @@ impl<'a> DatabaseObjectRef<'a> {
 
     pub fn object_type(&self) -> DatabaseObjectType {
         match self {
-            Self::Table(_)              => DatabaseObjectType::Table,
-            Self::View(_)               => DatabaseObjectType::View,
-            Self::Relationship(_)       => DatabaseObjectType::Relationship,
-            Self::Trigger(_)            => DatabaseObjectType::Trigger,
-            Self::StoredProcedure(_)    => DatabaseObjectType::StoredProcedure,
-            Self::Index(_)              => DatabaseObjectType::Index,
+            Self::Table(_) => DatabaseObjectType::Table,
+            Self::View(_) => DatabaseObjectType::View,
+            Self::Relationship(_) => DatabaseObjectType::Relationship,
+            Self::Trigger(_) => DatabaseObjectType::Trigger,
+            Self::StoredProcedure(_) => DatabaseObjectType::StoredProcedure,
+            Self::Index(_) => DatabaseObjectType::Index,
         }
     }
 

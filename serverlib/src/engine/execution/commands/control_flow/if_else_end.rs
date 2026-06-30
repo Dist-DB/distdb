@@ -73,6 +73,7 @@ pub fn execute_if_else_end_plan<'a, R, E>(
 where
     E: FnMut(&'a str) -> Result<R, String>,
 {
+
     let block = IfElseEndBlock {
         branches: plan
             .branches
@@ -91,6 +92,7 @@ where
         &mut |candidate, condition| condition_matches_provider(candidate, condition),
         &mut |action_sql| execute_action(action_sql),
     )
+
 }
 
 pub fn execute_if_else_end_from_create_procedure_sql<R, E>(
@@ -101,6 +103,7 @@ pub fn execute_if_else_end_from_create_procedure_sql<R, E>(
 where
     E: FnMut(&str) -> Result<R, String>,
 {
+    
     let Some(plan) = parse_if_else_end_plan_from_create_procedure_statement(procedure_sql)
         .map_err(|err| format!("IF/ELSE/END routine parse failed: {err}"))?
     else {
@@ -108,6 +111,7 @@ where
     };
 
     execute_if_else_end_plan(provider, &plan, execute_action)
+    
 }
 
 #[cfg(test)]

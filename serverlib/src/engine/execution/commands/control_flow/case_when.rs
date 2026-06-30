@@ -93,6 +93,7 @@ mod tests {
     use crate::engine::sql::{SelectCaseWhen, SelectExpression};
 
     fn parse_function_expr(sql: &str) -> sqlparser::ast::Function {
+
         let statements = Parser::parse_sql(&MySqlDialect {}, sql)
             .expect("sql should parse");
 
@@ -112,6 +113,7 @@ mod tests {
         };
 
         function.clone()
+        
     }
 
     #[test]

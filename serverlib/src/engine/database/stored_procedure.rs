@@ -42,10 +42,12 @@ impl DatabaseStoredProcedure {
     }
 
     pub fn refresh_control_flow_plan_cache(&mut self) {
+
         self.if_else_end_plan =
             parse_if_else_end_plan_from_create_procedure_statement(&self.sql)
                 .ok()
                 .flatten();
+
     }
 
     pub fn if_else_end_plan(&self) -> Option<&IfElseEndPlan> {
@@ -93,13 +95,17 @@ impl DatabaseEntityAspect for DatabaseStoredProcedure {
     }
 
     fn normalize_in_place(&mut self) {
+
         self.procedure_id = common::normalize_identifier!(&self.procedure_id);
+
         self.dependencies = self
             .dependencies
             .iter()
             .map(|dep| common::normalize_identifier!(dep))
             .collect();
+
         self.refresh_control_flow_plan_cache();
+        
     }
     
 }

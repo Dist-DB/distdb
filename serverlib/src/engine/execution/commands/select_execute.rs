@@ -209,6 +209,7 @@ where
     let mut columns = Vec::with_capacity(projection_items.len());
 
     for (seq, projection_item) in projection_items.iter().enumerate() {
+        
         let is_hidden_sort_key = seq >= visible_projection_len;
         
         match projection_item {
@@ -392,7 +393,9 @@ where
     }
 
     let count_star_projection = count_star_projection(read_plan);
+    
     if let Some(output_name) = &count_star_projection {
+
         let row_tuples = build_joined_row_tuples(
             catalog,
             wal,
@@ -435,6 +438,7 @@ where
     let mut static_projection_values = Vec::with_capacity(projection_items.len());
 
     for (seq, projection_item) in projection_items.iter().enumerate() {
+        
         let is_hidden_sort_key = seq >= visible_projection_len;
 
         match projection_item {
@@ -466,9 +470,11 @@ where
                 });
 
                 static_projection_values.push(None);
+
             },
 
             SelectProjectionItem::InbuiltFunction { function, .. } => {
+
                 let value = if sql_function_references_column(function) {
                     None
                 } else {
@@ -491,9 +497,11 @@ where
                 });
 
                 static_projection_values.push(value);
+
             },
 
             SelectProjectionItem::Case { output_name, .. } => {
+
                 columns.push(FieldDef {
                     seqno: (seq + 1) as u32,
                     field_name: output_name.clone(),
@@ -505,6 +513,7 @@ where
                 });
 
                 static_projection_values.push(None);
+
             },
 
             SelectProjectionItem::Wildcard { .. } => {
@@ -547,6 +556,7 @@ where
                     }),
 
                     SelectProjectionItem::InbuiltFunction { function, .. } => {
+
                         let static_value = static_projection_values
                             .get(projection_idx)
                             .and_then(|entry| entry.as_ref())
@@ -567,6 +577,7 @@ where
                                 format!("select join failed: inbuilt projection evaluation failed: {err}")
                             })
                         }
+
                     },
 
                     SelectProjectionItem::Case {
@@ -575,6 +586,7 @@ where
                         else_value,
                         ..
                     } => Ok(
+
                         render_stored_field_value(&evaluate_case_projection(
                             &row_tuple,
                             operand.as_ref(),
@@ -582,6 +594,7 @@ where
                             else_value.as_ref(),
                         )?
                             .unwrap_or_else(|| b"NULL".to_vec())),
+
                     ),
 
                     SelectProjectionItem::Wildcard { .. } => Ok(Vec::new()),
@@ -644,6 +657,7 @@ fn apply_select_post_processing(
         .collect::<Vec<_>>();
 
     if read_plan.distinct {
+
         let mut unique_rows = Vec::with_capacity(rows.len());
         let mut seen = HashSet::new();
 
@@ -663,9 +677,11 @@ fn apply_select_post_processing(
         }
 
         rows = unique_rows;
+
     }
 
     if !read_plan.order_by.is_empty() {
+
         let mut order_indexes = Vec::with_capacity(read_plan.order_by.len());
 
         for item in &read_plan.order_by {
@@ -689,6 +705,7 @@ fn apply_select_post_processing(
                 Ordering::Equal
             });
         }
+
     }
 
     apply_row_window(rows, read_plan.limit, read_plan.offset)
@@ -724,6 +741,7 @@ fn ensure_order_by_projection_items(
                 output_name: order_by.field_name.clone(),
             });
         }
+        
     }
 
     projection_items

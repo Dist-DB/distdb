@@ -46,6 +46,7 @@ pub struct ActiveSchemaChange {
 impl ActiveSchemaChange {
 
     pub fn begin(table_id: String, target_revision: u64, schema_epoch: u64) -> Self {
+        
         Self {
             job_id: common::helpers::utils::unique_id(),
             table_id,
@@ -57,6 +58,7 @@ impl ActiveSchemaChange {
             checkpoint_epoch_ms: common::epoch_nanos!(),
             resume_token: None,
         }
+
     }
 
     pub fn update_progress(
@@ -65,15 +67,20 @@ impl ActiveSchemaChange {
         rows_total: Option<u64>,
         resume_token: Option<String>,
     ) {
+
         self.rows_rewritten = rows_rewritten;
+
         if rows_total.is_some() {
             self.rows_total = rows_total;
         }
         if resume_token.is_some() {
             self.resume_token = resume_token;
         }
+        
         self.checkpoint_epoch_ms = common::epoch_nanos!();
+
     }
+
 }
 
 

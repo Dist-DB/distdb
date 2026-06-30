@@ -174,6 +174,7 @@ pub struct ChainedTransactionPayloadWriter {
 }
 
 impl ChainedTransactionPayloadWriter {
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -192,8 +193,10 @@ impl ChainedTransactionPayloadWriter {
         record: &TransactionRecord,
         raw_payload: Option<&[u8]>,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+        
         let context = TransactionPayloadContext::default();
         self.write_payload_with_context(record, raw_payload, &context)
+
     }
 
     pub fn write_payload_with_context(
@@ -202,6 +205,7 @@ impl ChainedTransactionPayloadWriter {
         raw_payload: Option<&[u8]>,
         context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         let Some(payload) = raw_payload else {
             return Ok(None);
         };
@@ -220,20 +224,26 @@ impl ChainedTransactionPayloadWriter {
             Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
             Cow::Owned(bytes) => Ok(Some(bytes)),
         }
+
     }
+
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlainTransactionPayloadResolver;
 
 impl TransactionPayloadResolver for PlainTransactionPayloadResolver {
+
     fn resolve_payload(
         &self,
         raw_payload: Option<&[u8]>,
         _context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         Ok(raw_payload.map(|payload| payload.to_vec()))
+    
     }
+
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -259,7 +269,9 @@ pub struct TransactionRecord {
 }
 
 impl PartialEq for TransactionRecord {
+    
     fn eq(&self, other: &Self) -> bool {
+
         self.id == other.id
             && self.groupid == other.groupid
             && self.refid == other.refid
@@ -267,7 +279,9 @@ impl PartialEq for TransactionRecord {
             && self.actor == other.actor
             && self.kind == other.kind
             && self.payload() == other.payload()
+
     }
+
 }
 
 impl Eq for TransactionRecord {}
@@ -360,8 +374,10 @@ impl TransactionRecord {
         &mut self,
         resolver: &R,
     ) -> Result<Option<&[u8]>, PayloadTransformError> {
+        
         let context = TransactionPayloadContext::default();
         self.resolve_payload_with_context(resolver, &context)
+
     }
 
     pub fn resolve_payload_with_context<R: TransactionPayloadResolver>(
@@ -369,6 +385,7 @@ impl TransactionRecord {
         resolver: &R,
         context: &TransactionPayloadContext,
     ) -> Result<Option<&[u8]>, PayloadTransformError> {
+        
         if self.payload_shadow.is_resolved
             && self.payload_shadow.resolved_context.as_ref() == Some(context)
         {
@@ -381,6 +398,7 @@ impl TransactionRecord {
         self.payload_shadow.is_resolved = true;
 
         Ok(self.payload_shadow.resolved_payload.as_deref())
+        
     }
 
     pub fn set_payload(&mut self, payload: Option<Vec<u8>>) {

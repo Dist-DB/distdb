@@ -73,12 +73,15 @@ impl DatabaseEntityAspect for DatabaseView {
     }
 
     fn normalize_in_place(&mut self) {
+
         self.view_id = common::normalize_identifier!(&self.view_id);
+
         self.dependencies = self
             .dependencies
             .iter()
             .map(|dep| common::normalize_identifier!(dep))
             .collect();
+        
     }
 
 }

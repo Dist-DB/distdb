@@ -52,12 +52,15 @@ pub struct SelectReadPlanCursorSource {
 }
 
 impl VecSqlCursorSource {
+    
     pub fn new(rows: Vec<HashMap<String, Vec<u8>>>) -> Self {
         Self { rows, index: 0 }
     }
+
 }
 
 impl SelectReadPlanCursorSource {
+
     pub fn from_read_plan(
         catalog: &DatabaseCatalog,
         wal: &ConcurrentWalManager,
@@ -275,6 +278,7 @@ impl SqlCursorSource for VecSqlCursorSource {
 }
 
 impl SqlCursorSource for SelectReadPlanCursorSource {
+
     fn open(&mut self) -> Result<(), String> {
         self.index = 0;
         Ok(())
@@ -299,6 +303,7 @@ impl SqlCursorSource for SelectReadPlanCursorSource {
     fn close(&mut self) -> Result<(), String> {
         Ok(())
     }
+    
 }
 
 pub fn execute_sql_cursor<S, F, R>(

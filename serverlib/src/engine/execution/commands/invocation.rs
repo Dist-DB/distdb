@@ -23,11 +23,13 @@ pub fn execute_stored_procedure_invocation<R, E>(
 where
     E: FnMut(&str) -> Result<R, String>,
 {
+
     if let Some(plan) = procedure.if_else_end_plan() {
         return execute_if_else_end_plan(provider, plan, execute_action);
     }
 
     execute_if_else_end_from_create_procedure_sql(provider, &procedure.sql, execute_action)
+
 }
 
 pub fn execute_stored_procedure_invocation_over_cursor<S, R, E>(
@@ -41,6 +43,7 @@ where
     S: SqlCursorSource,
     E: FnMut(&str, &SqlCursorFrame) -> Result<R, String>,
 {
+
     let mut outcomes = Vec::new();
 
     execute_sql_cursor(cursor_source, cursor_frame, &mut |frame| {
@@ -57,6 +60,7 @@ where
     })?;
 
     Ok(outcomes)
+
 }
 
 pub fn execute_trigger_invocation<R, E>(
@@ -80,6 +84,7 @@ pub fn execute_automatic_triggers_for_event<R, E>(
 where
     E: FnMut(&str) -> Result<R, String>,
 {
+
     let mut outcomes = Vec::new();
 
     for trigger in catalog.triggers_for_event(table_id, timing, event) {
@@ -91,6 +96,7 @@ where
     }
 
     Ok(outcomes)
+    
 }
 
 #[cfg(test)]

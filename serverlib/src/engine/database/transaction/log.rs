@@ -18,6 +18,7 @@ pub trait TransactionLog {
         from: Option<TransactionId>,
         kinds: &[TransactionKind],
     ) -> Vec<TransactionRecord> {
+
         if kinds.is_empty() {
             return Vec::new();
         }
@@ -26,6 +27,7 @@ pub trait TransactionLog {
             .into_iter()
             .filter(|record| kinds.contains(&record.kind))
             .collect()
+            
     }
 
 }

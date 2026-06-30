@@ -79,6 +79,7 @@ pub fn convert_value_to_field_type(
     match target_type {
         
         FieldType::Int(_) => {
+
             if let Some(v) = decode_numeric_value(value).and_then(numeric_as_i128) {
                 return encode_signed_numeric(target_type.clone(), v);
             }
@@ -87,9 +88,11 @@ pub fn convert_value_to_field_type(
                 TypeConversionPolicy::Force => encode_signed_numeric(target_type.clone(), 0),
                 TypeConversionPolicy::Safe => Err(()),
             }
+
         },
 
         FieldType::UInt(_) => {
+
             if let Some(v) = decode_numeric_value(value).and_then(numeric_as_u128) {
                 return encode_unsigned_numeric(target_type.clone(), v);
             }
@@ -98,9 +101,11 @@ pub fn convert_value_to_field_type(
                 TypeConversionPolicy::Force => encode_unsigned_numeric(target_type.clone(), 0),
                 TypeConversionPolicy::Safe => Err(()),
             }
+
         },
 
         FieldType::Float(_) => {
+
             if let Some(v) = decode_numeric_value(value).map(numeric_as_f64) {
                 return encode_float_numeric(target_type.clone(), v);
             }
@@ -109,6 +114,7 @@ pub fn convert_value_to_field_type(
                 TypeConversionPolicy::Force => encode_float_numeric(target_type.clone(), 0.0),
                 TypeConversionPolicy::Safe => Err(()),
             }
+
         },
 
         FieldType::StringFixed(_)
@@ -117,11 +123,14 @@ pub fn convert_value_to_field_type(
         | FieldType::DateTime
         | FieldType::Timestamp
         | FieldType::Enum(_) => match std::str::from_utf8(&render_stored_field_value(value)) {
+
             Ok(valid) => Ok(valid.as_bytes().to_vec()),
+
             Err(_) => match policy {
                 TypeConversionPolicy::Force => Ok(String::from_utf8_lossy(&render_stored_field_value(value)).into_owned().into_bytes()),
                 TypeConversionPolicy::Safe => Err(()),
             },
+            
         },
 
         FieldType::Blob | FieldType::Spatial => Ok(value.to_vec()),

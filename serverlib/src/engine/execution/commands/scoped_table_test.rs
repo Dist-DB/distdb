@@ -10,7 +10,9 @@ use super::{
 };
 
 fn users_schema() -> TableSchema {
+
     TableSchema::new(vec![
+        
         FieldDef {
             seqno: 1,
             field_name: "id".to_string(),
@@ -20,6 +22,7 @@ fn users_schema() -> TableSchema {
             default_value: None,
             metadata: None,
         },
+
         FieldDef {
             seqno: 2,
             field_name: "email".to_string(),
@@ -29,7 +32,9 @@ fn users_schema() -> TableSchema {
             default_value: None,
             metadata: None,
         },
+    
     ])
+
 }
 
 #[test]

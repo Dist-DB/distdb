@@ -24,6 +24,7 @@ pub fn create_scoped_ephemeral_table(
     table_id: impl Into<String>,
     schema: TableSchema,
 ) -> Result<ScopedEphemeralTableHandle, String> {
+
     let normalized_table_id = common::normalize_identifier!(table_id.into());
 
     catalog
@@ -39,6 +40,7 @@ pub fn create_scoped_ephemeral_table(
         table_id: normalized_table_id,
         released: false,
     })
+
 }
 
 pub fn release_scoped_ephemeral_table(
@@ -46,6 +48,7 @@ pub fn release_scoped_ephemeral_table(
     wal: &ConcurrentWalManager,
     handle: &mut ScopedEphemeralTableHandle,
 ) -> Result<(), String> {
+
     if handle.released {
         return Ok(());
     }
@@ -61,6 +64,7 @@ pub fn release_scoped_ephemeral_table(
     handle.released = true;
 
     Ok(())
+    
 }
 
 #[cfg(test)]

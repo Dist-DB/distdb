@@ -25,11 +25,13 @@ impl SchemaMigrationExecutor for NoopSchemaMigrationExecutor {
         _catalog: &DatabaseCatalog,
         _table_id: &str,
     ) -> DatabaseResult<SchemaMigrationProgress> {
+
         Ok(SchemaMigrationProgress {
             rows_rewritten: 0,
             rows_total: Some(0),
             resume_token: None,
         })
+
     }
 
     fn rebuild_indexes(&self, _catalog: &DatabaseCatalog, _table_id: &str) -> DatabaseResult<()> {
@@ -77,9 +79,12 @@ impl DiskToMemorySchemaMigrationExecutor {
         table_id: &str,
         rules: SchemaMutationRuleSet,
     ) -> DatabaseResult<()> {
+
         let mut all_rules = self.rules.lock().map_err(|_| DatabaseError::CatalogWrite)?;
         all_rules.insert(common::normalize_identifier!(table_id), rules);
+        
         Ok(())
+
     }
 
 }
@@ -94,6 +99,7 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
 
         let stream_key = stream_key_for_table(table_id)?;
         let final_path = self.data_dir.join(common::helpers::format::FileKind::Data.file_name(&stream_key));
+        
         let temp_path = self
             .data_dir
             .join(format!("{}.migrate.tmp", common::helpers::format::FileKind::Data.file_name(&stream_key)));

@@ -52,6 +52,7 @@ fn remove_field_returns_error_when_not_found() {
 
 #[test]
 fn update_field_replaces_existing_definition() {
+
     let mut schema = TableSchema::new(vec![text_field(1, "email")]);
 
     let updated = FieldDef {
@@ -67,6 +68,7 @@ fn update_field_replaces_existing_definition() {
     schema.update_field(updated.clone()).unwrap();
 
     assert_eq!(schema.field("email"), Some(&updated));
+    
 }
 
 #[test]

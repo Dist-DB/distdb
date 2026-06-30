@@ -13,6 +13,7 @@ fn schema_change_phase_enforces_ordered_transitions() {
 
 #[test]
 fn active_schema_change_progress_checkpoint_updates_fields() {
+
     let mut active = ActiveSchemaChange::begin("users".to_string(), 3, 10);
     let first_checkpoint = active.checkpoint_epoch_ms;
 
@@ -22,10 +23,13 @@ fn active_schema_change_progress_checkpoint_updates_fields() {
     assert_eq!(active.rows_total, Some(128));
     assert_eq!(active.resume_token.as_deref(), Some("pk:users:42"));
     assert!(active.checkpoint_epoch_ms >= first_checkpoint);
+
 }
 
 #[test]
 fn active_schema_change_begin_assigns_job_id() {
+    
     let active = ActiveSchemaChange::begin("users".to_string(), 1, 1);
     assert!(!active.job_id.is_empty());
+    
 }

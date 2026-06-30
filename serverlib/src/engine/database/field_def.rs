@@ -75,11 +75,13 @@ impl FieldDef {
     }
 
     fn sql_type_declaration(&self) -> String {
+
         self.metadata
             .as_ref()
             .and_then(|metadata| metadata.original_sql_type.as_ref())
             .cloned()
             .unwrap_or_else(|| self.field_type.to_sql_string())
+
     }
 
     fn sql_comment(&self) -> Option<&str> {
@@ -95,10 +97,12 @@ impl FieldDef {
     }
 
     fn is_auto_incrementing(&self) -> bool {
+
         self.metadata
             .as_ref()
             .map(|metadata| metadata.auto_increment)
             .unwrap_or(false)
+            
     }
 
 }

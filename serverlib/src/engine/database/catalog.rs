@@ -259,22 +259,34 @@ impl DatabaseCatalog {
     }
 
     pub fn table(&self, table_id: &str) -> Option<&DatabaseTable> {
+        
         match self.object(DatabaseObjectType::Table, table_id) {
+
             Some(DatabaseObjectRef::Table(table)) => Some(table),
+
             _ => None,
+
         }
+
     }
 
     pub fn index(&self, index_id: &str) -> Option<&DatabaseIndex> {
+        
         match self.object(DatabaseObjectType::Index, index_id) {
+            
             Some(DatabaseObjectRef::Index(index)) => Some(index),
+
             _ => None,
+
         }
+
     }
 
     pub fn index_in_table(&self, table_id: &str, index_id: &str) -> Option<&DatabaseIndex> {
+
         self.table(table_id)
             .and_then(|table| table.indexes.get(index_id))
+
     }
 
     pub fn object(&self, object_type: DatabaseObjectType, object_id: &str) -> Option<DatabaseObjectRef<'_>> {
@@ -413,6 +425,7 @@ impl DatabaseCatalog {
     }
 
     pub fn transition_status(&mut self, next: ObjectStatus) -> DatabaseResult<()> {
+
         let current = self.status;
 
         if !current.can_transition_to(next) {
@@ -434,10 +447,13 @@ impl DatabaseCatalog {
         );
 
         Ok(())
+
     }
 
     pub fn begin_indexing(&mut self) -> DatabaseResult<()> {
+
         if self.status == ObjectStatus::Indexing {
+
             for entity in self.entities.values_mut() {
                 if let DatabaseEntity::Table(table) = entity {
                     table.begin_indexing()?;
@@ -445,17 +461,21 @@ impl DatabaseCatalog {
             }
 
             return Ok(());
+
         }
 
         self.transition_status(ObjectStatus::Indexing)?;
 
         for entity in self.entities.values_mut() {
+
             if let DatabaseEntity::Table(table) = entity {
                 table.begin_indexing()?;
             }
+        
         }
 
         Ok(())
+
     }
 
     pub fn complete_indexing(&mut self) -> DatabaseResult<()> {
@@ -688,6 +708,7 @@ impl DatabaseCatalog {
         let table_id = common::normalize_identifier!(payload.table_id);
 
         match payload.action {
+
             TableLifecycleAction::Create => {
                 let schema = payload.schema.unwrap_or_else(|| TableSchema::new(Vec::new()));
                 if self.table(&table_id).is_none() {
@@ -695,7 +716,8 @@ impl DatabaseCatalog {
                 }
                 self.accept_schema_epoch(payload.schema_epoch);
                 Ok(())
-            }
+            },
+            
             TableLifecycleAction::Drop => match self.drop_table(&table_id) {
                 Ok(()) | Err(DatabaseError::TableNotFound) => {
                     self.accept_schema_epoch(payload.schema_epoch);
@@ -703,6 +725,7 @@ impl DatabaseCatalog {
                 }
                 Err(e) => Err(e),
             },
+
         }
 
     }
@@ -710,20 +733,28 @@ impl DatabaseCatalog {
     pub fn apply_entity_metadata(&mut self, payload: EntityMetadataPayload) -> DatabaseResult<()> {
 
         let entity_id = common::normalize_identifier!(payload.entity_id);
+        
         let resolved_key = self
             .resolve_entity_key(&entity_id)
             .ok_or(DatabaseError::EntityNotFound)?;
+
         let entity = self
             .entities
             .get_mut(&resolved_key)
             .ok_or(DatabaseError::EntityNotFound)?;
 
         match entity {
+            
             DatabaseEntity::Table(table) => table.metadata = payload.metadata,
+
             DatabaseEntity::View(view) => view.metadata = payload.metadata,
+
             DatabaseEntity::Relationship(relationship) => relationship.metadata = payload.metadata,
+
             DatabaseEntity::Trigger(trigger) => trigger.metadata = payload.metadata,
+
             DatabaseEntity::StoredProcedure(procedure) => procedure.metadata = payload.metadata,
+
         }
 
         Ok(())
@@ -831,6 +862,7 @@ impl DatabaseCatalog {
                         let procedure = self
                             .stored_procedure_mut(&object_id)
                             .ok_or(DatabaseError::StoredProcedureNotFound)?;
+                        
                         procedure.set_sql(payload.sql);
                         procedure.dependencies = normalized_dependencies;
 
@@ -951,6 +983,7 @@ impl DatabaseCatalog {
                 | TransactionKind::MetadataChange
                 | TransactionKind::SecurityChange
                 | TransactionKind::SqlDefinitionChange => {
+
                     let decoded = DecodedTransactionPayload::decode(
                         record.kind,
                         record
@@ -982,18 +1015,23 @@ impl DatabaseCatalog {
                         })?;
 
                     match decoded {
+
                         DecodedTransactionPayload::SchemaChange(payload) => {
                             self.apply_schema_change(payload)?;
-                        }
+                        },
+
                         DecodedTransactionPayload::TableLifecycle(payload) => {
                             self.apply_table_lifecycle(payload)?;
-                        }
+                        },
+
                         DecodedTransactionPayload::EntityMetadata(payload) => {
                             self.apply_entity_metadata(payload)?;
-                        }
+                        },
+
                         DecodedTransactionPayload::SqlDefinition(payload) => {
                             self.apply_sql_definition(payload)?;
-                        }
+                        },
+
                     }
 
                     applied += 1;
@@ -1037,6 +1075,7 @@ impl DatabaseCatalog {
     }
 
     pub fn table_ids(&self) -> Vec<String> {
+
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1044,12 +1083,15 @@ impl DatabaseCatalog {
                 _ => None,
             })
             .collect()
+
     }
 
     pub fn entities_iter(&self) -> impl Iterator<Item = (&str, &DatabaseEntity)> {
+
         self.entities
             .iter()
             .map(|(entity_id, entity)| (entity_id.as_str(), entity))
+
     }
 
     /// Register a view definition with a pre-derived schema. The schema is
@@ -1080,10 +1122,15 @@ impl DatabaseCatalog {
     }
 
     pub fn view(&self, view_id: &str) -> Option<&DatabaseView> {
+        
         match self.object(DatabaseObjectType::View, view_id) {
+
             Some(DatabaseObjectRef::View(view)) => Some(view),
+
             _ => None,
+
         }
+
     }
 
     pub fn drop_view(&mut self, view_id: &str) -> DatabaseResult<()> {
@@ -1091,10 +1138,15 @@ impl DatabaseCatalog {
     }
 
     pub fn relationship(&self, relationship_id: &str) -> Option<&DatabaseRelationship> {
+
         match self.object(DatabaseObjectType::Relationship, relationship_id) {
+
             Some(DatabaseObjectRef::Relationship(relationship)) => Some(relationship),
+
             _ => None,
+
         }
+
     }
 
     pub fn register_trigger(
@@ -1121,10 +1173,15 @@ impl DatabaseCatalog {
     }
 
     pub fn trigger(&self, trigger_id: &str) -> Option<&DatabaseTrigger> {
+
         match self.object(DatabaseObjectType::Trigger, trigger_id) {
+            
             Some(DatabaseObjectRef::Trigger(trigger)) => Some(trigger),
+            
             _ => None,
+
         }
+
     }
 
     pub fn drop_trigger(&mut self, trigger_id: &str) -> DatabaseResult<()> {
@@ -1132,6 +1189,7 @@ impl DatabaseCatalog {
     }
 
     pub fn trigger_ids(&self) -> Vec<String> {
+
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1139,6 +1197,7 @@ impl DatabaseCatalog {
                 _ => None,
             })
             .collect()
+
     }
 
     pub fn triggers_for_event(
@@ -1147,6 +1206,7 @@ impl DatabaseCatalog {
         timing: TriggerTiming,
         event: TriggerEventKind,
     ) -> Vec<&DatabaseTrigger> {
+
         let normalized_table_id = common::normalize_identifier!(table_id);
 
         self.entities
@@ -1163,6 +1223,7 @@ impl DatabaseCatalog {
                 })
             })
             .collect()
+
     }
 
     pub fn register_stored_procedure(
@@ -1190,10 +1251,15 @@ impl DatabaseCatalog {
     }
 
     pub fn stored_procedure(&self, procedure_id: &str) -> Option<&DatabaseStoredProcedure> {
+        
         match self.object(DatabaseObjectType::StoredProcedure, procedure_id) {
+            
             Some(DatabaseObjectRef::StoredProcedure(procedure)) => Some(procedure),
+
             _ => None,
+        
         }
+
     }
 
     pub fn drop_stored_procedure(&mut self, procedure_id: &str) -> DatabaseResult<()> {
@@ -1201,6 +1267,7 @@ impl DatabaseCatalog {
     }
 
     pub fn stored_procedure_ids(&self) -> Vec<String> {
+
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1210,9 +1277,11 @@ impl DatabaseCatalog {
                 _ => None,
             })
             .collect()
+
     }
 
     pub fn view_ids(&self) -> Vec<String> {
+
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1220,6 +1289,7 @@ impl DatabaseCatalog {
                 _ => None,
             })
             .collect()
+
     }
 
     pub fn view_schema(&self, view_id: &str) -> Option<&TableSchema> {
@@ -1230,33 +1300,53 @@ impl DatabaseCatalog {
     /// routing layer to reject write operations against view sources before
     /// any execution begins.
     pub fn is_writable(&self, object_id: &str) -> bool {
+
         self.resolve_entity_key(object_id)
             .and_then(|key| self.entities.get(&key))
             .is_some_and(|entity| matches!(entity, DatabaseEntity::Table(_)))
+
     }
 
     fn table_mut(&mut self, table_id: &str) -> Option<&mut DatabaseTable> {
+
         let key = self.resolve_entity_key(table_id)?;
+        
         match self.entities.get_mut(&key) {
+            
             Some(DatabaseEntity::Table(table)) => Some(table),
+            
             _ => None,
+
         }
+
     }
 
     fn view_mut(&mut self, view_id: &str) -> Option<&mut DatabaseView> {
+
         let key = self.resolve_entity_key(view_id)?;
+
         match self.entities.get_mut(&key) {
+
             Some(DatabaseEntity::View(view)) => Some(view),
+
             _ => None,
+
         }
+
     }
 
     fn trigger_mut(&mut self, trigger_id: &str) -> Option<&mut DatabaseTrigger> {
+
         let key = self.resolve_entity_key(trigger_id)?;
+
         match self.entities.get_mut(&key) {
+
             Some(DatabaseEntity::Trigger(trigger)) => Some(trigger),
+
             _ => None,
+
         }
+
     }
 
     fn stored_procedure_mut(
@@ -1334,8 +1424,11 @@ impl DatabaseCatalog {
         }
 
         match self.at_rest_encryption_key_ref.as_deref() {
+
             Some(current) if current == normalized => Ok(()),
+
             Some(_) => Err(DatabaseError::ImmutableEncryptionConfiguration),
+
             None => {
                 self.at_rest_encryption_key_ref = Some(normalized);
                 if self.at_rest_encryption_key_version == 0 {
@@ -1343,7 +1436,9 @@ impl DatabaseCatalog {
                 }
                 Ok(())
             }
+
         }
+
     }
 
     pub fn set_database_name(&mut self, name: &str) {

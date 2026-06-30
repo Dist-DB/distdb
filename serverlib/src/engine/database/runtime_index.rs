@@ -60,6 +60,7 @@ impl RuntimeIndexState {
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
+
         if additional == 0 {
             return;
         }
@@ -77,6 +78,7 @@ impl RuntimeIndexState {
             let target = geometric_target.max(runway_target);
             self.entries.reserve(target.saturating_sub(len));
         }
+
     }
 
 }
@@ -93,12 +95,14 @@ pub struct RuntimeIndexStore {
 impl RuntimeIndexStore {
 
     pub fn new() -> Self {
+
         Self {
             indexes: AHashMap::new(),
             materialize_non_primary: runtime_index_materialize_non_primary(),
             non_primary_field_allowlist: runtime_index_non_primary_field_allowlist(),
             non_primary_index_allowlist: runtime_index_non_primary_index_allowlist(),
         }
+
     }
 
     pub fn should_track_index(&self, index: &DatabaseIndex) -> bool {
@@ -151,10 +155,12 @@ impl RuntimeIndexStore {
 
     #[expect(clippy::should_implement_trait, reason="Index access by string ID, not by reference")]
     pub fn index_mut(&mut self, index_id: &str) -> &mut RuntimeIndexState {
+        
         match self.indexes.entry(index_id.to_string()) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(RuntimeIndexState::default()),
         }
+
     }
 
     pub fn cardinality(&self, index_id: &str) -> Option<usize> {
@@ -167,6 +173,7 @@ impl RuntimeIndexStore {
     }
 
     pub fn register_index(&mut self, index: DatabaseIndex) {
+        
         if !self.should_track_index(&index) {
             return;
         }
@@ -176,15 +183,18 @@ impl RuntimeIndexStore {
             index: Some(index),
             entries: AHashSet::new(),
         });
+
     }
 
     pub fn record_row(&mut self, index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) {
+        
         if !self.should_track_index(index) {
             return;
         }
 
         let key = index_value_tuple(index, row_map);
         self.index_mut(&index.index_id.0).insert(key);
+
     }
 
     pub fn record_table_row<'a, I>(&mut self, indexes: I, row_map: &HashMap<String, Vec<u8>>)
@@ -216,6 +226,7 @@ impl RuntimeIndexStore {
         indexes: &[&DatabaseIndex],
         row_maps: &[HashMap<String, Vec<u8>>],
     ) {
+
         if row_maps.is_empty() {
             return;
         }
@@ -233,7 +244,9 @@ impl RuntimeIndexStore {
                 let key = index_value_tuple(index, row_map);
                 state.insert(key);
             }
+        
         }
+
     }
 
     pub fn remove_table_rows_batch(
@@ -241,6 +254,7 @@ impl RuntimeIndexStore {
         indexes: &[&DatabaseIndex],
         row_maps: &[HashMap<String, Vec<u8>>],
     ) {
+
         if row_maps.is_empty() {
             return;
         }
@@ -258,19 +272,24 @@ impl RuntimeIndexStore {
             }
 
         }
+
     }
 
     pub fn reserve_table_indexes<'a, I>(&mut self, indexes: I, additional: usize)
     where
         I: IntoIterator<Item = &'a DatabaseIndex>,
     {
+        
         for index in indexes {
+
             if !self.should_track_index(index) {
                 continue;
             }
 
             self.index_mut(&index.index_id.0).reserve_entries(additional);
+        
         }
+
     }
 
     pub fn apply_table_row_mutation<'a, I>(
@@ -282,14 +301,21 @@ impl RuntimeIndexStore {
     where
         I: IntoIterator<Item = &'a DatabaseIndex>,
     {
+
         match kind {
-            TransactionKind::Ignore => {}
+            
+            TransactionKind::Ignore => {},
+
             TransactionKind::Delete => self.remove_table_row(indexes, row_map),
+
             TransactionKind::Insert | TransactionKind::Update => {
                 self.record_table_row(indexes, row_map)
-            }
+            },
+
             _ => {}
+
         }
+
     }
 
     /// Populate indexes for every table in every catalog by replaying their WALs.
@@ -301,6 +327,7 @@ impl RuntimeIndexStore {
     ) {
 
         let bootstrap_started_at = Instant::now();
+
         log::info!(
             "runtime index bootstrap mode materialize_non_primary={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
@@ -507,6 +534,7 @@ fn build_bootstrap_index_entries(
     tracked_indexes: &[DatabaseIndex],
     live_rows: &[(u64, HashMap<String, Vec<u8>>)],
 ) -> Vec<(String, DatabaseIndex, AHashSet<Vec<Vec<u8>>>)> {
+
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -532,9 +560,11 @@ fn build_bootstrap_index_entries(
         std::cmp::min(available, runtime_index_parallel_build_max_workers()),
         tracked_indexes.len(),
     );
+
     let chunk_size = tracked_indexes.len().div_ceil(workers);
 
     let mut chunks = std::thread::scope(|scope| {
+
         let mut handles = Vec::new();
 
         for worker_idx in 0..workers {
@@ -560,12 +590,15 @@ fn build_bootstrap_index_entries(
         }
 
         let mut out = Vec::with_capacity(handles.len());
+        
         for handle in handles {
             if let Ok(chunk) = handle.join() {
                 out.push(chunk);
             }
         }
+        
         out
+
     });
 
     chunks.sort_by_key(|(start, _)| *start);
@@ -576,15 +609,19 @@ fn build_bootstrap_index_entries(
     }
 
     rebuilt
+
 }
 
 impl Default for RuntimeIndexStore {
+    
     fn default() -> Self {
         Self::new()
     }
+
 }
 
 fn runtime_index_materialize_non_primary() -> bool {
+
     std::env::var("DISTDB_RUNTIME_INDEX_MATERIALIZE_NON_PRIMARY")
         .ok()
         .map(|value| {
@@ -594,6 +631,7 @@ fn runtime_index_materialize_non_primary() -> bool {
             )
         })
         .unwrap_or(true)
+        
 }
 
 fn runtime_index_non_primary_field_allowlist() -> AHashSet<String> {

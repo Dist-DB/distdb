@@ -26,6 +26,7 @@ pub struct DatabaseTrigger {
 impl DatabaseTrigger {
 
     pub fn new(trigger_id: String, sql: String, dependencies: Vec<String>) -> Self {
+        
         let mut trigger = Self {
             entity_id: common::helpers::utils::unique_id(),
             trigger_id,
@@ -37,6 +38,7 @@ impl DatabaseTrigger {
 
         trigger.refresh_invocation_binding_cache();
         trigger
+
     }
 
     pub fn set_sql(&mut self, sql: String) {
@@ -45,10 +47,12 @@ impl DatabaseTrigger {
     }
 
     pub fn refresh_invocation_binding_cache(&mut self) {
+
         self.invocation_binding =
             parse_trigger_invocation_binding_from_create_trigger_statement(&self.sql)
                 .ok()
                 .flatten();
+
     }
 
     pub fn invocation_binding(&self) -> Option<&TriggerInvocationBinding> {
@@ -96,13 +100,17 @@ impl DatabaseEntityAspect for DatabaseTrigger {
     }
 
     fn normalize_in_place(&mut self) {
+        
         self.trigger_id = common::normalize_identifier!(&self.trigger_id);
+        
         self.dependencies = self
             .dependencies
             .iter()
             .map(|dep| common::normalize_identifier!(dep))
             .collect();
+        
         self.refresh_invocation_binding_cache();
+
     }
     
 }

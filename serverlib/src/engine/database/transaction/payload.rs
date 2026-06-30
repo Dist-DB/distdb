@@ -72,20 +72,29 @@ pub enum DecodedTransactionPayload {
 }
 
 impl DecodedTransactionPayload {
+
     pub fn decode(kind: TransactionKind, payload: &[u8]) -> Result<Self, &'static str> {
+
         match kind {
             TransactionKind::SchemaChange => SchemaChangePayload::decode_payload(payload)
                 .map(Self::SchemaChange),
+
             TransactionKind::TableLifecycle => TableLifecyclePayload::decode_payload(payload)
                 .map(Self::TableLifecycle),
+
             TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
                 EntityMetadataPayload::decode_payload(payload).map(Self::EntityMetadata)
-            }
+            },
+
             TransactionKind::SqlDefinitionChange => SqlDefinitionPayload::decode_payload(payload)
                 .map(Self::SqlDefinition),
+            
             _ => Err("transaction kind does not define a structured payload codec"),
+
         }
+
     }
+
 }
 
 #[cfg(test)]
@@ -95,6 +104,7 @@ mod tests {
 
     #[test]
     fn schema_change_payload_round_trips_through_common_codec() {
+
         let payload = SchemaChangePayload {
             table_id: "users".to_string(),
             schema_revision: 1,
@@ -114,6 +124,7 @@ mod tests {
         let decoded = SchemaChangePayload::decode_payload(&encoded).expect("payload should decode");
 
         assert_eq!(decoded, payload);
+        
     }
 
     #[test]
