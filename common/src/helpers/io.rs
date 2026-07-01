@@ -1,6 +1,10 @@
 use std::fs;
+use std::fs::File;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use crate::epoch_nanos;
 
 pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
     fs::create_dir_all(path)
@@ -27,6 +31,42 @@ pub fn write_bytes(path: impl AsRef<Path>, content: &[u8]) -> io::Result<()> {
         }
 
     fs::write(path, content)
+}
+
+pub fn write_bytes_atomic(path: impl AsRef<Path>, content: &[u8]) -> io::Result<()> {
+    
+    let path = path.as_ref();
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+
+    fs::create_dir_all(parent)?;
+
+    let tmp_name = format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("distdb"),
+        std::process::id(),
+        epoch_nanos!(),
+    );
+    let tmp_path = parent.join(tmp_name);
+
+    let mut file = File::create(&tmp_path)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(&tmp_path, path)?;
+
+    if let Ok(dir_file) = File::open(parent) {
+        let _ = dir_file.sync_all();
+    }
+
+    Ok(())
+
 }
 
 pub fn append_bytes(path: impl AsRef<Path>, content: &[u8]) -> io::Result<()> {
@@ -96,4 +136,18 @@ mod tests {
         let _ = fs::remove_file(file);
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn write_bytes_atomic_round_trip() {
+
+        let path = unique_temp_file("atomic");
+
+        write_bytes_atomic(&path, &[9, 8, 7]).expect("write_bytes_atomic should succeed");
+        let bytes = read_bytes(&path).expect("read_bytes should succeed");
+
+        assert_eq!(bytes, vec![9, 8, 7]);
+        let _ = fs::remove_file(path);
+
+    }
+    
 }

@@ -55,7 +55,12 @@
       },
       "command": true,
       "cargo llvm-cov": true,
-      "printf": true
+      "printf": true,
+      "true": true,
+      "/^cd '/Users/samcolak/Source Code/rust/distdb/distdb/server' && python3 - <<'PY'\nimport os,glob,time\nbase='\\./data/server-node-01/runtime-index'\nrows=\\[\\]\nfor p in sorted\\(glob\\.glob\\(base\\+'/\\*\\.ent'\\)\\):\n    st=os\\.stat\\(p\\)\n    rows\\.append\\(\\(os\\.path\\.basename\\(p\\), st\\.st_size, st\\.st_mtime\\)\\)\nfor n,s,m in rows:\n    print\\(f\"\\{n\\}\\\\t\\{s\\}\\\\t\\{time\\.strftime\\('%Y-%m-%d %H:%M:%S', time\\.localtime\\(m\\)\\)\\}\"\\)\nPY$/": {
+        "approve": true,
+        "matchCommandLine": true
+      }
     }
   }
 }

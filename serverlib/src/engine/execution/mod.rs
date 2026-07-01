@@ -17,6 +17,7 @@ pub use access::{
     collect_indexable_prefix_like_filter_for_schema, count_condition_predicates,
     field_has_single_column_index, load_live_row_count,
     load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows,
+    snapshot_equality_cache, restore_equality_cache_from_snapshot, EqualityTableCacheSnapshot,
     apply_equality_cache_row_mutation, apply_equality_cache_row_mutation_batch,
     materialize_relation_rows, plan_relation_access, EqualityProbeSource,
     RelationAccessPlan, RelationAccessStrategy,

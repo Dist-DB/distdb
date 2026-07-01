@@ -30,6 +30,19 @@ cargo run datadir=./data servers=127.0.0.1:9400,10.0.0.5:9400
 
 Bootstrap peer entries accept either `host:port` or multiaddr values such as `/ip4/127.0.0.1/tcp/9400`.
 
+### Startup Indexing Mode (Default)
+
+The default operational mode is to preload runtime accessor caches during bootstrap so the database is query-ready immediately after startup.
+
+- Default: `DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=true`
+- Effect: higher startup cost, lower first-query latency on large tables
+
+To optimize for faster process start instead (and accept first-query warmup), disable preloading:
+
+```bash
+DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=false cargo run
+```
+
 ## Client
 
 An example application featuring a range of features available to the platform - this is (at the moment) behind the core application development cycle - interested parties should look at the console application first

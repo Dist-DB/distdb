@@ -93,6 +93,7 @@ pub use engine::execution::{
 	advise_select_execution, SelectExecutionAdvice,
 	field_has_single_column_index, join_condition_field_names, join_condition_matches_provider,
 	load_live_row_count, load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows, materialize_relation_rows, plan_relation_access, relation_qualifier,
+	snapshot_equality_cache, restore_equality_cache_from_snapshot, EqualityTableCacheSnapshot,
 	apply_equality_cache_row_mutation, apply_equality_cache_row_mutation_batch,
 	row_matches_condition_with, row_matches_select_condition, ConditionValueProvider,
 	ControlFlowBranch, CursorDiagnostics, CursorDirective,

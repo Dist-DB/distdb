@@ -1,17 +1,113 @@
 use ahash::{AHashMap, AHashSet};
+use common::epoch_ms;
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
+use std::fs;
+use std::io::{BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+use std::time::UNIX_EPOCH;
+
+use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE};
+use common::helpers::hash::stable_id;
+use common::helpers::io::{read_bytes, write_bytes_atomic};
+use flate2::Compression;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
 
 use super::table::DatabaseTable;
-use crate::engine::execution::access::load_live_rows_in_place;
+use crate::engine::execution::access::{
+    load_live_rows_in_place,
+    warm_string_like_cache_for_fields,
+};
 use crate::{
+    EqualityTableCacheSnapshot,
+    restore_equality_cache_from_snapshot,
+    snapshot_equality_cache,
     warm_equality_cache_from_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
+    TableSchema,
     TransactionKind,
 };
 
 const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: usize = 250_000;
 const RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS: usize = 32;
+const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtix";
+const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
+const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimeIndexTableSnapshot {
+    table_id: String,
+    latest_tx_id: u64,
+    schema_fingerprint: String,
+    live_row_count: usize,
+    #[serde(default)]
+    wal_size_bytes: u64,
+    #[serde(default)]
+    wal_modified_epoch_ms: u64,
+    indexes: Vec<RuntimeIndexSnapshotIndex>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimeIndexSnapshotIndex {
+    index_id: String,
+    entries: Vec<Vec<Vec<u8>>>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedRuntimeIndexSnapshot {
+    snapshot: RuntimeIndexTableSnapshot,
+    legacy_plain_encoding: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TableLiveRowCheckpoint {
+    table_id: String,
+    latest_tx_id: u64,
+    schema_fingerprint: String,
+    wal_size_bytes: u64,
+    wal_modified_epoch_ms: u64,
+    live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TableAccessorCacheSnapshot {
+    table_id: String,
+    latest_tx_id: u64,
+    schema_fingerprint: String,
+    wal_size_bytes: u64,
+    wal_modified_epoch_ms: u64,
+    live_row_count: usize,
+    warm_fields: Vec<String>,
+    cache: EqualityTableCacheSnapshot,
+}
+
+fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let raw = bincode::serialize(value)
+        .map_err(|_| "snapshot serialization failed".to_string())?;
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&raw)
+        .map_err(|_| "snapshot compression failed".to_string())?;
+
+    encoder
+        .finish()
+        .map_err(|_| "snapshot compression finish failed".to_string())
+}
+
+fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<(T, bool)> {
+    if let Ok(decoded) = bincode::deserialize::<T>(payload) {
+        return Some((decoded, true));
+    }
+
+    let decoder = ZlibDecoder::new(payload);
+    let mut reader = BufReader::new(decoder);
+
+    bincode::deserialize_from::<_, T>(&mut reader)
+        .ok()
+        .map(|decoded| (decoded, false))
+}
 
 fn runtime_index_parallel_build_max_workers() -> usize {
     std::env::var("DISTDB_RUNTIME_INDEX_BUILD_WORKERS")
@@ -20,6 +116,56 @@ fn runtime_index_parallel_build_max_workers() -> usize {
         .filter(|value| *value > 0)
         .unwrap_or(RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS)
 }
+
+fn runtime_index_migrate_legacy_snapshot_on_bootstrap() -> bool {
+    std::env::var("DISTDB_RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn runtime_index_incremental_persistence_on_commit() -> bool {
+    std::env::var("DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_ON_COMMIT")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn runtime_index_incremental_persistence_min_interval_ms() -> u64 {
+    std::env::var("DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(1_000)
+}
+
+fn runtime_index_preload_accessors_on_bootstrap() -> bool {
+    std::env::var("DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
+
+// fn epoch_ms_now() -> u64 {
+//     std::time::SystemTime::now()
+//         .duration_since(UNIX_EPOCH)
+//         .map(|duration| duration.as_millis() as u64)
+//         .unwrap_or(0)
+// }
 
 /// In-memory state for a single index.
 /// Each entry is a composite key tuple in the index's field order.
@@ -90,6 +236,7 @@ pub struct RuntimeIndexStore {
     materialize_non_primary: bool,
     non_primary_field_allowlist: AHashSet<String>,
     non_primary_index_allowlist: AHashSet<String>,
+    incremental_persist_last_saved_ms: AHashMap<String, u64>,
 }
 
 impl RuntimeIndexStore {
@@ -101,6 +248,7 @@ impl RuntimeIndexStore {
             materialize_non_primary: runtime_index_materialize_non_primary(),
             non_primary_field_allowlist: runtime_index_non_primary_field_allowlist(),
             non_primary_index_allowlist: runtime_index_non_primary_index_allowlist(),
+            incremental_persist_last_saved_ms: AHashMap::new(),
         }
 
     }
@@ -332,8 +480,9 @@ impl RuntimeIndexStore {
         let bootstrap_started_at = Instant::now();
 
         log::info!(
-            "runtime index bootstrap mode materialize_non_primary={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
+            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
+            runtime_index_preload_accessors_on_bootstrap(),
             
             if self.non_primary_field_allowlist.is_empty() {
                 "<none>".to_string()
@@ -360,6 +509,7 @@ impl RuntimeIndexStore {
         let mut bootstrapped_tables = 0usize;
         let mut bootstrapped_indexes = 0usize;
         let mut bootstrapped_rows = 0usize;
+        let snapshot_data_dir = wal.data_dir_path();
 
         for (database_id, catalog) in catalogs {
             
@@ -393,15 +543,9 @@ impl RuntimeIndexStore {
                     self.register_index(index.clone());
                 }
 
-                let live_rows_started_at = Instant::now();
-                let live_rows = load_live_rows_in_place(wal, &table_id, &table.schema);
-                let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
-                let live_row_count = live_rows.len();
-
-                let latest_tx_id = wal
-                    .latest_transaction_id(&table_id)
-                    .map(|tx| tx.0)
-                    .unwrap_or(0);
+                let wal_fingerprint = snapshot_data_dir
+                    .as_ref()
+                    .and_then(|data_dir| wal_stream_fingerprint(data_dir, &table_id));
 
                 let mut warm_fields = tracked_indexes
                     .iter()
@@ -421,11 +565,275 @@ impl RuntimeIndexStore {
                 warm_fields.sort();
                 warm_fields.dedup();
 
-                if live_rows_elapsed_ms >= 1_000 {
+                if let Some(snapshot_info) = snapshot_data_dir
+                    .as_ref()
+                    .and_then(|data_dir| {
+                        load_runtime_index_snapshot(
+                            data_dir,
+                            table,
+                            &tracked_indexes,
+                            wal_fingerprint,
+                        )
+                    })
+                {
+                    let snapshot = &snapshot_info.snapshot;
+                    bootstrapped_tables += 1;
+                    bootstrapped_indexes += tracked_indexes.len();
+                    bootstrapped_rows += snapshot.live_row_count;
+
+                    let restored = build_snapshot_index_entries(&tracked_indexes, snapshot);
+                    let restored_index_count = restored.len();
+                    let restored_entry_count = restored
+                        .iter()
+                        .map(|(_, _, entries)| entries.len())
+                        .sum::<usize>();
+
+                    if restored_index_count != tracked_indexes.len() {
+                        log::warn!(
+                            "runtime index snapshot restore mismatch database={} table={} expected_indexes={} restored_indexes={}",
+                            database_id,
+                            table_id,
+                            tracked_indexes.len(),
+                            restored_index_count,
+                        );
+                    }
+
+                    for (index_id, index, entries) in restored {
+                        let state = self.index_mut(&index_id);
+                        state.rebuild(entries);
+                        state.index = Some(index);
+                    }
+
                     log::info!(
-                        "runtime index bootstrap live-row materialization database={} table={} live_rows={} elapsed_ms={}",
+                        "runtime index snapshot restore database={} table={} restored_indexes={} index_tuples={} live_rows={}",
                         database_id,
                         table_id,
+                        restored_index_count,
+                        restored_entry_count,
+                        snapshot.live_row_count,
+                    );
+
+                    if snapshot_info.legacy_plain_encoding
+                        && runtime_index_migrate_legacy_snapshot_on_bootstrap()
+                        && let Some(data_dir) = snapshot_data_dir.as_ref()
+                    {
+                        let _ = save_runtime_index_snapshot(
+                            data_dir,
+                            table,
+                            snapshot.latest_tx_id,
+                            snapshot.live_row_count,
+                            wal_fingerprint,
+                            &tracked_indexes,
+                            self,
+                        );
+                    } else if snapshot_info.legacy_plain_encoding {
+                        log::info!(
+                            "runtime index legacy snapshot detected table={} migration_deferred=true env=DISTDB_RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP",
+                            table_id,
+                        );
+                    }
+
+                    if runtime_index_preload_accessors_on_bootstrap() && !warm_fields.is_empty() {
+                        
+                        let preload_started_at = Instant::now();
+
+                        if let Some(data_dir) = snapshot_data_dir.as_ref()
+                            && let Some(accessor_snapshot) = load_accessor_cache_snapshot(
+                                data_dir,
+                                table,
+                                wal_fingerprint,
+                                &warm_fields,
+                            )
+                        {
+
+                            let live_row_count = accessor_snapshot.live_row_count;
+                            restore_equality_cache_from_snapshot(
+                                wal.cache_scope_id(),
+                                &table_id,
+                                accessor_snapshot.cache,
+                            );
+
+                            warm_string_like_cache_for_fields(
+                                wal.cache_scope_id(),
+                                &table_id,
+                                &table.schema,
+                                &warm_fields,
+                            );
+
+                            log::info!(
+                                "runtime index bootstrap accessor preload database={} table={} source={} live_rows={} load_ms={} elapsed_ms={}",
+                                database_id,
+                                table_id,
+                                "accessor_snapshot",
+                                live_row_count,
+                                0,
+                                preload_started_at.elapsed().as_millis(),
+                            );
+
+                            log::info!(
+                                "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=snapshot elapsed_ms={}",
+                                database_id,
+                                table_id,
+                                tracked_indexes.len(),
+                                snapshot.live_row_count,
+                                table_started_at.elapsed().as_millis(),
+                            );
+
+                            continue;
+
+                        }
+
+                        let checkpoint_started_at = Instant::now();
+                        let checkpoint_rows = snapshot_data_dir
+                            .as_ref()
+                            .and_then(|data_dir| {
+                                load_live_row_checkpoint(
+                                    data_dir,
+                                    table,
+                                    wal_fingerprint,
+                                )
+                            });
+
+                        let checkpoint_elapsed_ms = checkpoint_started_at.elapsed().as_millis();
+
+                        let (latest_tx_id, live_rows, source, load_elapsed_ms) =
+                            if let Some(checkpoint) = checkpoint_rows {
+                                (
+                                    checkpoint.latest_tx_id,
+                                    checkpoint.live_rows,
+                                    "checkpoint",
+                                    checkpoint_elapsed_ms,
+                                )
+                            } else {
+                                let live_rows_started_at = Instant::now();
+                                let live_rows = load_live_rows_in_place(wal, &table_id, &table.schema);
+                                let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
+
+                                (
+                                    snapshot.latest_tx_id,
+                                    live_rows,
+                                    "wal",
+                                    live_rows_elapsed_ms,
+                                )
+                            };
+
+                        if let Some(data_dir) = snapshot_data_dir.as_ref()
+                            && source == "wal"
+                            && let Err(err) = save_live_row_checkpoint(
+                                data_dir,
+                                table,
+                                latest_tx_id,
+                                wal_fingerprint,
+                                &live_rows,
+                            )
+                        {
+                            log::warn!(
+                                "live-row checkpoint save skipped table={} reason={}",
+                                table_id,
+                                err,
+                            );
+                        }
+
+                        let live_row_count = live_rows.len();
+
+                        warm_equality_cache_from_live_rows(
+                            wal.cache_scope_id(),
+                            &table_id,
+                            &table.schema,
+                            latest_tx_id,
+                            live_rows,
+                            &warm_fields,
+                        );
+
+                        if let Some(data_dir) = snapshot_data_dir.as_ref()
+                            && let Err(err) = save_accessor_cache_snapshot(
+                                data_dir,
+                                table,
+                                latest_tx_id,
+                                wal_fingerprint,
+                                &warm_fields,
+                                wal.cache_scope_id(),
+                            )
+                        {
+                            log::warn!(
+                                "accessor cache snapshot save skipped table={} reason={}",
+                                table_id,
+                                err,
+                            );
+                        }
+
+                        log::info!(
+                            "runtime index bootstrap accessor preload database={} table={} source={} live_rows={} load_ms={} elapsed_ms={}",
+                            database_id,
+                            table_id,
+                            source,
+                            live_row_count,
+                            load_elapsed_ms,
+                            preload_started_at.elapsed().as_millis(),
+                        );
+
+                    }
+
+                    log::info!(
+                        "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=snapshot elapsed_ms={}",
+                        database_id,
+                        table_id,
+                        tracked_indexes.len(),
+                        snapshot.live_row_count,
+                        table_started_at.elapsed().as_millis(),
+                    );
+
+                    continue;
+
+                }
+
+                let latest_tx_id = wal
+                    .latest_transaction_id(&table_id)
+                    .map(|tx| tx.0)
+                    .unwrap_or(0);
+
+                let checkpoint_started_at = Instant::now();
+                let checkpoint_rows = snapshot_data_dir
+                    .as_ref()
+                    .and_then(|data_dir| {
+                        load_live_row_checkpoint(
+                            data_dir,
+                            table,
+                            wal_fingerprint,
+                        )
+                    });
+                let checkpoint_elapsed_ms = checkpoint_started_at.elapsed().as_millis();
+
+                let (latest_tx_id, live_rows, live_rows_elapsed_ms, live_rows_mode) =
+
+                    if let Some(checkpoint) = checkpoint_rows {
+                        (
+                            checkpoint.latest_tx_id,
+                            checkpoint.live_rows,
+                            checkpoint_elapsed_ms,
+                            "checkpoint",
+                        )
+                    } else {
+                        let live_rows_started_at = Instant::now();
+                        let live_rows = load_live_rows_in_place(wal, &table_id, &table.schema);
+                        let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
+
+                        (
+                            latest_tx_id,
+                            live_rows,
+                            live_rows_elapsed_ms,
+                            "wal",
+                        )
+                    };
+                    
+                let live_row_count = live_rows.len();
+
+                if live_rows_elapsed_ms >= 1_000 {
+                    log::info!(
+                        "runtime index bootstrap live-row materialization database={} table={} source={} live_rows={} elapsed_ms={}",
+                        database_id,
+                        table_id,
+                        live_rows_mode,
                         live_row_count,
                         live_rows_elapsed_ms,
                     );
@@ -441,6 +849,23 @@ impl RuntimeIndexStore {
                     state.index = Some(index);
                 }
 
+                if let Some(data_dir) = snapshot_data_dir.as_ref()
+                    && live_rows_mode == "wal"
+                    && let Err(err) = save_live_row_checkpoint(
+                        data_dir,
+                        table,
+                        latest_tx_id,
+                        wal_fingerprint,
+                        &live_rows,
+                    )
+                {
+                    log::warn!(
+                        "live-row checkpoint save skipped table={} reason={}",
+                        table_id,
+                        err,
+                    );
+                }
+
                 let warm_started_at = Instant::now();
                 warm_equality_cache_from_live_rows(
                     wal.cache_scope_id(),
@@ -451,6 +876,41 @@ impl RuntimeIndexStore {
                     &warm_fields,
                 );
                 let warm_elapsed_ms = warm_started_at.elapsed().as_millis();
+
+                if let Some(data_dir) = snapshot_data_dir.as_ref()
+                    && let Err(err) = save_accessor_cache_snapshot(
+                        data_dir,
+                        table,
+                        latest_tx_id,
+                        wal_fingerprint,
+                        &warm_fields,
+                        wal.cache_scope_id(),
+                    )
+                {
+                    log::warn!(
+                        "accessor cache snapshot save skipped table={} reason={}",
+                        table_id,
+                        err,
+                    );
+                }
+
+                if let Some(data_dir) = snapshot_data_dir.as_ref()
+                    && let Err(err) = save_runtime_index_snapshot(
+                        data_dir,
+                        table,
+                        latest_tx_id,
+                        live_row_count,
+                        wal_fingerprint,
+                        &tracked_indexes,
+                        self,
+                    )
+                {
+                    log::warn!(
+                        "runtime index snapshot save skipped table={} reason={}",
+                        table_id,
+                        err,
+                    );
+                }
 
                 bootstrapped_tables += 1;
                 bootstrapped_indexes += tracked_indexes.len();
@@ -535,6 +995,449 @@ impl RuntimeIndexStore {
         
     }
 
+    pub fn persist_table_snapshot_on_commit(
+        &mut self,
+        table: &DatabaseTable,
+        wal: &ConcurrentWalManager,
+    ) -> Result<(), String> {
+
+        if !runtime_index_incremental_persistence_on_commit() {
+            return Ok(());
+        }
+
+        let Some(data_dir) = wal.data_dir_path() else {
+            return Ok(());
+        };
+
+        let tracked_indexes = table
+            .indexes
+            .values()
+            .filter(|index| {
+                self.should_track_index(index)
+                    && self.should_materialize_index_for_bootstrap(index)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if tracked_indexes.is_empty() {
+            return Ok(());
+        }
+
+        let min_interval_ms = runtime_index_incremental_persistence_min_interval_ms();
+        let now_ms = epoch_ms!();
+
+        if min_interval_ms > 0
+            && let Some(last_persist_ms) = self.incremental_persist_last_saved_ms.get(&table.table_id)
+            && now_ms.saturating_sub(*last_persist_ms) < min_interval_ms
+        {
+            return Ok(());
+        }
+
+        let wal_fingerprint = wal_stream_fingerprint(&data_dir, &table.table_id);
+        let latest_tx_id = wal
+            .latest_transaction_id(&table.table_id)
+            .map(|tx| tx.0)
+            .unwrap_or(0);
+
+        let live_row_count = primary_key_index(table)
+            .and_then(|index| self.cardinality(&index.index_id.0))
+            .unwrap_or_else(|| {
+                tracked_indexes
+                    .iter()
+                    .filter_map(|index| self.cardinality(&index.index_id.0))
+                    .max()
+                    .unwrap_or(0)
+            });
+
+        save_runtime_index_snapshot(
+            &data_dir,
+            table,
+            latest_tx_id,
+            live_row_count,
+            wal_fingerprint,
+            &tracked_indexes,
+            self,
+        )?;
+
+        self.incremental_persist_last_saved_ms
+            .insert(table.table_id.clone(), now_ms);
+
+        Ok(())
+
+    }
+
+}
+
+fn runtime_index_snapshot_path(data_dir: &Path, table_id: &str) -> PathBuf {
+    let table_key = stable_id(&[table_id]);
+    let stem = format!("{}_{}", RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX, table_key);
+    data_dir
+        .join("runtime-index")
+        .join(FileKind::Entity.file_name(stem))
+}
+
+fn accessor_cache_snapshot_path(data_dir: &Path, table_id: &str) -> PathBuf {
+    let table_key = stable_id(&[table_id]);
+    let stem = format!("{}_{}", ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX, table_key);
+    data_dir
+        .join("accessor-cache")
+        .join(FileKind::Entity.file_name(stem))
+}
+
+    fn live_row_checkpoint_path(data_dir: &Path, table_id: &str) -> PathBuf {
+        let table_key = stable_id(&[table_id]);
+        let stem = format!("{}_{}", LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX, table_key);
+        data_dir
+        .join("live-rows")
+        .join(FileKind::Entity.file_name(stem))
+    }
+
+fn wal_stream_path(data_dir: &Path, table_id: &str) -> PathBuf {
+    let stream_key = stable_id(&[table_id]);
+    data_dir.join(FileKind::Data.file_name(stream_key))
+}
+
+fn wal_stream_fingerprint(data_dir: &Path, table_id: &str) -> Option<(u64, u64)> {
+    let path = wal_stream_path(data_dir, table_id);
+    let metadata = fs::metadata(path).ok()?;
+    let modified_epoch_ms = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+
+    Some((metadata.len(), modified_epoch_ms))
+}
+
+fn table_schema_fingerprint(table: &DatabaseTable) -> Option<String> {
+    table_schema_fingerprint_for_parts(&table.table_id, table.schema())
+}
+
+fn table_schema_fingerprint_for_parts(
+    table_id: &str,
+    schema: &TableSchema,
+) -> Option<String> {
+    let encoded = bincode::serialize(schema).ok()?;
+    let hex = encoded
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    Some(stable_id(&[table_id, &hex]))
+}
+
+pub fn load_live_row_checkpoint_rows(
+    data_dir: &Path,
+    table_id: &str,
+    schema: &TableSchema,
+) -> Option<(u64, Vec<(u64, HashMap<String, Vec<u8>>)>)> {
+    let checkpoint_path = live_row_checkpoint_path(data_dir, table_id);
+    let bytes = read_bytes(&checkpoint_path).ok()?;
+
+    if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
+        return None;
+    }
+
+    let (checkpoint, _legacy_plain_encoding): (TableLiveRowCheckpoint, bool) =
+        decode_snapshot_payload(&bytes[HEADER_SIZE..])?;
+
+    let schema_fingerprint = table_schema_fingerprint_for_parts(table_id, schema)?;
+
+    if checkpoint.table_id != table_id || checkpoint.schema_fingerprint != schema_fingerprint {
+        return None;
+    }
+
+    let (wal_size_bytes, wal_modified_epoch_ms) = wal_stream_fingerprint(data_dir, table_id)?;
+    if checkpoint.wal_size_bytes != wal_size_bytes
+        || checkpoint.wal_modified_epoch_ms != wal_modified_epoch_ms
+    {
+        return None;
+    }
+
+    Some((checkpoint.latest_tx_id, checkpoint.live_rows))
+}
+
+fn load_runtime_index_snapshot(
+    data_dir: &Path,
+    table: &DatabaseTable,
+    tracked_indexes: &[DatabaseIndex],
+    wal_fingerprint: Option<(u64, u64)>,
+) -> Option<LoadedRuntimeIndexSnapshot> {
+    let snapshot_path = runtime_index_snapshot_path(data_dir, &table.table_id);
+    let bytes = read_bytes(&snapshot_path).ok()?;
+
+    if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
+        return None;
+    }
+
+    let (snapshot, legacy_plain_encoding): (RuntimeIndexTableSnapshot, bool) =
+        decode_snapshot_payload(&bytes[HEADER_SIZE..])?;
+
+    let schema_fingerprint = table_schema_fingerprint(table)?;
+
+    if snapshot.table_id != table.table_id
+        || snapshot.schema_fingerprint != schema_fingerprint
+    {
+        return None;
+    }
+
+    let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
+        return None;
+    };
+
+    if snapshot.wal_size_bytes != wal_size_bytes
+        || snapshot.wal_modified_epoch_ms != wal_modified_epoch_ms
+    {
+        return None;
+    }
+
+    let snapshot_index_ids = snapshot
+        .indexes
+        .iter()
+        .map(|index| index.index_id.as_str())
+        .collect::<HashSet<_>>();
+
+    if tracked_indexes
+        .iter()
+        .any(|index| !snapshot_index_ids.contains(index.index_id.0.as_str()))
+    {
+        return None;
+    }
+
+    Some(LoadedRuntimeIndexSnapshot {
+        snapshot,
+        legacy_plain_encoding,
+    })
+}
+
+fn load_live_row_checkpoint(
+    data_dir: &Path,
+    table: &DatabaseTable,
+    wal_fingerprint: Option<(u64, u64)>,
+) -> Option<TableLiveRowCheckpoint> {
+    let checkpoint_path = live_row_checkpoint_path(data_dir, &table.table_id);
+    let bytes = read_bytes(&checkpoint_path).ok()?;
+
+    if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
+        return None;
+    }
+
+    let (checkpoint, _legacy_plain_encoding): (TableLiveRowCheckpoint, bool) =
+        decode_snapshot_payload(&bytes[HEADER_SIZE..])?;
+
+    let schema_fingerprint = table_schema_fingerprint(table)?;
+
+    if checkpoint.table_id != table.table_id || checkpoint.schema_fingerprint != schema_fingerprint {
+        return None;
+    }
+
+    let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
+        return None;
+    };
+
+    if checkpoint.wal_size_bytes != wal_size_bytes
+        || checkpoint.wal_modified_epoch_ms != wal_modified_epoch_ms
+    {
+        return None;
+    }
+
+    Some(checkpoint)
+}
+
+fn load_accessor_cache_snapshot(
+    data_dir: &Path,
+    table: &DatabaseTable,
+    wal_fingerprint: Option<(u64, u64)>,
+    warm_fields: &[String],
+) -> Option<TableAccessorCacheSnapshot> {
+    let snapshot_path = accessor_cache_snapshot_path(data_dir, &table.table_id);
+    let bytes = read_bytes(&snapshot_path).ok()?;
+
+    if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
+        return None;
+    }
+
+    let (snapshot, _legacy_plain_encoding): (TableAccessorCacheSnapshot, bool) =
+        decode_snapshot_payload(&bytes[HEADER_SIZE..])?;
+
+    let schema_fingerprint = table_schema_fingerprint(table)?;
+
+    if snapshot.table_id != table.table_id || snapshot.schema_fingerprint != schema_fingerprint {
+        return None;
+    }
+
+    let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
+        return None;
+    };
+
+    if snapshot.wal_size_bytes != wal_size_bytes
+        || snapshot.wal_modified_epoch_ms != wal_modified_epoch_ms
+    {
+        return None;
+    }
+
+    if !warm_fields
+        .iter()
+        .all(|field_name| snapshot.warm_fields.iter().any(|saved| saved == field_name))
+    {
+        return None;
+    }
+
+    Some(snapshot)
+}
+
+fn save_runtime_index_snapshot(
+    data_dir: &Path,
+    table: &DatabaseTable,
+    latest_tx_id: u64,
+    live_row_count: usize,
+    wal_fingerprint: Option<(u64, u64)>,
+    tracked_indexes: &[DatabaseIndex],
+    store: &RuntimeIndexStore,
+) -> Result<(), String> {
+    let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
+        .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
+
+    let expected_wal_fingerprint = (wal_size_bytes, wal_modified_epoch_ms);
+
+    if wal_stream_fingerprint(data_dir, &table.table_id) != Some(expected_wal_fingerprint) {
+        return Err("wal fingerprint changed before snapshot write".to_string());
+    }
+
+    let schema_fingerprint = table_schema_fingerprint(table)
+        .ok_or_else(|| "schema fingerprint serialization failed".to_string())?;
+
+    let mut indexes = Vec::with_capacity(tracked_indexes.len());
+
+    for index in tracked_indexes {
+        let state = store
+            .index(&index.index_id.0)
+            .ok_or_else(|| format!("missing runtime index state '{}'", index.index_id.0))?;
+
+        indexes.push(RuntimeIndexSnapshotIndex {
+            index_id: index.index_id.0.clone(),
+            entries: state.entries.iter().cloned().collect(),
+        });
+    }
+
+    let snapshot = RuntimeIndexTableSnapshot {
+        table_id: table.table_id.clone(),
+        latest_tx_id,
+        schema_fingerprint,
+        live_row_count,
+        wal_size_bytes,
+        wal_modified_epoch_ms,
+        indexes,
+    };
+
+    let mut content = make_header(FileKind::Entity).to_vec();
+    let payload = encode_snapshot_payload(&snapshot)?;
+    content.extend_from_slice(&payload);
+
+    let snapshot_path = runtime_index_snapshot_path(data_dir, &table.table_id);
+    write_bytes_atomic(&snapshot_path, &content)
+        .map_err(|err| format!("snapshot write failed: {err}"))?;
+
+    if wal_stream_fingerprint(data_dir, &table.table_id) != Some(expected_wal_fingerprint) {
+        let _ = fs::remove_file(&snapshot_path);
+        return Err("wal fingerprint changed after snapshot write".to_string());
+    }
+
+    Ok(())
+}
+
+fn save_live_row_checkpoint(
+    data_dir: &Path,
+    table: &DatabaseTable,
+    latest_tx_id: u64,
+    wal_fingerprint: Option<(u64, u64)>,
+    live_rows: &[(u64, HashMap<String, Vec<u8>>)],
+) -> Result<(), String> {
+    let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
+        .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
+
+    let expected_wal_fingerprint = (wal_size_bytes, wal_modified_epoch_ms);
+
+    if wal_stream_fingerprint(data_dir, &table.table_id) != Some(expected_wal_fingerprint) {
+        return Err("wal fingerprint changed before live-row checkpoint write".to_string());
+    }
+
+    let schema_fingerprint = table_schema_fingerprint(table)
+        .ok_or_else(|| "schema fingerprint serialization failed".to_string())?;
+
+    let checkpoint = TableLiveRowCheckpoint {
+        table_id: table.table_id.clone(),
+        latest_tx_id,
+        schema_fingerprint,
+        wal_size_bytes,
+        wal_modified_epoch_ms,
+        live_rows: live_rows.to_vec(),
+    };
+
+    let mut content = make_header(FileKind::Entity).to_vec();
+    let payload = encode_snapshot_payload(&checkpoint)?;
+    content.extend_from_slice(&payload);
+
+    let checkpoint_path = live_row_checkpoint_path(data_dir, &table.table_id);
+    write_bytes_atomic(&checkpoint_path, &content)
+        .map_err(|err| format!("live-row checkpoint write failed: {err}"))?;
+
+    if wal_stream_fingerprint(data_dir, &table.table_id) != Some(expected_wal_fingerprint) {
+        let _ = fs::remove_file(&checkpoint_path);
+        return Err("wal fingerprint changed after live-row checkpoint write".to_string());
+    }
+
+    Ok(())
+}
+
+fn save_accessor_cache_snapshot(
+    data_dir: &Path,
+    table: &DatabaseTable,
+    latest_tx_id: u64,
+    wal_fingerprint: Option<(u64, u64)>,
+    warm_fields: &[String],
+    cache_scope_id: usize,
+) -> Result<(), String> {
+    let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
+        .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
+
+    let expected_wal_fingerprint = (wal_size_bytes, wal_modified_epoch_ms);
+
+    if wal_stream_fingerprint(data_dir, &table.table_id) != Some(expected_wal_fingerprint) {
+        return Err("wal fingerprint changed before accessor cache snapshot write".to_string());
+    }
+
+    let schema_fingerprint = table_schema_fingerprint(table)
+        .ok_or_else(|| "schema fingerprint serialization failed".to_string())?;
+
+    let cache = snapshot_equality_cache(cache_scope_id, &table.table_id)
+        .ok_or_else(|| "equality cache snapshot missing".to_string())?;
+
+    let snapshot = TableAccessorCacheSnapshot {
+        table_id: table.table_id.clone(),
+        latest_tx_id,
+        schema_fingerprint,
+        wal_size_bytes,
+        wal_modified_epoch_ms,
+        live_row_count: cache.rows_by_id.len(),
+        warm_fields: warm_fields.to_vec(),
+        cache,
+    };
+
+    let mut content = make_header(FileKind::Entity).to_vec();
+    let payload = encode_snapshot_payload(&snapshot)?;
+    content.extend_from_slice(&payload);
+
+    let snapshot_path = accessor_cache_snapshot_path(data_dir, &table.table_id);
+    write_bytes_atomic(&snapshot_path, &content)
+        .map_err(|err| format!("accessor cache snapshot write failed: {err}"))?;
+
+    if wal_stream_fingerprint(data_dir, &table.table_id) != Some(expected_wal_fingerprint) {
+        let _ = fs::remove_file(&snapshot_path);
+        return Err("wal fingerprint changed after accessor cache snapshot write".to_string());
+    }
+
+    Ok(())
 }
 
 fn build_bootstrap_index_entries(
@@ -610,6 +1513,102 @@ fn build_bootstrap_index_entries(
         
         out
 
+    });
+
+    chunks.sort_by_key(|(start, _)| *start);
+
+    let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
+
+    for (_, mut chunk) in chunks {
+        rebuilt.append(&mut chunk);
+    }
+
+    rebuilt
+
+}
+
+fn build_snapshot_index_entries(
+    tracked_indexes: &[DatabaseIndex],
+    snapshot: &RuntimeIndexTableSnapshot,
+) -> Vec<(String, DatabaseIndex, AHashSet<Vec<Vec<u8>>>)> {
+
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let should_parallel = available > 1
+        && tracked_indexes.len() > 1
+        && snapshot.live_row_count >= RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS;
+
+    if !should_parallel {
+        return tracked_indexes
+            .iter()
+            .filter_map(|index| {
+                snapshot
+                    .indexes
+                    .iter()
+                    .find(|item| item.index_id == index.index_id.0)
+                    .map(|item| {
+                        (
+                            index.index_id.0.clone(),
+                            index.clone(),
+                            item.entries.iter().cloned().collect::<AHashSet<_>>(),
+                        )
+                    })
+            })
+            .collect();
+    }
+
+    let workers = std::cmp::min(
+        std::cmp::min(available, runtime_index_parallel_build_max_workers()),
+        tracked_indexes.len(),
+    );
+
+    let chunk_size = tracked_indexes.len().div_ceil(workers);
+
+    let mut chunks = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+
+        for worker_idx in 0..workers {
+            let start = worker_idx * chunk_size;
+            if start >= tracked_indexes.len() {
+                break;
+            }
+
+            let end = std::cmp::min(start + chunk_size, tracked_indexes.len());
+            let indexes = &tracked_indexes[start..end];
+
+            handles.push(scope.spawn(move || {
+                let mut chunk = Vec::with_capacity(indexes.len());
+
+                for index in indexes {
+                    let Some(item) = snapshot
+                        .indexes
+                        .iter()
+                        .find(|item| item.index_id == index.index_id.0) else {
+                        continue;
+                    };
+
+                    chunk.push((
+                        index.index_id.0.clone(),
+                        index.clone(),
+                        item.entries.iter().cloned().collect::<AHashSet<_>>(),
+                    ));
+                }
+
+                (start, chunk)
+            }));
+        }
+
+        let mut out = Vec::with_capacity(handles.len());
+
+        for handle in handles {
+            if let Ok(chunk) = handle.join() {
+                out.push(chunk);
+            }
+        }
+
+        out
     });
 
     chunks.sort_by_key(|(start, _)| *start);

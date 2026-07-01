@@ -225,6 +225,10 @@ impl ConcurrentWalManager {
         self.cache_scope_id
     }
 
+    pub fn data_dir_path(&self) -> Option<PathBuf> {
+        self.data_dir.as_ref().map(|path| path.as_ref().clone())
+    }
+
     pub fn with_records<T, F>(&self, wal_id: &str, func: F) -> Option<T>
     where
         F: FnOnce(&[TransactionRecord]) -> T,
@@ -552,6 +556,15 @@ impl ConcurrentWalManager {
         let stream_key = obfuscated_stream_key(wal_id).ok()?;
 
         self.hydrate_stream_if_needed(wal_id, &stream_key);
+
+        let store = self.storage.lock().ok()?;
+        store
+            .get(&stream_key)
+            .and_then(|entries| entries.last().map(|entry| entry.id))
+    }
+
+    pub fn latest_transaction_id_if_loaded(&self, wal_id: &str) -> Option<TransactionId> {
+        let stream_key = obfuscated_stream_key(wal_id).ok()?;
 
         let store = self.storage.lock().ok()?;
         store

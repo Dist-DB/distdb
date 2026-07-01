@@ -406,6 +406,14 @@ where
             );
         }
 
+        if let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, wal) {
+            log::warn!(
+                "runtime index incremental persistence skipped table={} reason={}",
+                table.table_id,
+                err,
+            );
+        }
+
         response
 
     } else {
@@ -433,6 +441,8 @@ where
 
 pub(crate) fn commit_external_write_group(
     wal: &ConcurrentWalManager,
+    catalogs: Option<&HashMap<String, DatabaseCatalog>>,
+    mut runtime_indexes: Option<&mut RuntimeIndexStore>,
     table_ids: &HashSet<String>,
     group_id: TransactionId,
 ) -> Result<(), String> {
@@ -446,6 +456,19 @@ pub(crate) fn commit_external_write_group(
             common::epoch_nanos!(),
             Some(group_id),
         )?;
+
+        if let (Some(catalogs), Some(runtime_indexes)) = (catalogs, runtime_indexes.as_deref_mut())
+            && let Some(table) = catalogs
+                .values()
+                .find_map(|catalog| catalog.table(table_id))
+            && let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, wal)
+        {
+            log::warn!(
+                "runtime index incremental persistence skipped table={} reason={}",
+                table_id,
+                err,
+            );
+        }
     }
 
     Ok(())

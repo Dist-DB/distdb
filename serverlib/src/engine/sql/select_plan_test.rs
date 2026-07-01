@@ -422,7 +422,7 @@ fn select_read_plan_parses_like_predicates() {
         plan.where_condition,
         Some(SelectCondition::Predicate(SelectPredicate::Like {
             negated: false,
-            case_insensitive: false,
+            case_insensitive: true,
             escape_char: None,
             ..
         }))
@@ -440,7 +440,7 @@ fn select_read_plan_parses_like_predicates_with_escape() {
         plan.where_condition,
         Some(SelectCondition::Predicate(SelectPredicate::Like {
             negated: false,
-            case_insensitive: false,
+            case_insensitive: true,
             escape_char: Some('\\'),
             ..
         }))

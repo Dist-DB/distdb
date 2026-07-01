@@ -36,7 +36,7 @@ impl<T: Transport> ServerP2pNetwork<T> {
     }
 
     pub fn broadcast_announce(&mut self, local: NodeDescriptor) -> Result<()> {
-        log::info!(
+        log::debug!(
             "server p2p broadcast announce peer_id={} addrs={}",
             local.id.0,
             local.addrs.join(",")
@@ -76,6 +76,7 @@ impl<T: Transport> ServerP2pNetwork<T> {
         }
 
         let mut last_err: Option<ServerLibError> = None;
+        
         for addr in resolved_addrs {
             match self.transport.send(&addr, message.clone()) {
                 Ok(()) => return Ok(()),
@@ -97,6 +98,7 @@ impl<T: Transport> ServerP2pNetwork<T> {
                 peer_id
             ))
         }))
+
     }
 
     pub fn discovery(&self) -> &KademliaDiscoveryService {

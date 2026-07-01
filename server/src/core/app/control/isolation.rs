@@ -170,7 +170,13 @@ impl ServerApp {
         }
 
         if !touched_tables.is_empty()
-            && let Err(err) = commit_external_write_group(&sandbox_wal, &touched_tables, write_group_id)
+            && let Err(err) = commit_external_write_group(
+                &sandbox_wal,
+                None,
+                None,
+                &touched_tables,
+                write_group_id,
+            )
             {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
@@ -264,9 +270,9 @@ impl ServerApp {
         &mut self,
         session_id: &str,
         query: &connector::DataQuery,
-        catalogs: &HashMap<String, DatabaseCatalog>,
-        wal: &ConcurrentWalManager,
-        runtime_indexes: &RuntimeIndexStore,
+        _catalogs: &HashMap<String, DatabaseCatalog>,
+        _wal: &ConcurrentWalManager,
+        _runtime_indexes: &RuntimeIndexStore,
     ) {
 
         let Ok(read_plan) = serverlib::parse_select_read_plan_from_statement(&query.sql) else {
@@ -277,27 +283,10 @@ impl ServerApp {
             return;
         }
 
-        let Some(catalog) = catalogs.get(&query.database_id) else {
-            return;
-        };
-
-        let Some(schema) = catalog.table_schema(&read_plan.table_id) else {
-            return;
-        };
-
-        let observed_row_ids = serverlib::load_live_rows(wal, &read_plan.table_id, schema)
-            .into_iter()
-            .filter(|(_, row_map)| {
-                serverlib::row_matches_select_condition(
-                    row_map,
-                    read_plan.where_condition.as_ref(),
-                    catalog,
-                    wal,
-                    runtime_indexes,
-                )
-            })
-            .map(|(row_id, _)| row_id)
-            .collect::<HashSet<_>>();
+        // Serializable conflict detection currently operates at table granularity
+        // via has_write_after(table_id, snapshot_epoch_ms), so avoid an additional
+        // full live-row scan here.
+        let observed_row_ids = HashSet::new();
 
         let observations = self
             .tx_read_observations_by_session

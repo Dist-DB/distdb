@@ -575,7 +575,13 @@ impl ServerApp {
 
         let commit_marker_start = Instant::now();
 
-        if let Err(err) = commit_external_write_group(&self.wal, &touched_tables, write_group_id) {
+        if let Err(err) = commit_external_write_group(
+            &self.wal,
+            Some(&self.catalogs),
+            Some(&mut self.runtime_indexes),
+            &touched_tables,
+            write_group_id,
+        ) {
             abort_external_write_group(
                 &self.wal,
                 &self.catalogs,

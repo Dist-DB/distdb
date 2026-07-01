@@ -26,6 +26,10 @@ impl<T> TPHashSet<T> {
         self.items_by_key.len()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &T)> {
+        self.items_by_key.iter()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items_by_key.is_empty()
     }
@@ -54,31 +58,51 @@ impl<T> TPHashSet<T> {
         self.reverse_key_to_key.contains_key(reverse_key)
     }
 
-    pub fn search_prefix(&self, prefix: &str) -> Vec<(&String, &T)> {
-        let upper_bound = Self::prefix_upper_bound(prefix);
+    pub fn search_prefix(&self, prefix: &str, case_insensitive: bool) -> Vec<(&String, &T)> {
+
+        if !case_insensitive {
+            let upper_bound = Self::prefix_upper_bound(prefix);
+
+            return self.items_by_key
+                .range::<String, _>((Bound::Included(prefix.to_string()), Bound::Excluded(upper_bound)))
+                .filter(|(key, _)| key.starts_with(prefix))
+                .collect();
+        }
+
         self.items_by_key
-            .range::<String, _>((Bound::Included(prefix.to_string()), Bound::Excluded(upper_bound)))
-            .filter(|(key, _)| key.starts_with(prefix))
+            .iter()
+            .filter(|(key, _)| Self::starts_with_ignore_ascii_case(key, prefix))
             .collect()
+
     }
 
-    pub fn search_suffix(&self, suffix: &str) -> Vec<(&String, &T)> {
-        let reversed_suffix = Self::reverse_key(suffix);
-        let upper_bound = Self::prefix_upper_bound(&reversed_suffix);
-        self.reverse_key_to_key
-            .range::<String, _>((Bound::Included(reversed_suffix), Bound::Excluded(upper_bound)))
-            .filter_map(|(reverse_key, key)| {
-                if reverse_key.starts_with(&Self::reverse_key(suffix)) {
-                    self.items_by_key.get(key).map(|value| (key, value))
-                } else {
-                    None
-                }
-            })
+    pub fn search_suffix(&self, suffix: &str, case_insensitive: bool) -> Vec<(&String, &T)> {
+
+        if !case_insensitive {
+            let reversed_suffix = Self::reverse_key(suffix);
+            let upper_bound = Self::prefix_upper_bound(&reversed_suffix);
+
+            return self.reverse_key_to_key
+                .range::<String, _>((Bound::Included(reversed_suffix), Bound::Excluded(upper_bound)))
+                .filter_map(|(reverse_key, key)| {
+                    if reverse_key.starts_with(&Self::reverse_key(suffix)) {
+                        self.items_by_key.get(key).map(|value| (key, value))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+
+        self.items_by_key
+            .iter()
+            .filter(|(key, _)| Self::ends_with_ignore_ascii_case(key, suffix))
             .collect()
+
     }
 
     pub fn search_like(&self, pattern: &str) -> Vec<(&String, &T)> {
-        
+
         if pattern.is_empty() {
             return self.items_by_key.iter().collect();
         }
@@ -95,14 +119,14 @@ impl<T> TPHashSet<T> {
             && !pattern[1..].contains('%')
             && !pattern[1..].contains('_')
         {
-            return self.search_suffix(&pattern[1..]);
+            return self.search_suffix(&pattern[1..], false);
         }
 
         if pattern.ends_with('%')
             && !pattern[..pattern.len().saturating_sub(1)].contains('%')
             && !pattern.contains('_')
         {
-            return self.search_prefix(&pattern[..pattern.len().saturating_sub(1)]);
+            return self.search_prefix(&pattern[..pattern.len().saturating_sub(1)], false);
         }
 
         self.items_by_key
@@ -142,6 +166,34 @@ impl<T> TPHashSet<T> {
         upper
     }
 
+    fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+        let value_bytes = value.as_bytes();
+        let prefix_bytes = prefix.as_bytes();
+
+        if prefix_bytes.len() > value_bytes.len() {
+            return false;
+        }
+
+        value_bytes
+            .get(..prefix_bytes.len())
+            .map(|head| head.eq_ignore_ascii_case(prefix_bytes))
+            .unwrap_or(false)
+    }
+
+    fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
+        let value_bytes = value.as_bytes();
+        let suffix_bytes = suffix.as_bytes();
+
+        if suffix_bytes.len() > value_bytes.len() {
+            return false;
+        }
+
+        value_bytes
+            .get(value_bytes.len().saturating_sub(suffix_bytes.len())..)
+            .map(|tail| tail.eq_ignore_ascii_case(suffix_bytes))
+            .unwrap_or(false)
+    }
+
     fn like_matches(actual: &str, pattern: &str) -> bool {
         let actual_chars = actual.chars().collect::<Vec<_>>();
         let pattern_chars = pattern.chars().collect::<Vec<_>>();
@@ -149,26 +201,30 @@ impl<T> TPHashSet<T> {
     }
 
     fn like_matches_chars(actual: &[char], pattern: &[char]) -> bool {
+
         let mut actual_index = 0usize;
         let mut pattern_index = 0usize;
         let mut last_percent_index: Option<usize> = None;
         let mut retry_index = 0usize;
 
         while actual_index < actual.len() {
+
             if pattern_index < pattern.len() {
+
                 match pattern[pattern_index] {
+                    
                     '_' => {
                         actual_index += 1;
                         pattern_index += 1;
                         continue;
-                    }
+                    },
 
                     '%' => {
                         last_percent_index = Some(pattern_index);
                         pattern_index += 1;
                         retry_index = actual_index;
                         continue;
-                    }
+                    },
 
                     expected => {
                         if actual[actual_index] == expected {
@@ -177,7 +233,9 @@ impl<T> TPHashSet<T> {
                             continue;
                         }
                     }
+                
                 }
+
             }
 
             if let Some(percent_index) = last_percent_index {
@@ -236,6 +294,21 @@ mod tests {
     }
 
     #[test]
+    fn prefix_search_can_ignore_ascii_case() {
+        let mut set = TPHashSet::new();
+        set.insert("Amsterdam".to_string(), 1);
+        set.insert("amstel".to_string(), 2);
+        set.insert("Rotterdam".to_string(), 3);
+
+        let keys = set
+            .search_prefix("ams", true)
+            .into_iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["Amsterdam".to_string(), "amstel".to_string()]);
+    }
+
+    #[test]
     fn suffix_search_uses_reverse_index() {
         let mut set = TPHashSet::new();
         set.insert("amsterdam".to_string(), 1);
@@ -244,6 +317,22 @@ mod tests {
 
         let keys = set.search_like_keys("%dam");
         assert_eq!(keys, vec!["dam".to_string(), "amsterdam".to_string(), "rotterdam".to_string()]);
+    }
+
+    #[test]
+    fn suffix_search_can_ignore_ascii_case() {
+        let mut set = TPHashSet::new();
+        set.insert("AmsterDAM".to_string(), 1);
+        set.insert("rotterDam".to_string(), 2);
+        set.insert("Case".to_string(), 3);
+
+        let keys = set
+            .search_suffix("dam", true)
+            .into_iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["AmsterDAM".to_string(), "rotterDam".to_string()]);
     }
 
     #[test]

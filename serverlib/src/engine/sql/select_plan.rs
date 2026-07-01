@@ -1678,7 +1678,7 @@ fn parse_select_condition_expression(
             expr,
             pattern,
             *negated,
-            false,
+            true,
             escape_char.as_deref(),
             relation_bindings,
         ),
