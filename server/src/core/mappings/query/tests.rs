@@ -11,6 +11,7 @@ use serverlib::{
 use super::*;
 
 fn test_node_data_dir() -> PathBuf {
+    
     let dir = std::env::temp_dir().join(format!(
         "distdb-query-tests-{}-{}",
         std::process::id(),
@@ -19,9 +20,11 @@ fn test_node_data_dir() -> PathBuf {
 
     std::fs::create_dir_all(&dir).expect("test data dir should be created");
     dir
+
 }
 
 fn query_result_rows(response: connector::ConnectorResponse) -> Vec<Vec<String>> {
+
     let ConnectorResult::Query(result) = response.result else {
         panic!("expected query response")
     };
@@ -35,14 +38,17 @@ fn query_result_rows(response: connector::ConnectorResponse) -> Vec<Vec<String>>
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>()
+
 }
 
 fn query_result_columns(response: connector::ConnectorResponse) -> Vec<connector::FieldDef> {
+
     let ConnectorResult::Query(result) = response.result else {
         panic!("expected query response")
     };
 
     result.columns
+    
 }
 
 #[test]
@@ -150,6 +156,96 @@ fn select_from_dotted_table_without_active_database_resolves_catalog_prefix() {
     );
     let rows = query_result_rows(response);
     assert!(rows.is_empty());
+}
+
+#[test]
+fn select_from_dotted_table_with_active_database_strips_matching_prefix() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("locations").expect("catalog should be created");
+    catalog
+        .register_table("places", TableSchema::new(Vec::new()))
+        .expect("table should be created");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(catalog.database_id.0.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "locations".to_string(),
+        sql: "select * from locations.places".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-dotted-select-active-db",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+    let rows = query_result_rows(response);
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn create_view_persists_dependencies_from_view_body() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let database_id = catalog.database_id.0.clone();
+    catalog
+        .register_table("users", TableSchema::new(Vec::new()))
+        .expect("table should be created");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(database_id.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "create view users_v as select * from users".to_string(),
+    };
+    let request = serverlib::SqlRequest {
+        database_id: data_query.database_id.clone(),
+        sql: data_query.sql.clone(),
+        parsed_statement: None,
+        parsed_insert_plan: None,
+        directive: serverlib::SqlDirective::Create,
+        operation: serverlib::SqlOperation::CreateView,
+        object_name: Some("users_v".to_string()),
+        compatibility_target: serverlib::engine::sql::DEFAULT_SQL_COMPATIBILITY_TARGET,
+    };
+
+    let response = super::core::execute_create_view_impl(
+        "req-create-view",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &request,
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let catalog = catalogs
+        .get(&database_id)
+        .expect("catalog should still exist after view creation");
+    let view = catalog.view("users_v").expect("view should exist");
+
+    assert_eq!(view.dependencies, vec!["users".to_string()]);
 }
 
 #[test]

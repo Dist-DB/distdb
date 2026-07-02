@@ -720,7 +720,7 @@ fn execute_drop_entity_object(
 
 }
 
-pub(super) fn execute_create_view_impl(
+pub(crate) fn execute_create_view_impl(
     request_id: &str,
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
@@ -741,6 +741,19 @@ pub(super) fn execute_create_view_impl(
             request_id.to_string(),
             format!("database '{}' not found", query.database_id),
         );
+    };
+
+    let dependencies = match serverlib::parse_create_view_dependencies_from_sql(&statement.sql) {
+        
+        Ok(dependencies) => dependencies,
+        
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create view dependency parse failed: {err}"),
+            );
+        }
+
     };
 
     let wal_id = catalog.database_id.0.clone();
@@ -769,6 +782,18 @@ pub(super) fn execute_create_view_impl(
                 return ConnectorResponse::rejected(request_id.to_string(), err);
             }
 
+            if let Err(err) = catalog.set_sql_definition(
+                view_id,
+                SqlObjectKind::View,
+                statement.sql.clone(),
+                dependencies.clone(),
+            ) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create view definition apply failed: {err}"),
+                );
+            }
+
             if let Err(err) = append_sql_definition_upsert_with_wal(
                 catalog,
                 wal,
@@ -777,6 +802,7 @@ pub(super) fn execute_create_view_impl(
                 view_id,
                 SqlObjectKind::View,
                 &statement.sql,
+                dependencies,
                 created_at,
                 "create view",
             ) {
@@ -880,6 +906,7 @@ pub(super) fn execute_create_trigger_impl(
         trigger_id,
         SqlObjectKind::Trigger,
         &statement.sql,
+        Vec::new(),
         created_at,
         "create trigger",
     ) {
@@ -897,6 +924,7 @@ pub(super) fn execute_create_trigger_impl(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+    
 }
 
 pub(super) fn execute_create_stored_procedure_impl(
@@ -974,6 +1002,7 @@ pub(super) fn execute_create_stored_procedure_impl(
         procedure_id,
         SqlObjectKind::StoredProcedure,
         &statement.sql,
+        Vec::new(),
         created_at,
         "create procedure",
     ) {
@@ -1066,6 +1095,7 @@ fn append_sql_definition_upsert_with_wal(
     object_id: &str,
     object_kind: SqlObjectKind,
     sql: &str,
+    dependencies: Vec<String>,
     created_at: u64,
     operation_label: &str,
 ) -> Result<(), String> {
@@ -1076,7 +1106,7 @@ fn append_sql_definition_upsert_with_wal(
         action: SqlDefinitionAction::Upsert,
         schema_epoch: catalog.schema_epoch(),
         sql: sql.to_string(),
-        dependencies: Vec::new(),
+        dependencies,
     };
 
     let encoded = payload

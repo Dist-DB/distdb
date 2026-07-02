@@ -118,6 +118,10 @@ pub use engine::database::transaction::
 	encode_wal_frame, decode_wal_frame,
 };
 
+pub use engine::sql::{
+	parse_create_view_dependencies_from_sql, parse_create_view_dependencies_from_statement,
+};
+
 pub use engine::affinity::{
 	AffinityDocument, AffinityMember, AffinityMemberStatus, AffinityProcessor,
 	AffinityProcessorError, AffinityProcessorState, AffinitySyncPhase, AffinitySyncStep,

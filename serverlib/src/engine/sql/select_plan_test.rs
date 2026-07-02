@@ -89,7 +89,20 @@ fn select_projection_only_order_by_unknown_alias_is_rejected() {
 }
 
 #[test]
+fn create_view_dependency_extraction_collects_base_table() {
+
+    let dependencies = parse_create_view_dependencies_from_sql(
+        "create view users_v as select * from users",
+    )
+    .expect("create view dependencies should parse");
+
+    assert_eq!(dependencies, vec!["users".to_string()]);
+
+}
+
+#[test]
 fn union_select_parses_branch_plans_and_quantifier() {
+
     let (steps, order_by, limit, offset) = parse_union_select_read_plans_from_statement(
         "select id from users union all select id from archived_users",
     )
@@ -105,10 +118,12 @@ fn union_select_parses_branch_plans_and_quantifier() {
     assert_eq!(offset, None);
     assert_eq!(branch_plans[0].table_id, "users");
     assert_eq!(branch_plans[1].table_id, "archived_users");
+
 }
 
 #[test]
 fn union_select_parses_mixed_quantifiers_and_query_level_windowing() {
+
     let (steps, order_by, limit, offset) =
         parse_union_select_read_plans_from_statement(
             "select id from users union all select id from archived_users union select id from users order by id desc limit 5 offset 1",
@@ -131,6 +146,7 @@ fn union_select_parses_mixed_quantifiers_and_query_level_windowing() {
     assert!(order_by[0].descending);
     assert_eq!(limit, Some(5));
     assert_eq!(offset, Some(1));
+    
 }
 
 #[test]

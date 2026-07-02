@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::{
     BinaryOperator, Expr, GroupByExpr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr,
@@ -53,6 +53,39 @@ pub fn parse_select_read_plan_from_statement(
     };
 
     parse_select_read_plan_from_query(query, is_explain)
+}
+
+pub fn parse_create_view_dependencies_from_statement(
+    statement: &Statement,
+) -> Result<Vec<String>, SqlParseError> {
+
+    let Statement::CreateView { query, .. } = statement else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not CREATE VIEW".to_string(),
+        ));
+    };
+
+    let plan = parse_select_read_plan_from_query(query.as_ref(), false)?;
+
+    Ok(collect_select_plan_dependencies(&plan))
+
+}
+
+pub fn parse_create_view_dependencies_from_sql(
+    statement: &str,
+) -> Result<Vec<String>, SqlParseError> {
+
+    let parsed = parse_mysql_statements(statement)?;
+    let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
+
+    if parsed.len() > 1 {
+        return Err(SqlParseError::UnsupportedStatement(
+            "expected a single CREATE VIEW statement".to_string(),
+        ));
+    }
+
+    parse_create_view_dependencies_from_statement(single)
+
 }
 
 pub(super) fn parse_select_read_plan_from_query(
@@ -316,7 +349,7 @@ fn parse_group_by_fields(
     group_by: &GroupByExpr,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<Vec<String>, SqlParseError> {
-    
+
     match group_by {
 
         GroupByExpr::All(_) => Err(SqlParseError::UnsupportedStatement(
@@ -340,6 +373,54 @@ fn parse_group_by_fields(
         },
 
     }
+
+}
+
+
+fn collect_select_plan_dependencies(plan: &SelectReadPlan) -> Vec<String> {
+
+    let mut seen = HashSet::new();
+    let mut dependencies = Vec::new();
+
+    collect_select_plan_dependencies_into(plan, &mut seen, &mut dependencies);
+
+    dependencies
+
+}
+
+fn collect_select_plan_dependencies_into(
+    plan: &SelectReadPlan,
+    seen: &mut HashSet<String>,
+    dependencies: &mut Vec<String>,
+) {
+
+    push_select_plan_dependency(&plan.table_id, seen, dependencies);
+
+    for relation in &plan.relations {
+        push_select_plan_dependency(&relation.table_id, seen, dependencies);
+    }
+
+    for join in &plan.joins {
+        push_select_plan_dependency(&join.relation.table_id, seen, dependencies);
+    }
+
+    for cte in &plan.ctes {
+        collect_select_plan_dependencies_into(&cte.read_plan, seen, dependencies);
+    }
+
+}
+
+fn push_select_plan_dependency(
+    dependency: &str,
+    seen: &mut HashSet<String>,
+    dependencies: &mut Vec<String>,
+) {
+
+    if dependency.is_empty() || !seen.insert(dependency.to_string()) {
+        return;
+    }
+
+    dependencies.push(dependency.to_string());
 
 }
 
@@ -604,13 +685,14 @@ fn collect_set_query_steps(
             collect_set_query_steps(right, inherited_with, steps)?;
 
             let boundary_operation = match op {
+
                 SetOperator::Union => {
                     if matches!(set_quantifier, SetQuantifier::All) {
                         SelectSetBoundaryOp::UnionAll
                     } else {
                         SelectSetBoundaryOp::UnionDistinct
                     }
-                }
+                },
 
                 SetOperator::Except => {
                     if matches!(set_quantifier, SetQuantifier::All) {
@@ -620,7 +702,7 @@ fn collect_set_query_steps(
                     }
 
                     SelectSetBoundaryOp::ExceptDistinct
-                }
+                },
 
                 SetOperator::Intersect => {
                     if matches!(set_quantifier, SetQuantifier::All) {
@@ -630,7 +712,8 @@ fn collect_set_query_steps(
                     }
 
                     SelectSetBoundaryOp::IntersectDistinct
-                }
+                },
+
             };
 
             steps.push(SelectSetQueryStep::BoundaryOperation(boundary_operation));
@@ -642,9 +725,10 @@ fn collect_set_query_steps(
             let branch_plan = parse_union_branch_set_expr(set_expr, inherited_with)?;
             steps.push(SelectSetQueryStep::Branch(branch_plan));
             Ok(())
-        }
+        },
 
         SetExpr::Query(query) => {
+
             let query = query.as_ref();
 
             if matches!(query.body.as_ref(), SetExpr::SetOperation { .. }) {
@@ -668,7 +752,7 @@ fn collect_set_query_steps(
                 steps.push(SelectSetQueryStep::Branch(branch_plan));
                 Ok(())
             }
-        }
+        },
 
         _ => Err(SqlParseError::UnsupportedStatement(
             "set query branch must be a SELECT query".to_string(),
@@ -677,6 +761,7 @@ fn collect_set_query_steps(
     }
 
 }
+
 fn parse_union_branch_set_expr(
     set_expr: &SetExpr,
     inherited_with: Option<&With>,
@@ -722,6 +807,7 @@ fn parse_union_branch_set_expr(
 fn parse_union_order_by_items(
     order_by: Option<&sqlparser::ast::OrderBy>,
 ) -> Result<Vec<SelectOrderByItem>, SqlParseError> {
+
     const UNION_ORDER_BY_ORDINAL_PREFIX: &str = "__union_order_by_ordinal__";
 
     let Some(order_by) = order_by else {
@@ -735,7 +821,9 @@ fn parse_union_order_by_items(
     }
 
     let mut items = Vec::with_capacity(order_by.exprs.len());
+
     for expression in &order_by.exprs {
+
         if expression.nulls_first.is_some() || expression.with_fill.is_some() {
             return Err(SqlParseError::UnsupportedStatement(
                 "UNION ORDER BY NULLS FIRST/LAST or WITH FILL is not supported yet".to_string(),
@@ -743,6 +831,7 @@ fn parse_union_order_by_items(
         }
 
         let field_name = match &expression.expr {
+
             Expr::Identifier(identifier) => common::normalize_identifier!(&identifier.value),
 
             Expr::CompoundIdentifier(parts) if !parts.is_empty() => {
@@ -753,9 +842,10 @@ fn parse_union_order_by_items(
                         .collect::<Vec<_>>()
                         .join(".")
                 )
-            }
+            },
 
             Expr::Value(sqlparser::ast::Value::Number(position, _)) => {
+
                 let position = position.parse::<usize>().map_err(|_| {
                     SqlParseError::UnsupportedStatement(
                         "UNION ORDER BY ordinal must be an unsigned numeric literal".to_string(),
@@ -769,7 +859,7 @@ fn parse_union_order_by_items(
                 }
 
                 format!("{UNION_ORDER_BY_ORDINAL_PREFIX}{position}")
-            }
+            },
 
             _ => {
                 return Err(SqlParseError::UnsupportedStatement(
@@ -777,15 +867,18 @@ fn parse_union_order_by_items(
                         .to_string(),
                 ));
             }
+
         };
 
         items.push(SelectOrderByItem {
             field_name,
             descending: expression.asc == Some(false),
         });
+
     }
 
     Ok(items)
+
 }
 
 fn parse_passthrough_derived_select_plan(
@@ -832,6 +925,7 @@ fn parse_passthrough_derived_select_plan(
     let projection_map = passthrough_projection_map(&inner_plan)?;
 
     if !is_wildcard_passthrough {
+
         let derived_binding = SelectRelationBinding {
             table_id: alias_name
                 .clone()
@@ -857,11 +951,14 @@ fn parse_passthrough_derived_select_plan(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
+
         inner_plan.projection_items = rewritten_projection_items;
         inner_plan.projection_is_wildcard = false;
+
     }
 
     if let Some(selection) = select.selection.as_ref() {
+
         let derived_binding = SelectRelationBinding {
             table_id: alias_name
                 .clone()
@@ -895,6 +992,7 @@ fn parse_passthrough_derived_select_plan(
             &inner_plan.relations,
             &inner_plan.joins,
         );
+
     }
 
     let outer_limit = parse_query_limit(query.limit.as_ref())?;
@@ -913,6 +1011,7 @@ fn parse_passthrough_derived_select_plan(
     }
 
     Ok(Some(inner_plan))
+
 }
 
 fn rewrite_passthrough_outer_projection_items(
@@ -920,12 +1019,15 @@ fn rewrite_passthrough_outer_projection_items(
     relation_bindings: &[SelectRelationBinding],
     projection_map: &HashMap<String, String>,
 ) -> Result<Vec<SelectProjectionItem>, SqlParseError> {
+
     projection_items
         .iter()
         .map(|item| {
+
             let projection_item = parse_select_projection_item(item, relation_bindings)?;
 
             match projection_item {
+
                 SelectProjectionItem::Column {
                     field_name,
                     output_name,
@@ -933,21 +1035,26 @@ fn rewrite_passthrough_outer_projection_items(
                     field_name: rewrite_passthrough_field_name(&field_name, projection_map)?,
                     output_name,
                 }),
+
                 _ => Err(SqlParseError::UnsupportedStatement(
                     "derived wrapper projection currently supports only direct outer column projections"
                         .to_string(),
                 )),
             }
+
         })
         .collect::<Result<Vec<_>, _>>()
+
 }
 
 fn passthrough_projection_map(
     inner_plan: &SelectReadPlan,
 ) -> Result<HashMap<String, String>, SqlParseError> {
+
     let mut projection_map = HashMap::new();
 
     for item in &inner_plan.projection_items {
+
         let SelectProjectionItem::Column {
             field_name,
             output_name,
@@ -970,13 +1077,16 @@ fn passthrough_projection_map(
     }
 
     Ok(projection_map)
+
 }
 
 fn rewrite_passthrough_outer_condition(
     condition: &SelectCondition,
     projection_map: &HashMap<String, String>,
 ) -> Result<SelectCondition, SqlParseError> {
+
     match condition {
+
         SelectCondition::And(children) => Ok(SelectCondition::And(
             children
                 .iter()
@@ -998,14 +1108,18 @@ fn rewrite_passthrough_outer_condition(
         SelectCondition::Predicate(predicate) => Ok(SelectCondition::Predicate(
             rewrite_passthrough_outer_predicate(predicate, projection_map)?,
         )),
+
     }
+
 }
 
 fn rewrite_passthrough_outer_predicate(
     predicate: &SelectPredicate,
     projection_map: &HashMap<String, String>,
 ) -> Result<SelectPredicate, SqlParseError> {
+
     match predicate {
+
         SelectPredicate::Comparison {
             field_name,
             op,
@@ -1111,13 +1225,16 @@ fn rewrite_passthrough_outer_predicate(
             subquery: subquery.clone(),
             negated: *negated,
         }),
+
     }
+
 }
 
 fn rewrite_passthrough_field_name(
     field_name: &str,
     projection_map: &HashMap<String, String>,
 ) -> Result<String, SqlParseError> {
+
     let output_name = field_name
         .split_once('.')
         .map(|(_, output_name)| output_name)
@@ -1129,6 +1246,7 @@ fn rewrite_passthrough_field_name(
             output_name
         ))
     })
+
 }
 
 fn compose_row_windows(
@@ -1137,8 +1255,10 @@ fn compose_row_windows(
     outer_limit: Option<usize>,
     outer_offset: Option<usize>,
 ) -> (Option<usize>, Option<usize>) {
+
     let resolved_inner_offset = inner_offset.unwrap_or(0);
     let resolved_outer_offset = outer_offset.unwrap_or(0);
+    
     let offset = if inner_offset.is_some() || outer_offset.is_some() {
         Some(resolved_inner_offset.saturating_add(resolved_outer_offset))
     } else {
@@ -1157,12 +1277,14 @@ fn compose_row_windows(
     };
 
     (limit, offset)
+
 }
 
 fn parse_select_projection_item(
     item: &SelectItem,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<SelectProjectionItem, SqlParseError> {
+
     let dialect_capabilities = dialect_capabilities_for_target(DEFAULT_SQL_COMPATIBILITY_TARGET);
 
     match item {
@@ -1305,6 +1427,7 @@ fn parse_case_projection_item(
     relation_bindings: &[SelectRelationBinding],
     dialect_capabilities: super::SqlDialectCapabilities,
 ) -> Result<SelectProjectionItem, SqlParseError> {
+
     if !dialect_capabilities.supports_searched_case_expressions {
         return Err(SqlParseError::UnsupportedStatement(
             "CASE expressions are not supported for this SQL compatibility target".to_string(),
@@ -1331,7 +1454,9 @@ fn parse_case_projection_item(
     }
 
     let mut branches = Vec::with_capacity(conditions.len());
+
     for (condition_expr, result_expr) in conditions.iter().zip(results.iter()) {
+
         if parsed_operand.is_some() {
             branches.push((
                 SelectCaseWhen::Equals(parse_case_projection_value(
@@ -1349,6 +1474,7 @@ fn parse_case_projection_item(
                 parse_case_projection_value(result_expr, relation_bindings)?,
             ));
         }
+
     }
 
     let else_value = else_result
@@ -1361,13 +1487,16 @@ fn parse_case_projection_item(
         branches,
         else_value,
     })
+
 }
 
 fn parse_case_projection_value(
     expression: &Expr,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<SelectExpression, SqlParseError> {
+
     match expression {
+
         Expr::Value(value) => Ok(match parse_default_value(value.to_string()) {
             Some(value) => SelectExpression::Literal(value),
             None => SelectExpression::Null,
@@ -1403,19 +1532,22 @@ fn parse_case_projection_value(
         _ => Err(SqlParseError::UnsupportedStatement(
             "CASE expressions currently support only literals, direct columns, and inbuilt functions".to_string(),
         )),
+
     }
+
 }
 
 fn ensure_condition_has_no_subqueries(
     condition: &SelectCondition,
     location: &str,
 ) -> Result<(), SqlParseError> {
+
     match condition {
+
         SelectCondition::And(children) | SelectCondition::Or(children) => {
             for child in children {
                 ensure_condition_has_no_subqueries(child, location)?;
             }
-
             Ok(())
         }
 
@@ -1432,7 +1564,9 @@ fn ensure_condition_has_no_subqueries(
 
             _ => Ok(()),
         },
+    
     }
+
 }
 
 fn is_inbuilt_projection_item(item: &SelectProjectionItem) -> bool {
@@ -1510,17 +1644,20 @@ fn flatten_and_clauses(condition: &SelectCondition) -> Vec<&SelectCondition> {
 }
 
 fn combine_conditions(conditions: Vec<SelectCondition>) -> Option<SelectCondition> {
+
     match conditions.len() {
         0 => None,
         1 => conditions.into_iter().next(),
         _ => Some(SelectCondition::And(conditions)),
     }
+
 }
 
 fn relation_index_for_condition(
     condition: &SelectCondition,
     relation_bindings: &[SelectRelationBinding],
 ) -> Option<usize> {
+
     let field_name = match condition {
         SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. })
         | SelectCondition::Predicate(SelectPredicate::Like { field_name, .. })
@@ -1540,6 +1677,7 @@ fn relation_index_for_condition(
     relation_bindings.iter().position(|binding| {
         binding.alias.as_deref() == Some(qualifier) || binding.table_id == qualifier
     })
+
 }
 
 fn is_safe_relation_pushdown(relation_index: usize, joins: &[SelectJoin]) -> bool {
@@ -1551,7 +1689,9 @@ fn is_safe_relation_pushdown(relation_index: usize, joins: &[SelectJoin]) -> boo
 }
 
 fn localize_condition_for_relation(condition: &SelectCondition) -> Option<SelectCondition> {
+
     match condition {
+
         SelectCondition::Predicate(SelectPredicate::Comparison {
             field_name,
             op,
@@ -1710,20 +1850,24 @@ fn parse_select_condition_expression(
         ),
 
         Expr::BinaryOp { left, op, right } => match op {
+
             BinaryOperator::And => Ok(SelectCondition::And(vec![
                 parse_select_condition_expression(left, relation_bindings)?,
                 parse_select_condition_expression(right, relation_bindings)?,
             ])),
+            
             BinaryOperator::Or => Ok(SelectCondition::Or(vec![
                 parse_select_condition_expression(left, relation_bindings)?,
                 parse_select_condition_expression(right, relation_bindings)?,
             ])),
+
             BinaryOperator::Eq
             | BinaryOperator::NotEq
             | BinaryOperator::Gt
             | BinaryOperator::GtEq
             | BinaryOperator::Lt
             | BinaryOperator::LtEq => {
+
                 let op = parse_select_comparison_op(op)?;
 
                 let left_field_name = parse_condition_column_name(left, relation_bindings);
@@ -1781,9 +1925,11 @@ fn parse_select_condition_expression(
                     )),
                 }
             }
+            
             _ => Err(SqlParseError::UnsupportedStatement(
                 "WHERE operator is not supported yet".to_string(),
             )),
+
         },
 
         Expr::AnyOp {
@@ -1791,6 +1937,7 @@ fn parse_select_condition_expression(
             compare_op,
             right,
         } => {
+
             let field_name = parse_condition_column_name(left, relation_bindings)?;
             let op = parse_select_comparison_op(compare_op)?;
             let Some(subquery_plan) = parse_single_column_subquery_plan(
@@ -1808,7 +1955,8 @@ fn parse_select_condition_expression(
                 op,
                 subquery: Box::new(subquery_plan),
             }))
-        }
+
+        },
 
         Expr::AllOp {
             left,
@@ -1832,7 +1980,7 @@ fn parse_select_condition_expression(
                 op,
                 subquery: Box::new(subquery_plan),
             }))
-        }
+        },
 
         Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
@@ -1879,7 +2027,7 @@ fn parse_select_condition_expression(
                 subquery: Box::new(subquery_plan),
                 negated: *negated,
             }))
-        }
+        },
 
         Expr::Exists { subquery, negated } => {
             let subquery_plan = parse_select_read_plan_from_query(subquery.as_ref(), false)?;
@@ -1888,7 +2036,7 @@ fn parse_select_condition_expression(
                 subquery: Box::new(subquery_plan),
                 negated: *negated,
             }))
-        }
+        },
 
         Expr::IsNull(expr) => Ok(SelectCondition::Predicate(SelectPredicate::IsNull {
             field_name: parse_condition_column_name(expr, relation_bindings)?,
@@ -1928,7 +2076,7 @@ fn parse_select_condition_expression(
             } else {
                 Ok(between)
             }
-        }
+        },
 
         _ => Err(SqlParseError::UnsupportedStatement(
             "WHERE expression is not supported yet".to_string(),
@@ -1979,6 +2127,7 @@ fn parse_single_column_subquery_plan(
     expression: &Expr,
     message: &str,
 ) -> Result<Option<SelectReadPlan>, SqlParseError> {
+
     let expression = unwrap_nested_expression(expression);
 
     let Expr::Subquery(subquery) = expression else {
@@ -1994,10 +2143,13 @@ fn parse_single_column_subquery_plan(
     }
 
     Ok(Some(subquery_plan))
+
 }
 
 fn parse_select_comparison_op(op: &BinaryOperator) -> Result<SelectComparisonOp, SqlParseError> {
+
     match op {
+
         BinaryOperator::Eq => Ok(SelectComparisonOp::Eq),
         BinaryOperator::NotEq => Ok(SelectComparisonOp::NotEq),
         BinaryOperator::Gt => Ok(SelectComparisonOp::Gt),
@@ -2007,10 +2159,13 @@ fn parse_select_comparison_op(op: &BinaryOperator) -> Result<SelectComparisonOp,
         _ => Err(SqlParseError::UnsupportedStatement(
             "WHERE comparison operator is not supported yet".to_string(),
         )),
+    
     }
+
 }
 
 fn reverse_select_comparison_op(op: &SelectComparisonOp) -> SelectComparisonOp {
+
     match op {
         SelectComparisonOp::Eq => SelectComparisonOp::Eq,
         SelectComparisonOp::NotEq => SelectComparisonOp::NotEq,
@@ -2019,6 +2174,7 @@ fn reverse_select_comparison_op(op: &SelectComparisonOp) -> SelectComparisonOp {
         SelectComparisonOp::Lt => SelectComparisonOp::Gt,
         SelectComparisonOp::Lte => SelectComparisonOp::Gte,
     }
+
 }
 
 fn parse_like_condition_expression(
@@ -2046,6 +2202,7 @@ fn parse_like_condition_expression(
 }
 
 fn parse_like_escape_character(escape_char: Option<&str>) -> Result<Option<char>, SqlParseError> {
+
     let Some(raw_escape) = escape_char else {
         return Ok(None);
     };
@@ -2076,9 +2233,11 @@ fn parse_like_escape_character(escape_char: Option<&str>) -> Result<Option<char>
     }
 
     Ok(Some(escape))
+
 }
 
 fn supports_single_column_subquery(subquery_plan: &SelectReadPlan) -> bool {
+
     if subquery_plan.projection_items.len() != 1 {
         return false;
     }
@@ -2091,6 +2250,7 @@ fn supports_single_column_subquery(subquery_plan: &SelectReadPlan) -> bool {
                 | SelectProjectionItem::Case { .. }
         )
     )
+
 }
 
 fn parse_query_limit(limit: Option<&Expr>) -> Result<Option<usize>, SqlParseError> {
@@ -2113,6 +2273,7 @@ fn parse_unsigned_numeric_expression(
     expression: &Expr,
     clause_name: &str,
 ) -> Result<usize, SqlParseError> {
+
     let expression = unwrap_nested_expression(expression);
 
     let Expr::Value(sqlparser::ast::Value::Number(value, _)) = expression else {
@@ -2126,6 +2287,7 @@ fn parse_unsigned_numeric_expression(
             "{clause_name} value '{value}' is out of range"
         ))
     })
+
 }
 
 fn parse_regex_condition_expression(
@@ -2228,31 +2390,38 @@ pub fn parse_joins_from_table_with_joins(
             .ok_or_else(|| SqlParseError::UnsupportedStatement(statement.to_string()))?;
 
         let (kind, on_condition) = match &join.join_operator {
+            
             JoinOperator::Inner(JoinConstraint::On(expr)) => {
                 (SelectJoinKind::Inner, parse_join_on_expression(expr, &available, &relation)?)
-            }
+            },
+
             JoinOperator::LeftOuter(JoinConstraint::On(expr)) => {
                 (SelectJoinKind::Left, parse_join_on_expression(expr, &available, &relation)?)
-            }
+            },
+            
             JoinOperator::RightOuter(JoinConstraint::On(expr)) => {
                 (SelectJoinKind::Right, parse_join_on_expression(expr, &available, &relation)?)
-            }
+            },
+            
             JoinOperator::FullOuter(JoinConstraint::On(expr)) => {
                 (SelectJoinKind::Full, parse_join_on_expression(expr, &available, &relation)?)
-            }
+            },
 
             JoinOperator::Inner(JoinConstraint::Using(attrs)) => {
                 (SelectJoinKind::Inner, parse_join_using_expression(attrs, &available, &relation)?)
-            }
+            },
+            
             JoinOperator::LeftOuter(JoinConstraint::Using(attrs)) => {
                 (SelectJoinKind::Left, parse_join_using_expression(attrs, &available, &relation)?)
-            }
+            },
+            
             JoinOperator::RightOuter(JoinConstraint::Using(attrs)) => {
                 (SelectJoinKind::Right, parse_join_using_expression(attrs, &available, &relation)?)
-            }
+            },
+
             JoinOperator::FullOuter(JoinConstraint::Using(attrs)) => {
                 (SelectJoinKind::Full, parse_join_using_expression(attrs, &available, &relation)?)
-            }
+            },
 
             JoinOperator::CrossJoin => (SelectJoinKind::Cross, SelectCondition::And(Vec::new())),
 
@@ -2262,6 +2431,7 @@ pub fn parse_joins_from_table_with_joins(
                         .to_string(),
                 ));
             }
+
         };
 
         joins.push(SelectJoin {
@@ -2295,6 +2465,7 @@ fn parse_join_using_expression(
     left_relations: &[SelectRelationBinding],
     right_relation: &SelectRelationBinding,
 ) -> Result<SelectCondition, SqlParseError> {
+
     if attrs.is_empty() {
         return Err(SqlParseError::UnsupportedStatement(
             "JOIN USING requires at least one column".to_string(),
@@ -2324,6 +2495,7 @@ fn parse_join_using_expression(
         1 => conditions.into_iter().next().expect("one condition should exist"),
         _ => SelectCondition::And(conditions),
     })
+
 }
 
 fn parse_join_field_name(
@@ -2331,6 +2503,7 @@ fn parse_join_field_name(
     relation_bindings: &[SelectRelationBinding],
     location: &str,
 ) -> Result<String, SqlParseError> {
+
     let expression = unwrap_nested_expression(expression);
 
     let Expr::CompoundIdentifier(parts) = expression else {
@@ -2348,6 +2521,7 @@ fn parse_qualified_field_name(
     relation_bindings: &[SelectRelationBinding],
     location: &str,
 ) -> Result<String, SqlParseError> {
+
     if parts.len() == 1 {
         ensure_unqualified_allowed(relation_bindings, &parts[0].value, location)?;
         return Ok(common::normalize_identifier!(&parts[0].value));
@@ -2365,6 +2539,7 @@ fn parse_qualified_field_name(
     }
 
     parse_join_qualified_field_name(parts, relation_bindings, location)
+
 }
 
 fn parse_join_qualified_field_name(
@@ -2372,6 +2547,7 @@ fn parse_join_qualified_field_name(
     relation_bindings: &[SelectRelationBinding],
     location: &str,
 ) -> Result<String, SqlParseError> {
+
     if parts.len() != 2 {
         return Err(SqlParseError::UnsupportedStatement(format!(
             "invalid compound identifier in {location}"
@@ -2379,13 +2555,16 @@ fn parse_join_qualified_field_name(
     }
 
     let qualifier = validate_qualifier(&parts[0].value, relation_bindings, location)?;
+    
     Ok(format!("{}.{}", qualifier, common::normalize_identifier!(&parts[1].value)))
+
 }
 
 fn validate_qualified_prefix(
     prefix: &sqlparser::ast::ObjectName,
     relation_bindings: &[SelectRelationBinding],
 ) -> Result<String, SqlParseError> {
+
     let parts = &prefix.0;
 
     if parts.len() != 1 {
@@ -2395,6 +2574,7 @@ fn validate_qualified_prefix(
     }
 
     validate_qualifier(&parts[0].value, relation_bindings, "SELECT wildcard")
+
 }
 
 fn validate_qualifier(
@@ -2402,6 +2582,7 @@ fn validate_qualifier(
     relation_bindings: &[SelectRelationBinding],
     location: &str,
 ) -> Result<String, SqlParseError> {
+
     if relation_bindings.is_empty() {
         return Err(SqlParseError::UnsupportedStatement(format!(
             "qualified reference '{}' in {} requires FROM relation",
@@ -2427,6 +2608,7 @@ fn validate_qualifier(
         "unknown relation qualifier '{}' in {}",
         qualifier, location
     )))
+
 }
 
 fn relation_lookup_key(binding: &SelectRelationBinding) -> String {
@@ -2438,6 +2620,7 @@ fn ensure_unqualified_allowed(
     field_name: &str,
     location: &str,
 ) -> Result<(), SqlParseError> {
+
     if relation_bindings.len() > 1 {
         return Err(SqlParseError::UnsupportedStatement(format!(
             "{} requires qualified column '{}' when JOIN is present",
@@ -2446,6 +2629,7 @@ fn ensure_unqualified_allowed(
     }
 
     Ok(())
+    
 }
 
 fn parse_condition_literal_value(expression: &Expr) -> Result<Vec<u8>, SqlParseError> {

@@ -290,7 +290,13 @@ pub(super) fn execute_select_impl(
             );
         };
 
-        (catalog, read_plan)
+        let mut normalized_read_plan = read_plan;
+        normalize_select_read_plan_for_active_database(
+            &mut normalized_read_plan,
+            &query.database_id,
+        );
+
+        (catalog, normalized_read_plan)
 
     };
 
@@ -520,6 +526,46 @@ pub(super) fn execute_select_impl(
             timings: empty_query_timings(),
         }),
     )
+
+}
+
+fn normalize_select_read_plan_for_active_database(
+    read_plan: &mut serverlib::SelectReadPlan,
+    active_database_id: &str,
+) {
+
+    read_plan.table_id = strip_matching_database_prefix(&read_plan.table_id, active_database_id);
+
+    for relation in &mut read_plan.relations {
+        relation.table_id = strip_matching_database_prefix(&relation.table_id, active_database_id);
+    }
+
+    for join in &mut read_plan.joins {
+        
+        join.relation.table_id = strip_matching_database_prefix(
+            &join.relation.table_id,
+            active_database_id,
+        );
+
+    }
+
+}
+
+fn strip_matching_database_prefix(table_id: &str, active_database_id: &str) -> String {
+
+    let normalized_table_id = common::normalize_identifier!(table_id);
+    let normalized_active_database_id = common::normalize_identifier!(active_database_id);
+
+    normalized_table_id
+        .rsplit_once('.')
+        .and_then(|(database_name, referenced_table_id)| {
+            if common::normalize_identifier!(database_name) == normalized_active_database_id {
+                Some(common::normalize_identifier!(referenced_table_id))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(normalized_table_id)
 
 }
 

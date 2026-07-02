@@ -63,9 +63,10 @@ use dispatch_ops::execute_parsed_query;
 use mutation_ops::{execute_delete_impl, execute_insert_impl, execute_update_impl};
 use ddl_ops::{
     execute_alter_table_impl, execute_create_database_impl, execute_create_stored_procedure_impl,
-    execute_create_table_impl, execute_create_trigger_impl, execute_create_view_impl,
+    execute_create_table_impl, execute_create_trigger_impl,
     execute_drop_directive_impl,
 };
+pub(crate) use ddl_ops::execute_create_view_impl;
 use set_ops::execute_union_query_impl;
 use select_ops::{execute_select_impl, execute_select_plan_result, execute_select_with_ctes};
 

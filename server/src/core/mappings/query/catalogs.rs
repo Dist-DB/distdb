@@ -6,11 +6,13 @@ pub(super) fn resolve_catalog<'a>(
     catalogs: &'a HashMap<String, DatabaseCatalog>,
     database_id: &str,
 ) -> Option<&'a DatabaseCatalog> {
+    
     catalogs.get(database_id).or_else(|| {
         DatabaseId::from_database_name(database_id)
             .ok()
             .and_then(|dbid| catalogs.get(&dbid.0))
     })
+
 }
 
 pub(super) fn resolve_catalog_mut<'a>(
@@ -36,6 +38,20 @@ pub(super) fn resolve_catalog_for_table_reference<'a>(
     let table_id = common::normalize_identifier!(object_name);
 
     if !active_database_id.trim().is_empty() {
+        let normalized_active_database_id = common::normalize_identifier!(active_database_id);
+        let normalized_object_name = common::normalize_identifier!(object_name);
+
+        let table_id = normalized_object_name
+            .rsplit_once('.')
+            .and_then(|(database_name, referenced_table_id)| {
+                if common::normalize_identifier!(database_name) == normalized_active_database_id {
+                    Some(common::normalize_identifier!(referenced_table_id))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(table_id);
+
         return resolve_catalog(catalogs, active_database_id).map(|catalog| (catalog, table_id));
     }
 
@@ -59,6 +75,20 @@ pub(super) fn resolve_catalog_for_table_reference_mut<'a>(
     let table_id = common::normalize_identifier!(object_name);
 
     if !active_database_id.trim().is_empty() {
+        let normalized_active_database_id = common::normalize_identifier!(active_database_id);
+        let normalized_object_name = common::normalize_identifier!(object_name);
+
+        let table_id = normalized_object_name
+            .rsplit_once('.')
+            .and_then(|(database_name, referenced_table_id)| {
+                if common::normalize_identifier!(database_name) == normalized_active_database_id {
+                    Some(common::normalize_identifier!(referenced_table_id))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(table_id);
+
         return resolve_catalog_mut(catalogs, active_database_id).map(|catalog| (catalog, table_id));
     }
 

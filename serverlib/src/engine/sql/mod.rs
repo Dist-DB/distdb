@@ -35,6 +35,8 @@ pub use select_plan::{
     parse_union_select_read_plans_from_statement,
     parse_select_condition_from_expr, parse_relation_bindings_from_table_with_joins,
     parse_joins_from_table_with_joins, derive_relation_pushdown_conditions,
+    parse_create_view_dependencies_from_statement,
+    parse_create_view_dependencies_from_sql,
 };
 pub use routine_plan::{
     parse_if_else_end_plan_from_create_procedure_statement,
