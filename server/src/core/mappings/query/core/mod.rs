@@ -44,7 +44,12 @@ use serverlib::{
     plan_relation_access, primary_key_index,
 };
 
-use super::catalogs::{resolve_catalog, resolve_catalog_mut};
+use super::catalogs::{
+    resolve_catalog,
+    resolve_catalog_for_table_reference,
+    resolve_catalog_for_table_reference_mut,
+    resolve_catalog_mut,
+};
 
 use super::explain::{
     connector_field_defs, explain_inner_statement, explain_join_mutation_plan,

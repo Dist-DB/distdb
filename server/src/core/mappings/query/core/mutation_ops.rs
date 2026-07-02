@@ -1044,19 +1044,32 @@ where
     F: FnOnce(&mut DatabaseCatalog) -> ConnectorResponse,
 {
     
-    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
+    let Some((catalog, table_id)) = resolve_catalog_for_table_reference_mut(
+        catalogs,
+        database_id,
+        table_id,
+    ) else {
+        let database_name = if database_id.trim().is_empty() {
+            table_id
+                .rsplit_once('.')
+                .map(|(database_name, _)| database_name)
+                .unwrap_or(table_id)
+        } else {
+            database_id
+        };
+
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", database_id),
+            format!("database '{}' not found", database_name),
         );
     };
 
     let already_locked = catalog
-        .table(table_id)
+        .table(&table_id)
         .is_some_and(|table| table.status() == ObjectStatus::Lock);
 
     if !already_locked
-        && let Err(err) = catalog.begin_table_write(table_id)
+        && let Err(err) = catalog.begin_table_write(&table_id)
     {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -1072,12 +1085,12 @@ where
             return response;
         }
 
-        match catalog.finalize_table_write(table_id) {
+        match catalog.finalize_table_write(&table_id) {
 
             Ok(()) => response,
 
             Err(err) => {
-                let _ = catalog.abort_table_write(table_id);
+                let _ = catalog.abort_table_write(&table_id);
                 ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("table write finalize failed: {err}"),
@@ -1088,7 +1101,7 @@ where
 
     } else {
         if !already_locked {
-            let _ = catalog.abort_table_write(table_id);
+            let _ = catalog.abort_table_write(&table_id);
         }
         response
     }

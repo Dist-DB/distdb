@@ -6,7 +6,9 @@ pub(super) fn execute_select_plan_result(
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &serverlib::SelectReadPlan,
 ) -> Result<serverlib::SelectExecutionResult, String> {
+
     if !read_plan.joins.is_empty() {
+
         return serverlib::execute_joined_select_plan(
             catalog,
             wal,
@@ -32,6 +34,7 @@ pub(super) fn execute_select_plan_result(
                 ))
             },
         );
+
     }
 
     if read_plan.table_id.is_empty() {
@@ -94,6 +97,7 @@ pub(super) fn execute_select_plan_result(
             ))
         },
     )
+
 }
 
 fn extract_view_select_sql(view_sql: &str) -> Result<String, String> {
@@ -183,13 +187,6 @@ pub(super) fn execute_select_impl(
         || statement_sql_lower.starts_with("show columns")
     {
 
-        let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("database '{}' not found", query.database_id),
-            );
-        };
-
         let Some(object_name) = statement.object_name.as_deref() else {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -197,8 +194,27 @@ pub(super) fn execute_select_impl(
             );
         };
 
-        let table_id = object_name.rsplit('.').next().unwrap_or(object_name);
-        let Some(schema) = catalog.table_schema(table_id) else {
+        let Some((catalog, table_id)) = resolve_catalog_for_table_reference(
+            catalogs,
+            &query.database_id,
+            object_name,
+        ) else {
+            let database_name = if query.database_id.trim().is_empty() {
+                object_name
+                    .rsplit_once('.')
+                    .map(|(database_name, _)| database_name)
+                    .unwrap_or(object_name)
+            } else {
+                &query.database_id
+            };
+
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", database_name),
+            );
+        };
+
+        let Some(schema) = catalog.table_schema(&table_id) else {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!(
@@ -234,13 +250,51 @@ pub(super) fn execute_select_impl(
 
     };
 
-    if !read_plan.ctes.is_empty() {
+    let resolved_object_name = statement
+        .object_name
+        .as_deref()
+        .unwrap_or(&read_plan.table_id);
+
+    let (catalog, read_plan) = if query.database_id.trim().is_empty() {
+
+        let Some((catalog, table_id)) = resolve_catalog_for_table_reference_mut(
+            
+            catalogs,
+            &query.database_id,
+            resolved_object_name,
+
+        ) else {
+
+            let database_name = resolved_object_name
+                .rsplit_once('.')
+                .map(|(database_name, _)| database_name)
+                .unwrap_or(resolved_object_name);
+
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", database_name),
+            );
+
+        };
+
+        let mut normalized_read_plan = read_plan.clone();
+        normalized_read_plan.table_id = table_id;
+        (catalog, normalized_read_plan)
+
+    } else {
+
         let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("database '{}' not found", query.database_id),
             );
         };
+
+        (catalog, read_plan)
+
+    };
+
+    if !read_plan.ctes.is_empty() {
 
         let result = match execute_select_with_ctes(catalog, wal, runtime_indexes, &read_plan) {
             Ok(result) => result,
@@ -260,12 +314,6 @@ pub(super) fn execute_select_impl(
     }
 
     if !read_plan.joins.is_empty() {
-        let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("database '{}' not found", query.database_id),
-            );
-        };
         return execute_joined_select(request_id, query, catalog, wal, runtime_indexes, &read_plan);
     }
 
@@ -312,8 +360,8 @@ pub(super) fn execute_select_impl(
 
     }
 
-    let view_sql = resolve_catalog(catalogs, &query.database_id)
-        .and_then(|catalog| catalog.view(table_id))
+      let view_sql = catalog
+          .view(table_id)
         .map(|view| view.sql.clone());
 
     if let Some(view_sql) = view_sql {
@@ -335,34 +383,17 @@ pub(super) fn execute_select_impl(
             }
         };
 
-        let view_result = match resolve_catalog(catalogs, &query.database_id) {
-            Some(catalog) => {
-                match execute_select_plan_result(catalog, wal, runtime_indexes, &view_read_plan) {
-                    
-                    Ok(result) => result,
-                    
-                    Err(message) => {
-                        return ConnectorResponse::rejected(
-                            request_id.to_string(),
-                            format!("view execution failed: {message}"),
-                        );
-                    }
-                    
-                }
-            }
-            None => {
+        let view_result = match execute_select_plan_result(catalog, wal, runtime_indexes, &view_read_plan) {
+                
+            Ok(result) => result,
+            
+            Err(message) => {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
-                    format!("database '{}' not found", query.database_id),
+                    format!("view execution failed: {message}"),
                 );
             }
-        };
-
-        let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("database '{}' not found", query.database_id),
-            );
+                
         };
 
         let result = match execute_view_over_scoped_materialization(
@@ -374,6 +405,7 @@ pub(super) fn execute_select_impl(
             view_result,
         ) {
             Ok(result) => result,
+
             Err(message) => {
                 return ConnectorResponse::rejected(request_id.to_string(), message);
             }
@@ -387,14 +419,8 @@ pub(super) fn execute_select_impl(
                 timings: empty_query_timings(),
             }),
         );
-    }
 
-    let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
-        );
-    };
+    }
 
     let Some(schema) = catalog.table_schema(table_id) else {
         return ConnectorResponse::rejected(
@@ -417,12 +443,14 @@ pub(super) fn execute_select_impl(
     };
 
     let mut index_filter_map = HashMap::new();
+
     let like_filter = read_plan
         .where_condition
         .as_ref()
         .and_then(|condition| {
             collect_indexable_like_filter_for_schema(schema, condition)
         });
+
     let allow_index_short_circuit = read_plan
         .where_condition
         .as_ref()
@@ -441,6 +469,7 @@ pub(super) fn execute_select_impl(
         index_filter_map,
         like_filter,
     );
+
     let index_lookup = access_plan.runtime_index_lookup(table);
 
     if read_plan.is_explain {
@@ -534,6 +563,7 @@ fn execute_view_over_scoped_materialization(
         .map_err(|err| format!("view execution failed: scoped release failed: {err}"))?;
 
     scoped_result
+
 }
 
 pub(super) fn execute_select_with_ctes(
@@ -546,7 +576,9 @@ pub(super) fn execute_select_with_ctes(
     let mut scoped_handles = Vec::with_capacity(read_plan.ctes.len());
 
     let execution_result = (|| -> Result<serverlib::SelectExecutionResult, String> {
+
         for cte in &read_plan.ctes {
+
             if catalog.table(&cte.table_id).is_some() || catalog.view(&cte.table_id).is_some() {
                 return Err(format!(
                     "cte execution failed: cte '{}' conflicts with existing table/view",
@@ -582,9 +614,11 @@ pub(super) fn execute_select_with_ctes(
 
         execute_select_plan_result(catalog, wal, runtime_indexes, &main_plan)
             .map_err(|message| format!("cte execution failed: {message}"))
+
     })();
 
     let mut release_error = None;
+
     for handle in scoped_handles.iter_mut().rev() {
         if let Err(err) = serverlib::release_scoped_ephemeral_table(catalog, wal, handle)
             && release_error.is_none()
@@ -598,6 +632,7 @@ pub(super) fn execute_select_with_ctes(
     }
 
     execution_result
+
 }
 
 fn materialize_select_result_into_scoped_table(
@@ -638,6 +673,7 @@ fn materialize_select_result_into_scoped_table(
             None,
         )
         .map_err(|err| format!("view execution failed: scoped row append failed: {err}"))?;
+
     }
 
     Ok(())
@@ -648,6 +684,7 @@ fn remap_select_read_plan_table(
     read_plan: &serverlib::SelectReadPlan,
     scoped_table_id: &str,
 ) -> serverlib::SelectReadPlan {
+
     let mut scoped_read_plan = read_plan.clone();
     let original_table_id = scoped_read_plan.table_id.clone();
     scoped_read_plan.table_id = scoped_table_id.to_string();
@@ -659,6 +696,7 @@ fn remap_select_read_plan_table(
     }
 
     scoped_read_plan
+
 }
 
 fn execute_joined_select(

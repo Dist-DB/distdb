@@ -114,6 +114,45 @@ fn resolve_catalog_supports_user_database_name_lookup() {
 }
 
 #[test]
+fn select_from_dotted_table_without_active_database_resolves_catalog_prefix() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table("users", TableSchema::new(Vec::new()))
+        .expect("table should be created");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(catalog.database_id.0.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: String::new(),
+        sql: "select * from main.users".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-dotted-select",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+    let rows = query_result_rows(response);
+    assert!(rows.is_empty());
+}
+
+#[test]
 fn begin_transaction_is_explicitly_recognized() {
     let mut catalogs = HashMap::new();
     let wal = ConcurrentWalManager::in_memory();
