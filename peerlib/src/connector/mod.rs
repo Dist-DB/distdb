@@ -7,6 +7,5 @@ pub use runtime::{
 };
 pub use transport::{
     ConnectorDiscoveryMode, ConnectorP2pConfig, ConnectorP2pTransport,
-    ConnectorTlsConfig,
-    ConnectorPeer,
+    ConnectorPeer, ConnectorTlsConfig,
 };

@@ -1,5 +1,4 @@
 use super::*;
-use crate::core::identity::NodeId;
 use crate::p2p::discovery::{KademliaDiscoveryConfig, KademliaDiscoveryService};
 use crate::p2p::protocol::{
     DataSnapshotRequest, DataSnapshotResponse, SchemaCatalogRequest, SchemaCatalogResponse,
@@ -38,10 +37,9 @@ impl ServerSwarmEventSource for StubSwarmSource {
 
 }
 
-fn node(id: &str, addr: &str) -> NodeDescriptor {
-
-    NodeDescriptor {
-        id: NodeId(id.to_string()),
+fn node(id: &str, addr: &str) -> PeerNode {
+    PeerNode {
+        id: id.to_string(),
         addrs: vec![addr.to_string()],
         is_local: false,
     }
@@ -52,7 +50,7 @@ fn node(id: &str, addr: &str) -> NodeDescriptor {
 fn runtime_processes_discovery_and_announce_events() {
 
     let discovery = KademliaDiscoveryService::new(
-        NodeId("local".to_string()),
+        "local",
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
     );
 
@@ -85,7 +83,7 @@ fn runtime_processes_discovery_and_announce_events() {
 fn runtime_can_run_from_swarm_source() {
     
     let discovery = KademliaDiscoveryService::new(
-        NodeId("local".to_string()),
+        "local",
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
     );
     let network = ServerP2pNetwork::new(discovery, StubTransport);
@@ -108,7 +106,7 @@ fn runtime_can_run_from_swarm_source() {
 #[test]
 fn runtime_returns_error_for_error_event() {
     let discovery = KademliaDiscoveryService::new(
-        NodeId("local".to_string()),
+        "local",
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
     );
     let network = ServerP2pNetwork::new(discovery, StubTransport);
@@ -124,11 +122,14 @@ fn runtime_returns_error_for_error_event() {
 
 #[test]
 fn runtime_queues_schema_catalog_messages() {
+
     let discovery = KademliaDiscoveryService::new(
-        NodeId("local".to_string()),
+        "local",
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
     );
+
     let network = ServerP2pNetwork::new(discovery, StubTransport);
+    
     let mut runtime = ServerP2pRuntime::new(network);
 
     let request = SchemaCatalogRequest {
@@ -138,6 +139,7 @@ fn runtime_queues_schema_catalog_messages() {
         expected_schema_identifier: 1,
         expected_schema_hash: Some("hash".to_string()),
     };
+
     let response = SchemaCatalogResponse {
         request_id: "req-schema-1".to_string(),
         ok: true,
@@ -154,6 +156,7 @@ fn runtime_queues_schema_catalog_messages() {
             message: ServiceMessage::SchemaCatalogRequest(request.clone()),
         })
         .expect("schema request event should be handled");
+
     runtime
         .handle_event(ServerP2pEvent::MessageReceived {
             from_peer_id: "peer-a".to_string(),
@@ -165,13 +168,15 @@ fn runtime_queues_schema_catalog_messages() {
     let queued_responses = runtime.pending_schema_catalog_responses();
 
     assert_eq!(queued_requests, vec![("peer-a".to_string(), request)]);
+    
     assert_eq!(queued_responses, vec![("peer-a".to_string(), response)]);
+
 }
 
 #[test]
 fn runtime_queues_data_snapshot_messages() {
     let discovery = KademliaDiscoveryService::new(
-        NodeId("local".to_string()),
+        "local",
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
     );
     let network = ServerP2pNetwork::new(discovery, StubTransport);
@@ -216,7 +221,7 @@ fn runtime_queues_data_snapshot_messages() {
 #[test]
 fn runtime_queues_transactions_since_messages() {
     let discovery = KademliaDiscoveryService::new(
-        NodeId("local".to_string()),
+        "local",
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"),
     );
     let network = ServerP2pNetwork::new(discovery, StubTransport);

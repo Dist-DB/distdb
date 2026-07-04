@@ -2431,6 +2431,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "peerlib"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "common",
+ "connector",
+ "log",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+]
+
+[[package]]
 name = "pem"
 version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3057,6 +3070,7 @@ dependencies = [
  "connector",
  "env_logger",
  "log",
+ "peerlib",
  "rustls",
  "rustls-pemfile",
  "serverlib",

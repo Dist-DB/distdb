@@ -3,7 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
-use serverlib::p2p::protocol::ServiceMessage;
+use peerlib::ServiceMessage;
 
 use crate::core::control::p2p_wire::{decode_service_message, encode_service_message};
 

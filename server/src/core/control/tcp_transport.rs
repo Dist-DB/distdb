@@ -1,13 +1,14 @@
 use crate::core::control::outbound_transport::send_service_message_to_addr;
-use crate::core::control::p2p_wire::{bootstrap_nodes_from_server_list, multiaddr_to_socket_addr};
-use serverlib::core::cluster::NodeDescriptor;
-use serverlib::core::identity::NodeId;
-use serverlib::p2p::transport::Transport;
-use serverlib::p2p::protocol::{ServiceAnnounce, ServiceMessage};
-use serverlib::{
-    KademliaDiscoveryConfig, KademliaDiscoveryService, ServerP2pEvent, ServerP2pNetwork,
-    ServerP2pRuntime,
+use crate::core::control::p2p_wire::{
+    bootstrap_nodes_from_server_list, multiaddr_to_socket_addr, node_descriptor_to_peer_node,
 };
+use peerlib::p2p::transport::Transport;
+use peerlib::{
+    KademliaDiscoveryConfig, KademliaDiscoveryService, ServerP2pEvent, ServerP2pNetwork,
+    ServerP2pRuntime, ServiceAnnounce, ServiceMessage,
+    PeerError, PeerNode, Result as PeerResult,
+};
+use serverlib::core::cluster::NodeDescriptor;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -26,13 +27,14 @@ impl TcpServerTransport {
 
 impl Transport for TcpServerTransport {
 
-    fn send(&mut self, peer_id: &str, message: ServiceMessage) -> serverlib::helpers::error::Result<()> {
+    fn send(&mut self, peer_id: &str, message: ServiceMessage) -> PeerResult<()> {
         let addr = multiaddr_to_socket_addr(peer_id)
-            .ok_or_else(|| serverlib::helpers::error::ServerLibError::Network(format!("invalid peer address '{peer_id}'")))?;
+            .ok_or_else(|| PeerError::Network(format!("invalid peer address '{peer_id}'")))?;
         send_service_message_to_addr(&addr, &message)
+            .map_err(|err| PeerError::Network(err.to_string()))
     }
 
-    fn broadcast(&mut self, message: ServiceMessage) -> serverlib::helpers::error::Result<()> {
+    fn broadcast(&mut self, message: ServiceMessage) -> PeerResult<()> {
         
         if self.peer_addrs.is_empty() {
             return Ok(());
@@ -80,7 +82,7 @@ pub fn initialize_server_p2p_runtime(
 
     let bootstrap_nodes = bootstrap_nodes_from_server_list(server_list);
     let discovery = KademliaDiscoveryService::new(
-        NodeId(node_id.to_string()),
+        node_id.to_string(),
         KademliaDiscoveryConfig::new(format!("/distdb/kad/{swarm_id}"))
             .with_bootstrap_nodes(bootstrap_nodes),
     );
@@ -92,8 +94,8 @@ pub fn initialize_server_p2p_runtime(
         runtime.handle_event(ServerP2pEvent::PeerDiscovered(peer))?;
     }
 
-    let local_node = NodeDescriptor {
-        id: NodeId(node_id.to_string()),
+    let local_node = PeerNode {
+        id: node_id.to_string(),
         addrs: vec![format!("/ip4/{advertise_addr}/tcp/{port}")],
         is_local: true,
     };
@@ -118,7 +120,7 @@ pub fn spawn_p2p_heartbeat_task(
             let mut runtime = runtime.lock().await;
             if let Err(err) = runtime
                 .network_mut()
-                .broadcast_announce(local_node.clone())
+                .broadcast_announce(node_descriptor_to_peer_node(&local_node))
             {
                 log::warn!("server p2p heartbeat announce failed: {}", err);
                 continue;

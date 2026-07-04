@@ -1,5 +1,5 @@
-use crate::core::{ConnectorError, ConnectorResponse};
-use crate::p2p::{ConnectorP2pTransport, ConnectorPeer};
+use super::{ConnectorP2pTransport, ConnectorPeer};
+use connector::{ConnectorError, ConnectorResponse};
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
@@ -65,6 +65,7 @@ impl ConnectorP2pRuntime {
     }
 
     pub fn run_loop(&mut self, events: &Receiver<ConnectorP2pEvent>) -> Result<(), ConnectorError> {
+        
         self.running = true;
 
         while self.running {
@@ -79,9 +80,11 @@ impl ConnectorP2pRuntime {
 
         self.running = false;
         Ok(())
+
     }
 
     pub fn run_swarm_loop<S: ConnectorSwarmEventSource>(&mut self, source: &mut S) -> Result<(), ConnectorError> {
+        
         self.running = true;
 
         while self.running {
@@ -95,6 +98,7 @@ impl ConnectorP2pRuntime {
 
         self.running = false;
         Ok(())
+
     }
 
     pub fn handle_event(&mut self, event: ConnectorP2pEvent) -> Result<ConnectorP2pHandleOutcome, ConnectorError> {
@@ -147,13 +151,14 @@ impl ConnectorP2pRuntime {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
-    use crate::core::{
+    use connector::{
         ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult,
         MutationResult, ResponseStatus,
     };
-    use crate::core::ConnectorTransport;
-    use crate::p2p::ConnectorP2pConfig;
+    use connector::ConnectorTransport;
+    use crate::connector::ConnectorP2pConfig;
 
     #[derive(Debug)]
     struct StubSwarmSource {
@@ -172,10 +177,12 @@ mod tests {
 
     #[test]
     fn runtime_processes_peer_and_response_events() {
+
         let transport = ConnectorP2pTransport::new(
             ConnectorP2pConfig::new("/distdb/kad/1.0.0")
                 .with_bootstrap_peers(vec!["bootstrap".to_string()]),
         );
+        
         let mut runtime = ConnectorP2pRuntime::new(transport);
 
         let (tx, rx) = std::sync::mpsc::channel();

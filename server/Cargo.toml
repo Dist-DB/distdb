@@ -7,6 +7,7 @@ authors = ["Sam Colak <sam@samcolak.com>"]
 [dependencies]
 serverlib = { path = "../serverlib" }
 connector = { path = "../connector" }
+peerlib = { path = "../peerlib", default-features = false, features = ["server-p2p"] }
 common = { path = "../common" }
 log = "0.4"
 env_logger = "0.11"

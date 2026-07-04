@@ -42,7 +42,6 @@ pub mod core;
 pub mod engine;
 pub mod helpers;
 pub mod security;
-pub mod p2p;
 
 pub use core::config::NodeConfig;
 pub use core::identity::{NodeId, PasswordKey, UserId};
@@ -159,13 +158,6 @@ pub use engine::sql::{
 };
 
 pub use engine::wal::{ConcurrentWalManager, WalStreamMode};
-
-pub use p2p::{
-	DiscoveryMode, KademliaDiscoveryConfig, KademliaDiscoveryService,
-	ServerP2pEvent, ServerP2pHandleOutcome, ServerP2pNetwork, ServerP2pRuntime,
-};
-
-pub use p2p::protocol::{TlsCaDistribution, TlsCertEnrollRequest, TlsCertEnrollResponse};
 
 pub use security::{
 	AutoTlsPaths, TlsEnrollmentRequestMaterial, build_tls_enrollment_request,

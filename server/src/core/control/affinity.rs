@@ -2,19 +2,21 @@ use std::sync::Arc;
 
 use common::helpers::stable_id;
 use common::helpers::utils::md5_hash;
-use serverlib::core::cluster::NodeDescriptor;
-use serverlib::p2p::protocol::{
-    AffinityJoinRequest, AffinityJoinResponse, AffinityReplicationAction, ServiceMessage,
+use peerlib::{
+    AffinityJoinRequest, AffinityJoinResponse, AffinityReplicationAction, PeerNode, ServiceMessage,
 };
+use serverlib::core::identity::NodeId;
 use serverlib::{
     AffinityDocument, AffinityMember, AffinityMemberStatus, AffinityProcessor, AffinityStorage,
-    DatabaseSchemaSummary,
+    AffinitySyncPhase, DatabaseSchemaSummary,
 };
 use tokio::sync::Mutex;
 
 use crate::core::app::ServerApp;
 use crate::core::control::outbound_transport::send_service_request_to_addr;
-use crate::core::control::p2p_wire::{multiaddr_to_socket_addr, normalize_bootstrap_addr};
+use crate::core::control::p2p_wire::{
+    multiaddr_to_socket_addr, normalize_bootstrap_addr, wire_affinity_document_to_domain,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AffinityStartupConfig {
@@ -28,7 +30,6 @@ pub fn parse_server_list_from_args(args: &[String]) -> Vec<String> {
 mod tests {
     
     use super::*;
-    use serverlib::core::identity::NodeId;
 
     #[test]
     fn parse_server_list_from_args_dedups_and_normalizes() {
@@ -72,13 +73,13 @@ mod tests {
             affinity_id: "team-a".to_string(),
             affinity_key: "k1".to_string(),
         };
-        let local_node = NodeDescriptor {
-            id: NodeId("sam01".to_string()),
+        let local_node = PeerNode {
+            id: "sam01".to_string(),
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
             is_local: true,
         };
-        let discovered = vec![NodeDescriptor {
-            id: NodeId("sam02".to_string()),
+        let discovered = vec![PeerNode {
+            id: "sam02".to_string(),
             addrs: vec!["/ip4/127.0.0.1/tcp/4002".to_string()],
             is_local: false,
         }];
@@ -149,14 +150,14 @@ pub fn parse_affinity_startup_config(args: &[String]) -> Option<AffinityStartupC
 
 pub fn build_affinity_document_snapshot(
     config: &AffinityStartupConfig,
-    local_node: &NodeDescriptor,
-    discovered_peers: Vec<NodeDescriptor>,
+    local_node: &PeerNode,
+    discovered_peers: Vec<PeerNode>,
 ) -> AffinityDocument {
 
     let mut members = discovered_peers
         .into_iter()
         .map(|peer| AffinityMember {
-            node_id: peer.id,
+            node_id: NodeId(peer.id),
             addrs: peer.addrs,
             status: AffinityMemberStatus::Unknown,
             last_seen_epoch_ms: now_millis(),
@@ -164,7 +165,7 @@ pub fn build_affinity_document_snapshot(
         .collect::<Vec<_>>();
 
     members.push(AffinityMember {
-        node_id: local_node.id.clone(),
+        node_id: NodeId(local_node.id.clone()),
         addrs: local_node.addrs.clone(),
         status: AffinityMemberStatus::Online,
         last_seen_epoch_ms: now_millis(),
@@ -218,15 +219,15 @@ pub fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<Database
 
 pub fn send_affinity_join_requests(
     config: &AffinityStartupConfig,
-    local_node: &NodeDescriptor,
-    discovered_peers: &[NodeDescriptor],
+    local_node: &PeerNode,
+    discovered_peers: &[PeerNode],
 ) -> Vec<AffinityJoinResponse> {
     let mut responses = Vec::new();
 
     for peer in discovered_peers {
         let request_id = format!(
             "{}_{}",
-            local_node.id.0,
+            local_node.id,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -236,7 +237,7 @@ pub fn send_affinity_join_requests(
         let join_req = AffinityJoinRequest {
             request_id,
             affinity_id: config.affinity_id.clone(),
-            requester_node_id: local_node.id.0.clone(),
+            requester_node_id: local_node.id.clone(),
             requester_addrs: local_node.addrs.clone(),
             affinity_key: config.affinity_key.clone(),
         };
@@ -262,7 +263,7 @@ pub fn send_affinity_join_requests(
                     delivered = true;
                     log::debug!(
                         "sent affinity join request and received response peer_id={} addr={}",
-                        peer.id.0,
+                        peer.id,
                         socket_addr
                     );
                     break;
@@ -270,7 +271,7 @@ pub fn send_affinity_join_requests(
                 Ok(Some(other)) => {
                     log::warn!(
                         "unexpected message while awaiting join response from peer_id={} addr={}: {:?}",
-                        peer.id.0,
+                        peer.id,
                         socket_addr,
                         other
                     );
@@ -278,14 +279,14 @@ pub fn send_affinity_join_requests(
                 Ok(None) => {
                     log::debug!(
                         "no join response received from peer_id={} addr={}",
-                        peer.id.0,
+                        peer.id,
                         socket_addr
                     );
                 }
                 Err(err) => {
                     log::warn!(
                         "failed to send affinity join request to peer_id={} addr={}: {}",
-                        peer.id.0,
+                        peer.id,
                         socket_addr,
                         err
                     );
@@ -296,7 +297,7 @@ pub fn send_affinity_join_requests(
         if !delivered {
             log::warn!(
                 "failed to deliver affinity join request to any address for peer_id={}",
-                peer.id.0
+                peer.id
             );
         }
     }
@@ -315,6 +316,7 @@ pub fn merge_affinity_documents_from_responses(
         }
 
         if let Some(remote_doc) = response.document {
+            let remote_doc = wire_affinity_document_to_domain(&remote_doc);
             let member_count = remote_doc.members.len();
             let database_count = remote_doc.databases.len();
 
@@ -339,8 +341,8 @@ pub async fn execute_affinity_join_sequence(
     affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
     affinity_storage: Arc<AffinityStorage>,
     config: &AffinityStartupConfig,
-    local_node: &NodeDescriptor,
-    discovered_peers: &[NodeDescriptor],
+    local_node: &PeerNode,
+    discovered_peers: &[PeerNode],
 ) {
     
     if discovered_peers.is_empty() {
@@ -397,8 +399,8 @@ pub async fn execute_affinity_join_sequence(
 
 pub fn initialize_affinity_with_persistence(
     config: Option<&AffinityStartupConfig>,
-    local_node: &NodeDescriptor,
-    discovered_peers: Vec<NodeDescriptor>,
+    local_node: &PeerNode,
+    discovered_peers: Vec<PeerNode>,
     data_dir: &std::path::Path,
 ) -> (Option<AffinityProcessor>, AffinityStorage) {
 
@@ -434,7 +436,7 @@ pub fn initialize_affinity_with_persistence(
 
     };
 
-    let mut processor = AffinityProcessor::new(local_node.id.clone());
+    let mut processor = AffinityProcessor::new(NodeId(local_node.id.clone()));
     processor.begin_join();
     processor.apply_affinity_document(document);
 
@@ -450,12 +452,12 @@ pub fn initialize_affinity_with_persistence(
 
         Ok(None) => {
             log::debug!("no checkpoint found, starting fresh");
-            processor.initialize_checkpoint(serverlib::AffinitySyncPhase::ControlPlane);
+            processor.initialize_checkpoint(AffinitySyncPhase::ControlPlane);
         },
 
         Err(err) => {
             log::warn!("failed to load checkpoint: {}, starting fresh", err);
-            processor.initialize_checkpoint(serverlib::AffinitySyncPhase::ControlPlane);
+            processor.initialize_checkpoint(AffinitySyncPhase::ControlPlane);
         }
 
     }

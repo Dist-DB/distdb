@@ -3,15 +3,16 @@ use crate::core::control::affinity::{
     AffinityStartupConfig, merge_affinity_documents_from_responses, send_affinity_join_requests,
 };
 use crate::core::control::outbound_transport::send_service_request_to_addr;
-use crate::core::control::p2p_wire::multiaddr_to_socket_addr;
+use crate::core::control::p2p_wire::{multiaddr_to_socket_addr, transaction_id_to_wire};
 use crate::core::control::schema_catalog::apply_schema_definitions_to_local_database;
 use crate::core::control::tcp_transport::TcpServerTransport;
 use common::epoch_ms;
-use serverlib::core::cluster::NodeDescriptor;
-use serverlib::p2p::protocol::{AffinityReplicationAction, ServiceMessage};
+use peerlib::{
+    AffinityReplicationAction, PeerNode, ServiceMessage, ServerP2pRuntime,
+};
 use serverlib::{
-    AffinityProcessor, AffinityStorage, ReplicationPhaseExecutor, ServerP2pRuntime,
-    decode_wal_frame,
+    AffinityProcessor, AffinityProcessorState, AffinityStorage,
+    AffinitySyncPhase, ReplicationPhaseExecutor, TransactionId, decode_wal_frame,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,13 +26,13 @@ pub fn spawn_affinity_replication_task(
     app: Arc<Mutex<ServerApp>>,
     p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_config: AffinityStartupConfig,
-    local_node: NodeDescriptor,
+    local_node: PeerNode,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_millis(500));
         let mut executor = ReplicationPhaseExecutor::new();
         let mut last_affinity_refresh_at = std::time::Instant::now() - Duration::from_secs(30);
-        let mut wal_cursors: HashMap<String, HashMap<String, serverlib::TransactionId>> = HashMap::new();
+        let mut wal_cursors: HashMap<String, HashMap<String, TransactionId>> = HashMap::new();
         let mut last_wal_sync_at: HashMap<String, std::time::Instant> = HashMap::new();
 
         loop {
@@ -40,13 +41,13 @@ pub fn spawn_affinity_replication_task(
             let mut processor = affinity_processor.lock().await;
 
             if let Some(ref mut proc) = processor.as_mut() {
-                if let serverlib::AffinityProcessorState::Syncing(_) = proc.state() {
+                if let AffinityProcessorState::Syncing(_) = proc.state() {
                     match proc.build_sync_plan() {
                         Ok(plan) => {
                             let current_idx = executor.current_sync_index();
 
                             if let Some(step) = plan.get(current_idx) {
-                                if matches!(step.phase, serverlib::AffinitySyncPhase::SchemaCatalog)
+                                if matches!(step.phase, AffinitySyncPhase::SchemaCatalog)
                                     && let Some(database_id) = &step.database_id
                                 {
                                     let affinity_id = proc
@@ -84,7 +85,7 @@ pub fn spawn_affinity_replication_task(
                                     }
                                 }
 
-                                if matches!(step.phase, serverlib::AffinitySyncPhase::WalCatchup)
+                                if matches!(step.phase, AffinitySyncPhase::WalCatchup)
                                     && let Some(database_id) = &step.database_id
                                 {
                                     let affinity_id = proc
@@ -158,7 +159,7 @@ pub fn spawn_affinity_replication_task(
                     }
                 }
 
-                if let serverlib::AffinityProcessorState::Ready = proc.state() {
+                if let AffinityProcessorState::Ready = proc.state() {
                     if last_affinity_refresh_at.elapsed() >= Duration::from_secs(2) {
                         last_affinity_refresh_at = std::time::Instant::now();
 
@@ -330,7 +331,7 @@ pub async fn execute_live_schema_catalog_sync(
         };
 
         let message = ServiceMessage::SchemaCatalogRequest(
-            serverlib::p2p::protocol::SchemaCatalogRequest {
+            peerlib::SchemaCatalogRequest {
                 request_id: request_id.clone(),
                 affinity_id: affinity_id.to_string(),
                 database_id: database_id.to_string(),
@@ -398,10 +399,10 @@ pub async fn execute_live_wal_catchup_sync(
     p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_id: &str,
     database_id: &str,
-    from_transaction_id: Option<serverlib::TransactionId>,
-    from_stream_transaction_ids: Option<&HashMap<String, serverlib::TransactionId>>,
+    from_transaction_id: Option<TransactionId>,
+    from_stream_transaction_ids: Option<&HashMap<String, TransactionId>>,
     target_addr: Option<&str>,
-) -> Result<HashMap<String, serverlib::TransactionId>, String> {
+) -> Result<HashMap<String, TransactionId>, String> {
     if affinity_id.is_empty() {
         return Ok(HashMap::new());
     }
@@ -446,13 +447,17 @@ pub async fn execute_live_wal_catchup_sync(
         };
 
         let message = ServiceMessage::TransactionsSinceRequest(
-            serverlib::p2p::protocol::TransactionsSinceRequest {
+            peerlib::TransactionsSinceRequest {
                 request_id: request_id.clone(),
                 affinity_id: affinity_id.to_string(),
                 database_id: database_id.to_string(),
-                from_transaction_id,
+                from_transaction_id: from_transaction_id.map(transaction_id_to_wire),
                 from_stream_transaction_ids: from_stream_transaction_ids
-                    .map(|map| map.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                    .map(|map| {
+                        map.iter()
+                            .map(|(k, v)| (k.clone(), transaction_id_to_wire(*v)))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             },
         );
@@ -526,6 +531,6 @@ pub async fn execute_live_wal_catchup_sync(
 
     Ok(max_seen_by_stream
         .into_iter()
-        .map(|(stream, tx)| (stream, serverlib::TransactionId(tx)))
+        .map(|(stream, tx)| (stream, TransactionId(tx)))
         .collect())
 }

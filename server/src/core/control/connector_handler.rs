@@ -1,6 +1,9 @@
 use crate::core::app::ServerApp;
 use crate::core::control::affinity::build_database_schema_summaries_from_app;
-use crate::core::control::p2p_wire::{decode_service_message, multiaddr_to_socket_addr};
+use crate::core::control::p2p_wire::{
+    affinity_document_to_wire, decode_service_message, multiaddr_to_socket_addr,
+    node_descriptor_to_peer_node, wire_transaction_id_to_transaction_id,
+};
 use crate::core::control::outbound_transport::send_service_message_to_addr;
 use crate::core::control::schema_catalog::{
     build_schema_definitions_for_database, resolve_schema_catalog, schema_catalog_signature,
@@ -13,19 +16,18 @@ use connector::{
     ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, FieldDef, FieldIndex,
     FieldType, MutationResult, QueryResult, QueryTimings,
 };
-use serverlib::core::cluster::NodeDescriptor;
-use serverlib::core::identity::NodeId;
-use serverlib::p2p::protocol::{
+use peerlib::{
+    PeerNode,
     AffinityJoinResponse, DataSnapshotResponse, SchemaCatalogResponse, ServiceMessage,
-    TableLockState,
-    TlsCertEnrollResponse,
-    TransactionsSinceResponse,
+    TableLockState, TlsCertEnrollResponse, TransactionsSinceResponse,
+    ServerP2pEvent, ServerP2pRuntime,
 };
+use serverlib::core::cluster::NodeDescriptor;
 use serverlib::{
-    AffinityProcessor, ConcurrentWalManager, DatabaseCatalog, DatabaseEntity,
-    DatabaseEntityAspect, DatabaseEntityKind, DatabaseId, ServerP2pEvent, ServerP2pRuntime,
-    encode_wal_frame,
-    import_p2p_ca_pem_if_missing, sign_tls_enrollment_csr,
+    AffinityProcessor,
+    ConcurrentWalManager, DatabaseCatalog, DatabaseEntity,
+    DatabaseEntityAspect, DatabaseEntityKind, DatabaseId,
+    encode_wal_frame, import_p2p_ca_pem_if_missing, sign_tls_enrollment_csr,
 };
 use common::helpers::p2p::{
     decode_ca_bootstrap_request, encode_ca_bootstrap_response, is_ca_bootstrap_frame,
@@ -443,8 +445,8 @@ async fn execute_app_request_for_session(
     app.handle_connector_request_for_session(request, session_id)
 }
 
-pub fn node_announce_dedup_key(node: &NodeDescriptor) -> String {
-    format!("{}|{}", node.id.0, node.addrs.join(","))
+pub fn node_announce_dedup_key(node: &PeerNode) -> String {
+    format!("{}|{}", node.id, node.addrs.join(","))
 }
 
 pub fn is_server_peer_discovery_query(sql: &str) -> bool {
@@ -1057,12 +1059,12 @@ pub async fn maybe_server_peer_discovery_response(
         runtime.network().discover_peers()
     };
 
-    if is_valid_server_node(local_node) {
-        peers.push(local_node.clone());
+    if is_valid_server_node(&node_descriptor_to_peer_node(local_node)) {
+        peers.push(node_descriptor_to_peer_node(local_node));
     }
 
     let mut seen_ids = HashSet::new();
-    peers.retain(|peer| seen_ids.insert(peer.id.0.clone()));
+    peers.retain(|peer| seen_ids.insert(peer.id.clone()));
 
     let service_snapshot = {
         let registry = service_registry.lock().await;
@@ -1073,12 +1075,12 @@ pub async fn maybe_server_peer_discovery_response(
         .into_iter()
         .map(|peer| {
             let services = service_snapshot
-                .get(&peer.id.0)
+                .get(&peer.id)
                 .cloned()
                 .unwrap_or_default()
                 .join(",");
             vec![
-                peer.id.0.into_bytes(),
+                peer.id.into_bytes(),
                 peer.addrs.join(",").into_bytes(),
                 services.into_bytes(),
             ]
@@ -1131,9 +1133,9 @@ pub async fn maybe_server_peer_discovery_response(
     Some(response)
 }
 
-pub fn is_valid_server_node(node: &NodeDescriptor) -> bool {
+pub fn is_valid_server_node(node: &PeerNode) -> bool {
 
-    if node.id.0.trim().is_empty() {
+    if node.id.trim().is_empty() {
         return false;
     }
 
@@ -1261,7 +1263,7 @@ pub async fn handle_connector_stream(
             if let ServiceMessage::NodeAnnounce(node) = &message && !is_valid_server_node(node) {
                 log::debug!(
                     "ignoring invalid server node announce id='{}' addrs='{}' from {}",
-                    node.id.0,
+                    node.id,
                     node.addrs.join(","),
                     peer_addr
                 );
@@ -1396,8 +1398,8 @@ pub async fn handle_connector_stream(
                     .collect::<Vec<_>>();
 
                 if !valid_addrs.is_empty() {
-                    runtime.network_mut().upsert_discovered_peer(NodeDescriptor {
-                        id: NodeId(announcement.node_id.clone()),
+                    runtime.network_mut().upsert_discovered_peer(PeerNode {
+                        id: announcement.node_id.clone(),
                         addrs: valid_addrs,
                         is_local: false,
                     });
@@ -1424,8 +1426,8 @@ pub async fn handle_connector_stream(
                     .collect::<Vec<_>>();
 
                 if !requester_addrs.is_empty() {
-                    runtime.network_mut().upsert_discovered_peer(NodeDescriptor {
-                        id: NodeId(join_req.requester_node_id.clone()),
+                    runtime.network_mut().upsert_discovered_peer(PeerNode {
+                        id: join_req.requester_node_id.clone(),
                         addrs: requester_addrs,
                         is_local: false,
                     });
@@ -1454,7 +1456,7 @@ pub async fn handle_connector_stream(
                             request_id: join_req.request_id.clone(),
                             ok: true,
                             error: None,
-                            document: Some(merged_doc),
+                            document: Some(affinity_document_to_wire(&merged_doc)),
                         }
 
                     } else {
@@ -1637,12 +1639,16 @@ pub async fn handle_connector_stream(
                 let stream_cursors = txn_req
                     .from_stream_transaction_ids
                     .iter()
-                    .map(|(stream_id, tx_id)| (stream_id.clone(), *tx_id))
+                    .map(|(stream_id, tx_id)| {
+                        (stream_id.clone(), wire_transaction_id_to_transaction_id(*tx_id))
+                    })
                     .collect::<HashMap<_, _>>();
                 let (ok, error, transactions) = if let Some(app_guard) = app_guard {
                     match app_guard.export_wal_records_for_database(
                         &txn_req.database_id,
-                        txn_req.from_transaction_id,
+                        txn_req
+                            .from_transaction_id
+                            .map(wire_transaction_id_to_transaction_id),
                         Some(&stream_cursors),
                     ) {
                         Ok(records) => {
@@ -1742,7 +1748,7 @@ pub async fn handle_connector_stream(
 
                         if let Err(err) = send_service_message_to_addr(
                             &target_addr,
-                            &ServiceMessage::NodeAnnounce(local_node.clone()),
+                            &ServiceMessage::NodeAnnounce(node_descriptor_to_peer_node(&local_node)),
                         ) {
                             log::debug!(
                                 "server p2p direct announce reply to {} failed: {}",
@@ -1983,8 +1989,8 @@ mod tests {
 
     #[test]
     fn node_announce_dedup_key_is_stable() {
-        let node = NodeDescriptor {
-            id: NodeId("sam01".to_string()),
+        let node = PeerNode {
+            id: "sam01".to_string(),
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
             is_local: false,
         };
@@ -1997,30 +2003,29 @@ mod tests {
     #[test]
     fn is_valid_server_node_requires_non_empty_id_and_multiaddrs() {
 
-        let valid = NodeDescriptor {
-            id: NodeId("sam01".to_string()),
+        let valid = PeerNode {
+            id: "sam01".to_string(),
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
             is_local: false,
         };
         
         assert!(is_valid_server_node(&valid));
 
-        let empty_id = NodeDescriptor {
-            id: NodeId("".to_string()),
+        let empty_id = PeerNode {
+            id: "".to_string(),
             addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
             is_local: false,
         };
 
         assert!(!is_valid_server_node(&empty_id));
 
-        let bad_addr = NodeDescriptor {
-            id: NodeId("sam01".to_string()),
+        let bad_addr = PeerNode {
+            id: "sam01".to_string(),
             addrs: vec!["127.0.0.1:4001".to_string()],
             is_local: false,
         };
         
         assert!(!is_valid_server_node(&bad_addr));
-
     }
 
     #[test]

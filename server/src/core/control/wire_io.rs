@@ -1,5 +1,5 @@
 use connector::ConnectorResponse;
-use serverlib::p2p::protocol::ServiceMessage;
+use peerlib::ServiceMessage;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::core::control::p2p_wire::encode_service_message;

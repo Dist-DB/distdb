@@ -1,10 +1,9 @@
-use crate::core::cluster::NodeDescriptor;
-use crate::core::identity::NodeId;
+use crate::p2p::types::PeerNode;
 
 use std::collections::HashMap;
 
 pub trait DiscoveryService {
-    fn discover_peers(&self) -> Vec<NodeDescriptor>;
+    fn discover_peers(&self) -> Vec<PeerNode>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,10 +14,11 @@ pub enum DiscoveryMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KademliaDiscoveryConfig {
     pub protocol: String,
-    pub bootstrap_nodes: Vec<NodeDescriptor>,
+    pub bootstrap_nodes: Vec<PeerNode>,
 }
 
 impl KademliaDiscoveryConfig {
+
     pub fn new(protocol: impl Into<String>) -> Self {
         Self {
             protocol: protocol.into(),
@@ -26,25 +26,26 @@ impl KademliaDiscoveryConfig {
         }
     }
 
-    pub fn with_bootstrap_nodes(mut self, nodes: Vec<NodeDescriptor>) -> Self {
+    pub fn with_bootstrap_nodes(mut self, nodes: Vec<PeerNode>) -> Self {
         self.bootstrap_nodes = nodes;
         self
     }
+
 }
 
 #[derive(Debug, Clone)]
 pub struct KademliaDiscoveryService {
-    local_node_id: NodeId,
+    local_node_id: String,
     config: KademliaDiscoveryConfig,
-    bootstrap_nodes: Vec<NodeDescriptor>,
-    peers: HashMap<NodeId, NodeDescriptor>,
+    bootstrap_nodes: Vec<PeerNode>,
+    peers: HashMap<String, PeerNode>,
 }
 
 impl KademliaDiscoveryService {
     
-    pub fn new(local_node_id: NodeId, config: KademliaDiscoveryConfig) -> Self {
+    pub fn new(local_node_id: impl Into<String>, config: KademliaDiscoveryConfig) -> Self {
         Self {
-            local_node_id,
+            local_node_id: local_node_id.into(),
             bootstrap_nodes: config.bootstrap_nodes.clone(),
             config,
             peers: HashMap::new(),
@@ -59,22 +60,24 @@ impl KademliaDiscoveryService {
         &self.config.protocol
     }
 
-    pub fn upsert_peer(&mut self, node: NodeDescriptor) {
+    pub fn upsert_peer(&mut self, node: PeerNode) {
+        
         if node.id != self.local_node_id {
             let mut remote = node;
             remote.is_local = false;
             self.peers.insert(remote.id.clone(), remote);
         }
+
     }
 
-    pub fn bootstrap_nodes(&self) -> &[NodeDescriptor] {
+    pub fn bootstrap_nodes(&self) -> &[PeerNode] {
         &self.bootstrap_nodes
     }
 
 }
 
 impl DiscoveryService for KademliaDiscoveryService {
-    fn discover_peers(&self) -> Vec<NodeDescriptor> {
+    fn discover_peers(&self) -> Vec<PeerNode> {
         self.peers.values().cloned().collect()
     }
 }

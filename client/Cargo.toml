@@ -6,4 +6,5 @@ authors = ["Sam Colak <sam@samcolak.com>"]
 
 [dependencies]
 connector = { path = "../connector" }
+peerlib = { path = "../peerlib" }
 common = { path = "../common" }

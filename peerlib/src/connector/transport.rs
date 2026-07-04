@@ -1,4 +1,4 @@
-use crate::core::{
+use connector::{
     ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorResult,
     ConnectorTransport, ResponseStatus,
 };
@@ -1087,7 +1087,7 @@ fn generate_shared_session_token(peer_id: &str, server_token: Option<&str>) -> S
 mod tests {
     
     use super::*;
-    use crate::core::{
+    use connector::{
         ConnectorCommand, ConnectorRequest, ConnectorResult, MutationResult,
         ResponseStatus,
     };

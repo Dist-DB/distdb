@@ -1,10 +1,10 @@
-use crate::core::cluster::NodeDescriptor;
-use crate::helpers::error::{Result, ServerLibError};
+use crate::error::{PeerError, Result};
 use crate::p2p::network::ServerP2pNetwork;
 use crate::p2p::protocol::{
     AffinityJoinRequest, AffinityJoinResponse, AffinityReplicationAction, ServiceMessage,
 };
 use crate::p2p::transport::Transport;
+use crate::p2p::types::PeerNode;
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -12,16 +12,21 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerP2pEvent {
-    PeerDiscovered(NodeDescriptor),
+
+    PeerDiscovered(PeerNode),
+    
     MessageReceived {
         from_peer_id: String,
         message: ServiceMessage,
     },
+
     ErrorReceived {
         from_peer_id: Option<String>,
         message: String,
     },
+
     Shutdown,
+    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +189,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
         match event {
 
             ServerP2pEvent::PeerDiscovered(node) => {
-                let peer_id = node.id.0.clone();
+                let peer_id = node.id.clone();
                 log::info!(
                     "server p2p peer discovered peer_id={} addrs={}",
                     peer_id,
@@ -214,7 +219,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::NodeAnnounce(node) => {
                         log::info!(
                             "server p2p node announce received peer_id={} addrs={}",
-                            node.id.0,
+                            node.id,
                             node.addrs.join(",")
                         );
                         self.network.upsert_discovered_peer(node);
@@ -332,16 +337,22 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 let source = from_peer_id
                     .map(|peer| format!("peer={peer}"))
                     .unwrap_or_else(|| "peer=unknown".to_string());
+                
                 log::error!("server p2p runtime error from {}: {}", source, message);
-                Err(ServerLibError::Network(format!(
+                
+                Err(PeerError::Network(format!(
                     "p2p event error from {source}: {message}"
                 )))
+
             },
 
             ServerP2pEvent::Shutdown => {
+                
                 log::info!("server p2p runtime shutdown received");
                 self.running = false;
+
                 Ok(ServerP2pHandleOutcome::Shutdown)
+            
             }
 
         }

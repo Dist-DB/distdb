@@ -35,10 +35,13 @@
 */
 
 use connector::{
-    ConnectorClient, ConnectorCommand, ConnectorP2pConfig, ConnectorP2pEvent,
-    ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorRequest,
-    ConnectorResponse, ConnectorResult, ConnectorPeer,
+    ConnectorClient, ConnectorCommand, ConnectorRequest,
+    ConnectorResponse, ConnectorResult,
     FieldKind, FieldSpec, SchemaChangeRequest, SchemaCommand, SchemaResult,
+};
+use peerlib::{
+    ConnectorP2pConfig, ConnectorP2pEvent, ConnectorP2pRuntime,
+    ConnectorP2pTransport, ConnectorPeer,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

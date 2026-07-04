@@ -1,4 +1,4 @@
-use connector::ConnectorTlsConfig;
+use peerlib::ConnectorTlsConfig;
 use common::DEFAULT_SERVER_PORT;
 use std::{collections::HashSet, net::Ipv4Addr};
 

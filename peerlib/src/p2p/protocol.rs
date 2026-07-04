@@ -1,6 +1,4 @@
-use crate::core::cluster::NodeDescriptor;
-use crate::engine::affinity::AffinityDocument;
-use crate::engine::database::transaction::TransactionId;
+use crate::p2p::types::{PeerNode, WireAffinityDocument, WireTransactionId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AffinityReplicationAction {
@@ -42,7 +40,7 @@ pub enum EventType {
 pub struct PublicationEvent {
     pub timestamp_epoch_ms: u64,
     pub service_id: String,
-    pub transaction_id: TransactionId,
+    pub transaction_id: WireTransactionId,
     pub event_type: EventType,
 }
 
@@ -61,7 +59,7 @@ pub struct AffinityJoinResponse {
     pub request_id: String,
     pub ok: bool,
     pub error: Option<String>,
-    pub document: Option<AffinityDocument>,
+    pub document: Option<WireAffinityDocument>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -106,8 +104,8 @@ pub struct TransactionsSinceRequest {
     pub request_id: String,
     pub affinity_id: String,
     pub database_id: String,
-    pub from_transaction_id: Option<TransactionId>,
-    pub from_stream_transaction_ids: Vec<(String, TransactionId)>,
+    pub from_transaction_id: Option<WireTransactionId>,
+    pub from_stream_transaction_ids: Vec<(String, WireTransactionId)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -162,14 +160,14 @@ pub struct TableLockState {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ServiceMessage {
-    NodeAnnounce(NodeDescriptor),
+    NodeAnnounce(PeerNode),
     Publication {
         subscription_key: String,
         event: PublicationEvent,
     },
     TransactionsSince {
         database_id: String,
-        from: Option<TransactionId>,
+        from: Option<WireTransactionId>,
     },
     AffinityJoinRequest(AffinityJoinRequest),
     AffinityJoinResponse(AffinityJoinResponse),
@@ -187,7 +185,9 @@ pub enum ServiceMessage {
 }
 
 impl ServiceMessage {
+
     pub fn affinity_replication_action(&self) -> Option<AffinityReplicationAction> {
+
         match self {
             Self::AffinityJoinRequest(_) => Some(AffinityReplicationAction::JoinRequest),
             Self::AffinityJoinResponse(_) => Some(AffinityReplicationAction::JoinResponse),
@@ -199,5 +199,7 @@ impl ServiceMessage {
             Self::TransactionsSinceResponse(_) => Some(AffinityReplicationAction::TransactionsSinceResponse),
             _ => None,
         }
+
     }
+    
 }

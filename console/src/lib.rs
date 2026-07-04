@@ -1,9 +1,12 @@
 
 use connector::{
-    ConnectorClient, ConnectorCommand, ConnectorP2pConfig,
-    ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer, ConnectorRequest,
-    ConnectorResult, ConnectorTlsConfig, ConnectorError,
+    ConnectorClient, ConnectorCommand, ConnectorRequest,
+    ConnectorResult, ConnectorError,
     DataQuery, ResponseStatus,
+};
+use peerlib::{
+    ConnectorP2pConfig, ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer,
+    ConnectorTlsConfig,
 };
 use common::helpers::utils::md5_hash;
 use std::io::BufReader;
@@ -164,6 +167,7 @@ impl ConsoleSession {
         })?;
 
         Ok(resolved_peer_id)
+
     }
 
     pub fn execute(&mut self, command: ConsoleCommand) -> Result<bool, Box<dyn std::error::Error>> {
@@ -270,7 +274,7 @@ impl ConsoleSession {
             ConsoleCommand::ImportFile(file_name) => {
                 self.execute_import_file(&file_name)?;
                 Ok(true)
-            }
+            },
 
             ConsoleCommand::Sql(sql) => self.execute_sql(sql),
 
@@ -311,6 +315,7 @@ impl ConsoleSession {
             let request_start = std::time::Instant::now();
 
             match client.execute(&request) {
+
                 Ok(mut current_response) => {
                     let round_trip_ms = request_start.elapsed().as_millis() as u64;
                     if let ConnectorResult::Query(result) = &mut current_response.result {
@@ -319,7 +324,7 @@ impl ConsoleSession {
 
                     response = Some(current_response);
                     break;
-                }
+                },
 
                 Err(err) => {
                     let message = err.to_string();
@@ -340,8 +345,10 @@ impl ConsoleSession {
                     self
                         .recover_import_transport()
                         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
-                }
+                },
+
             }
+
         }
 
         let response = response.ok_or_else(|| {
@@ -459,6 +466,7 @@ impl ConsoleSession {
         let statement_kind = import::classify_import_statement(statement);
 
         for attempt in 0..=IMPORT_TRANSPORT_RETRY_LIMIT {
+
             let request_id = self.next_request_id();
 
             let request = ConnectorRequest::new(
@@ -492,7 +500,7 @@ impl ConsoleSession {
                         _ => Ok(()),
                     };
 
-                }
+                },
 
                 Err(err) => {
 
@@ -579,6 +587,7 @@ impl ConsoleSession {
 
                 let should_commit_by_size =
                     transaction_state.dml_statements_in_batch >= import::import_transaction_batch_size();
+
                 let should_commit_by_age = transaction_state
                     .batch_started_at
                     .map(|started_at| {
@@ -690,6 +699,7 @@ impl ConsoleSession {
         let show_peers_timeout_secs = show_peers_request_timeout_secs();
 
         let mut known_peers = self.runtime.transport().known_peers();
+        
         if known_peers.is_empty() {
             known_peers = self
                 .runtime
@@ -777,21 +787,26 @@ impl ConsoleSession {
                 Some(Duration::from_secs(show_peers_timeout_secs)),
                 Some(Duration::from_secs(show_peers_timeout_secs)),
             );
+
             let response = match client.execute(&request) {
                 
                 Ok(response) => response,
                 
                 Err(err) => {
+
                     let _ = self.runtime.transport().set_active_connection_timeouts(
                         Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
                         Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
                     );
+
                     log::debug!(
                         "server peer refresh request failed for peer_id={}: {}",
                         peer.peer_id,
                         err
                     );
+
                     continue;
+                    
                 }
 
             };
@@ -857,7 +872,7 @@ impl ConsoleSession {
 
         let transport = self.runtime.transport();
         let mode = match transport.discovery_mode() {
-            connector::ConnectorDiscoveryMode::Kademlia => "kademlia",
+            peerlib::ConnectorDiscoveryMode::Kademlia => "kademlia",
         };
 
         log::info!("connector p2p:");

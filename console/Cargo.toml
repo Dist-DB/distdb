@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 connector = { path = "../connector" }
+peerlib = { path = "../peerlib" }
 env_logger = "0.11"
 log = "0.4"
 common = { path = "../common" }

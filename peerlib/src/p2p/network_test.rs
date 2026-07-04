@@ -1,6 +1,4 @@
 use super::*;
-use crate::core::identity::NodeId;
-use crate::helpers::error::ServerLibError;
 use crate::p2p::discovery::KademliaDiscoveryConfig;
 
 #[derive(Debug, Default)]
@@ -20,9 +18,9 @@ impl Transport for StubTransport {
     }
 }
 
-fn node(id: &str, addr: &str) -> NodeDescriptor {
-    NodeDescriptor {
-        id: NodeId(id.to_string()),
+fn node(id: &str, addr: &str) -> PeerNode {
+    PeerNode {
+        id: id.to_string(),
         addrs: vec![addr.to_string()],
         is_local: false,
     }
@@ -30,7 +28,7 @@ fn node(id: &str, addr: &str) -> NodeDescriptor {
 
 #[test]
 fn network_returns_discovered_kademlia_peers() {
-    let local = NodeId("node-local".to_string());
+    let local = "node-local".to_string();
     let config = KademliaDiscoveryConfig::new("/distdb/kad/1.0.0")
         .with_bootstrap_nodes(vec![node("node-a", "/ip4/10.0.0.1/tcp/4001")]);
 
@@ -43,7 +41,7 @@ fn network_returns_discovered_kademlia_peers() {
 
 #[test]
 fn network_can_broadcast_announce() {
-    let local = NodeId("node-local".to_string());
+    let local = "node-local".to_string();
     let discovery =
         KademliaDiscoveryService::new(local, KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"));
     let mut network = ServerP2pNetwork::new(discovery, StubTransport::default());
@@ -54,7 +52,7 @@ fn network_can_broadcast_announce() {
 
 #[test]
 fn network_can_send_point_to_point_message() {
-    let local = NodeId("node-local".to_string());
+    let local = "node-local".to_string();
     let discovery = KademliaDiscoveryService::new(
         local,
         KademliaDiscoveryConfig::new("/distdb/kad/1.0.0")
@@ -72,13 +70,11 @@ fn network_can_send_point_to_point_message() {
 
     assert!(err.is_ok(), "send failed: {err:?}");
 
-    // Keep explicit reference to ensure ServerLibError stays in scope for this module.
-    let _ = ServerLibError::Network("none".to_string());
 }
 
 #[test]
 fn network_send_message_accepts_direct_address() {
-    let local = NodeId("node-local".to_string());
+    let local = "node-local".to_string();
     let discovery =
         KademliaDiscoveryService::new(local, KademliaDiscoveryConfig::new("/distdb/kad/1.0.0"));
     let mut network = ServerP2pNetwork::new(discovery, StubTransport::default());

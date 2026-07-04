@@ -42,6 +42,7 @@ use server::core::control::outbound_transport::{
 };
 use server::core::control::p2p_wire::{
     advertised_listen_addr_from_args, multiaddr_to_socket_addr,
+    node_descriptor_to_peer_node,
 };
 use server::core::control::replication_sync::spawn_affinity_replication_task;
 use server::core::control::tcp_transport::{
@@ -54,8 +55,8 @@ use server::core::control::tls_support::{
 };
 use serverlib::core::cluster::NodeDescriptor;
 use serverlib::core::identity::NodeId;
-use serverlib::p2p::protocol::ServiceMessage;
-use serverlib::{AffinityProcessor, ServerP2pRuntime};
+use serverlib::AffinityProcessor;
+use peerlib::{ServiceMessage, ServerP2pRuntime};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
@@ -152,7 +153,7 @@ fn try_enroll_tls_from_peers(
 
     for peer in server_list {
         let socket_addr = multiaddr_to_socket_addr(peer).unwrap_or_else(|| peer.to_string());
-        let request = ServiceMessage::TlsCertEnrollRequest(serverlib::TlsCertEnrollRequest {
+        let request = ServiceMessage::TlsCertEnrollRequest(peerlib::TlsCertEnrollRequest {
             request_id: request_id.clone(),
             requester_node_id: node_id.to_string(),
             csr_pem: enrollment.csr_pem.clone(),
@@ -408,6 +409,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let discovered_peers_for_affinity = runtime.network().discover_peers();
+    let local_peer_node = node_descriptor_to_peer_node(&local_node);
 
     let p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>> = Arc::new(Mutex::new(runtime));
     let p2p_heartbeat_task = spawn_p2p_heartbeat_task(Arc::clone(&p2p_runtime), local_node.clone());
@@ -420,7 +422,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if ca_root_enabled && matches!(tls_mode, common::TlsMode::Optional | common::TlsMode::Required)
         && let Ok(Some(ca_cert_pem)) = serverlib::load_p2p_ca_pem(&node_data_dir) {
             
-            let distribution = serverlib::TlsCaDistribution {
+            let distribution = peerlib::TlsCaDistribution {
                 issuer_node_id: local_node.id.0.clone(),
                 ca_cert_pem,
             };
@@ -443,7 +445,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (affinity_processor, affinity_storage) = initialize_affinity_with_persistence(
         affinity_config.as_ref(),
-        &local_node,
+        &local_peer_node,
         discovered_peers_for_affinity.clone(),
         &data_dir,
     );
@@ -620,7 +622,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::clone(&affinity_processor),
             Arc::clone(&affinity_storage),
             config,
-            &local_node,
+            &local_peer_node,
             &discovered_peers_for_affinity,
         )
         .await;
@@ -632,7 +634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::clone(&app),
             Arc::clone(&p2p_runtime),
             config.clone(),
-            local_node.clone(),
+            local_peer_node.clone(),
         );
 
     }
