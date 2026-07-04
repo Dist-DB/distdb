@@ -1157,6 +1157,10 @@ fn append_wal_bytes(
 
     if let Some(file) = append_file.as_mut()
         && file.write_all(bytes).is_ok() {
+            if wal_sync_on_append() {
+                file.sync_data()
+                    .map_err(|_| "failed to sync WAL bytes to disk")?;
+            }
             return Ok(());
         }
 
@@ -1167,6 +1171,11 @@ fn append_wal_bytes(
     if let Some(file) = append_file.as_mut() {
         file.write_all(bytes)
             .map_err(|_| "failed to persist WAL bytes to disk")?;
+
+        if wal_sync_on_append() {
+            file.sync_data()
+                .map_err(|_| "failed to sync WAL bytes to disk")?;
+        }
     }
 
     Ok(())
@@ -1183,8 +1192,32 @@ fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'
         bytes.extend_from_slice(&frame);
     }
     
-    write_bytes(path, &bytes).map_err(|_| "failed to rewrite compacted WAL file")
+    write_bytes(path, &bytes).map_err(|_| "failed to rewrite compacted WAL file")?;
 
+    if wal_sync_on_append() {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| "failed to reopen WAL file for sync")?;
+
+        file.sync_all()
+            .map_err(|_| "failed to sync rewritten WAL file")?;
+    }
+
+    Ok(())
+
+}
+
+fn wal_sync_on_append() -> bool {
+    std::env::var("DISTDB_WAL_SYNC_ON_APPEND")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
 }
 
 fn compact_entries_to_latest_schema_and_metadata(

@@ -80,7 +80,7 @@ pub(in super::super) fn append_row_payload_record(
 pub(super) fn append_row_payload_record_with_live_row_ids(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
-    wal_id: &str,
+    _wal_id: &str,
     table: &serverlib::DatabaseTable,
     runtime_indexes: &mut RuntimeIndexStore,
     kind: TransactionKind,
@@ -91,14 +91,15 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
     group_id: Option<TransactionId>,
 ) -> Result<(), String> {
     let mutation_start = Instant::now();
-    let payload_context = payload_context_for_table(catalog, wal_id);
+    let stream_id = table_stream_id(catalog, &table.table_id);
+    let payload_context = payload_context_for_table(catalog, &table.table_id);
 
     if let Some(expected_refid) = refid {
         let live_row_check_start = Instant::now();
         let live_row_exists = if let Some(live_row_ids) = expected_live_row_ids {
             live_row_ids.contains(&expected_refid.0)
         } else {
-            let live_row_ids = load_live_rows_with_context(wal, wal_id, table.schema(), &payload_context)
+            let live_row_ids = load_live_rows_with_context(wal, &stream_id, table.schema(), &payload_context)
                 .map_err(|err| format!("live row load failed: {err}"))?
                 .into_iter()
                 .map(|(row_id, _)| row_id)
@@ -124,7 +125,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
         }
     }
 
-    let last_id = wal.latest_transaction_id(wal_id);
+    let last_id = wal.latest_transaction_id(&stream_id);
     let next_id = TransactionId(last_id.map(|id| id.0 + 1).unwrap_or(1));
     let refid = refid.or(last_id);
 
@@ -153,17 +154,17 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
     );
 
     let wal_append_start = Instant::now();
-    wal.append(wal_id, record).map_err(|e| e.to_string())?;
+    wal.append(&stream_id, record).map_err(|e| e.to_string())?;
     let wal_append_ms = wal_append_start.elapsed().as_millis() as u64;
     let latest_tx_id = next_id.0;
 
     let index_apply_start = Instant::now();
 
     if let Some(row_map) = row_map.as_ref() {
-        runtime_indexes.apply_table_row_mutation(derived_indexes.iter().copied(), kind, row_map);
+        runtime_indexes.apply_table_row_mutation(&stream_id, derived_indexes.iter().copied(), kind, row_map);
         serverlib::apply_equality_cache_row_mutation(
             wal.cache_scope_id(),
-            &table.table_id,
+            &stream_id,
             latest_tx_id,
             kind,
             next_id.0,
@@ -206,11 +207,12 @@ pub(super) fn append_row_payload_records_batch(
     }
 
     let batch_start = Instant::now();
+    let stream_id = wal_id.to_string();
     let derived_indexes = derived_indexes_for_table(table).collect::<Vec<_>>();
     let track_runtime_indexes = !derived_indexes.is_empty();
     let payload_count = payloads.len();
 
-    let last_id = wal.latest_transaction_id(wal_id);
+    let last_id = wal.latest_transaction_id(&stream_id);
     let first_row_id = last_id.map(|id| id.0.saturating_add(1)).unwrap_or(1);
     let mut next_id = first_row_id;
     let mut refid = last_id;
@@ -252,7 +254,7 @@ pub(super) fn append_row_payload_records_batch(
     let materialize_us = materialize_start.elapsed().as_micros() as u64;
 
     let wal_append_start = Instant::now();
-    wal.append_batch(wal_id, records)
+    wal.append_batch(&stream_id, records)
         .map_err(|err| err.to_string())?;
     let wal_append_us = wal_append_start.elapsed().as_micros() as u64;
     let latest_tx_id = next_id.saturating_sub(1);
@@ -262,11 +264,11 @@ pub(super) fn append_row_payload_records_batch(
     if track_runtime_indexes {
         match kind {
             TransactionKind::Delete => {
-                runtime_indexes.remove_table_rows_batch(&derived_indexes, &row_maps);
+                runtime_indexes.remove_table_rows_batch(&stream_id, &derived_indexes, &row_maps);
             }
 
             TransactionKind::Insert | TransactionKind::Update => {
-                runtime_indexes.record_table_rows_batch(&derived_indexes, &row_maps);
+                runtime_indexes.record_table_rows_batch(&stream_id, &derived_indexes, &row_maps);
             }
 
             _ => {}
@@ -274,7 +276,7 @@ pub(super) fn append_row_payload_records_batch(
 
         serverlib::apply_equality_cache_row_mutation_batch(
             wal.cache_scope_id(),
-            &table.table_id,
+            &stream_id,
             latest_tx_id,
             kind,
             first_row_id,
@@ -291,7 +293,7 @@ pub(super) fn append_row_payload_records_batch(
         for index in &derived_indexes {
             let index_id = &index.index_id.0;
             let stats = runtime_indexes
-                .stats(index_id)
+                .stats_for_table(&stream_id, index_id)
                 .map(|(cardinality, capacity)| format!("{}:{}/{}", index_id, cardinality, capacity))
                 .unwrap_or_else(|| format!("{}:missing", index_id));
             index_stats.push(stats);
@@ -337,12 +339,14 @@ where
     F: FnOnce(TransactionId, &mut RuntimeIndexStore) -> ConnectorResponse,
 {
 
+    let table_stream_id = table_stream_id(catalog, &table.table_id);
+
     if let (Some(write_group_id), Some(touched_tables)) = (external_write_group_id, touched_tables)
     {
-        if touched_tables.insert(table.table_id.clone())
+        if touched_tables.insert(table_stream_id.clone())
             && let Err(err) = append_payload_record_with_group(
                 wal,
-                &table.table_id,
+                &table_stream_id,
                 TransactionKind::WriteBegin,
                 request_id.as_bytes().to_vec(),
                 common::epoch_nanos!(),
@@ -359,7 +363,7 @@ where
 
     let write_group_id = match append_payload_record_with_group(
         wal,
-        &table.table_id,
+        &table_stream_id,
         TransactionKind::WriteBegin,
         request_id.as_bytes().to_vec(),
         common::epoch_nanos!(),
@@ -380,7 +384,7 @@ where
 
         if let Err(err) = append_payload_record_with_group(
             wal,
-            &table.table_id,
+            &table_stream_id,
             TransactionKind::WriteCommit,
             Vec::new(),
             common::epoch_nanos!(),
@@ -393,7 +397,7 @@ where
             );
             let _ = append_payload_record_with_group(
                 wal,
-                &table.table_id,
+                &table_stream_id,
                 TransactionKind::WriteAbort,
                 Vec::new(),
                 common::epoch_nanos!(),
@@ -406,10 +410,11 @@ where
             );
         }
 
-        if let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, wal) {
+        if let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, &table_stream_id, wal) {
             log::warn!(
-                "runtime index incremental persistence skipped table={} reason={}",
+                "runtime index incremental persistence skipped table={} stream={} reason={}",
                 table.table_id,
+                table_stream_id,
                 err,
             );
         }
@@ -425,7 +430,7 @@ where
         
         let _ = append_payload_record_with_group(
             wal,
-            &table.table_id,
+            &table_stream_id,
             TransactionKind::WriteAbort,
             Vec::new(),
             common::epoch_nanos!(),
@@ -458,10 +463,21 @@ pub(crate) fn commit_external_write_group(
         )?;
 
         if let (Some(catalogs), Some(runtime_indexes)) = (catalogs, runtime_indexes.as_deref_mut())
-            && let Some(table) = catalogs
+            && let Some((_, table)) = catalogs
                 .values()
-                .find_map(|catalog| catalog.table(table_id))
-            && let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, wal)
+                .find_map(|catalog| {
+                    catalog
+                        .table_ids()
+                        .into_iter()
+                        .find(|candidate| {
+                            catalog
+                                .entity_wal_stream_id(candidate)
+                                .as_deref()
+                                .is_some_and(|stream_id| stream_id == table_id)
+                        })
+                        .and_then(|candidate| catalog.table(&candidate).map(|table| (catalog, table)))
+                })
+            && let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, table_id, wal)
         {
             log::warn!(
                 "runtime index incremental persistence skipped table={} reason={}",
@@ -500,7 +516,18 @@ pub(crate) fn abort_external_write_group(
 
         if let Some((catalog, table)) = catalogs
             .values()
-            .find_map(|catalog| catalog.table(table_id).map(|table| (catalog, table))) {
+            .find_map(|catalog| {
+                catalog
+                    .table_ids()
+                    .into_iter()
+                    .find(|candidate| {
+                        catalog
+                            .entity_wal_stream_id(candidate)
+                            .as_deref()
+                            .is_some_and(|stream_id| stream_id == table_id)
+                    })
+                    .and_then(|candidate| catalog.table(&candidate).map(|table| (catalog, table)))
+            }) {
             rebuild_runtime_indexes_for_table(catalog, table, wal, runtime_indexes);
         }
 
@@ -514,7 +541,8 @@ fn rebuild_runtime_indexes_for_table(
     runtime_indexes: &mut RuntimeIndexStore,
 ) {
     let payload_context = payload_context_for_table(catalog, &table.table_id);
-    let live_rows = match load_live_rows_with_context(wal, &table.table_id, table.schema(), &payload_context) {
+    let stream_id = table_stream_id(catalog, &table.table_id);
+    let live_rows = match load_live_rows_with_context(wal, &stream_id, table.schema(), &payload_context) {
         Ok(rows) => rows,
         Err(err) => {
             log::warn!(
@@ -531,7 +559,7 @@ fn rebuild_runtime_indexes_for_table(
             continue;
         }
 
-        runtime_indexes.index_mut(&index.index_id.0).rebuild(
+        runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0).rebuild(
             live_rows
                 .iter()
                 .map(|(_, row_map)| index_value_tuple(index, row_map))
@@ -539,6 +567,12 @@ fn rebuild_runtime_indexes_for_table(
         );
 
     }
+}
+
+pub(super) fn table_stream_id(catalog: &DatabaseCatalog, table_id: &str) -> String {
+    catalog
+        .entity_wal_stream_id(table_id)
+        .unwrap_or_else(|| common::normalize_identifier!(table_id))
 }
 
 pub(super) fn payload_context_for_table(

@@ -110,6 +110,7 @@ mod tests {
             table_id: "users".to_string(),
             schema_revision: 1,
             schema_epoch: 1,
+            entity_id: None,
             schema: TableSchema::new(vec![FieldDef {
                 seqno: 1,
                 field_name: "id".to_string(),

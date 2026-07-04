@@ -84,8 +84,13 @@ impl DatabaseEntityAspect for DatabaseEntity {
     }
 
     fn wal_stream_id(&self, database_wal_id: &str) -> String {
-        let _ = database_wal_id;
-        self.storage_key()
+        match self {
+            Self::Table(t) => t.wal_stream_id(database_wal_id),
+            Self::View(v) => v.wal_stream_id(database_wal_id),
+            Self::Relationship(r) => r.wal_stream_id(database_wal_id),
+            Self::Trigger(t) => t.wal_stream_id(database_wal_id),
+            Self::StoredProcedure(p) => p.wal_stream_id(database_wal_id),
+        }
     }
 
     fn schema_revision(&self) -> Option<u64> {

@@ -332,11 +332,18 @@ pub(super) fn execute_create_table_impl(
     }
 
     let wal_id = catalog.database_id.0.clone();
-    let entity_wal_id = normalized_table_id.clone();
+    let table_entity_stream_id = catalog
+        .entity_wal_stream_id(&normalized_table_id)
+        .unwrap_or_else(|| normalized_table_id.clone());
+    let table_entity_id = catalog
+        .entity_identity_id(&normalized_table_id)
+        .unwrap_or_else(|| normalized_table_id.clone());
+    let entity_wal_id = table_entity_stream_id.clone();
     let schema_payload = SchemaChangePayload {
         table_id: normalized_table_id.clone(),
         schema_revision: 1,
         schema_epoch: catalog.schema_epoch(),
+        entity_id: Some(table_entity_id.clone()),
         schema,
     };
 
@@ -367,6 +374,7 @@ pub(super) fn execute_create_table_impl(
         table_id: normalized_table_id.clone(),
         action: TableLifecycleAction::Create,
         schema_epoch: catalog.schema_epoch(),
+        entity_id: Some(table_entity_id),
         schema: Some(
             catalog
                 .table_schema(&normalized_table_id)
@@ -643,6 +651,7 @@ fn execute_drop_entity_object(
             table_id: normalized_object_id.clone(),
             action: TableLifecycleAction::Drop,
             schema_epoch: catalog.schema_epoch(),
+            entity_id: None,
             schema: None,
         };
 

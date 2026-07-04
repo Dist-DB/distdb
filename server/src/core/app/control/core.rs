@@ -2,7 +2,7 @@ use std::time::Instant;
 use std::collections::HashSet;
 
 use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
-use serverlib::{ConcurrentWalManager, DatabaseCatalog, TransactionId};
+use serverlib::{ConcurrentWalManager, DatabaseCatalog, SqlOperation, TransactionId, parse_mysql8_sql_requests};
 
 use crate::core::app::helpers::{
     CommandKind, SessionTxMarkerType, command_info, is_staged_dml_query, is_transactional_read_query,
@@ -16,6 +16,58 @@ use crate::core::mappings::query::{
 use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
+
+    pub fn handle_read_only_connector_request_for_session(
+        &self,
+        request: &ConnectorRequest,
+        session_id: &str,
+    ) -> Option<ConnectorResponse> {
+
+        let ConnectorCommand::Query { query } = &request.command else {
+            return None;
+        };
+
+        if self
+            .transaction_coordinator
+            .is_active(session_id)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+
+        let parsed = parse_mysql8_sql_requests(&query.sql, &query.database_id).ok()?;
+        if parsed.is_empty() {
+            return None;
+        }
+
+        let read_only = parsed.iter().all(|statement| {
+            matches!(statement.operation, SqlOperation::Select | SqlOperation::UnionQuery)
+        });
+
+        if !read_only {
+            return None;
+        }
+
+        let mut catalogs = self.catalogs.clone();
+        let mut runtime_indexes = self.runtime_indexes.clone();
+        let session_state = self.get_session(session_id);
+        let (connection_id, session_user) = session_state
+            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
+            .unwrap_or((0, None));
+
+        Some(handle_query_command(
+            &request.request_id,
+            query,
+            &mut catalogs,
+            &self.wal,
+            &self.node_data_dir,
+            &mut runtime_indexes,
+            session_id,
+            connection_id,
+            session_user,
+        ))
+
+    }
 
     fn finalize_group_table_writes(&mut self, table_ids: &HashSet<String>) -> Result<(), String> {
         for table_id in table_ids {

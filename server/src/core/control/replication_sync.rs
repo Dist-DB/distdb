@@ -16,19 +16,21 @@ use serverlib::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, interval};
 
 pub fn spawn_affinity_replication_task(
     affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
     affinity_storage: Arc<AffinityStorage>,
-    app: Arc<Mutex<ServerApp>>,
+    app: Arc<RwLock<ServerApp>>,
     p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_config: AffinityStartupConfig,
     local_node: PeerNode,
 ) -> JoinHandle<()> {
+
     tokio::spawn(async move {
+
         let mut ticker = interval(Duration::from_millis(500));
         let mut executor = ReplicationPhaseExecutor::new();
         let mut last_affinity_refresh_at = std::time::Instant::now() - Duration::from_secs(30);
@@ -125,6 +127,7 @@ pub fn spawn_affinity_replication_task(
                             }
 
                             match executor.execute_next_phase(proc, &plan) {
+
                                 Ok(completed) => {
                                     if let Some(checkpoint) = proc.checkpoint()
                                         && let Err(err) = affinity_storage.save_checkpoint(checkpoint)
@@ -144,23 +147,29 @@ pub fn spawn_affinity_replication_task(
                                     } else {
                                         log::debug!("affinity replication phase completed, continuing to next phase");
                                     }
-                                }
+                                },
 
                                 Err(err) => {
                                     log::error!("affinity replication phase failed: {}", err);
                                     proc.set_degraded(format!("replication failed: {}", err));
                                 }
+
                             }
-                        }
+
+                        },
 
                         Err(err) => {
                             log::warn!("failed to build replication sync plan: {}", err);
                         }
+
                     }
+
                 }
 
                 if let AffinityProcessorState::Ready = proc.state() {
+
                     if last_affinity_refresh_at.elapsed() >= Duration::from_secs(2) {
+
                         last_affinity_refresh_at = std::time::Instant::now();
 
                         let discovered_peers = {
@@ -175,11 +184,14 @@ pub fn spawn_affinity_replication_task(
                         );
 
                         if !responses.is_empty() && let Some(base_doc) = proc.document() {
+
                             let mut merged_doc = base_doc.clone();
                             let previous_database_count = merged_doc.databases.len();
+                            
                             merge_affinity_documents_from_responses(&mut merged_doc, responses);
 
                             if merged_doc != *base_doc {
+
                                 proc.apply_affinity_document(merged_doc.clone());
 
                                 if let Err(err) = affinity_storage.save(&merged_doc) {
@@ -199,8 +211,11 @@ pub fn spawn_affinity_replication_task(
                                 } else {
                                     proc.set_ready();
                                 }
+                            
                             }
+
                         }
+
                     }
 
                     let Some(document) = proc.document() else {
@@ -226,6 +241,7 @@ pub fn spawn_affinity_replication_task(
                     };
 
                     for database_id in database_ids {
+
                         let should_sync = last_wal_sync_at
                             .get(&database_id)
                             .map(|last| last.elapsed() >= Duration::from_secs(5))
@@ -240,6 +256,7 @@ pub fn spawn_affinity_replication_task(
                         let db_cursors = wal_cursors.get(&database_id).cloned();
 
                         for target_addr in &peer_targets {
+
                             match execute_live_wal_catchup_sync(
                                 &app,
                                 &p2p_runtime,
@@ -255,7 +272,7 @@ pub fn spawn_affinity_replication_task(
                                     if !updated.is_empty() {
                                         wal_cursors.insert(database_id.clone(), updated);
                                     }
-                                }
+                                },
 
                                 Err(err) => {
                                     log::warn!(
@@ -267,16 +284,23 @@ pub fn spawn_affinity_replication_task(
                                     );
                                 }
                             }
+
                         }
+
                     }
+
                 }
+
             }
+
         }
+    
     })
+
 }
 
 pub async fn execute_live_schema_catalog_sync(
-    app: &Arc<Mutex<ServerApp>>,
+    app: &Arc<RwLock<ServerApp>>,
     p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_id: &str,
     database_id: &str,
@@ -284,6 +308,7 @@ pub async fn execute_live_schema_catalog_sync(
     expected_schema_hash: Option<String>,
     expected_database_name: Option<String>,
 ) -> Result<(), String> {
+
     if affinity_id.is_empty() {
         return Ok(());
     }
@@ -294,11 +319,12 @@ pub async fn execute_live_schema_catalog_sync(
         && !database_name.is_empty()
         && database_name != database_id
     {
-        let mut app_guard = app.lock().await;
+        let mut app_guard = app.write().await;
         let _ = app_guard.set_affinity_catalog_database_name(database_id, database_name);
     }
 
     let peer_targets = {
+
         let runtime = p2p_runtime.lock().await;
         let peers = runtime.network().discover_peers();
 
@@ -312,7 +338,9 @@ pub async fn execute_live_schema_catalog_sync(
                 targets.push(addr);
             }
         }
+        
         targets
+
     };
 
     if peer_targets.is_empty() {
@@ -325,7 +353,9 @@ pub async fn execute_live_schema_catalog_sync(
     }
 
     let mut applied_any = false;
+
     for target in peer_targets {
+
         let Some(socket_addr) = multiaddr_to_socket_addr(&target) else {
             continue;
         };
@@ -359,28 +389,36 @@ pub async fn execute_live_schema_catalog_sync(
         }
 
         if !response.ok {
+
             let err = response
                 .error
                 .unwrap_or_else(|| "unknown schema sync error".to_string());
+            
             log::warn!(
                 "peer rejected schema catalog request affinity_id={} database_id={}: {}",
                 affinity_id,
                 database_id,
                 err
             );
+            
             continue;
+
         }
 
-        let mut app_guard = app.lock().await;
+        let mut app_guard = app.write().await;
+
         apply_schema_definitions_to_local_database(
             &mut app_guard,
             database_id,
             &response.schema_definitions,
         )?;
+
         if !response.database_name.is_empty() && response.database_name != database_id {
             let _ = app_guard.set_affinity_catalog_database_name(database_id, &response.database_name);
         }
+
         applied_any = true;
+
     }
 
     if applied_any {
@@ -392,10 +430,11 @@ pub async fn execute_live_schema_catalog_sync(
     }
 
     Ok(())
+
 }
 
 pub async fn execute_live_wal_catchup_sync(
-    app: &Arc<Mutex<ServerApp>>,
+    app: &Arc<RwLock<ServerApp>>,
     p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
     affinity_id: &str,
     database_id: &str,
@@ -403,6 +442,7 @@ pub async fn execute_live_wal_catchup_sync(
     from_stream_transaction_ids: Option<&HashMap<String, TransactionId>>,
     target_addr: Option<&str>,
 ) -> Result<HashMap<String, TransactionId>, String> {
+
     if affinity_id.is_empty() {
         return Ok(HashMap::new());
     }
@@ -410,6 +450,7 @@ pub async fn execute_live_wal_catchup_sync(
     let request_id = format!("wal-sync-{}-{}", database_id, epoch_ms!());
 
     let peer_targets = {
+
         let runtime = p2p_runtime.lock().await;
         let peers = runtime.network().discover_peers();
 
@@ -427,6 +468,7 @@ pub async fn execute_live_wal_catchup_sync(
         }
 
         targets
+
     };
 
     if peer_targets.is_empty() {
@@ -442,6 +484,7 @@ pub async fn execute_live_wal_catchup_sync(
     let mut imported = Vec::new();
 
     for target in peer_targets {
+
         let Some(socket_addr) = multiaddr_to_socket_addr(&target) else {
             continue;
         };
@@ -496,7 +539,9 @@ pub async fn execute_live_wal_catchup_sync(
         }
 
         for encoded in response.transactions {
+
             match decode_wal_frame(&encoded) {
+
                 Ok(frame) => {
                     max_seen_by_stream
                         .entry(frame.0.clone())
@@ -507,11 +552,14 @@ pub async fn execute_live_wal_catchup_sync(
                         })
                         .or_insert(frame.1.id.0);
                     imported.push(frame);
-                }
+                },
+
                 Err(err) => {
                     log::warn!("failed decoding WAL frame during catchup: {}", err);
                 }
+
             }
+
         }
     }
 
@@ -526,11 +574,12 @@ pub async fn execute_live_wal_catchup_sync(
         imported.len()
     );
 
-    let mut app_guard = app.lock().await;
+    let mut app_guard = app.write().await;
     app_guard.import_wal_records(database_id, imported)?;
 
     Ok(max_seen_by_stream
         .into_iter()
         .map(|(stream, tx)| (stream, TransactionId(tx)))
         .collect())
+        
 }

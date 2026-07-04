@@ -26,7 +26,7 @@ pub enum ServerP2pEvent {
     },
 
     Shutdown,
-    
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +190,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
 
             ServerP2pEvent::PeerDiscovered(node) => {
                 let peer_id = node.id.clone();
-                log::info!(
+                log::debug!(
                     "server p2p peer discovered peer_id={} addrs={}",
                     peer_id,
                     node.addrs.join(",")
@@ -217,7 +217,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 match message {
 
                     ServiceMessage::NodeAnnounce(node) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p node announce received peer_id={} addrs={}",
                             node.id,
                             node.addrs.join(",")
@@ -226,7 +226,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
                     
                     ServiceMessage::AffinityJoinRequest(req) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p affinity join request received action={} from_peer_id={} affinity_id={}",
                             AffinityReplicationAction::JoinRequest.as_str(),
                             from_peer_id,
@@ -237,7 +237,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
                     
                     ServiceMessage::AffinityJoinResponse(resp) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p affinity join response received action={} from_peer_id={} request_id={} ok={}",
                             AffinityReplicationAction::JoinResponse.as_str(),
                             from_peer_id,
@@ -249,7 +249,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
                     
                     ServiceMessage::SchemaCatalogRequest(req) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p schema catalog request received action={} from_peer_id={} database_id={}",
                             AffinityReplicationAction::SchemaCatalogRequest.as_str(),
                             from_peer_id,
@@ -260,7 +260,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
 
                     ServiceMessage::SchemaCatalogResponse(resp) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p schema catalog response received action={} from_peer_id={} request_id={}",
                             AffinityReplicationAction::SchemaCatalogResponse.as_str(),
                             from_peer_id,
@@ -271,7 +271,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
 
                     ServiceMessage::DataSnapshotRequest(req) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p data snapshot request received action={} from_peer_id={} database_id={}",
                             AffinityReplicationAction::DataSnapshotRequest.as_str(),
                             from_peer_id,
@@ -282,7 +282,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
 
                     ServiceMessage::DataSnapshotResponse(resp) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p data snapshot response received action={} from_peer_id={} request_id={}",
                             AffinityReplicationAction::DataSnapshotResponse.as_str(),
                             from_peer_id,
@@ -293,7 +293,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
 
                     ServiceMessage::TransactionsSinceRequest(req) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p transactions since request received action={} from_peer_id={} database_id={} from_tx={:?}",
                             AffinityReplicationAction::TransactionsSinceRequest.as_str(),
                             from_peer_id,
@@ -305,7 +305,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     },
 
                     ServiceMessage::TransactionsSinceResponse(resp) => {
-                        log::info!(
+                        log::debug!(
                             "server p2p transactions since response received action={} from_peer_id={} request_id={} count={}",
                             AffinityReplicationAction::TransactionsSinceResponse.as_str(),
                             from_peer_id,

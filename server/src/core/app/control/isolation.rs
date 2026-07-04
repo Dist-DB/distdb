@@ -18,7 +18,7 @@ impl ServerApp {
         staged_queries: &[connector::DataQuery],
     ) -> Option<String> {
 
-        let mut touched_tables = HashSet::new();
+        let mut touched_tables: HashSet<(String, String)> = HashSet::new();
 
         for query in staged_queries {
             let Ok(parsed) = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) else {
@@ -36,17 +36,30 @@ impl ServerApp {
                         | serverlib::SqlOperation::Update
                         | serverlib::SqlOperation::Delete
                 ) {
-                    touched_tables.insert(table_id);
+                    touched_tables.insert((query.database_id.clone(), table_id));
                 }
             }
         }
 
-        for table_id in touched_tables {
-            let has_late_write = self.wal.has_write_after(&table_id, snapshot_epoch_ms);
+        for (database_id, table_id) in touched_tables {
+            let Some(catalog_key) = self.resolve_catalog_key(&database_id) else {
+                continue;
+            };
+
+            let Some(catalog) = self.catalogs.get(&catalog_key) else {
+                continue;
+            };
+
+            let stream_id = catalog
+                .entity_wal_stream_id(&table_id)
+                .unwrap_or_else(|| table_id.clone());
+
+            let has_late_write = self.wal.has_write_after(&stream_id, snapshot_epoch_ms);
 
             if has_late_write {
                 return Some(format!(
-                    "snapshot isolation conflict detected for table '{}'",
+                    "snapshot isolation conflict detected for database '{}' table '{}'",
+                    database_id,
                     table_id
                 ));
             }
@@ -65,9 +78,21 @@ impl ServerApp {
         let observations = self.tx_read_observations_by_session.get(session_id)?;
 
         for observation in observations {
+            let Some(catalog_key) = self.resolve_catalog_key(&observation.database_id) else {
+                continue;
+            };
+
+            let Some(catalog) = self.catalogs.get(&catalog_key) else {
+                continue;
+            };
+
+            let stream_id = catalog
+                .entity_wal_stream_id(&observation.table_id)
+                .unwrap_or_else(|| observation.table_id.clone());
+
             let has_conflict = self
                 .wal
-                .has_write_after(&observation.table_id, snapshot_epoch_ms);
+                .has_write_after(&stream_id, snapshot_epoch_ms);
 
             if has_conflict {
                 return Some(format!(
@@ -220,13 +245,16 @@ impl ServerApp {
         for catalog in catalogs.values() {
 
             for table_id in catalog.table_ids() {
-                let records = source_wal.since(&table_id, None);
+                let stream_id = catalog
+                    .entity_wal_stream_id(&table_id)
+                    .unwrap_or(table_id);
+                let records = source_wal.since(&stream_id, None);
                 target_wal
-                    .append_batch(&table_id, records)
+                    .append_batch(&stream_id, records)
                     .map_err(|err| {
                         format!(
                             "failed to seed sandbox WAL for stream '{}': {}",
-                            table_id, err
+                            stream_id, err
                         )
                     })?;
             }
@@ -250,13 +278,16 @@ impl ServerApp {
                     continue;
                 }
 
-                let records = source_wal.since(&table_id, None);
+                let stream_id = catalog
+                    .entity_wal_stream_id(&table_id)
+                    .unwrap_or(table_id);
+                let records = source_wal.since(&stream_id, None);
                 target_wal
-                    .append_batch(&table_id, records)
+                    .append_batch(&stream_id, records)
                     .map_err(|err| {
                         format!(
                             "failed to seed sandbox WAL for stream '{}': {}",
-                            table_id, err
+                            stream_id, err
                         )
                     })?;
             }

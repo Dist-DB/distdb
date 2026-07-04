@@ -53,6 +53,11 @@ pub(super) fn execute_select_plan_result(
         .table(table_id)
         .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
 
+    let mut scoped_table = table.clone();
+    if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
+        scoped_table.entity_id = stream_id;
+    }
+
     let mut index_filter_map = HashMap::new();
     let like_filter = read_plan
         .where_condition
@@ -73,7 +78,7 @@ pub(super) fn execute_select_plan_result(
         .unwrap_or(true);
 
     let access_plan = plan_relation_access(
-        table,
+        &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
         like_filter,
@@ -81,7 +86,7 @@ pub(super) fn execute_select_plan_result(
 
     serverlib::execute_relation_select_plan(
         wal,
-        table,
+        &scoped_table,
         schema,
         runtime_indexes,
         read_plan,
@@ -281,6 +286,28 @@ pub(super) fn execute_select_impl(
         normalized_read_plan.table_id = table_id;
         (catalog, normalized_read_plan)
 
+    } else if resolved_object_name.contains('.') {
+
+        let Some((catalog, table_id)) = resolve_catalog_for_table_reference_mut(
+            catalogs,
+            &query.database_id,
+            resolved_object_name,
+        ) else {
+            let database_name = resolved_object_name
+                .rsplit_once('.')
+                .map(|(database_name, _)| database_name)
+                .unwrap_or(resolved_object_name);
+
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", database_name),
+            );
+        };
+
+        let mut normalized_read_plan = read_plan;
+        normalized_read_plan.table_id = table_id;
+        (catalog, normalized_read_plan)
+
     } else {
 
         let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
@@ -448,6 +475,11 @@ pub(super) fn execute_select_impl(
         );
     };
 
+    let mut scoped_table = table.clone();
+    if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
+        scoped_table.entity_id = stream_id;
+    }
+
     let mut index_filter_map = HashMap::new();
 
     let like_filter = read_plan
@@ -470,13 +502,13 @@ pub(super) fn execute_select_impl(
         .unwrap_or(true);
 
     let access_plan = plan_relation_access(
-        table,
+        &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
         like_filter,
     );
 
-    let index_lookup = access_plan.runtime_index_lookup(table);
+    let index_lookup = access_plan.runtime_index_lookup(&scoped_table);
 
     if read_plan.is_explain {
         return explain_select_plan(
@@ -498,7 +530,7 @@ pub(super) fn execute_select_impl(
 
     let result = match serverlib::execute_relation_select_plan(
         wal,
-        table,
+        &scoped_table,
         schema,
         runtime_indexes,
         &read_plan,

@@ -14,6 +14,8 @@ pub struct TableLifecyclePayload {
     pub action: TableLifecycleAction,
     #[serde(default)]
     pub schema_epoch: u64,
+    #[serde(default)]
+    pub entity_id: Option<String>,
     pub schema: Option<TableSchema>,
 }
 

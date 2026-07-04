@@ -7,6 +7,8 @@ pub struct SchemaChangePayload {
     pub schema_revision: u64,
     #[serde(default)]
     pub schema_epoch: u64,
+    #[serde(default)]
+    pub entity_id: Option<String>,
     pub schema: TableSchema,
 }
 

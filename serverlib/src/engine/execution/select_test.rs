@@ -277,9 +277,8 @@ fn execute_relation_select_plan_supports_count_star_projection() {
 }
 
 #[test]
-fn execute_relation_select_plan_count_star_uses_pk_cardinality_when_full_table() {
+fn execute_relation_select_plan_count_star_materializes_rows_when_full_table() {
 
-    let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
@@ -292,8 +291,8 @@ fn execute_relation_select_plan_count_star_uses_pk_cardinality_when_full_table()
         .register_table("users", users_schema.clone())
         .expect("users table should register");
 
-    // Build runtime indexes from seeded rows, then execute count against an
-    // empty WAL to prove the result can come directly from PK cardinality.
+    // Build runtime indexes from seeded rows and execute count against the
+    // same seeded WAL to validate row materialization semantics.
     let wal_seed = ConcurrentWalManager::in_memory();
     let actor = UserId("test-user".to_string());
 
@@ -336,7 +335,7 @@ fn execute_relation_select_plan_count_star_uses_pk_cardinality_when_full_table()
     };
 
     let result = execute_relation_select_plan(
-        &wal,
+        &wal_seed,
         relation,
         schema,
         &runtime_indexes,
@@ -345,7 +344,7 @@ fn execute_relation_select_plan_count_star_uses_pk_cardinality_when_full_table()
         &mut |_function| Ok(None),
         &mut |_row_map, _nested_condition| Ok(true),
     )
-    .expect("count select should execute from pk cardinality");
+    .expect("count select should execute from materialized relation rows");
 
     assert_eq!(result.rows, vec![vec![b"3".to_vec()]]);
     

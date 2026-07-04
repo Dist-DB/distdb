@@ -53,6 +53,39 @@ pub struct DatabaseCatalog {
 
 impl DatabaseCatalog {
 
+    fn register_table_with_entity_id(
+        &mut self,
+        table_id: String,
+        schema: TableSchema,
+        entity_id: Option<String>,
+    ) -> DatabaseResult<()> {
+
+        schema
+            .validate()
+            .map_err(DatabaseError::SchemaChange)?;
+
+        if self.resolve_entity_key(&table_id).is_some() {
+            return Err(DatabaseError::DuplicateEntity);
+        }
+
+        let indexes = Self::indexes_for_schema(&table_id, &schema);
+        let mut table = DatabaseTable::new(table_id.clone(), schema, indexes);
+
+        if let Some(entity_id) = entity_id {
+            let normalized_entity_id = common::normalize_identifier!(entity_id);
+
+            if !normalized_entity_id.is_empty() {
+                table.set_entity_id(normalized_entity_id);
+            }
+        }
+
+        let storage_key = table.storage_key();
+        self.entities.insert(storage_key, DatabaseEntity::Table(table));
+
+        Ok(())
+
+    }
+
     fn resolve_entity_key(&self, entity_id: &str) -> Option<String> {
 
         if self.entities.contains_key(entity_id) {
@@ -125,22 +158,7 @@ impl DatabaseCatalog {
     ) -> DatabaseResult<()> {
 
         let table_id = common::normalize_identifier!(table_id.into());
-
-        schema
-            .validate()
-            .map_err(DatabaseError::SchemaChange)?;
-
-        if self.resolve_entity_key(&table_id).is_some() {
-            return Err(DatabaseError::DuplicateEntity);
-        }
-
-        let indexes = Self::indexes_for_schema(&table_id, &schema);
-        let table = DatabaseTable::new(table_id, schema, indexes);
-        let storage_key = table.storage_key();
-
-        self.entities.insert(storage_key, DatabaseEntity::Table(table));
-
-        Ok(())
+        self.register_table_with_entity_id(table_id, schema, None)
         
     }
 
@@ -398,6 +416,10 @@ impl DatabaseCatalog {
     pub fn entity_wal_stream_id(&self, entity_id: &str) -> Option<String> {
         self.entity(entity_id)
             .map(|entity| entity.wal_stream_id(&self.database_id.0))
+    }
+
+    pub fn entity_identity_id(&self, entity_id: &str) -> Option<String> {
+        self.resolve_entity_key(entity_id)
     }
 
     pub fn entity_schema_revision(&self, entity_id: &str) -> Option<u64> {
@@ -697,7 +719,11 @@ impl DatabaseCatalog {
 
         let table_id = common::normalize_identifier!(payload.table_id);
         if self.table(&table_id).is_none() {
-            self.register_table(table_id.clone(), payload.schema.clone())?;
+            self.register_table_with_entity_id(
+                table_id.clone(),
+                payload.schema.clone(),
+                payload.entity_id.clone(),
+            )?;
         }
 
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
@@ -727,7 +753,7 @@ impl DatabaseCatalog {
             TableLifecycleAction::Create => {
                 let schema = payload.schema.unwrap_or_else(|| TableSchema::new(Vec::new()));
                 if self.table(&table_id).is_none() {
-                    self.register_table(table_id, schema)?;
+                    self.register_table_with_entity_id(table_id, schema, payload.entity_id)?;
                 }
                 self.accept_schema_epoch(payload.schema_epoch);
                 Ok(())
@@ -1573,7 +1599,7 @@ impl DatabaseCatalog {
         for (_legacy_key, mut entity) in std::mem::take(&mut self.entities) {
 
             if entity.storage_key().is_empty() {
-                entity.set_entity_id(common::helpers::utils::unique_id());                
+                entity.set_entity_id(common::helpers::utils::unique_id());
             }
 
             entity.normalize_in_place();

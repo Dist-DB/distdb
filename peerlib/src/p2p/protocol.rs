@@ -160,15 +160,19 @@ pub struct TableLockState {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ServiceMessage {
+
     NodeAnnounce(PeerNode),
+    
     Publication {
         subscription_key: String,
         event: PublicationEvent,
     },
+    
     TransactionsSince {
         database_id: String,
         from: Option<WireTransactionId>,
     },
+    
     AffinityJoinRequest(AffinityJoinRequest),
     AffinityJoinResponse(AffinityJoinResponse),
     SchemaCatalogRequest(SchemaCatalogRequest),
@@ -182,6 +186,7 @@ pub enum ServiceMessage {
     TlsCertEnrollResponse(TlsCertEnrollResponse),
     ServiceAnnounce(ServiceAnnounce),
     TableLockState(TableLockState),
+    
 }
 
 impl ServiceMessage {
@@ -201,5 +206,5 @@ impl ServiceMessage {
         }
 
     }
-    
+
 }

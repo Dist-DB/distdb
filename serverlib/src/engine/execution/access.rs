@@ -2021,7 +2021,7 @@ fn load_live_rows_for_accessor_miss(
 
     if let Some(data_dir) = wal.data_dir_path()
         && let Some((latest_tx_id, live_rows)) =
-            load_live_row_checkpoint_rows(&data_dir, table_id, schema)
+            load_live_row_checkpoint_rows(&data_dir, table_id, table_id, schema)
     {
         return (latest_tx_id, live_rows);
     }
@@ -2342,6 +2342,8 @@ pub fn materialize_relation_rows(
     access_plan: &RelationAccessPlan,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
+    let table_stream_id = resolve_materialization_stream_id(wal, table);
+
     match &access_plan.strategy {
 
         RelationAccessStrategy::RuntimeIndexLookup {
@@ -2349,7 +2351,7 @@ pub fn materialize_relation_rows(
             lookup_key,
         } => {
 
-            if let Some(state) = runtime_indexes.index(index_id) {
+            if let Some(state) = runtime_indexes.index_for_table(table_stream_id, index_id) {
 
                 if state.cardinality() == 0 {
                     log::debug!(
@@ -2383,7 +2385,7 @@ pub fn materialize_relation_rows(
                     index_id,
                 );
 
-                return load_live_rows(wal, &table.table_id, schema);
+                return load_live_rows(wal, table_stream_id, schema);
 
             }
 
@@ -2404,7 +2406,7 @@ pub fn materialize_relation_rows(
                 if let Some(single_field_name) = single_field_name {
                     return load_live_rows_by_equality(
                         wal,
-                        &table.table_id,
+                        table_stream_id,
                         schema,
                         single_field_name,
                         &lookup_key[0],
@@ -2412,7 +2414,7 @@ pub fn materialize_relation_rows(
                 }
             }
 
-            load_live_rows(wal, &table.table_id, schema)
+            load_live_rows(wal, table_stream_id, schema)
 
         },
 
@@ -2433,7 +2435,7 @@ pub fn materialize_relation_rows(
 
             load_live_rows_by_equality(
                 wal,
-                &table.table_id,
+                table_stream_id,
                 schema,
                 field_name,
                 lookup_value,
@@ -2460,7 +2462,7 @@ pub fn materialize_relation_rows(
 
             load_live_rows_by_prefix(
                 wal,
-                &table.table_id,
+                table_stream_id,
                 schema,
                 field_name,
                 prefix,
@@ -2488,7 +2490,7 @@ pub fn materialize_relation_rows(
 
             load_live_rows_by_string_like(
                 wal,
-                &table.table_id,
+                table_stream_id,
                 schema,
                 field_name,
                 pattern,
@@ -2496,9 +2498,32 @@ pub fn materialize_relation_rows(
             )
         },
 
-        RelationAccessStrategy::FullScan => load_live_rows(wal, &table.table_id, schema),
+        RelationAccessStrategy::FullScan => load_live_rows(wal, table_stream_id, schema),
 
     }
+
+}
+
+fn resolve_materialization_stream_id<'a>(
+    wal: &ConcurrentWalManager,
+    table: &'a DatabaseTable,
+) -> &'a str {
+
+    let scoped_stream_id = if table.entity_id.is_empty() {
+        table.table_id.as_str()
+    } else {
+        table.entity_id.as_str()
+    };
+
+    if scoped_stream_id != table.table_id
+        && wal.data_dir_path().is_none()
+        && wal.latest_transaction_id_if_loaded(scoped_stream_id).is_none()
+        && wal.latest_transaction_id_if_loaded(&table.table_id).is_some()
+    {
+        return table.table_id.as_str();
+    }
+
+    scoped_stream_id
 
 }
 

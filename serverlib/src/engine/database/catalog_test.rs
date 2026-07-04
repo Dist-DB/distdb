@@ -211,6 +211,7 @@ fn schema_change_payload_updates_existing_table() {
         table_id: "users".to_string(),
         schema_revision: 3,
         schema_epoch: 1,
+        entity_id: None,
         schema: updated_schema.clone(),
     };
 
@@ -625,6 +626,7 @@ fn schema_replay_uses_latest_transaction_payload() {
         table_id: "users".to_string(),
         schema_revision: 1,
         schema_epoch: 1,
+        entity_id: None,
         schema: first_schema,
     };
 
@@ -658,6 +660,7 @@ fn schema_replay_uses_latest_transaction_payload() {
         table_id: "users".to_string(),
         schema_revision: 2,
         schema_epoch: 2,
+        entity_id: None,
         schema: second_schema.clone(),
     };
 
@@ -781,6 +784,7 @@ fn table_lifecycle_replay_honors_create_then_drop() {
         table_id: "users".to_string(),
         action: TableLifecycleAction::Create,
         schema_epoch: 1,
+        entity_id: None,
         schema: Some(TableSchema::new(Vec::new())),
     };
 
@@ -804,6 +808,7 @@ fn table_lifecycle_replay_honors_create_then_drop() {
         table_id: "users".to_string(),
         action: TableLifecycleAction::Drop,
         schema_epoch: 2,
+        entity_id: None,
         schema: None,
     };
 
@@ -1065,6 +1070,7 @@ fn schema_epoch_advances_for_schema_change_and_sql_update() {
             table_id: "users".to_string(),
             schema_revision: 1,
             schema_epoch: baseline_epoch + 1,
+            entity_id: None,
             schema: TableSchema::new(Vec::new()),
         })
         .expect("schema change should succeed");
@@ -1129,7 +1135,11 @@ fn entity_aspects_expose_status_and_wal_stream() {
     assert_eq!(catalog.entity_status("users"), Some(ObjectStatus::Load));
     assert_eq!(
         catalog.entity_wal_stream_id("users"),
-        Some(users_entity.storage_key())
+        Some(format!(
+            "{}:{}",
+            catalog.database_id.0,
+            users_entity.storage_key()
+        ))
     );
     assert_eq!(catalog.entity_schema_revision("users"), Some(0));
 

@@ -35,34 +35,27 @@ pub(super) fn resolve_catalog_for_table_reference<'a>(
     object_name: &str,
 ) -> Option<(&'a DatabaseCatalog, String)> {
 
-    let table_id = common::normalize_identifier!(object_name);
+    if let Some((database_name, referenced_table_id)) = object_name.rsplit_once('.') {
+        let referenced_table_id = common::normalize_identifier!(referenced_table_id);
 
-    if !active_database_id.trim().is_empty() {
-        let normalized_active_database_id = common::normalize_identifier!(active_database_id);
-        let normalized_object_name = common::normalize_identifier!(object_name);
+        if referenced_table_id.is_empty() {
+            return None;
+        }
 
-        let table_id = normalized_object_name
-            .rsplit_once('.')
-            .and_then(|(database_name, referenced_table_id)| {
-                if common::normalize_identifier!(database_name) == normalized_active_database_id {
-                    Some(common::normalize_identifier!(referenced_table_id))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(table_id);
-
-        return resolve_catalog(catalogs, active_database_id).map(|catalog| (catalog, table_id));
+        return resolve_catalog(catalogs, database_name).map(|catalog| (catalog, referenced_table_id));
     }
 
-    let (database_name, referenced_table_id) = object_name.rsplit_once('.')?;
-    let referenced_table_id = common::normalize_identifier!(referenced_table_id);
+    let table_id = common::normalize_identifier!(object_name);
 
-    if referenced_table_id.is_empty() {
+    if table_id.is_empty() {
         return None;
     }
 
-    resolve_catalog(catalogs, database_name).map(|catalog| (catalog, referenced_table_id))
+    if !active_database_id.trim().is_empty() {
+        return resolve_catalog(catalogs, active_database_id).map(|catalog| (catalog, table_id));
+    }
+
+    None
 
 }
 
@@ -72,33 +65,26 @@ pub(super) fn resolve_catalog_for_table_reference_mut<'a>(
     object_name: &str,
 ) -> Option<(&'a mut DatabaseCatalog, String)> {
 
-    let table_id = common::normalize_identifier!(object_name);
+    if let Some((database_name, referenced_table_id)) = object_name.rsplit_once('.') {
+        let referenced_table_id = common::normalize_identifier!(referenced_table_id);
 
-    if !active_database_id.trim().is_empty() {
-        let normalized_active_database_id = common::normalize_identifier!(active_database_id);
-        let normalized_object_name = common::normalize_identifier!(object_name);
+        if referenced_table_id.is_empty() {
+            return None;
+        }
 
-        let table_id = normalized_object_name
-            .rsplit_once('.')
-            .and_then(|(database_name, referenced_table_id)| {
-                if common::normalize_identifier!(database_name) == normalized_active_database_id {
-                    Some(common::normalize_identifier!(referenced_table_id))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(table_id);
-
-        return resolve_catalog_mut(catalogs, active_database_id).map(|catalog| (catalog, table_id));
+        return resolve_catalog_mut(catalogs, database_name).map(|catalog| (catalog, referenced_table_id));
     }
 
-    let (database_name, referenced_table_id) = object_name.rsplit_once('.')?;
-    let referenced_table_id = common::normalize_identifier!(referenced_table_id);
+    let table_id = common::normalize_identifier!(object_name);
 
-    if referenced_table_id.is_empty() {
+    if table_id.is_empty() {
         return None;
     }
 
-    resolve_catalog_mut(catalogs, database_name).map(|catalog| (catalog, referenced_table_id))
+    if !active_database_id.trim().is_empty() {
+        return resolve_catalog_mut(catalogs, active_database_id).map(|catalog| (catalog, table_id));
+    }
+
+    None
 
 }

@@ -501,18 +501,26 @@ fn runtime_index_bootstrap_uses_latest_live_row_keys() {
     )
     .expect("pk value should encode");
 
+    let table_stream_id = if wal.latest_transaction_id_if_loaded("users").is_some() {
+        "users".to_string()
+    } else {
+        catalog
+            .entity_wal_stream_id("users")
+            .unwrap_or_else(|| "users".to_string())
+    };
+
     assert!(runtime_indexes
-        .index(&pk_index.index_id.0)
+        .index_for_table(&table_stream_id, &pk_index.index_id.0)
         .expect("pk runtime index should exist")
         .contains(&[stored_pk]));
     
     assert!(runtime_indexes
-        .index(&email_index.index_id.0)
+        .index_for_table(&table_stream_id, &email_index.index_id.0)
         .expect("email runtime index should exist")
         .contains(&[b"sam+updated@example.com".to_vec()]));
     
     assert!(!runtime_indexes
-        .index(&email_index.index_id.0)
+        .index_for_table(&table_stream_id, &email_index.index_id.0)
         .expect("email runtime index should exist")
         .contains(&[b"sam@example.com".to_vec()]));
 
@@ -654,8 +662,13 @@ fn materialize_relation_rows_returns_empty_when_runtime_lookup_key_misses() {
         choose_index_lookup(table, &filters).expect("an index lookup should be selected");
 
     let mut runtime_indexes = RuntimeIndexStore::new();
+    let table_stream_id = if wal.latest_transaction_id_if_loaded(&table.entity_id).is_some() {
+        table.entity_id.clone()
+    } else {
+        table.table_id.clone()
+    };
     runtime_indexes
-        .index_mut(&index.index_id.0)
+        .index_mut_for_table(&table_stream_id, &index.index_id.0)
         .insert(vec![b"999".to_vec()]);
 
     let rows = materialize_relation_rows(

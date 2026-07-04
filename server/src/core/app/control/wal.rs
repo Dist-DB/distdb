@@ -15,8 +15,12 @@ impl ServerApp {
                     continue;
                 };
 
+                let stream_id = catalog
+                    .entity_wal_stream_id(&table_id)
+                    .unwrap_or_else(|| table.table_id.clone());
+
                 self.seed_table_stream_from_live_rows(
-                    &table.table_id,
+                    &stream_id,
                     table.schema(),
                     sandbox_wal,
                 )?;
@@ -92,7 +96,16 @@ impl ServerApp {
         };
 
         let mut stream_ids: Vec<String> = vec![database_key];
-        stream_ids.extend(catalog.table_ids());
+        stream_ids.extend(
+            catalog
+                .table_ids()
+                .into_iter()
+                .map(|table_id| {
+                    catalog
+                        .entity_wal_stream_id(&table_id)
+                        .unwrap_or(table_id)
+                }),
+        );
 
         let mut frames = Vec::new();
         for stream_id in stream_ids {

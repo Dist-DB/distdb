@@ -111,6 +111,11 @@ impl SelectReadPlanCursorSource {
                 .table(table_id)
                 .ok_or_else(|| format!("cursor source select failed: table '{}' not found", table_id))?;
 
+            let mut scoped_table = table.clone();
+            if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
+                scoped_table.entity_id = stream_id;
+            }
+
             let schema = catalog
                 .table_schema(table_id)
                 .ok_or_else(|| format!("cursor source select failed: table '{}' not found", table_id))?;
@@ -136,7 +141,7 @@ impl SelectReadPlanCursorSource {
                 .unwrap_or(true);
 
             let access_plan = plan_relation_access(
-                table,
+                &scoped_table,
                 allow_index_short_circuit,
                 index_filter_map,
                 like_filter,
@@ -144,7 +149,7 @@ impl SelectReadPlanCursorSource {
 
             execute_relation_select_plan(
                 wal,
-                table,
+                &scoped_table,
                 schema,
                 runtime_indexes,
                 read_plan,

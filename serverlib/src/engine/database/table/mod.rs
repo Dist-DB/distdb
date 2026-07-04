@@ -165,8 +165,8 @@ impl DatabaseEntityAspect for DatabaseTable {
         &self.metadata
     }
 
-    fn wal_stream_id(&self, _database_wal_id: &str) -> String {
-        self.storage_key()
+    fn wal_stream_id(&self, database_wal_id: &str) -> String {
+        format!("{}:{}", database_wal_id, self.storage_key())
     }
 
     fn schema_revision(&self) -> Option<u64> {

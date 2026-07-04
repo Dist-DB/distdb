@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::mappings::query::core::wal_ops::table_stream_id;
 
 pub(super) fn execute_insert_impl(
     request_id: &str,
@@ -142,6 +143,8 @@ fn execute_insert_locked(
         );
     };
 
+    let table_stream_id = table_stream_id(catalog, &plan.table_id);
+
     let columns = if plan.columns.is_empty() {
         schema
             .fields
@@ -228,12 +231,25 @@ fn execute_insert_locked(
                 Vec::new()
             };
             let mut staged_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
+            let mut existing_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
             let primary_key_details = primary_key_index(table).map(|pk_index| {
                 let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
                     vec![pk_index.field_name.as_str()]
                 } else {
                     pk_index.field_names.iter().map(|name| name.as_str()).collect()
                 };
+
+                let payload_context = payload_context_for_table(catalog, &plan.table_id);
+                existing_pk_keys = load_live_rows_with_context(
+                    wal,
+                    &table_stream_id,
+                    schema,
+                    &payload_context,
+                )
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_, row_map)| index_value_tuple(pk_index, &row_map))
+                .collect();
 
                 (pk_index.index_id.0.as_str(), pk_fields)
             });
@@ -328,11 +344,12 @@ fn execute_insert_locked(
                         .map(|pk| canonical_row.get(*pk).cloned().unwrap_or_default())
                         .collect::<Vec<_>>();
 
-                    let pk_runtime = runtime_indexes.index(pk_index_id);
+                    let pk_runtime = runtime_indexes.index_for_table(&table_stream_id, pk_index_id);
 
                     if pk_runtime
                         .map(|idx| idx.contains(&incoming_pk))
                         .unwrap_or(false)
+                        || existing_pk_keys.contains(&incoming_pk)
                         || staged_pk_keys.contains(&incoming_pk)
                     {
                         let pk_display = pk_fields
@@ -348,7 +365,8 @@ fn execute_insert_locked(
                         );
                     }
 
-                    staged_pk_keys.insert(incoming_pk);
+                    staged_pk_keys.insert(incoming_pk.clone());
+                    existing_pk_keys.insert(incoming_pk);
                 }
 
                 staged_payloads.push(encoded);
@@ -363,7 +381,7 @@ fn execute_insert_locked(
 
             if let Err(err) = append_row_payload_records_batch(
                 wal,
-                &plan.table_id,
+                &table_stream_id,
                 table,
                 runtime_indexes,
                 TransactionKind::Insert,
@@ -403,6 +421,7 @@ fn execute_insert_locked(
 
 }
 
+#[expect(clippy::type_complexity, reason="this function is complex due to the nature of insert execution and row materialization")]
 fn materialize_insert_source_rows<'a>(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -422,7 +441,7 @@ fn materialize_insert_source_rows<'a>(
                     catalog,
                     wal,
                     runtime_indexes,
-                    &read_plan,
+                    read_plan,
                     &mut |function| evaluate_inbuilt_sql_function(function),
                     &mut |row_map, condition| {
                         Ok(serverlib::row_matches_select_condition(
@@ -446,7 +465,7 @@ fn materialize_insert_source_rows<'a>(
 
             } else if read_plan.table_id.is_empty() {
                 
-                serverlib::execute_projection_only_select_plan(&read_plan, &mut |function| {
+                serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
                     evaluate_inbuilt_sql_function(function)
                 })
 
@@ -461,6 +480,11 @@ fn materialize_insert_source_rows<'a>(
                 let table = catalog.table(table_id).ok_or_else(|| {
                     format!("insert select failed: table '{}' not found", table_id)
                 })?;
+
+                let mut scoped_table = table.clone();
+                if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
+                    scoped_table.entity_id = stream_id;
+                }
 
                 let mut index_filter_map = HashMap::new();
                 let like_filter = read_plan
@@ -484,7 +508,7 @@ fn materialize_insert_source_rows<'a>(
 
                 let access_plan =
                     plan_relation_access(
-                        table,
+                        &scoped_table,
                         allow_index_short_circuit,
                         index_filter_map,
                         like_filter,
@@ -492,10 +516,10 @@ fn materialize_insert_source_rows<'a>(
 
                 serverlib::execute_relation_select_plan(
                     wal,
-                    table,
+                    &scoped_table,
                     schema,
                     runtime_indexes,
-                    &read_plan,
+                    read_plan,
                     &access_plan,
                     &mut |function| evaluate_inbuilt_sql_function(function),
                     &mut |row_map, condition| {
@@ -630,6 +654,8 @@ fn execute_update_locked(
         );
     };
 
+    let table_stream_id = table_stream_id(catalog, &plan.table_id);
+
     for assignment in &plan.assignments {
         if schema.field(&assignment.field_name).is_none() {
             return ConnectorResponse::rejected(
@@ -647,6 +673,7 @@ fn execute_update_locked(
         runtime_indexes,
         schema,
         &plan.table_id,
+        &table_stream_id,
         &plan.relations,
         &plan.pushdown_conditions,
         &plan.joins,
@@ -801,7 +828,7 @@ fn execute_update_locked(
                 if let Err(err) = append_row_payload_record_with_live_row_ids(
                     catalog,
                     wal,
-                    &plan.table_id,
+                    &table_stream_id,
                     table,
                     runtime_indexes,
                     TransactionKind::Delete,
@@ -820,7 +847,7 @@ fn execute_update_locked(
                 if let Err(err) = append_row_payload_record(
                     catalog,
                     wal,
-                    &plan.table_id,
+                    &table_stream_id,
                     table,
                     runtime_indexes,
                     TransactionKind::Insert,
@@ -939,6 +966,8 @@ fn execute_delete_locked(
         );
     };
 
+    let table_stream_id = table_stream_id(catalog, &plan.table_id);
+
     let mutation_uses_joins = !plan.joins.is_empty();
 
     let current_live_rows = match load_mutation_rows(
@@ -947,6 +976,7 @@ fn execute_delete_locked(
         runtime_indexes,
         schema,
         &plan.table_id,
+        &table_stream_id,
         &plan.relations,
         &plan.pushdown_conditions,
         &plan.joins,
@@ -1002,7 +1032,7 @@ fn execute_delete_locked(
                 if let Err(err) = append_row_payload_record_with_live_row_ids(
                     catalog,
                     wal,
-                    &plan.table_id,
+                    &table_stream_id,
                     table,
                     runtime_indexes,
                     TransactionKind::Delete,
@@ -1115,6 +1145,7 @@ fn load_mutation_rows(
     runtime_indexes: &RuntimeIndexStore,
     schema: &TableSchema,
     table_id: &str,
+    table_stream_id: &str,
     relations: &[serverlib::SelectRelation],
     pushdown_conditions: &[Option<SelectCondition>],
     joins: &[serverlib::SelectJoin],
@@ -1124,7 +1155,7 @@ fn load_mutation_rows(
     let payload_context = payload_context_for_table(catalog, table_id);
 
     if joins.is_empty() {
-        return load_live_rows_with_context(wal, table_id, schema, &payload_context);
+        return load_live_rows_with_context(wal, table_stream_id, schema, &payload_context);
     }
 
     serverlib::select_mutation_target_rows(

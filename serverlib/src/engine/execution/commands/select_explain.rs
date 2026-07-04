@@ -115,7 +115,7 @@ pub fn explain_select_plan_result(
 
         if let Some((index, key)) = index_lookup {
 
-            let state = runtime_indexes.index(&index.index_id.0);
+            let state = runtime_indexes.index_for_table(table_id, &index.index_id.0);
 
             let hit = state.map(|s| s.contains(key)).unwrap_or(false);
             let card = state.map(|s| s.cardinality()).unwrap_or(0);

@@ -142,39 +142,8 @@ where
 
     if let Some(output_name) = &count_star_projection {
 
-        if count_star_is_strict_full_table(read_plan) {
-
-            if let Some(pk_count) = count_star_primary_key_cardinality(table, runtime_indexes, read_plan)
-                && pk_count > 0 {
-                return Ok(SelectExecutionResult {
-                    columns: vec![FieldDef {
-                        seqno: 1,
-                        field_name: output_name.clone(),
-                        field_type: FieldType::Text,
-                        nullable: false,
-                        indexed: FieldIndex::None,
-                        default_value: None,
-                        metadata: None,
-                    }],
-                    rows: vec![vec![pk_count.to_string().into_bytes()]],
-                });
-            }
-
-            let live_row_count = load_live_row_count(wal, &table.table_id);
-            return Ok(SelectExecutionResult {
-                columns: vec![FieldDef {
-                    seqno: 1,
-                    field_name: output_name.clone(),
-                    field_type: FieldType::Text,
-                    nullable: false,
-                    indexed: FieldIndex::None,
-                    default_value: None,
-                    metadata: None,
-                }],
-                rows: vec![vec![live_row_count.to_string().into_bytes()]],
-            });
-
-        }
+        // Always materialize count(*) rows for correctness. The strict full-table
+        // fast path currently overcounts in grouped WAL histories.
 
         let mut matched_rows = 0usize;
 
@@ -921,12 +890,34 @@ fn count_star_primary_key_cardinality(
     read_plan: &SelectReadPlan,
 ) -> Option<usize> {
 
+    let _ = table;
+    let _ = runtime_indexes;
+    let _ = read_plan;
+
+    // Runtime index cardinality can be stale across cross-catalog hot paths;
+    // prefer WAL-backed row counting for strict correctness.
+    None
+
+}
+
+fn _count_star_primary_key_cardinality_disabled_reference(
+    table: &DatabaseTable,
+    runtime_indexes: &RuntimeIndexStore,
+    read_plan: &SelectReadPlan,
+) -> Option<usize> {
+
     if !count_star_is_strict_full_table(read_plan) {
         return None;
     }
 
     let pk_index = primary_key_index(table)?;
-    runtime_indexes.cardinality(&pk_index.index_id.0)
+    let table_scope_id = if table.entity_id.is_empty() {
+        table.table_id.as_str()
+    } else {
+        table.entity_id.as_str()
+    };
+
+    runtime_indexes.cardinality_for_table(table_scope_id, &pk_index.index_id.0)
 
 }
 

@@ -29,6 +29,13 @@ impl ConnectorTransport for InProcessServerTransport {
     }
 }
 
+fn table_stream_id(app: &ServerApp, database_id: &str, table_id: &str) -> String {
+    app.catalogs
+        .get(database_id)
+        .and_then(|catalog| catalog.entity_wal_stream_id(table_id))
+        .unwrap_or_else(|| table_id.to_string())
+}
+
 #[test]
 fn bootstrap_replays_latest_schema_from_wal() {
 
@@ -83,6 +90,7 @@ fn bootstrap_replays_latest_schema_from_wal() {
         table_id: "users".to_string(),
         schema_revision: 2,
         schema_epoch: 2,
+        entity_id: None,
         schema: schema.clone(),
     };
 
@@ -551,7 +559,8 @@ fn insert_query_appends_insert_record_to_table_wal() {
     };
     assert_eq!(mutation.affected_rows, 1);
 
-    let records = app.wal.since("users", None);
+    let users_stream_id = table_stream_id(&app, "main", "users");
+    let records = app.wal.since(&users_stream_id, None);
     let insert_record = records
         .iter()
         .find(|record| record.kind == TransactionKind::Insert)
@@ -820,6 +829,7 @@ fn affinity_wal_import_ignores_stale_schema_revision_and_returns_database_to_rea
         table_id: "users".to_string(),
         schema_revision: 0,
         schema_epoch: 1,
+        entity_id: None,
         schema: TableSchema::new(vec![FieldDef {
             seqno: 1,
             field_name: "id".to_string(),
@@ -905,9 +915,12 @@ fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
         .expect("load->ready should be valid");
     app.catalogs.insert("main".to_string(), catalog);
 
+    let users_stream_id = table_stream_id(&app, "main", "users");
+    let accounts_stream_id = table_stream_id(&app, "main", "accounts");
+
     app.wal
         .append(
-            "users",
+            &users_stream_id,
             TransactionRecord::without_payload(
                 TransactionId(1),
                 None,
@@ -921,7 +934,7 @@ fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
 
     app.wal
         .append(
-            "accounts",
+            &accounts_stream_id,
             TransactionRecord::without_payload(
                 TransactionId(2),
                 None,
@@ -934,7 +947,7 @@ fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
         .expect("accounts WAL append should succeed");
 
     let mut stream_cursors = std::collections::HashMap::new();
-    stream_cursors.insert("users".to_string(), TransactionId(1));
+    stream_cursors.insert(users_stream_id.clone(), TransactionId(1));
 
     let exported = app
         .export_wal_records_for_database(
@@ -947,13 +960,15 @@ fn wal_export_with_stream_cursors_does_not_skip_unseen_streams() {
     assert!(
         exported
             .iter()
-            .any(|(stream_id, record)| stream_id == "accounts" && record.id == TransactionId(2)),
+            .any(|(stream_id, record)| stream_id == &accounts_stream_id && record.id == TransactionId(2)),
         "accounts stream records should not be filtered by global cursor"
     );
     assert!(
         exported
             .iter()
-            .all(|(stream_id, record)| !(stream_id == "users" && record.id <= TransactionId(1))),
+            .all(|(stream_id, record)| {
+                !(stream_id == &users_stream_id && record.id <= TransactionId(1))
+            }),
         "users stream should respect its own cursor"
     );
 
@@ -1937,7 +1952,8 @@ fn commit_groups_staged_dml_into_one_write_batch() {
         app.handle_connector_request_for_session(&commit_request, "session-a");
     assert_eq!(commit_response.status, ResponseStatus::Applied);
 
-    let records = app.wal.since("users", None);
+    let users_stream_id = table_stream_id(&app, "main", "users");
+    let records = app.wal.since(&users_stream_id, None);
 
     let write_begin = records
         .iter()
@@ -2058,7 +2074,8 @@ fn failed_commit_validation_leaves_real_wal_and_indexes_clean() {
         app.handle_connector_request_for_session(&commit_request, "session-a");
     assert_eq!(commit_response.status, ResponseStatus::Rejected);
 
-    let records_after_failed_commit = app.wal.since("users", None);
+    let users_stream_id = table_stream_id(&app, "main", "users");
+    let records_after_failed_commit = app.wal.since(&users_stream_id, None);
     assert!(!records_after_failed_commit.iter().any(|record| {
         matches!(
             record.kind,
@@ -2193,8 +2210,10 @@ fn commit_shares_one_group_id_across_touched_tables() {
         app.handle_connector_request_for_session(&commit_request, "session-a");
     assert_eq!(commit_response.status, ResponseStatus::Applied);
 
-    let users_records = app.wal.since("users", None);
-    let profiles_records = app.wal.since("profiles", None);
+    let users_stream_id = table_stream_id(&app, "main", "users");
+    let profiles_stream_id = table_stream_id(&app, "main", "profiles");
+    let users_records = app.wal.since(&users_stream_id, None);
+    let profiles_records = app.wal.since(&profiles_stream_id, None);
 
     let users_group_id = users_records
         .iter()
@@ -3722,6 +3741,13 @@ fn select_alias_where_pk_returns_empty_when_runtime_index_is_empty() {
         table.indexes.values().cloned().collect::<Vec<_>>()
     };
 
+    let table_stream_id = {
+        let catalog = app.catalogs.get("main").expect("main catalog should exist");
+        catalog
+            .entity_wal_stream_id("users")
+            .expect("users stream id should exist")
+    };
+
     let primary_index_id = index_defs
         .iter()
         .find(|index| index.is_primary_key())
@@ -3729,10 +3755,15 @@ fn select_alias_where_pk_returns_empty_when_runtime_index_is_empty() {
         .expect("primary key index should exist");
 
     for index in index_defs {
-        app.runtime_indexes.register_index(index);
+        app.runtime_indexes
+            .register_index_for_table(&table_stream_id, index);
     }
 
-    assert_eq!(app.runtime_indexes.cardinality(&primary_index_id), Some(0));
+    assert_eq!(
+        app.runtime_indexes
+            .cardinality_for_table(&table_stream_id, &primary_index_id),
+        Some(0)
+    );
 
     let query_request = ConnectorRequest::new(
         "req-select-empty-index-fallback-1",

@@ -48,6 +48,11 @@ where
         ));
     };
 
+    let mut scoped_primary_table = primary_table.clone();
+    if let Some(stream_id) = catalog.entity_wal_stream_id(&primary_relation.table_id) {
+        scoped_primary_table.entity_id = stream_id;
+    }
+
     let primary_condition = pushdown_conditions.first().and_then(|condition| condition.as_ref());
     let mut primary_filter_map = HashMap::new();
     let primary_like_filter = primary_condition
@@ -65,7 +70,7 @@ where
         .unwrap_or(true);
 
     let primary_access_plan = plan_relation_access(
-        primary_table,
+        &scoped_primary_table,
         primary_allow_index_short_circuit,
         primary_filter_map,
         primary_like_filter,
@@ -73,7 +78,7 @@ where
 
     let mut joined_rows = materialize_relation_rows(
         wal,
-        primary_table,
+        &scoped_primary_table,
         primary_schema,
         runtime_indexes,
         &primary_access_plan,
@@ -106,6 +111,11 @@ where
             ));
         };
 
+        let mut scoped_right_table = right_table.clone();
+        if let Some(stream_id) = catalog.entity_wal_stream_id(&join.relation.table_id) {
+            scoped_right_table.entity_id = stream_id;
+        }
+
         let right_condition = pushdown_conditions
             .get(join_index + 1)
             .and_then(|condition| condition.as_ref());
@@ -125,7 +135,7 @@ where
             .unwrap_or(true);
 
         let right_access_plan = plan_relation_access(
-            right_table,
+            &scoped_right_table,
             right_allow_index_short_circuit,
             right_filter_map,
             right_like_filter,
@@ -133,7 +143,7 @@ where
 
         let right_rows = materialize_relation_rows(
             wal,
-            right_table,
+            &scoped_right_table,
             right_schema,
             runtime_indexes,
             &right_access_plan,

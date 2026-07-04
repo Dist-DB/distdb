@@ -142,6 +142,11 @@ fn collect_subquery_exists_with_outer(
             return Ok(false);
         };
 
+        let mut scoped_table = table.clone();
+        if let Some(stream_id) = catalog.entity_wal_stream_id(&subquery.table_id) {
+            scoped_table.entity_id = stream_id;
+        }
+
         let mut index_filter_map = HashMap::new();
         let like_filter = subquery
             .where_condition
@@ -160,7 +165,7 @@ fn collect_subquery_exists_with_outer(
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(
-            table,
+            &scoped_table,
             allow_index_short_circuit,
             index_filter_map,
             like_filter,
@@ -174,7 +179,7 @@ fn collect_subquery_exists_with_outer(
 
         let result = execute_relation_select_plan(
             wal,
-            table,
+            &scoped_table,
             schema,
             runtime_indexes,
             subquery,
@@ -277,6 +282,11 @@ fn collect_subquery_projection_values_with_outer(
             return Ok(HashSet::new());
         };
 
+        let mut scoped_table = table.clone();
+        if let Some(stream_id) = catalog.entity_wal_stream_id(&subquery.table_id) {
+            scoped_table.entity_id = stream_id;
+        }
+
         let mut index_filter_map = HashMap::new();
         let like_filter = subquery
             .where_condition
@@ -295,7 +305,7 @@ fn collect_subquery_projection_values_with_outer(
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(
-            table,
+            &scoped_table,
             allow_index_short_circuit,
             index_filter_map,
             like_filter,
@@ -303,7 +313,7 @@ fn collect_subquery_projection_values_with_outer(
 
         return execute_relation_select_plan(
             wal,
-            table,
+            &scoped_table,
             schema,
             runtime_indexes,
             subquery,

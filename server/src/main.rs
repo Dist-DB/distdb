@@ -58,7 +58,7 @@ use serverlib::core::identity::NodeId;
 use serverlib::AffinityProcessor;
 use peerlib::{ServiceMessage, ServerP2pRuntime};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -462,7 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tls,
     };
 
-    let app = Arc::new(Mutex::new(ServerApp::new(config)?));
+    let app = Arc::new(RwLock::new(ServerApp::new(config)?));
     let bootstrap_ready = Arc::new(AtomicBool::new(false));
 
     let tcp_bind_addr = format!("{}:{}", listen_addr, port);
@@ -596,7 +596,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app_for_bootstrap = Arc::clone(&app);
     let bootstrap_result = tokio::task::spawn_blocking(move || {
-        let mut app_guard = app_for_bootstrap.blocking_lock();
+        let mut app_guard = app_for_bootstrap.blocking_write();
         app_guard.bootstrap()?;
         let result = app_guard.run_wal_smoke_test()?;
         Ok::<(String, _), server::helpers::ServerAppError>((app_guard.node_id().to_string(), result))
@@ -646,7 +646,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     p2p_heartbeat_task.abort();
     p2p_service_announce_task.abort();
 
-    app.lock().await.shutdown()?;
+    app.write().await.shutdown()?;
     drop(p2p_runtime);
     
     Ok(())
