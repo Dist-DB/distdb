@@ -12,17 +12,57 @@ pub(super) fn expect_arg_count(
 ) -> Result<(), String> {
 
 	if args.len() < min || args.len() > max {
+		let usage = usage_for_clarity(function_name, min, max);
 		if min == max {
-			return Err(format!("{} requires {} argument(s)", function_name, min));
+			return Err(format!(
+				"{} requires {} argument(s); usage: {}",
+				function_name,
+				min,
+				usage
+			));
 		}
 		return Err(format!(
-			"{} requires between {} and {} arguments",
-			function_name, min, max
+			"{} requires between {} and {} arguments; usage: {}",
+			function_name,
+			min,
+			max,
+			usage
 		));
 	}
 
 	Ok(())
 	
+}
+
+fn usage_for_clarity(function_name: &str, min: usize, max: usize) -> String {
+
+	if min == 0 && max == 0 {
+		return format!("{}()", function_name);
+	}
+
+	if min == max {
+		let args = (1..=min)
+			.map(|idx| format!("<arg{}>", idx))
+			.collect::<Vec<_>>()
+			.join(", ");
+		return format!("{}({})", function_name, args);
+	}
+
+	if max == usize::MAX {
+		if min == 0 {
+			return format!("{}(<arg1>, ...)", function_name);
+		}
+
+		let mut required = (1..=min)
+			.map(|idx| format!("<arg{}>", idx))
+			.collect::<Vec<_>>()
+			.join(", ");
+		required.push_str(&format!(", [<arg{}>, ...]", min + 1));
+		return format!("{}({})", function_name, required);
+	}
+
+	format!("{}(<arg1>, ...)", function_name)
+
 }
 
 pub(super) fn expect_zero_args(function_name: &str, args: &[FunctionArg]) -> Result<(), String> {

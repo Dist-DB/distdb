@@ -240,6 +240,7 @@ fn append_catalog_entity_rows(
                     .values()
                     .map(|index| index.index_id.0.clone())
                     .collect::<Vec<_>>();
+                
                 indexes.sort();
 
                 for index_id in indexes {
@@ -457,7 +458,7 @@ impl CatalogDispatcher {
                 }
 
             }
-            
+
         });
 
         let worker = CatalogWorkerHandle {
@@ -560,7 +561,7 @@ fn request_catalog_route_key(request: &ConnectorRequest) -> Option<String> {
             }
 
             infer_catalog_id_from_query_sql(&query.sql)
-        }
+        },
 
         ConnectorCommand::CreateDatabase { .. } => None,
 
@@ -589,11 +590,13 @@ fn explicit_catalog_ids_from_query_sql(sql: &str) -> HashSet<String> {
     let mut explicit_catalogs = HashSet::<String>::new();
 
     for request in requests {
+
         if let Some(object_name) = request.object_name
             && let Some(catalog_id) = catalog_id_from_qualified_object_name(&object_name)
         {
             explicit_catalogs.insert(catalog_id);
         }
+
     }
 
     for catalog_id in relation_catalog_hints_from_sql(sql) {
@@ -622,6 +625,7 @@ async fn maybe_dispatch_multi_catalog_query(
     let mut catalog_ids = explicit_catalog_ids_from_query_sql(&query.sql)
         .into_iter()
         .collect::<Vec<_>>();
+
     catalog_ids.sort();
     catalog_ids.dedup();
 
@@ -711,6 +715,7 @@ async fn maybe_dispatch_multi_catalog_query(
     }
 
     let columns = merged_columns.unwrap_or_default();
+
     Some(ConnectorResponse::applied(
         request.request_id.clone(),
         ConnectorResult::Query(QueryResult {
@@ -980,8 +985,10 @@ fn request_allowed_during_bootstrap(request: &ConnectorRequest) -> bool {
                 || is_show_entities_query(&query.sql)
                 || is_show_catalog_workers_query(&query.sql)
                 || extract_auth_token(&query.sql).is_some()
-        }
+        },
+
         _ => false,
+
     }
 
 }
@@ -1004,6 +1011,7 @@ pub async fn maybe_show_catalog_workers_response(
     let mut rows = Vec::new();
 
     if stats.is_empty() {
+
         rows.push(vec![
             b"*".to_vec(),
             b"0".to_vec(),
@@ -1012,7 +1020,9 @@ pub async fn maybe_show_catalog_workers_response(
             b"idle".to_vec(),
             if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
         ]);
+
     } else {
+
         for stat in stats {
             rows.push(vec![
                 stat.catalog_id.into_bytes(),
@@ -1023,6 +1033,7 @@ pub async fn maybe_show_catalog_workers_response(
                 if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
             ]);
         }
+
     }
 
     Some(ConnectorResponse::applied(
@@ -1118,6 +1129,7 @@ pub async fn maybe_show_entities_response(
         .trim_end_matches(';')
         .trim()
         .to_ascii_lowercase();
+
     let database_filter = if normalized_sql == SERVER_SHOW_ENTITIES_SQL {
         common::normalize_identifier!(query.database_id.clone())
     } else {
@@ -1165,6 +1177,7 @@ pub async fn maybe_show_entities_response(
             };
 
             let wal_id = catalog.database_id.0.clone();
+
             if let Err(err) = catalog.replay_entity_construction_from_log(&wal_id, &wal) {
                 log::debug!(
                     "show entities bootstrap fallback replay failed for database_id={} err={}",
@@ -1188,6 +1201,7 @@ pub async fn maybe_show_entities_response(
         if database_filter.is_empty() {
             
             if discovered_catalogs.is_empty() {
+
                 rows.push(vec![
                     b"*".to_vec(),
                     Vec::new(),
@@ -1197,11 +1211,14 @@ pub async fn maybe_show_entities_response(
                     b"loading".to_vec(),
                     b"n/a".to_vec(),
                 ]);
+
             } else {
+
                 for catalog in discovered_catalogs {
                     let catalog_id = catalog.database_id.0.clone();
                     append_catalog_entity_rows(&mut rows, &catalog_id, &catalog, false);
                 }
+
             }
 
         } else {
@@ -1325,10 +1342,13 @@ pub async fn maybe_show_entities_response(
     };
 
     let target_database_ids = if database_filter.is_empty() {
+        
         let mut all = app.catalogs().keys().cloned().collect::<Vec<_>>();
         all.sort();
         all
+
     } else {
+
         let resolved_database_id = if app.catalogs().contains_key(&database_filter) {
             database_filter.clone()
         } else {
@@ -1347,6 +1367,7 @@ pub async fn maybe_show_entities_response(
         }
 
         vec![resolved_database_id]
+
     };
 
     for resolved_database_id in target_database_ids {
@@ -1533,6 +1554,7 @@ pub async fn maybe_server_peer_discovery_response(
     );
 
     Some(response)
+
 }
 
 pub fn is_valid_server_node(node: &PeerNode) -> bool {
@@ -1612,6 +1634,7 @@ pub async fn handle_connector_stream(
         }
 
         if is_ca_bootstrap_frame(&payload) {
+
             let node_data_dir = {
                 let app_guard = app.read().await;
                 app_guard.node_data_dir().clone()
@@ -1658,6 +1681,7 @@ pub async fn handle_connector_stream(
 
             session.mark_disconnect();
             rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+            
             return Ok(());
 
         }
@@ -1676,6 +1700,7 @@ pub async fn handle_connector_stream(
 
             let message_for_fanout = message.clone();
             let mut runtime = p2p_runtime.lock().await;
+            
             if let Err(err) = runtime.handle_event(ServerP2pEvent::MessageReceived {
                 from_peer_id: peer_addr.clone(),
                 message,

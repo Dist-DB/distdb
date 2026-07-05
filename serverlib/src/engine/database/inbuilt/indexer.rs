@@ -12,6 +12,7 @@ use super::datetime;
 use super::numeric;
 use super::advanced;
 use super::geo;
+use super::custom;
 
 #[derive(Clone, Debug, Default)]
 pub struct InbuiltSqlRuntimeContext {
@@ -71,7 +72,15 @@ pub fn evaluate_inbuilt_sql_function(function: &Function) -> Result<Option<Vec<u
         return Err(format!("unsupported inbuilt function '{}'", function_name));
     };
 
-    command.evaluate(function)
+    command
+        .evaluate(function)
+        .map_err(|err| {
+            if err.to_ascii_lowercase().contains("usage:") {
+                err
+            } else {
+                format!("{}; usage: {}", err, command.usage())
+            }
+        })
 
 }
 
@@ -401,6 +410,10 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         "system_user"                           => Some(&advanced::system_user::SystemUserCommand),
         "user"                                  => Some(&advanced::user::UserCommand),
         "version"                               => Some(&advanced::version::VersionCommand),
+
+        // custom non-MySQL functions
+
+        "lookup"                                => Some(&custom::lookup::LookupCommand),
 
         _ => None,
 

@@ -3,6 +3,7 @@ mod datetime;
 mod numeric;
 mod advanced;
 mod geo;
+mod custom;
 
 mod command;
 mod indexer;
