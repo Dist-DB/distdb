@@ -9,6 +9,7 @@ pub struct ScopedEphemeralTableHandle {
 }
 
 impl ScopedEphemeralTableHandle {
+
     pub fn table_id(&self) -> &str {
         &self.table_id
     }
@@ -16,6 +17,7 @@ impl ScopedEphemeralTableHandle {
     pub fn released(&self) -> bool {
         self.released
     }
+    
 }
 
 pub fn create_scoped_ephemeral_table(
