@@ -20,9 +20,13 @@ fn show_databases_result_sorts_names() {
 
 #[test]
 fn show_tables_result_sorts_names() {
-    let result = show_tables_result(vec!["users".to_string(), "accounts".to_string()]);
+    let result = show_tables_result(vec![
+        ("users".to_string(), "permanent".to_string()),
+        ("accounts".to_string(), "memory".to_string()),
+    ]);
 
     assert_eq!(result.columns[0].field_name, "table_name");
+    assert_eq!(result.columns[1].field_name, "store_kind");
     assert_eq!(
         result
             .rows

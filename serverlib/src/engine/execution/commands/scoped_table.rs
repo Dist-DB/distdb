@@ -28,7 +28,7 @@ pub fn create_scoped_ephemeral_table(
     let normalized_table_id = common::normalize_identifier!(table_id.into());
 
     catalog
-        .register_table(normalized_table_id.clone(), schema)
+        .create_temporary_table(normalized_table_id.clone(), schema)
         .map_err(|err| format!("scoped table create failed: {err}"))?;
 
     if let Err(err) = wal.set_stream_mode(&normalized_table_id, WalStreamMode::Ephemeral) {

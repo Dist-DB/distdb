@@ -174,7 +174,15 @@ pub(super) fn execute_select_impl(
             );
         };
 
-        let result = serverlib::show_tables_result(catalog.table_ids());
+        let result = serverlib::show_tables_result(catalog.table_ids().into_iter().map(|table_id| {
+            let store_kind = catalog
+                .table(&table_id)
+                .map(|table| if table.is_temporary() { "memory" } else { "permanent" })
+                .unwrap_or("permanent")
+                .to_string();
+
+            (table_id, store_kind)
+        }));
 
         return ConnectorResponse::applied(
             request_id.to_string(),

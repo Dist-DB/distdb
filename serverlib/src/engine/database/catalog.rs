@@ -86,6 +86,31 @@ impl DatabaseCatalog {
 
     }
 
+    fn create_table_with_entity_id(
+        &mut self,
+        table_id: impl Into<String>,
+        schema: TableSchema,
+        entity_id: Option<String>,
+    ) -> DatabaseResult<()> {
+
+        let table_id = common::normalize_identifier!(table_id.into());
+        self.register_table_with_entity_id(table_id.clone(), schema, entity_id)?;
+
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        table.begin_sync()?;
+
+        if !self.table_sync_acknowledged_stub(&table_id) {
+            return Err(DatabaseError::SyncPending);
+        }
+
+        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+        table.complete_sync()?;
+        self.bump_schema_epoch();
+
+        Ok(())
+
+    }
+
     fn resolve_entity_key(&self, entity_id: &str) -> Option<String> {
 
         if self.entities.contains_key(entity_id) {
@@ -168,20 +193,22 @@ impl DatabaseCatalog {
         schema: TableSchema,
     ) -> DatabaseResult<()> {
 
+        self.create_table_with_entity_id(table_id, schema, None)
+
+    }
+
+    pub fn create_temporary_table(
+        &mut self,
+        table_id: impl Into<String>,
+        schema: TableSchema,
+    ) -> DatabaseResult<()> {
+
         let table_id = common::normalize_identifier!(table_id.into());
-        self.register_table(table_id.clone(), schema)?;
+        self.create_table_with_entity_id(table_id.clone(), schema, None)?;
 
         let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
-        table.begin_sync()?;
+        table.temporary = true;
 
-        if !self.table_sync_acknowledged_stub(&table_id) {
-            return Err(DatabaseError::SyncPending);
-        }
-
-        let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
-        table.complete_sync()?;
-        self.bump_schema_epoch();
-        
         Ok(())
 
     }
@@ -1503,7 +1530,12 @@ impl DatabaseCatalog {
     }
 
     fn save_to_path(&self, path: impl AsRef<Path>) -> DatabaseResult<()> {
-        let payload = bincode::serialize(self).map_err(|_| DatabaseError::CatalogSerialize)?;
+        let mut snapshot = self.clone();
+        snapshot.entities.retain(|_, entity| {
+            !matches!(entity, DatabaseEntity::Table(table) if table.is_temporary())
+        });
+
+        let payload = bincode::serialize(&snapshot).map_err(|_| DatabaseError::CatalogSerialize)?;
         let mut file = Vec::with_capacity(common::helpers::format::HEADER_SIZE + payload.len());
         file.extend_from_slice(&common::helpers::format::make_header(FileKind::Catalog));
         file.extend_from_slice(&payload);

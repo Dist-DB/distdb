@@ -21,6 +21,8 @@ pub struct DatabaseTable {
     pub schema_revision: u64,
     pub schema: TableSchema,
     pub indexes: HashMap<String, super::index::DatabaseIndex>,
+    #[serde(default)]
+    pub temporary: bool,
     pub metadata: EntityMetadata,
 }
 
@@ -38,6 +40,7 @@ impl DatabaseTable {
             schema_revision: 0,
             schema,
             indexes,
+            temporary: false,
             metadata: EntityMetadata::default(),
         }
     }
@@ -52,6 +55,10 @@ impl DatabaseTable {
 
     pub fn schema_revision(&self) -> u64 {
         self.schema_revision
+    }
+
+    pub fn is_temporary(&self) -> bool {
+        self.temporary
     }
 
     /// Acquire the transaction lock: `Ready → Lock`.

@@ -3,7 +3,16 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use sqlparser::ast::{BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value};
+use sqlparser::ast::{
+    BinaryOperator, 
+    Expr, 
+    Function, 
+    FunctionArg, 
+    FunctionArgExpr, 
+    FunctionArguments, 
+    UnaryOperator, 
+    Value
+};
 
 use super::command::InbuiltServerCommand;
 

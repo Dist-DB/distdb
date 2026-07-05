@@ -132,6 +132,7 @@ pub use engine::replication_executor::ReplicationPhaseExecutor;
 
 pub use engine::sql::{
 	create_table_schema_from_statement, 
+	create_table_plan_from_statement,
 	parse_mysql8_sql_requests, 
 	parse_sql_requests,
 	parse_insert_rows_from_parsed_statement,

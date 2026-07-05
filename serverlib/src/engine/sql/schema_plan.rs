@@ -8,9 +8,25 @@ use crate::{FieldDef, FieldIndex, FieldType, TableSchema};
 use super::literals::parse_default_value;
 use super::{parse_mysql_statements, AlterTableChangeOp, AlterTableChangePlan, SqlParseError};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTablePlan {
+    pub table_id: String,
+    pub schema: TableSchema,
+    pub temporary: bool,
+}
+
 pub fn create_table_schema_from_statement(
     statement: &str,
 ) -> Result<(String, TableSchema), SqlParseError> {
+
+    let plan = create_table_plan_from_statement(statement)?;
+    Ok((plan.table_id, plan.schema))
+
+}
+
+pub fn create_table_plan_from_statement(
+    statement: &str,
+) -> Result<CreateTablePlan, SqlParseError> {
 
     let parsed = parse_mysql_statements(statement)?;
     let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
@@ -84,7 +100,11 @@ pub fn create_table_schema_from_statement(
         SqlParseError::UnsupportedStatement(format!("invalid CREATE TABLE schema: {err}"))
     })?;
 
-    Ok((table_id, schema))
+    Ok(CreateTablePlan {
+        table_id,
+        schema,
+        temporary: create_table.temporary,
+    })
 
 }
 

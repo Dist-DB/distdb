@@ -295,8 +295,8 @@ pub(super) fn execute_create_table_impl(
         );
     };
 
-    let (table_id, schema) = match serverlib::create_table_schema_from_statement(&statement.sql) {
-        Ok(tuple) => tuple,
+    let create_table_plan = match serverlib::create_table_plan_from_statement(&statement.sql) {
+        Ok(plan) => plan,
         Err(err) => {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -304,6 +304,10 @@ pub(super) fn execute_create_table_impl(
             );
         }
     };
+
+    let table_id = create_table_plan.table_id;
+    let schema = create_table_plan.schema;
+    let is_temporary = create_table_plan.temporary;
 
     let normalized_table_id = common::normalize_identifier!(table_id);
     if catalog.table(&normalized_table_id).is_some() {
@@ -324,125 +328,140 @@ pub(super) fn execute_create_table_impl(
     }
 
     let created_at = common::epoch_nanos!();
-    if let Err(err) = catalog.create_table(normalized_table_id.clone(), schema.clone()) {
+
+    if is_temporary {
+        if let Err(err) = serverlib::create_scoped_ephemeral_table(
+            catalog,
+            wal,
+            normalized_table_id.clone(),
+            schema.clone(),
+        ) {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create temporary table failed: {err}"),
+            );
+        }
+    } else if let Err(err) = catalog.create_table(normalized_table_id.clone(), schema.clone()) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create table failed: {err}"),
         );
     }
 
-    let wal_id = catalog.database_id.0.clone();
-    let table_entity_stream_id = catalog
-        .entity_wal_stream_id(&normalized_table_id)
-        .unwrap_or_else(|| normalized_table_id.clone());
-    let table_entity_id = catalog
-        .entity_identity_id(&normalized_table_id)
-        .unwrap_or_else(|| normalized_table_id.clone());
-    let entity_wal_id = table_entity_stream_id.clone();
-    let schema_payload = SchemaChangePayload {
-        table_id: normalized_table_id.clone(),
-        schema_revision: 1,
-        schema_epoch: catalog.schema_epoch(),
-        entity_id: Some(table_entity_id.clone()),
-        schema,
-    };
+    if !is_temporary {
+        let wal_id = catalog.database_id.0.clone();
+        let table_entity_stream_id = catalog
+            .entity_wal_stream_id(&normalized_table_id)
+            .unwrap_or_else(|| normalized_table_id.clone());
+        let table_entity_id = catalog
+            .entity_identity_id(&normalized_table_id)
+            .unwrap_or_else(|| normalized_table_id.clone());
+        let entity_wal_id = table_entity_stream_id.clone();
+        let schema_payload = SchemaChangePayload {
+            table_id: normalized_table_id.clone(),
+            schema_revision: 1,
+            schema_epoch: catalog.schema_epoch(),
+            entity_id: Some(table_entity_id.clone()),
+            schema,
+        };
 
-    let encoded_schema = match schema_payload.encode() {
-        Ok(encoded) => encoded,
-        Err(err) => {
+        let encoded_schema = match schema_payload.encode() {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create table schema payload encode failed: {err}"),
+                );
+            }
+        };
+
+        if let Err(err) = append_payload_record_pair(
+            wal,
+            &wal_id,
+            &entity_wal_id,
+            TransactionKind::SchemaChange,
+            encoded_schema,
+            created_at,
+            "create table schema WAL append failed",
+            "create table entity WAL append failed",
+        ) {
+            return ConnectorResponse::rejected(request_id.to_string(), err);
+        }
+
+        let lifecycle_payload = TableLifecyclePayload {
+            table_id: normalized_table_id.clone(),
+            action: TableLifecycleAction::Create,
+            schema_epoch: catalog.schema_epoch(),
+            entity_id: Some(table_entity_id),
+            schema: Some(
+                catalog
+                    .table_schema(&normalized_table_id)
+                    .cloned()
+                    .unwrap_or_else(|| TableSchema::new(Vec::new())),
+            ),
+        };
+
+        let encoded_lifecycle = match lifecycle_payload.encode() {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create table lifecycle payload encode failed: {err}"),
+                );
+            }
+        };
+
+        if let Err(err) = append_payload_record_pair(
+            wal,
+            &wal_id,
+            &entity_wal_id,
+            TransactionKind::TableLifecycle,
+            encoded_lifecycle,
+            created_at,
+            "create table lifecycle WAL append failed",
+            "create table entity lifecycle WAL append failed",
+        ) {
+            return ConnectorResponse::rejected(request_id.to_string(), err);
+        }
+
+        let metadata = EntityMetadata::default()
+            .with_creator("server")
+            .with_created_at(created_at);
+
+        if let Err(err) = catalog.set_entity_metadata(&normalized_table_id, metadata.clone()) {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
-                format!("create table schema payload encode failed: {err}"),
+                format!("create table metadata apply failed: {err}"),
             );
         }
-    };
 
-    if let Err(err) = append_payload_record_pair(
-        wal,
-        &wal_id,
-        &entity_wal_id,
-        TransactionKind::SchemaChange,
-        encoded_schema,
-        created_at,
-        "create table schema WAL append failed",
-        "create table entity WAL append failed",
-    ) {
-        return ConnectorResponse::rejected(request_id.to_string(), err);
-    }
+        let metadata_payload = EntityMetadataPayload {
+            entity_id: normalized_table_id.clone(),
+            metadata,
+        };
 
-    let lifecycle_payload = TableLifecyclePayload {
-        table_id: normalized_table_id.clone(),
-        action: TableLifecycleAction::Create,
-        schema_epoch: catalog.schema_epoch(),
-        entity_id: Some(table_entity_id),
-        schema: Some(
-            catalog
-                .table_schema(&normalized_table_id)
-                .cloned()
-                .unwrap_or_else(|| TableSchema::new(Vec::new())),
-        ),
-    };
+        let encoded_metadata = match metadata_payload.encode() {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create table metadata payload encode failed: {err}"),
+                );
+            }
+        };
 
-    let encoded_lifecycle = match lifecycle_payload.encode() {
-        Ok(encoded) => encoded,
-        Err(err) => {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("create table lifecycle payload encode failed: {err}"),
-            );
+        if let Err(err) = append_payload_record_pair(
+            wal,
+            &wal_id,
+            &entity_wal_id,
+            TransactionKind::MetadataChange,
+            encoded_metadata,
+            created_at,
+            "create table metadata WAL append failed",
+            "create table entity metadata WAL append failed",
+        ) {
+            return ConnectorResponse::rejected(request_id.to_string(), err);
         }
-    };
-
-    if let Err(err) = append_payload_record_pair(
-        wal,
-        &wal_id,
-        &entity_wal_id,
-        TransactionKind::TableLifecycle,
-        encoded_lifecycle,
-        created_at,
-        "create table lifecycle WAL append failed",
-        "create table entity lifecycle WAL append failed",
-    ) {
-        return ConnectorResponse::rejected(request_id.to_string(), err);
-    }
-
-    let metadata = EntityMetadata::default()
-        .with_creator("server")
-        .with_created_at(created_at);
-
-    if let Err(err) = catalog.set_entity_metadata(&normalized_table_id, metadata.clone()) {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("create table metadata apply failed: {err}"),
-        );
-    }
-
-    let metadata_payload = EntityMetadataPayload {
-        entity_id: normalized_table_id.clone(),
-        metadata,
-    };
-
-    let encoded_metadata = match metadata_payload.encode() {
-        Ok(encoded) => encoded,
-        Err(err) => {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("create table metadata payload encode failed: {err}"),
-            );
-        }
-    };
-
-    if let Err(err) = append_payload_record_pair(
-        wal,
-        &wal_id,
-        &entity_wal_id,
-        TransactionKind::MetadataChange,
-        encoded_metadata,
-        created_at,
-        "create table metadata WAL append failed",
-        "create table entity metadata WAL append failed",
-    ) {
-        return ConnectorResponse::rejected(request_id.to_string(), err);
     }
 
     ConnectorResponse::applied(

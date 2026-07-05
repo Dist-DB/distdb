@@ -20,16 +20,17 @@ where
 
 pub fn show_tables_result<I>(table_ids: I) -> SelectExecutionResult
 where
-    I: IntoIterator<Item = String>,
+    I: IntoIterator<Item = (String, String)>,
 {
-    let mut table_ids = table_ids.into_iter().collect::<Vec<_>>();
-    table_ids.sort();
+    let mut table_rows = table_ids.into_iter().collect::<Vec<_>>();
+    table_rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
 
-    single_text_column_result(
+    two_text_column_result(
         "table_name",
-        table_ids
+        "store_kind",
+        table_rows
             .into_iter()
-            .map(|table_id| vec![table_id.into_bytes()])
+            .map(|(table_id, store_kind)| vec![table_id.into_bytes(), store_kind.into_bytes()])
             .collect(),
     )
 }
@@ -87,6 +88,19 @@ fn single_text_column_result(field_name: &str, rows: Vec<Vec<Vec<u8>>>) -> Selec
         rows,
     }
     
+}
+
+fn two_text_column_result(
+    first_field_name: &str,
+    second_field_name: &str,
+    rows: Vec<Vec<Vec<u8>>>,
+) -> SelectExecutionResult {
+
+    SelectExecutionResult {
+        columns: vec![text_column(1, first_field_name), text_column(2, second_field_name)],
+        rows,
+    }
+
 }
 
 fn text_column(seqno: u32, field_name: &str) -> FieldDef {

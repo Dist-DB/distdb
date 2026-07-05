@@ -596,6 +596,35 @@ fn active_schema_change_state_is_persisted_in_catalog_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn temporary_tables_are_not_persisted_in_catalog_file() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    catalog
+        .create_temporary_table("tmp_users", TableSchema::new(Vec::new()))
+        .expect("temporary table should be created");
+
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "distdb-catalog-temp-table-test-{}",
+        common::helpers::utils::unique_id()
+    ));
+
+    std::fs::create_dir_all(&dir).expect("temp dir should be created");
+
+    catalog
+        .save_in_directory(&dir)
+        .expect("catalog save should succeed");
+
+    let loaded = DatabaseCatalog::load_from_path(catalog_path_for_test(&catalog, &dir))
+        .expect("catalog load should succeed");
+
+    assert!(loaded.table("tmp_users").is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn catalog_path_for_test(catalog: &DatabaseCatalog, directory: &Path) -> PathBuf {
     directory.join(catalog.file_name())
 }

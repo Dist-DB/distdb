@@ -27,7 +27,8 @@ pub use requests::{
 };
 
 pub use schema_plan::{
-    create_table_schema_from_statement, parse_alter_table_change_plan_from_statement,
+    create_table_plan_from_statement, create_table_schema_from_statement,
+    parse_alter_table_change_plan_from_statement,
 };
 
 pub use select_plan::{

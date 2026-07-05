@@ -54,6 +54,7 @@ fn create_scoped_ephemeral_table_registers_table_and_marks_stream_ephemeral() {
     assert_eq!(handle.table_id(), "tmp_users");
     assert!(!handle.released());
     assert!(catalog.table("tmp_users").is_some());
+    assert!(catalog.table("tmp_users").is_some_and(|table| table.is_temporary()));
     assert_eq!(wal.stream_mode("tmp_users"), WalStreamMode::Ephemeral);
     assert!(!wal.is_stream_replicable("tmp_users"));
 }

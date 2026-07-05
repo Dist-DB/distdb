@@ -1,5 +1,6 @@
 use crate::{
-    DatabaseCatalog, DatabaseStoredProcedure, DatabaseTrigger, TriggerEventKind, TriggerTiming,
+    ConcurrentWalManager, DatabaseCatalog, DatabaseError, DatabaseStoredProcedure,
+    DatabaseTrigger, TriggerEventKind, TriggerTiming,
 };
 
 use super::super::ConditionValueProvider;
@@ -32,6 +33,63 @@ where
 
 }
 
+pub fn cleanup_temporary_tables(
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+) -> Result<(), String> {
+
+    let temporary_tables = catalog
+        .table_ids()
+        .into_iter()
+        .filter(|table_id| catalog.table(table_id).is_some_and(|table| table.is_temporary()))
+        .collect::<Vec<_>>();
+
+    for table_id in temporary_tables {
+        match catalog.drop_table(&table_id) {
+            Ok(()) | Err(DatabaseError::TableNotFound) => {}
+            Err(err) => {
+                return Err(format!("temporary table cleanup failed: {err}"));
+            }
+        }
+
+        wal.delete_stream(&table_id)
+            .map_err(|err| format!("temporary table cleanup failed: {err}"))?;
+    }
+
+    Ok(())
+
+}
+
+pub fn execute_stored_procedure_invocation_with_cleanup<R, E, C>(
+    provider: &dyn ConditionValueProvider,
+    procedure: &DatabaseStoredProcedure,
+    source: EntityInvocationSource,
+    execute_action: &mut E,
+    cleanup: &mut C,
+) -> Result<Option<R>, String>
+where
+    E: FnMut(&str) -> Result<R, String>,
+    C: FnMut() -> Result<(), String>,
+{
+
+    let invocation_result = execute_stored_procedure_invocation(
+        provider,
+        procedure,
+        source,
+        execute_action,
+    );
+
+    let cleanup_result = cleanup();
+
+    match (invocation_result, cleanup_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+        (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
+    }
+
+}
+
 pub fn execute_stored_procedure_invocation_over_cursor<S, R, E>(
     cursor_source: &mut S,
     cursor_frame: &mut SqlCursorFrame,
@@ -60,6 +118,39 @@ where
     })?;
 
     Ok(outcomes)
+
+}
+
+pub fn execute_stored_procedure_invocation_over_cursor_with_cleanup<S, R, E, C>(
+    cursor_source: &mut S,
+    cursor_frame: &mut SqlCursorFrame,
+    procedure: &DatabaseStoredProcedure,
+    source: EntityInvocationSource,
+    execute_action: &mut E,
+    cleanup: &mut C,
+) -> Result<Vec<R>, String>
+where
+    S: SqlCursorSource,
+    E: FnMut(&str, &SqlCursorFrame) -> Result<R, String>,
+    C: FnMut() -> Result<(), String>,
+{
+
+    let result = execute_stored_procedure_invocation_over_cursor(
+        cursor_source,
+        cursor_frame,
+        procedure,
+        source,
+        execute_action,
+    );
+
+    let cleanup_result = cleanup();
+
+    match (result, cleanup_result) {
+        (Ok(outcomes), Ok(())) => Ok(outcomes),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+        (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
+    }
 
 }
 

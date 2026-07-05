@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
-use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::function_args;
+use crate::engine::database::inbuilt::{
+    command::InbuiltServerCommand,
+    indexer::function_args
+};
 
 use super::{evaluate_i64_arg, expect_arg_count, float_result, random_seed_now, seeded_random};
 

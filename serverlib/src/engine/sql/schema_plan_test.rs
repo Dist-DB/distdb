@@ -26,6 +26,18 @@ fn create_table_schema_helper_maps_fields() {
 }
 
 #[test]
+fn create_table_plan_detects_temporary_flag() {
+    let plan = create_table_plan_from_statement(
+        "create temporary table tmp_users (id bigint primary key)",
+    )
+    .expect("temporary create table should parse");
+
+    assert_eq!(plan.table_id, "tmp_users");
+    assert!(plan.temporary);
+    assert_eq!(plan.schema.fields.len(), 1);
+}
+
+#[test]
 fn create_table_schema_maps_varchar_with_length() {
     let (_, schema) =
         create_table_schema_from_statement("create table users (email varchar(34) not null)")

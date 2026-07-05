@@ -1,7 +1,9 @@
 use sqlparser::ast::Function;
 
-use crate::engine::database::inbuilt::command::InbuiltServerCommand;
-use crate::engine::database::inbuilt::indexer::function_args;
+use crate::engine::database::inbuilt::{
+    command::InbuiltServerCommand,
+    indexer::function_args
+};
 
 use super::{evaluate_string_arg, expect_arg_count, find_substring_position, number_result};
 
