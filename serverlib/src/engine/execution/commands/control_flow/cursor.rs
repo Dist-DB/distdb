@@ -242,21 +242,19 @@ impl ConditionValueProvider for SqlCursorFrame {
                 return Some(value);
             }
 
-            if let Some((_, unqualified)) = normalized.split_once('.') {
-                if let Some(value) = row.get(unqualified) {
+            if let Some((_, unqualified)) = normalized.split_once('.')
+                && let Some(value) = row.get(unqualified) {
                     return Some(value);
                 }
-            }
 
-            if !normalized.contains('.') {
-                if let Some((_, value)) = row.iter().find(|(field_name, _)| {
+            if !normalized.contains('.')
+                && let Some((_, value)) = row.iter().find(|(field_name, _)| {
                     field_name
                         .split_once('.')
                         .is_some_and(|(_, column_name)| column_name == normalized)
                 }) {
                     return Some(value);
                 }
-            }
         }
 
         self.local_bindings.get(&normalized)

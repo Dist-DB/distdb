@@ -1,14 +1,9 @@
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum SystemFieldVisibility {
+    #[default]
     Visible,
     Hidden,
-}
-
-impl Default for SystemFieldVisibility {
-    fn default() -> Self {
-        Self::Visible
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

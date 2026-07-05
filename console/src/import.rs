@@ -123,9 +123,9 @@ where
                             import_insert_chunk_max_tuples(),
                             |import_statement| {
                                 if let Err(err) =
-                                    execute_statement(database_id, &import_statement, transaction_state)
+                                    execute_statement(database_id, import_statement, transaction_state)
                                 {
-                                    if should_skip_import_error(&import_statement, &err) {
+                                    if should_skip_import_error(import_statement, &err) {
                                         return Ok(());
                                     }
 
@@ -180,9 +180,9 @@ where
                     import_insert_chunk_max_tuples(),
                     |import_statement| {
                         if let Err(err) =
-                            execute_statement(database_id, &import_statement, transaction_state)
+                            execute_statement(database_id, import_statement, transaction_state)
                         {
-                            if should_skip_import_error(&import_statement, &err) {
+                            if should_skip_import_error(import_statement, &err) {
                                 return Ok(());
                             }
 
@@ -223,8 +223,8 @@ where
             import_insert_chunk_target_bytes(),
             import_insert_chunk_max_tuples(),
             |import_statement| {
-                if let Err(err) = execute_statement(database_id, &import_statement, transaction_state) {
-                    if should_skip_import_error(&import_statement, &err) {
+                if let Err(err) = execute_statement(database_id, import_statement, transaction_state) {
+                    if should_skip_import_error(import_statement, &err) {
                         return Ok(());
                     }
 

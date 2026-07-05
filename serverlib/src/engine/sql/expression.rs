@@ -3,6 +3,7 @@ use sqlparser::ast::Function;
 
 use super::sql_function_references_column;
 
+#[expect(clippy::large_enum_variant, reason="the enum variants are large but necessary for the expression representation")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectExpression {
     Null,

@@ -203,6 +203,8 @@ fn append_catalog_entity_rows(
     ]);
 
     let mut entities = catalog.entities_iter().collect::<Vec<_>>();
+
+    #[expect(clippy::unnecessary_sort_by, reason="we want to sort by entity ID for consistent output")]
     entities.sort_by(|(left_id, _), (right_id, _)| left_id.cmp(right_id));
 
     for (_entity_id, entity) in entities {

@@ -173,9 +173,9 @@ where
         let simple_join = join_condition_field_names(join);
         let right_field_name = simple_join
             .map(|(_, right_join_field_name)| join_field_column_name(right_join_field_name));
+        
         let probe_source = right_access_plan.equality_probe_source().unwrap_or_else(|| {
             right_field_name
-                .as_deref()
                 .map(|field_name| {
                     if field_has_single_column_index(right_table, field_name) {
                         EqualityProbeSource::ExistingIndex
@@ -185,14 +185,14 @@ where
                 })
                 .unwrap_or(EqualityProbeSource::TemporaryIndex)
         });
+
         let right_probe_index = right_field_name
-            .as_deref()
             .map(|right_field_name| build_relation_probe_index(&right_rows, right_field_name));
 
         log::debug!(
             "select join relation={} field={} strategy= {}",
             join.relation.table_id,
-            right_field_name.as_deref().unwrap_or("<predicate>"),
+            right_field_name.unwrap_or("<predicate>"),
             match probe_source {
                 EqualityProbeSource::ExistingIndex => "existing_index",
                 EqualityProbeSource::TemporaryIndex => "temporary_index",

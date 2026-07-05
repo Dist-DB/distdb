@@ -27,11 +27,10 @@ impl InbuiltServerCommand for NullIfCommand {
         match left {
             None => Ok(None),
             Some(left_value) => {
-                if let Some(right_value) = right {
-                    if left_value == right_value {
+                if let Some(right_value) = right
+                    && left_value == right_value {
                         return Ok(None);
                     }
-                }
 
                 Ok(Some(left_value))
             }

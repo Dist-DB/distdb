@@ -63,6 +63,7 @@ pub struct AlterTableChangePlan {
     pub operations: Vec<AlterTableChangeOp>,
 }
 
+#[expect(clippy::large_enum_variant, reason="the enum variants are large but necessary for the expression representation")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertRowsSource {
     Values(Vec<Vec<Option<Vec<u8>>>>),

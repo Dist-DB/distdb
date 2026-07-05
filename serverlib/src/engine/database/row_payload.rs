@@ -305,11 +305,10 @@ pub fn decode_encrypted_row_payload_envelope(
     payload: &[u8],
 ) -> Result<Option<EncryptedRowPayloadEnvelope>, String> {
 
-    if let Ok(envelope) = bincode::deserialize::<EncryptedRowPayloadEnvelope>(payload) {
-        if looks_like_valid_encrypted_payload_envelope(&envelope) {
+    if let Ok(envelope) = bincode::deserialize::<EncryptedRowPayloadEnvelope>(payload)
+        && looks_like_valid_encrypted_payload_envelope(&envelope) {
             return Ok(Some(envelope));
         }
-    }
 
     let Ok(legacy_envelope) = bincode::deserialize::<LegacyEncryptedRowPayloadEnvelope>(payload) else {
         return Ok(None);

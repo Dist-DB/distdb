@@ -449,11 +449,10 @@ pub fn decode_wal_frame(encoded: &str) -> Result<(String, TransactionRecord), St
 
     let base64_bytes = b64_decode(encoded);
     
-    if !base64_bytes.is_empty() {
-        if let Ok(frame) = bincode::deserialize::<(String, TransactionRecord)>(&base64_bytes) {
+    if !base64_bytes.is_empty()
+        && let Ok(frame) = bincode::deserialize::<(String, TransactionRecord)>(&base64_bytes) {
             return Ok(frame);
         }
-    }
 
     if !encoded.len().is_multiple_of(2) {
         return Err("invalid WAL frame encoding; expected base64 or hex".to_string());

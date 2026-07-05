@@ -1077,6 +1077,7 @@ fn resolve_table_stream_id_for_bootstrap(
                     table_elapsed_ms,
                 );
 
+                #[expect(clippy::manual_is_multiple_of, reason="Readable logging of progress every 10 tables")]
                 if bootstrapped_tables % 10 == 0 {
                     log::info!(
                         "runtime index bootstrap progress tables={} indexes={} live_rows={} elapsed_ms={}",
@@ -1274,12 +1275,14 @@ fn table_schema_fingerprint_for_parts(
     Some(stable_id(&[table_id, &hex]))
 }
 
+#[expect(clippy::type_complexity, reason="returning a tuple of (latest_tx_id, live_rows)")]
 pub fn load_live_row_checkpoint_rows(
     data_dir: &Path,
     table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
 ) -> Option<(u64, Vec<(u64, HashMap<String, Vec<u8>>)>)> {
+
     let checkpoint_path = live_row_checkpoint_path(data_dir, table_stream_id);
     let bytes = read_bytes(&checkpoint_path).ok()?;
 
@@ -1331,6 +1334,7 @@ fn load_runtime_index_snapshot(
         return None;
     }
 
+    #[expect(clippy::question_mark, reason="we want to return None if the wal fingerprint is unavailable")]
     let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
         return None;
     };
@@ -1382,6 +1386,7 @@ fn load_live_row_checkpoint(
         return None;
     }
 
+    #[expect(clippy::question_mark, reason="we want to return None if the wal fingerprint is unavailable")]
     let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
         return None;
     };
@@ -1418,6 +1423,7 @@ fn load_accessor_cache_snapshot(
         return None;
     }
 
+    #[expect(clippy::question_mark, reason="we want to return None if the wal fingerprint is unavailable")]
     let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
         return None;
     };
@@ -1438,6 +1444,7 @@ fn load_accessor_cache_snapshot(
     Some(snapshot)
 }
 
+#[expect(clippy::too_many_arguments, reason="this function needs many arguments to save the runtime index snapshot")]
 fn save_runtime_index_snapshot(
     data_dir: &Path,
     table: &DatabaseTable,
@@ -1448,6 +1455,7 @@ fn save_runtime_index_snapshot(
     tracked_indexes: &[DatabaseIndex],
     store: &RuntimeIndexStore,
 ) -> Result<(), String> {
+
     let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
         .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
 
@@ -1595,6 +1603,7 @@ fn save_accessor_cache_snapshot(
     Ok(())
 }
 
+#[expect(clippy::type_complexity, reason="returning a tuple of (latest_tx_id, live_rows)")]
 fn build_bootstrap_index_entries(
     tracked_indexes: &[DatabaseIndex],
     live_rows: &[(u64, HashMap<String, Vec<u8>>)],
@@ -1682,6 +1691,7 @@ fn build_bootstrap_index_entries(
 
 }
 
+#[expect(clippy::type_complexity, reason="returning a tuple of (index_id, index, entries)")]
 fn build_snapshot_index_entries(
     tracked_indexes: &[DatabaseIndex],
     snapshot: &RuntimeIndexTableSnapshot,

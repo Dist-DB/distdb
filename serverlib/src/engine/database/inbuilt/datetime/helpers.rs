@@ -431,7 +431,7 @@ pub(super) fn period_add(period: i64, months: i64) -> Option<i64> {
     let year = period / 100;
 	let month = period % 100;
 	
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
 		return None;
 	}
 	

@@ -220,6 +220,7 @@ fn find_segment_from(
         return None;
     }
 
+    #[expect(clippy::manual_find, reason="the loop is intentionally written to avoid allocation and for performance")]
     for candidate_start in start..=actual.len() - segment.len() {
         if matches_segment_at(actual, candidate_start, segment, case_insensitive) {
             return Some(candidate_start);
@@ -269,8 +270,8 @@ fn classify_like_ascii_fast_path(
 
         let current = pattern[index];
 
-        if let Some(escape) = escape_byte {
-            if current == escape {
+        if let Some(escape) = escape_byte
+            && current == escape {
                 if index + 1 < pattern.len() {
                     let escaped = pattern[index + 1];
                     if !escaped.is_ascii() {
@@ -285,7 +286,6 @@ fn classify_like_ascii_fast_path(
                 index += 1;
                 continue;
             }
-        }
 
         if !current.is_ascii() {
             return None;
@@ -396,11 +396,10 @@ fn classify_like_fast_path(pattern: &str, escape_char: Option<char>) -> Option<L
 
     }
 
-    if escaped {
-        if let Some(escape) = escape_char {
+    if escaped
+        && let Some(escape) = escape_char {
             literal.push(escape);
         }
-    }
 
     if has_trailing_many {
         Some(LikeFastPath::Prefix(literal))
@@ -526,6 +525,7 @@ fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) 
 
 fn like_char_eq(actual: char, pattern: char, case_insensitive: bool) -> bool {
 
+    #[expect(clippy::manual_ignore_case_cmp, reason="the comparison is intentionally done with ASCII lowercasing for performance and correctness")]
     if case_insensitive {
         actual.to_ascii_lowercase() == pattern.to_ascii_lowercase()
     } else {

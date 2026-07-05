@@ -41,6 +41,7 @@ pub fn evaluate_case_projection(
         };
 
         if branch_matches {
+            #[expect(clippy::needless_question_mark, reason="the question mark is necessary to propagate the error from resolve_case_value")]
             return Ok(resolve_case_value(provider, value)?);
         }
 

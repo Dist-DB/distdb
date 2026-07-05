@@ -26,11 +26,10 @@ impl InbuiltServerCommand for FieldCommand {
         let normalized_needle = needle.to_lowercase();
 
         for index in 1..args.len() {
-            if let Some(value) = evaluate_string_arg(args, index)? {
-                if value.to_lowercase() == normalized_needle {
+            if let Some(value) = evaluate_string_arg(args, index)?
+                && value.to_lowercase() == normalized_needle {
                     return Ok(number_result(index));
                 }
-            }
         }
 
         Ok(number_result(0))

@@ -171,27 +171,23 @@ pub enum WalStreamMode {
     Ephemeral,
 }
 
+#[expect(clippy::large_enum_variant, reason="WalCommand variants are small enough to be efficient, and we want to avoid heap allocations for the enum itself")]
 #[derive(Debug)]
 enum WalCommand {
-
     Append {
         record: TransactionRecord,
         ack: Sender<Result<(), &'static str>>,
     },
-
     AppendBatch {
         records: Vec<TransactionRecord>,
         ack: Sender<Result<(), &'static str>>,
     },
-
     CompactToLatestSchemaAndMetadata {
         actor: UserId,
         timestamp_epoch_ms: u64,
         ack: Sender<Result<(), &'static str>>,
     },
-
-    Shutdown,
-    
+    Shutdown,    
 }
 
 #[derive(Debug)]

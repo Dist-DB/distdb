@@ -832,12 +832,14 @@ fn select_passthrough_derived_wrapper_composes_outer_limit_offset() {
 
 #[test]
 fn select_passthrough_derived_wrapper_rewrites_outer_projection_with_aliases() {
+    
     let plan = parse_select_read_plan_from_statement(
         "select d.id as user_id, d.email from (select id, email from users) d",
     )
     .expect("passthrough derived wrapper with outer projection aliases should parse");
 
-    assert_eq!(plan.projection_is_wildcard, false);
+    assert!(!plan.projection_is_wildcard);
+
     assert_eq!(plan.projection, Some(vec!["id".to_string(), "email".to_string()]));
     assert_eq!(
         plan.projection_items,

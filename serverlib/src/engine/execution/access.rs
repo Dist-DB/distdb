@@ -21,6 +21,7 @@ use crate::{
 
 use super::MaterializedRelationRow;
 
+#[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
 static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<HashMap<(usize, String), (u64, usize)>>> =
     OnceLock::new();
 
@@ -37,6 +38,7 @@ struct EqualityTableCacheEntry {
     string_index_ci_by_field: AHashMap<String, TPHashSet<Vec<u64>>>,
 }
 
+#[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EqualityTableCacheSnapshot {
     pub latest_tx_id: u64,
@@ -274,6 +276,7 @@ fn build_rows_by_id_from_snapshot(
 
 }
 
+#[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
 fn build_row_ids_by_field_value_from_snapshot(
     postings_by_field: Vec<(String, Vec<(Vec<u8>, Vec<u64>)>)>,
 ) -> AHashMap<String, AHashMap<Vec<u8>, Vec<u64>>> {
@@ -1673,6 +1676,7 @@ fn collect_live_rows_from_records(
 
 }
 
+#[expect(clippy::type_complexity, reason="returning a vector of tuples with row ID and row map")]
 pub fn load_live_rows_with_context(
     wal: &ConcurrentWalManager,
     table_id: &str,
@@ -2013,6 +2017,7 @@ fn rows_for_field_prefix(
 
 }
 
+#[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
 fn load_live_rows_for_accessor_miss(
     wal: &ConcurrentWalManager,
     table_id: &str,

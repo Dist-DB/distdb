@@ -1128,6 +1128,7 @@ impl DatabaseCatalog {
 
     pub fn table_ids(&self) -> Vec<String> {
 
+        #[expect(clippy::iter_kv_map, reason="we need both the key and value to filter triggers, but we only return the value")]
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1242,6 +1243,7 @@ impl DatabaseCatalog {
 
     pub fn trigger_ids(&self) -> Vec<String> {
 
+        #[expect(clippy::iter_kv_map, reason="we need both the key and value to filter triggers, but we only return the value")]
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1261,6 +1263,7 @@ impl DatabaseCatalog {
 
         let normalized_table_id = common::normalize_identifier!(table_id);
 
+        #[expect(clippy::iter_kv_map, reason="we need both the key and value to filter triggers, but we only return the value")]
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1320,6 +1323,7 @@ impl DatabaseCatalog {
 
     pub fn stored_procedure_ids(&self) -> Vec<String> {
 
+        #[expect(clippy::iter_kv_map, reason="we need both the key and value to filter triggers, but we only return the value")]
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
@@ -1334,6 +1338,7 @@ impl DatabaseCatalog {
 
     pub fn view_ids(&self) -> Vec<String> {
 
+        #[expect(clippy::iter_kv_map, reason="we need both the key and value to filter triggers, but we only return the value")]
         self.entities
             .iter()
             .filter_map(|(_, entity)| match entity {
