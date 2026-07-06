@@ -451,16 +451,27 @@ fn show_tables_query_returns_table_name_rows() {
         .map(|field| field.field_name.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(column_names, vec!["table_name"]);
+    assert_eq!(column_names, vec!["table_name", "store_kind"]);
     assert_eq!(result.rows.len(), 2);
 
     let row_values = result
         .rows
         .iter()
-        .map(|row| String::from_utf8_lossy(&row[0]).to_string())
+        .map(|row| {
+            (
+                String::from_utf8_lossy(&row[0]).to_string(),
+                String::from_utf8_lossy(&row[1]).to_string(),
+            )
+        })
         .collect::<Vec<_>>();
 
-    assert_eq!(row_values, vec!["accounts", "users"]);
+    assert_eq!(
+        row_values,
+        vec![
+            ("accounts".to_string(), "permanent".to_string()),
+            ("users".to_string(), "permanent".to_string()),
+        ]
+    );
 
 }
 
