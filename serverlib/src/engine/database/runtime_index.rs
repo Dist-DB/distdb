@@ -244,11 +244,35 @@ fn scoped_index_id(table_scope_id: &str, index_id: &str) -> String {
 }
 
 fn table_scope_id(table: &DatabaseTable) -> &str {
+
     if table.entity_id.is_empty() {
         table.table_id.as_str()
     } else {
         table.entity_id.as_str()
     }
+
+}
+
+fn resolve_table_stream_id_for_bootstrap(
+    catalog: &DatabaseCatalog,
+    table_id: &str,
+    wal: &ConcurrentWalManager,
+) -> String {
+
+    let scoped_stream_id = catalog
+        .entity_wal_stream_id(table_id)
+        .unwrap_or_else(|| table_id.to_string());
+
+    if scoped_stream_id != table_id
+        && wal.data_dir_path().is_none()
+        && wal.latest_transaction_id_if_loaded(&scoped_stream_id).is_none()
+        && wal.latest_transaction_id_if_loaded(table_id).is_some()
+    {
+        return table_id.to_string();
+    }
+
+    scoped_stream_id
+
 }
 
 impl RuntimeIndexStore {
@@ -329,12 +353,14 @@ impl RuntimeIndexStore {
     }
 
     pub fn index_mut_for_table(&mut self, table_scope_id: &str, index_id: &str) -> &mut RuntimeIndexState {
+        
         let scoped = scoped_index_id(table_scope_id, index_id);
 
         match self.indexes.entry(scoped) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(RuntimeIndexState::default()),
         }
+
     }
 
     pub fn cardinality(&self, index_id: &str) -> Option<usize> {
@@ -565,7 +591,8 @@ impl RuntimeIndexStore {
 
             TransactionKind::Delete => self.remove_table_row_for_table(table_scope_id, indexes, row_map),
 
-            TransactionKind::Insert | TransactionKind::Update => {
+            TransactionKind::Insert 
+            | TransactionKind::Update => {
                 self.record_table_row_for_table(table_scope_id, indexes, row_map)
             },
 
@@ -615,6 +642,7 @@ impl RuntimeIndexStore {
         let mut bootstrapped_tables = 0usize;
         let mut bootstrapped_indexes = 0usize;
         let mut bootstrapped_rows = 0usize;
+
         let snapshot_data_dir = wal.data_dir_path();
 
         for (database_id, catalog) in catalogs {
@@ -628,29 +656,6 @@ impl RuntimeIndexStore {
                 };
 
                 let table_stream_id = resolve_table_stream_id_for_bootstrap(catalog, &table_id, wal);
-
-
-fn resolve_table_stream_id_for_bootstrap(
-    catalog: &DatabaseCatalog,
-    table_id: &str,
-    wal: &ConcurrentWalManager,
-) -> String {
-
-    let scoped_stream_id = catalog
-        .entity_wal_stream_id(table_id)
-        .unwrap_or_else(|| table_id.to_string());
-
-    if scoped_stream_id != table_id
-        && wal.data_dir_path().is_none()
-        && wal.latest_transaction_id_if_loaded(&scoped_stream_id).is_none()
-        && wal.latest_transaction_id_if_loaded(table_id).is_some()
-    {
-        return table_id.to_string();
-    }
-
-    scoped_stream_id
-
-}
                 if table.indexes.is_empty() {
                     continue;
                 }
@@ -1218,37 +1223,51 @@ fn resolve_table_stream_id_for_bootstrap(
 }
 
 fn runtime_index_snapshot_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
+    
     let table_key = stable_id(&[table_stream_id]);
     let stem = format!("{}_{}", RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX, table_key);
+    
     data_dir
         .join("runtime-index")
         .join(FileKind::Entity.file_name(stem))
+
 }
 
 fn accessor_cache_snapshot_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
+    
     let table_key = stable_id(&[table_stream_id]);
     let stem = format!("{}_{}", ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX, table_key);
+    
     data_dir
         .join("accessor-cache")
         .join(FileKind::Entity.file_name(stem))
+
 }
 
-    fn live_row_checkpoint_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
-        let table_key = stable_id(&[table_stream_id]);
-        let stem = format!("{}_{}", LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX, table_key);
-        data_dir
-        .join("live-rows")
-        .join(FileKind::Entity.file_name(stem))
-    }
+fn live_row_checkpoint_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
+    
+    let table_key = stable_id(&[table_stream_id]);
+    let stem = format!("{}_{}", LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX, table_key);
+    
+    data_dir
+    .join("live-rows")
+    .join(FileKind::Entity.file_name(stem))
+
+}
 
 fn wal_stream_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
+    
     let stream_key = stable_id(&[table_stream_id]);
+    
     data_dir.join(FileKind::Data.file_name(stream_key))
+
 }
 
 fn wal_stream_fingerprint(data_dir: &Path, table_stream_id: &str) -> Option<(u64, u64)> {
+    
     let path = wal_stream_path(data_dir, table_stream_id);
     let metadata = fs::metadata(path).ok()?;
+    
     let modified_epoch_ms = metadata
         .modified()
         .ok()?
@@ -1257,6 +1276,7 @@ fn wal_stream_fingerprint(data_dir: &Path, table_stream_id: &str) -> Option<(u64
         .as_millis() as u64;
 
     Some((metadata.len(), modified_epoch_ms))
+
 }
 
 fn table_schema_fingerprint(table: &DatabaseTable) -> Option<String> {
@@ -1267,12 +1287,16 @@ fn table_schema_fingerprint_for_parts(
     table_id: &str,
     schema: &TableSchema,
 ) -> Option<String> {
+    
     let encoded = bincode::serialize(schema).ok()?;
+    
     let hex = encoded
         .iter()
         .map(|byte| format!("{:02x}", byte))
         .collect::<String>();
+    
     Some(stable_id(&[table_id, &hex]))
+
 }
 
 #[expect(clippy::type_complexity, reason="returning a tuple of (latest_tx_id, live_rows)")]
@@ -1307,6 +1331,7 @@ pub fn load_live_row_checkpoint_rows(
     }
 
     Some((checkpoint.latest_tx_id, checkpoint.live_rows))
+
 }
 
 fn load_runtime_index_snapshot(
@@ -1316,6 +1341,7 @@ fn load_runtime_index_snapshot(
     tracked_indexes: &[DatabaseIndex],
     wal_fingerprint: Option<(u64, u64)>,
 ) -> Option<LoadedRuntimeIndexSnapshot> {
+
     let snapshot_path = runtime_index_snapshot_path(data_dir, table_stream_id);
     let bytes = read_bytes(&snapshot_path).ok()?;
 
@@ -1362,6 +1388,7 @@ fn load_runtime_index_snapshot(
         snapshot,
         legacy_plain_encoding,
     })
+
 }
 
 fn load_live_row_checkpoint(
@@ -1370,6 +1397,7 @@ fn load_live_row_checkpoint(
     table_stream_id: &str,
     wal_fingerprint: Option<(u64, u64)>,
 ) -> Option<TableLiveRowCheckpoint> {
+
     let checkpoint_path = live_row_checkpoint_path(data_dir, table_stream_id);
     let bytes = read_bytes(&checkpoint_path).ok()?;
 
@@ -1398,6 +1426,7 @@ fn load_live_row_checkpoint(
     }
 
     Some(checkpoint)
+
 }
 
 fn load_accessor_cache_snapshot(
@@ -1407,6 +1436,7 @@ fn load_accessor_cache_snapshot(
     wal_fingerprint: Option<(u64, u64)>,
     warm_fields: &[String],
 ) -> Option<TableAccessorCacheSnapshot> {
+
     let snapshot_path = accessor_cache_snapshot_path(data_dir, table_stream_id);
     let bytes = read_bytes(&snapshot_path).ok()?;
 
@@ -1442,6 +1472,7 @@ fn load_accessor_cache_snapshot(
     }
 
     Some(snapshot)
+
 }
 
 #[expect(clippy::too_many_arguments, reason="this function needs many arguments to save the runtime index snapshot")]
@@ -1505,6 +1536,7 @@ fn save_runtime_index_snapshot(
     }
 
     Ok(())
+
 }
 
 fn save_live_row_checkpoint(
@@ -1515,6 +1547,7 @@ fn save_live_row_checkpoint(
     wal_fingerprint: Option<(u64, u64)>,
     live_rows: &[(u64, HashMap<String, Vec<u8>>)],
 ) -> Result<(), String> {
+
     let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
         .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
 
@@ -1550,6 +1583,7 @@ fn save_live_row_checkpoint(
     }
 
     Ok(())
+
 }
 
 fn save_accessor_cache_snapshot(
@@ -1561,6 +1595,7 @@ fn save_accessor_cache_snapshot(
     warm_fields: &[String],
     cache_scope_id: usize,
 ) -> Result<(), String> {
+
     let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
         .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
 
@@ -1732,9 +1767,11 @@ fn build_snapshot_index_entries(
     let chunk_size = tracked_indexes.len().div_ceil(workers);
 
     let mut chunks = std::thread::scope(|scope| {
+        
         let mut handles = Vec::new();
 
         for worker_idx in 0..workers {
+
             let start = worker_idx * chunk_size;
             if start >= tracked_indexes.len() {
                 break;
@@ -1774,6 +1811,7 @@ fn build_snapshot_index_entries(
         }
 
         out
+        
     });
 
     chunks.sort_by_key(|(start, _)| *start);
@@ -1818,18 +1856,22 @@ fn runtime_index_non_primary_index_allowlist() -> AHashSet<String> {
     parse_runtime_index_allowlist_env("DISTDB_RUNTIME_INDEX_NON_PRIMARY_INDEX_IDS")
 }
 
-fn parse_runtime_index_allowlist_env(var_name: &str) -> AHashSet<String> {
-
-    let Some(value) = std::env::var(var_name).ok() else {
-        return AHashSet::new();
-    };
-
+fn parse_runtime_index_allowlist_entries(value: &str) -> AHashSet<String> {
     value
         .split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
         .map(|entry| common::normalize_identifier!(entry))
         .collect()
+}
+
+fn parse_runtime_index_allowlist_env(var_name: &str) -> AHashSet<String> {
+
+    let Some(value) = std::env::var(var_name).ok() else {
+        return AHashSet::new();
+    };
+
+    parse_runtime_index_allowlist_entries(&value)
 
 }
 
@@ -1873,3 +1915,7 @@ pub fn primary_key_index(table: &DatabaseTable) -> Option<&DatabaseIndex> {
 pub fn derived_indexes_for_table(table: &DatabaseTable) -> impl Iterator<Item = &DatabaseIndex> + '_ {
     table.indexes.values().filter(|index| !matches!(index.origin, DatabaseIndexOrigin::Temporary))
 }
+
+#[cfg(test)]
+#[path = "runtime_index_test.rs"]
+mod tests;
