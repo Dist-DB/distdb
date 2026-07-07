@@ -3,6 +3,23 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+has_pattern() {
+  local pattern="$1"
+  local target="$2"
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -n --fixed-strings "$pattern" "$target" >/dev/null
+    return $?
+  fi
+
+  if [[ -d "$target" ]]; then
+    grep -R -n -F -- "$pattern" "$target" >/dev/null
+    return $?
+  fi
+
+  grep -n -F -- "$pattern" "$target" >/dev/null
+}
+
 fail() {
   printf '[architecture][fail] %s\n' "$*" >&2
   exit 1
@@ -22,7 +39,7 @@ ensure_absent_path() {
 ensure_no_pattern_in_server_src() {
   local pattern="$1"
   local description="$2"
-  if rg -n "$pattern" "$ROOT_DIR/server/src" >/dev/null; then
+  if has_pattern "$pattern" "$ROOT_DIR/server/src"; then
     fail "forbidden server functional implementation detected: $description"
   fi
 }
@@ -31,7 +48,7 @@ ensure_pattern_present() {
   local pattern="$1"
   local path="$2"
   local description="$3"
-  if ! rg -n "$pattern" "$ROOT_DIR/$path" >/dev/null; then
+  if ! has_pattern "$pattern" "$ROOT_DIR/$path"; then
     fail "required architecture usage missing: $description"
   fi
 }
@@ -40,7 +57,7 @@ ensure_no_pattern_in_server_file() {
   local pattern="$1"
   local path="$2"
   local description="$3"
-  if rg -n "$pattern" "$ROOT_DIR/$path" >/dev/null; then
+  if has_pattern "$pattern" "$ROOT_DIR/$path"; then
     fail "forbidden server ownership pattern detected: $description"
   fi
 }
