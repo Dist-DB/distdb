@@ -423,20 +423,26 @@ fn execute_call_stored_procedure(
     ));
 
     if let Some(parsed_call_statement) = statement.parsed_statement.as_ref() {
+
         let argument_bindings =
+
             match serverlib::bind_call_procedure_arguments(&procedure.sql, parsed_call_statement) {
+                
                 Ok(bindings) => bindings,
+                
                 Err(err) => {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
                         format!("call procedure argument binding failed: {err}"),
                     );
                 }
+
             };
 
         for (name, value) in argument_bindings {
             local_entities.set_argument(name, value);
         }
+
     }
 
     let provider = local_entities.materialize_value_bindings();
@@ -446,8 +452,10 @@ fn execute_call_stored_procedure(
         &procedure,
         serverlib::EntityInvocationSource::DirectedUser,
         &mut |action_sql| {
+
             let mut last_response: Option<ConnectorResponse> = None;
             let mut handler_runtime = LocalHandlerRuntime::default();
+            let mut loop_runtime = LocalControlFlowRuntime::default();
             let control = execute_call_action_sql(
                 action_sql,
                 request_id,
@@ -457,6 +465,7 @@ fn execute_call_stored_procedure(
                 &mut last_response,
                 false,
                 &mut handler_runtime,
+                &mut loop_runtime,
             )?;
 
             if !matches!(control, serverlib::LoopControlDirective::None) {
@@ -469,6 +478,7 @@ fn execute_call_stored_procedure(
                     ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
                 )
             }))
+
         },
     );
 
@@ -478,6 +488,7 @@ fn execute_call_stored_procedure(
     };
 
     match (invocation_result, cleanup_result) {
+
         (Ok(Some(response)), Ok(())) => response,
 
         (Ok(None), Ok(())) => ConnectorResponse::applied(
@@ -499,6 +510,7 @@ fn execute_call_stored_procedure(
             request_id.to_string(),
             format!("call procedure failed: {err}; cleanup failed: {cleanup_err}"),
         ),
+
     }
 
 }
@@ -512,28 +524,36 @@ fn split_sql_statements_for_call_action(sql: &str) -> Vec<String> {
     let mut in_backtick = false;
 
     for ch in sql.chars() {
+
         match ch {
+
             '\'' if !in_double_quote && !in_backtick => {
                 in_single_quote = !in_single_quote;
                 current.push(ch);
-            }
+            },
+
             '"' if !in_single_quote && !in_backtick => {
                 in_double_quote = !in_double_quote;
                 current.push(ch);
-            }
+            },
+
             '`' if !in_single_quote && !in_double_quote => {
                 in_backtick = !in_backtick;
                 current.push(ch);
-            }
+            },
+
             ';' if !in_single_quote && !in_double_quote && !in_backtick => {
                 let trimmed = current.trim();
                 if !trimmed.is_empty() {
                     statements.push(trimmed.to_string());
                 }
                 current.clear();
-            }
+            },
+
             _ => current.push(ch),
+
         }
+
     }
 
     let trimmed = current.trim();
@@ -550,15 +570,22 @@ fn coalesce_compound_blocks(statements: Vec<String>) -> Vec<String> {
     let mut idx = 0usize;
 
     while idx < statements.len() {
+
         let current = statements[idx].trim().to_string();
         let lowered = current.to_ascii_lowercase();
 
-        let end_marker = if lowered.starts_with("while ") {
+        let end_marker = if lowered.starts_with("while ")
+            || parse_labeled_block_prefix(current.as_str(), "while").is_some()
+        {
             Some("end while")
-        } else if lowered.starts_with("repeat ") {
+        } else if lowered.starts_with("repeat ")
+            || parse_labeled_block_prefix(current.as_str(), "repeat").is_some()
+        {
             Some("end repeat")
         } else if is_loop_block_statement(lowered.as_str()) {
             Some("end loop")
+        } else if is_begin_block_statement(lowered.as_str()) {
+            Some("end")
         } else {
             None
         };
@@ -578,6 +605,7 @@ fn coalesce_compound_blocks(statements: Vec<String>) -> Vec<String> {
 
         merged.push(block_sql);
         idx += 1;
+
     }
 
     merged
@@ -601,6 +629,7 @@ fn rewrite_sql_with_call_aliases(
     let mut in_backtick = false;
 
     while i < chars.len() {
+
         let c = chars[i];
 
         if c == '\'' && !in_double_quote && !in_backtick {
@@ -631,8 +660,10 @@ fn rewrite_sql_with_call_aliases(
         }
 
         if c.is_ascii_alphabetic() || c == '_' {
+
             let start = i;
             i += 1;
+
             while i < chars.len() {
                 let next = chars[i];
                 if next.is_ascii_alphanumeric() || next == '_' {
@@ -650,11 +681,14 @@ fn rewrite_sql_with_call_aliases(
             } else {
                 out.push_str(&token);
             }
+            
             continue;
+
         }
 
         out.push(c);
         i += 1;
+
     }
 
     Ok(out)
@@ -687,6 +721,7 @@ struct LocalHandlerRuntime {
 }
 
 impl LocalHandlerRuntime {
+    
     fn push(&mut self, handler: LocalDeclaredHandler) {
         self.handlers.push(handler);
     }
@@ -702,6 +737,103 @@ impl LocalHandlerRuntime {
             .find(|handler| matches!(handler.condition, LocalHandlerCondition::SqlException))
             .cloned()
     }
+
+}
+
+#[derive(Clone, Debug)]
+enum LocalControlFlowFrame {
+    Loop(Option<String>),
+    Block(Option<String>),
+}
+
+#[derive(Default)]
+struct LocalControlFlowRuntime {
+    frames: Vec<LocalControlFlowFrame>,
+}
+
+impl LocalControlFlowRuntime {
+
+    fn push_loop(&mut self, label: Option<String>) {
+        self.frames.push(LocalControlFlowFrame::Loop(label));
+    }
+
+    fn push_block(&mut self, label: Option<String>) {
+        self.frames.push(LocalControlFlowFrame::Block(label));
+    }
+
+    fn pop(&mut self) {
+        let _ = self.frames.pop();
+    }
+
+    fn has_any_label(&self, target: &str) -> bool {
+        self.frames.iter().rev().any(|frame| match frame {
+            LocalControlFlowFrame::Loop(label) | LocalControlFlowFrame::Block(label) => label
+                .as_deref()
+                .map(|active| active.eq_ignore_ascii_case(target))
+                .unwrap_or(false),
+        })
+    }
+
+    fn has_loop_label(&self, target: &str) -> bool {
+        self.frames.iter().rev().any(|frame| match frame {
+            LocalControlFlowFrame::Loop(label) => label
+                .as_deref()
+                .map(|active| active.eq_ignore_ascii_case(target))
+                .unwrap_or(false),
+            LocalControlFlowFrame::Block(_) => false,
+        })
+    }
+
+}
+
+fn parse_labeled_block_prefix(raw_statement: &str, keyword: &str) -> Option<String> {
+
+    let trimmed = raw_statement.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if lowered.starts_with(keyword) {
+        return None;
+    }
+
+    let colon_index = trimmed.find(':')?;
+    let label = trimmed[..colon_index].trim();
+    if label.is_empty() || !label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return None;
+    }
+
+    let rest = trimmed[(colon_index + 1)..].trim_start();
+    if rest.to_ascii_lowercase().starts_with(keyword) {
+        return Some(label.to_string());
+    }
+
+    None
+
+}
+
+fn parse_loop_control_target(raw_statement: &str, directive: &str) -> Result<Option<String>, String> {
+
+    let trimmed = raw_statement.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with(directive) {
+        return Ok(None);
+    }
+
+    let rest = trimmed[directive.len()..].trim();
+    if rest.is_empty() {
+        return Ok(None);
+    }
+
+    if !rest.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(format!(
+            "{} directive parse failed: invalid label '{}'",
+            directive.to_ascii_uppercase(),
+            rest,
+        ));
+    }
+
+    Ok(Some(rest.to_string()))
+
 }
 
 fn is_loop_block_statement(lowered_raw: &str) -> bool {
@@ -724,6 +856,64 @@ fn is_loop_block_statement(lowered_raw: &str) -> bool {
 
 }
 
+fn is_begin_block_statement(lowered_raw: &str) -> bool {
+
+    let trimmed = lowered_raw.trim_start();
+    if trimmed.starts_with("begin") {
+        return true;
+    }
+
+    let Some(colon_index) = trimmed.find(':') else {
+        return false;
+    };
+
+    let label = trimmed[..colon_index].trim();
+    if label.is_empty() || !label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return false;
+    }
+
+    trimmed[(colon_index + 1)..].trim_start().starts_with("begin")
+
+}
+
+fn parse_local_begin_block(action_sql: &str) -> Result<(Option<String>, String), String> {
+
+    let normalized = action_sql.trim().trim_end_matches(';').trim();
+    let lowered = normalized.to_ascii_lowercase();
+
+    let block_label = parse_labeled_block_prefix(normalized, "begin");
+
+    let begin_start = if lowered.starts_with("begin") {
+        0
+    } else {
+        let Some(colon_index) = lowered.find(':') else {
+            return Err("begin parse failed: statement must start with BEGIN or <label>: BEGIN".to_string());
+        };
+
+        let rest = lowered[(colon_index + 1)..].trim_start();
+        if !rest.starts_with("begin") {
+            return Err("begin parse failed: statement must start with BEGIN or <label>: BEGIN".to_string());
+        }
+
+        lowered.len() - rest.len()
+    };
+
+    let end_index = lowered
+        .rfind("end")
+        .ok_or_else(|| "begin parse failed: END is missing".to_string())?;
+
+    if end_index <= begin_start {
+        return Err("begin parse failed: block layout is invalid".to_string());
+    }
+
+    let body_sql = normalized[(begin_start + "begin".len())..end_index]
+        .trim()
+        .to_string();
+
+    Ok((block_label, body_sql))
+
+}
+
 fn execute_call_action_sql(
     action_sql: &str,
     request_id: &str,
@@ -733,11 +923,13 @@ fn execute_call_action_sql(
     last_response: &mut Option<ConnectorResponse>,
     allow_loop_control: bool,
     handler_runtime: &mut LocalHandlerRuntime,
+    loop_runtime: &mut LocalControlFlowRuntime,
 ) -> Result<serverlib::LoopControlDirective, String> {
 
     let scope_start = handler_runtime.handlers.len();
 
     for raw_statement in split_sql_statements_for_call_action(action_sql) {
+
         let statement_result = execute_call_action_statement(
             raw_statement.as_str(),
             request_id,
@@ -747,11 +939,15 @@ fn execute_call_action_sql(
             last_response,
             allow_loop_control,
             handler_runtime,
+            loop_runtime,
         );
 
         let control = match statement_result {
+
             Ok(control) => control,
+            
             Err(err) => {
+
                 let Some(handler) = handler_runtime.resolve_for_error(err.as_str()) else {
                     handler_runtime.truncate(scope_start);
                     return Err(err);
@@ -766,6 +962,7 @@ fn execute_call_action_sql(
                     last_response,
                     allow_loop_control,
                     handler_runtime,
+                    loop_runtime,
                 )?;
 
                 if !matches!(handler_control, serverlib::LoopControlDirective::None) {
@@ -779,17 +976,22 @@ fn execute_call_action_sql(
                 }
 
                 continue;
+
             }
+
         };
 
         if !matches!(control, serverlib::LoopControlDirective::None) {
             handler_runtime.truncate(scope_start);
             return Ok(control);
         }
+
     }
 
     handler_runtime.truncate(scope_start);
+    
     Ok(serverlib::LoopControlDirective::None)
+
 }
 
 fn execute_call_action_statement(
@@ -801,55 +1003,100 @@ fn execute_call_action_statement(
     last_response: &mut Option<ConnectorResponse>,
     allow_loop_control: bool,
     handler_runtime: &mut LocalHandlerRuntime,
+    loop_runtime: &mut LocalControlFlowRuntime,
 ) -> Result<serverlib::LoopControlDirective, String> {
 
     let lowered_raw = raw_statement.trim().to_ascii_lowercase();
 
     if lowered_raw.starts_with("declare ") {
+
         if let Some(handler) = parse_local_handler_declare_statement(raw_statement)? {
+
             handler_runtime.push(handler);
+
             *last_response = Some(ConnectorResponse::applied(
                 request_id.to_string(),
                 ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
             ));
+
             return Ok(serverlib::LoopControlDirective::None);
+
         }
 
         apply_local_declare_statement(raw_statement, local_entities)?;
+        
         *last_response = Some(ConnectorResponse::applied(
             request_id.to_string(),
             ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
         ));
+        
         return Ok(serverlib::LoopControlDirective::None);
+
     }
 
     if lowered_raw.starts_with("set ") {
+        
         apply_local_set_statement(raw_statement, local_entities)?;
+        
         *last_response = Some(ConnectorResponse::applied(
             request_id.to_string(),
             ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
         ));
+        
         return Ok(serverlib::LoopControlDirective::None);
+
     }
 
     if lowered_raw.starts_with("leave") {
-        if !allow_loop_control {
-            return Err("LEAVE directive is only valid inside a loop block".to_string());
+        
+        let target = parse_loop_control_target(raw_statement, "leave")?;
+
+        if !allow_loop_control && target.is_none() {
+            return Err("LEAVE directive is only valid inside a loop block or when a target label is provided".to_string());
         }
-        return Ok(serverlib::LoopControlDirective::Leave);
+
+        if let Some(target_label) = target.as_deref()
+            && !loop_runtime.has_any_label(target_label)
+        {
+            return Err(format!("LEAVE target label '{}' is not active", target_label));
+        }
+
+        return Ok(serverlib::LoopControlDirective::Leave(target));
+
     }
 
     if lowered_raw.starts_with("iterate") {
+
         if !allow_loop_control {
             return Err("ITERATE directive is only valid inside a loop block".to_string());
         }
-        return Ok(serverlib::LoopControlDirective::Iterate);
+
+        let target = parse_loop_control_target(raw_statement, "iterate")?;
+        
+        if let Some(target_label) = target.as_deref()
+            && !loop_runtime.has_loop_label(target_label)
+        {
+            return Err(format!("ITERATE target label '{}' is not an active loop", target_label));
+        }
+
+        return Ok(serverlib::LoopControlDirective::Iterate(target));
+
     }
 
-    if lowered_raw.starts_with("while ") || lowered_raw.starts_with("repeat ") {
+    let is_while_block = lowered_raw.starts_with("while ")
+        || parse_labeled_block_prefix(raw_statement, "while").is_some();
+    let is_repeat_block = lowered_raw.starts_with("repeat ")
+        || parse_labeled_block_prefix(raw_statement, "repeat").is_some();
 
-        if lowered_raw.starts_with("while ") {
-            serverlib::execute_local_while_block(
+    if is_while_block || is_repeat_block {
+
+        if is_while_block {
+
+            let loop_label = parse_labeled_block_prefix(raw_statement, "while");
+            
+            loop_runtime.push_loop(loop_label);
+            
+            let loop_control = serverlib::execute_local_while_block(
                 raw_statement,
                 MAX_CALL_LOOP_ITERATIONS,
                 local_entities,
@@ -864,14 +1111,26 @@ fn execute_call_action_statement(
                         last_response,
                         true,
                         handler_runtime,
+                        loop_runtime,
                     )
                 },
             )?;
+            
+            loop_runtime.pop();
+
+            if !matches!(loop_control, serverlib::LoopControlDirective::None) {
+                return Ok(loop_control);
+            }
 
             return Ok(serverlib::LoopControlDirective::None);
+            
         }
 
-        serverlib::execute_local_repeat_block(
+        let loop_label = parse_labeled_block_prefix(raw_statement, "repeat");
+        
+        loop_runtime.push_loop(loop_label);
+
+        let loop_control = serverlib::execute_local_repeat_block(
             raw_statement,
             MAX_CALL_LOOP_ITERATIONS,
             local_entities,
@@ -886,16 +1145,28 @@ fn execute_call_action_statement(
                     last_response,
                     true,
                     handler_runtime,
+                    loop_runtime,
                 )
             },
         )?;
+
+        loop_runtime.pop();
+
+        if !matches!(loop_control, serverlib::LoopControlDirective::None) {
+            return Ok(loop_control);
+        }
 
         return Ok(serverlib::LoopControlDirective::None);
 
     }
 
     if is_loop_block_statement(lowered_raw.as_str()) {
-        serverlib::execute_local_loop_block(
+
+        let loop_label = parse_labeled_block_prefix(raw_statement, "loop");
+
+        loop_runtime.push_loop(loop_label);
+
+        let loop_control = serverlib::execute_local_loop_block(
             raw_statement,
             MAX_CALL_LOOP_ITERATIONS,
             local_entities,
@@ -909,12 +1180,52 @@ fn execute_call_action_statement(
                     last_response,
                     true,
                     handler_runtime,
+                    loop_runtime,
                 )
             },
         )?;
 
+        loop_runtime.pop();
+
+        if !matches!(loop_control, serverlib::LoopControlDirective::None) {
+            return Ok(loop_control);
+        }
+
         return Ok(serverlib::LoopControlDirective::None);
 
+    }
+
+    if is_begin_block_statement(lowered_raw.as_str()) {
+        
+        let (block_label, body_sql) = parse_local_begin_block(raw_statement)?;
+        
+        loop_runtime.push_block(block_label.clone());
+
+        let block_control = execute_call_action_sql(
+            body_sql.as_str(),
+            request_id,
+            query,
+            ctx,
+            local_entities,
+            last_response,
+            allow_loop_control,
+            handler_runtime,
+            loop_runtime,
+        )?;
+
+        loop_runtime.pop();
+
+        match block_control {
+            serverlib::LoopControlDirective::Leave(Some(target))
+                if block_label
+                    .as_deref()
+                    .map(|label| label.eq_ignore_ascii_case(target.as_str()))
+                    .unwrap_or(false) =>
+            {
+                return Ok(serverlib::LoopControlDirective::None);
+            }
+            other => return Ok(other),
+        }
     }
 
     let parsed_action_sql = serverlib::parse_mysql8_sql_requests(raw_statement, &query.database_id)
@@ -935,6 +1246,7 @@ fn execute_call_action_statement(
             .map_err(|err| format!("call action create table parse failed: {err}"))?;
 
         if plan.temporary {
+
             let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
                 return Err(format!("database '{}' not found", query.database_id));
             };
@@ -947,6 +1259,7 @@ fn execute_call_action_statement(
             ));
 
             return Ok(serverlib::LoopControlDirective::None);
+            
         }
 
     }

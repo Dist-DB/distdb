@@ -1,8 +1,8 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopControlDirective {
     None,
-    Leave,
-    Iterate,
+    Leave(Option<String>),
+    Iterate(Option<String>),
 }
 
 pub fn execute_local_loop_block<T, FExec>(
@@ -10,30 +10,49 @@ pub fn execute_local_loop_block<T, FExec>(
     max_iterations: usize,
     context: &mut T,
     execute_body: &mut FExec,
-) -> Result<(), String>
+) -> Result<LoopControlDirective, String>
 where
     FExec: FnMut(&mut T, &str) -> Result<LoopControlDirective, String>,
 {
 
-    let body_sql = parse_local_loop_block(action_sql)?;
+    let (loop_label, body_sql) = parse_local_loop_block(action_sql)?;
 
     for _ in 0..max_iterations {
+        
         match execute_body(context, body_sql.as_str())? {
-            LoopControlDirective::None | LoopControlDirective::Iterate => continue,
-            LoopControlDirective::Leave => return Ok(()),
+
+            LoopControlDirective::None => continue,
+            
+            LoopControlDirective::Iterate(target) => {
+                if loop_target_matches_label(target.as_deref(), loop_label.as_deref()) {
+                    continue;
+                }
+
+                return Ok(LoopControlDirective::Iterate(target));
+            },
+
+            LoopControlDirective::Leave(target) => {
+                if loop_target_matches_label(target.as_deref(), loop_label.as_deref()) {
+                    return Ok(LoopControlDirective::None);
+                }
+
+                return Ok(LoopControlDirective::Leave(target));
+            }
+
         }
+
     }
 
     Err("call action loop execution failed: exceeded max iteration limit".to_string())
 
 }
 
-fn parse_local_loop_block(action_sql: &str) -> Result<String, String> {
+fn parse_local_loop_block(action_sql: &str) -> Result<(Option<String>, String), String> {
 
     let normalized = action_sql.trim().trim_end_matches(';').trim();
     let lowered = normalized.to_ascii_lowercase();
 
-    let loop_start_index = find_loop_start_index(&lowered)
+    let (loop_label, loop_start_index) = find_loop_start_label_and_index(&lowered)
         .ok_or_else(|| "loop parse failed: statement must start with LOOP or <label>: LOOP".to_string())?;
 
     let end_loop_index = lowered
@@ -48,14 +67,14 @@ fn parse_local_loop_block(action_sql: &str) -> Result<String, String> {
         .trim()
         .to_string();
 
-    Ok(body_sql)
+    Ok((loop_label, body_sql))
 
 }
 
-fn find_loop_start_index(lowered: &str) -> Option<usize> {
+fn find_loop_start_label_and_index(lowered: &str) -> Option<(Option<String>, usize)> {
 
     if lowered.starts_with("loop") {
-        return Some(0);
+        return Some((None, 0));
     }
 
     let colon_index = lowered.find(':')?;
@@ -67,9 +86,18 @@ fn find_loop_start_index(lowered: &str) -> Option<usize> {
     let rest = lowered[(colon_index + 1)..].trim_start();
     if rest.starts_with("loop") {
         let prefix_len = lowered.len() - rest.len();
-        return Some(prefix_len);
+        return Some((Some(label.to_string()), prefix_len));
     }
 
     None
 
+}
+
+fn loop_target_matches_label(target: Option<&str>, current_label: Option<&str>) -> bool {
+    match target {
+        None => true,
+        Some(target_label) => current_label
+            .map(|label| label.eq_ignore_ascii_case(target_label))
+            .unwrap_or(false),
+    }
 }

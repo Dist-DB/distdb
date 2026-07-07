@@ -869,6 +869,100 @@ fn call_procedure_supports_declare_exit_handler_for_sqlexception() {
 }
 
 #[test]
+fn call_procedure_supports_labeled_begin_with_leave_label() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_begin_leave_label",
+            "create procedure p_begin_leave_label(p_active bigint) begin if p_active = 1 then outer_block: begin leave outer_block; select abs(9); end; select abs(1); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_begin_leave_label(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-begin-leave-label",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn call_procedure_rejects_leave_with_unknown_label() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_leave_bad_label",
+            "create procedure p_leave_bad_label(p_active bigint) begin if p_active = 1 then loop leave missing_label; end loop; else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_leave_bad_label(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-bad-leave-label",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Rejected),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(message.contains("LEAVE target label 'missing_label' is not active"));
+}
+
+#[test]
 fn append_row_payload_record_rejects_missing_refid() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();

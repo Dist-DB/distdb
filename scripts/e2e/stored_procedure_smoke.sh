@@ -44,6 +44,12 @@ create procedure p_iterate_while(p_mode uint64) as begin if p_mode = 1 then whil
 create procedure p_handler_continue(p_mode uint64) as begin if p_mode = 1 then declare continue handler for sqlexception select abs(2) as c_handler_continue; drop table missing_handler_table; else select abs(0) as c_handler_continue; end if; end//
 
 create procedure p_handler_exit(p_mode uint64) as begin if p_mode = 1 then declare exit handler for sqlexception select abs(7) as c_handler_exit; drop table missing_handler_table; select abs(9) as c_handler_exit; else select abs(0) as c_handler_exit; end if; end//
+
+create procedure p_begin_leave_label(p_mode uint64) as begin if p_mode = 1 then outer_block: begin leave outer_block; select abs(9) as c_begin_leave_label; end; select abs(1) as c_begin_leave_label; else select abs(0) as c_begin_leave_label; end if; end//
+
+create procedure p_loop_leave_label(p_mode uint64) as begin if p_mode = 1 then outer_loop: loop leave outer_loop; end loop; select abs(3) as c_loop_leave_label; else select abs(0) as c_loop_leave_label; end if; end//
+
+create procedure p_while_iterate_label(p_mode uint64) as begin if p_mode = 1 then outer_while: while p_mode = 1 do set p_mode = 0; iterate outer_while; end while; select abs(4) as c_iterate_label; else select abs(0) as c_iterate_label; end if; end//
 delimiter ;
 
 call p_arg_route(1);
@@ -55,6 +61,9 @@ call p_loop_leave(1);
 call p_iterate_while(1);
 call p_handler_continue(1);
 call p_handler_exit(1);
+call p_begin_leave_label(1);
+call p_loop_leave_label(1);
+call p_while_iterate_label(1);
 
 select count(*) as c_users_after from users;
 quit;
@@ -70,6 +79,9 @@ assert_count "$OUT_FILE" "c_loop_leave" "1" 1
 assert_count "$OUT_FILE" "c_iterate_while" "1" 1
 assert_count "$OUT_FILE" "c_handler_continue" "2" 1
 assert_count "$OUT_FILE" "c_handler_exit" "7" 1
+assert_count "$OUT_FILE" "c_begin_leave_label" "1" 1
+assert_count "$OUT_FILE" "c_loop_leave_label" "3" 1
+assert_count "$OUT_FILE" "c_iterate_label" "4" 1
 assert_count "$OUT_FILE" "c_users_after" "2" 1
 
 log "stored procedure smoke suite passed"
