@@ -58,6 +58,7 @@ fn parse_local_repeat_block(action_sql: &str) -> Result<(Option<String>, String,
 
     let until_index = find_keyword_boundary_index_in_text(&lowered, "until")
         .ok_or_else(|| "repeat parse failed: UNTIL is missing".to_string())?;
+    
     let end_repeat_index = lowered
         .rfind("end repeat")
         .ok_or_else(|| "repeat parse failed: END REPEAT is missing".to_string())?;
@@ -109,7 +110,7 @@ fn loop_target_matches_label(target: Option<&str>, current_label: Option<&str>) 
             .map(|label| label.eq_ignore_ascii_case(target_label))
             .unwrap_or(false),
     }
-    
+
 }
 
 fn find_keyword_boundary_index_in_text(haystack: &str, keyword: &str) -> Option<usize> {

@@ -210,7 +210,9 @@ pub(super) fn execute_create_database_impl(
     match DatabaseCatalog::create_new_database(database_name, node_data_dir) {
 
         Ok(mut catalog) => {
+
             if let Some(key_ref) = encryption_key_ref {
+
                 if let Err(err) = catalog.configure_at_rest_encryption_key_ref(key_ref) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
@@ -224,13 +226,16 @@ pub(super) fn execute_create_database_impl(
                         format!("create database persistence failed: {err}"),
                     );
                 }
+
             }
 
             catalogs.insert(catalog.database_id.0.clone(), catalog);
+
             ConnectorResponse::applied(
                 request_id.to_string(),
                 ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
             )
+            
         },
 
         Err(err) => ConnectorResponse::rejected(
@@ -243,12 +248,14 @@ pub(super) fn execute_create_database_impl(
 }
 
 fn parse_create_database_encryption_key_ref(sql: &str, database_name: &str) -> Option<String> {
+
     let tokens = sql
         .split_whitespace()
         .map(|token| token.trim_matches(';'))
         .collect::<Vec<_>>();
 
     for (idx, token) in tokens.iter().enumerate() {
+
         let lower = token.to_ascii_lowercase();
 
         if lower == "--aes" {
@@ -269,6 +276,7 @@ fn parse_create_database_encryption_key_ref(sql: &str, database_name: &str) -> O
 
             return Some(value.to_string());
         }
+
     }
 
     None
@@ -310,7 +318,9 @@ pub(super) fn execute_create_table_impl(
     let is_temporary = create_table_plan.temporary;
 
     let normalized_table_id = common::normalize_identifier!(table_id);
+
     if catalog.table(&normalized_table_id).is_some() {
+
         if request_id.starts_with("replication-schema-apply-") {
             return ConnectorResponse::applied(
                 request_id.to_string(),
@@ -325,11 +335,13 @@ pub(super) fn execute_create_table_impl(
                 normalized_table_id
             ),
         );
+
     }
 
     let created_at = common::epoch_nanos!();
 
     if is_temporary {
+        
         if let Err(err) = serverlib::create_scoped_ephemeral_table(
             catalog,
             wal,
@@ -341,22 +353,30 @@ pub(super) fn execute_create_table_impl(
                 format!("create temporary table failed: {err}"),
             );
         }
+
     } else if let Err(err) = catalog.create_table(normalized_table_id.clone(), schema.clone()) {
+
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("create table failed: {err}"),
         );
+
     }
 
     if !is_temporary {
+
         let wal_id = catalog.database_id.0.clone();
+        
         let table_entity_stream_id = catalog
             .entity_wal_stream_id(&normalized_table_id)
             .unwrap_or_else(|| normalized_table_id.clone());
+        
         let table_entity_id = catalog
             .entity_identity_id(&normalized_table_id)
             .unwrap_or_else(|| normalized_table_id.clone());
+        
         let entity_wal_id = table_entity_stream_id.clone();
+        
         let schema_payload = SchemaChangePayload {
             table_id: normalized_table_id.clone(),
             schema_revision: 1,
@@ -510,21 +530,11 @@ fn drop_entity_operation_metadata(
         
         SqlOperation::DropTable => Some((DatabaseObjectType::Table, "table", None)),
         
-        SqlOperation::DropView => {
-            Some((DatabaseObjectType::View, "view", Some(SqlObjectKind::View)))
-        },
+        SqlOperation::DropView => Some((DatabaseObjectType::View, "view", Some(SqlObjectKind::View))),
         
-        SqlOperation::DropTrigger => Some((
-            DatabaseObjectType::Trigger,
-            "trigger",
-            Some(SqlObjectKind::Trigger),
-        )),
+        SqlOperation::DropTrigger => Some((DatabaseObjectType::Trigger, "trigger", Some(SqlObjectKind::Trigger))),
 
-        SqlOperation::DropStoredProcedure => Some((
-            DatabaseObjectType::StoredProcedure,
-            "stored procedure",
-            Some(SqlObjectKind::StoredProcedure),
-        )),
+        SqlOperation::DropStoredProcedure => Some((DatabaseObjectType::StoredProcedure, "stored procedure", Some(SqlObjectKind::StoredProcedure))),
 
         _ => None,
 
@@ -1082,6 +1092,7 @@ fn append_payload_record_pair(
     database_error_context: &str,
     entity_error_context: &str,
 ) -> Result<(), String> {
+
     append_payload_record(
         wal,
         database_wal_id,
@@ -1095,6 +1106,7 @@ fn append_payload_record_pair(
         .map_err(|err| format!("{entity_error_context}: {err}"))?;
 
     Ok(())
+
 }
 
 fn apply_entity_metadata_with_wal(
@@ -1106,6 +1118,7 @@ fn apply_entity_metadata_with_wal(
     created_at: u64,
     operation_label: &str,
 ) -> Result<(), String> {
+
     let metadata = EntityMetadata::default()
         .with_creator("server")
         .with_created_at(created_at);
@@ -1207,6 +1220,7 @@ fn persist_entity_snapshot(
 ) -> Result<(), String> {
 
     let normalized_entity_id = common::normalize_identifier!(entity_id);
+
     let entity = catalog
         .entity(&normalized_entity_id)
         .ok_or_else(|| format!("entity '{}' not found in catalog", normalized_entity_id))?;

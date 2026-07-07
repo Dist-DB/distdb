@@ -23,6 +23,7 @@ pub fn select_mutation_target_rows<E>(
 where
     E: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
 {
+    
     let joined_rows = build_joined_row_tuples(
         catalog,
         wal,
@@ -34,6 +35,7 @@ where
     )?;
 
     deduplicate_target_rows(joined_rows, catalog, wal, runtime_indexes, where_condition)
+
 }
 
 fn deduplicate_target_rows(
@@ -70,4 +72,5 @@ fn deduplicate_target_rows(
     }
 
     Ok(selected_rows)
+
 }

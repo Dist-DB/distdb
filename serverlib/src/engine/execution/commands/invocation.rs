@@ -48,10 +48,13 @@ pub fn cleanup_temporary_tables(
     for table_id in temporary_tables {
         
         match catalog.drop_table(&table_id) {
-            Ok(()) | Err(DatabaseError::TableNotFound) => {}
+            
+            Ok(()) | Err(DatabaseError::TableNotFound) => {},
+            
             Err(err) => {
                 return Err(format!("temporary table cleanup failed: {err}"));
             }
+
         }
 
         wal.delete_stream(&table_id)
@@ -145,6 +148,7 @@ where
     let mut outcomes = Vec::new();
 
     execute_sql_cursor(cursor_source, cursor_frame, &mut |frame| {
+
         if let Some(outcome) = execute_stored_procedure_invocation(
             frame,
             procedure,
@@ -155,6 +159,7 @@ where
         }
 
         Ok(CursorDirective::<()>::Next)
+        
     })?;
 
     Ok(outcomes)

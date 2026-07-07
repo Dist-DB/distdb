@@ -869,6 +869,96 @@ fn call_procedure_supports_declare_exit_handler_for_sqlexception() {
 }
 
 #[test]
+fn call_procedure_supports_declare_continue_handler_for_sqlwarning() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_handler_sqlwarning_continue",
+            "create procedure p_handler_sqlwarning_continue(p_active bigint) begin if p_active = 1 then declare continue handler for sqlwarning select abs(4); drop table missing_handler_table; else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_handler_sqlwarning_continue(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-handler-sqlwarning-continue",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["4".to_string()]]);
+}
+
+#[test]
+fn call_procedure_supports_declare_exit_handler_for_sqlwarning() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_handler_sqlwarning_exit",
+            "create procedure p_handler_sqlwarning_exit(p_active bigint) begin if p_active = 1 then declare exit handler for sqlwarning select abs(8); drop table missing_handler_table; select abs(9); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_handler_sqlwarning_exit(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-handler-sqlwarning-exit",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["8".to_string()]]);
+}
+
+#[test]
 fn call_procedure_supports_labeled_begin_with_leave_label() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
@@ -960,6 +1050,175 @@ fn call_procedure_rejects_leave_with_unknown_label() {
     };
 
     assert!(message.contains("LEAVE target label 'missing_label' is not active"));
+}
+
+#[test]
+fn call_procedure_supports_cursor_fetch_with_not_found_handler() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    for id in ["11", "22"] {
+        let table = catalog.table("users").expect("users table should exist");
+
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalog
+        .register_stored_procedure(
+            "p_cursor_not_found",
+            "create procedure p_cursor_not_found(p_active bigint) begin if p_active = 1 then declare v_id bigint default 0; declare c cursor for select id from users order by id; declare continue handler for not found select abs(99); open c; fetch c into v_id; fetch c into v_id; fetch c into v_id; close c; select abs(1); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_cursor_not_found(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-cursor-not-found",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn call_procedure_rejects_unhandled_cursor_not_found() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    let table = catalog.table("users").expect("users table should exist");
+    let mut row = HashMap::new();
+    row.insert("id".to_string(), b"1".to_vec());
+
+    let payload =
+        serverlib::encode_row_payload(table.schema(), &row).expect("row payload should encode");
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    super::core::append_row_payload_record(
+        &catalog,
+        &wal,
+        "users",
+        table,
+        &mut runtime_indexes,
+        TransactionKind::Insert,
+        payload,
+        common::epoch_nanos!(),
+        None,
+        None,
+    )
+    .expect("row append should succeed");
+
+    catalog
+        .register_stored_procedure(
+            "p_cursor_unhandled",
+            "create procedure p_cursor_unhandled(p_active bigint) begin if p_active = 1 then declare v_id bigint default 0; declare c cursor for select id from users order by id; open c; fetch c into v_id; fetch c into v_id; close c; select v_id; else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_cursor_unhandled(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-cursor-unhandled",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Rejected),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(message.contains("cursor fetch reached end of result set"));
 }
 
 #[test]

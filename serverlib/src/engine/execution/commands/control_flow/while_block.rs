@@ -45,6 +45,7 @@ where
 fn parse_local_while_block(action_sql: &str) -> Result<(Option<String>, String, String), String> {
 
     let normalized = action_sql.trim().trim_end_matches(';').trim();
+
     let lowered = normalized.to_ascii_lowercase();
 
     let (loop_label, while_start_index) = parse_while_start(&lowered)
@@ -52,6 +53,7 @@ fn parse_local_while_block(action_sql: &str) -> Result<(Option<String>, String, 
 
     let do_index = find_keyword_boundary_index_in_text(&lowered, "do")
         .ok_or_else(|| "while parse failed: DO is missing".to_string())?;
+
     let end_while_index = lowered
         .rfind("end while")
         .ok_or_else(|| "while parse failed: END WHILE is missing".to_string())?;
@@ -61,6 +63,7 @@ fn parse_local_while_block(action_sql: &str) -> Result<(Option<String>, String, 
     }
 
     let condition_sql = normalized[(while_start_index + "while".len())..do_index].trim().to_string();
+
     let body_sql = normalized[(do_index + "do".len())..end_while_index]
         .trim()
         .to_string();
@@ -74,6 +77,7 @@ fn parse_local_while_block(action_sql: &str) -> Result<(Option<String>, String, 
 }
 
 fn parse_while_start(lowered: &str) -> Option<(Option<String>, usize)> {
+
     if lowered.starts_with("while ") {
         return Some((None, 0));
     }
@@ -91,15 +95,21 @@ fn parse_while_start(lowered: &str) -> Option<(Option<String>, usize)> {
     }
 
     None
+
 }
 
 fn loop_target_matches_label(target: Option<&str>, current_label: Option<&str>) -> bool {
+
     match target {
+
         None => true,
+
         Some(target_label) => current_label
             .map(|label| label.eq_ignore_ascii_case(target_label))
             .unwrap_or(false),
+
     }
+
 }
 
 fn find_keyword_boundary_index_in_text(haystack: &str, keyword: &str) -> Option<usize> {
@@ -108,6 +118,7 @@ fn find_keyword_boundary_index_in_text(haystack: &str, keyword: &str) -> Option<
     let mut from = 0usize;
 
     while let Some(found) = haystack[from..].find(keyword) {
+
         let idx = from + found;
         let before_ok = idx == 0 || bytes[idx - 1].is_ascii_whitespace();
         let after_idx = idx + keyword.len();
@@ -118,6 +129,7 @@ fn find_keyword_boundary_index_in_text(haystack: &str, keyword: &str) -> Option<
         }
 
         from = after_idx;
+        
     }
 
     None

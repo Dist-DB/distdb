@@ -244,6 +244,7 @@ impl ConditionValueProvider for SqlCursorFrame {
         }
 
         if let Some(row) = self.current_row.as_ref() {
+
             if let Some(value) = row.get(&normalized) {
                 return Some(value);
             }
@@ -261,6 +262,7 @@ impl ConditionValueProvider for SqlCursorFrame {
                 }) {
                     return Some(value);
                 }
+
         }
 
         None
@@ -277,6 +279,7 @@ impl SqlCursorSource for VecSqlCursorSource {
     }
 
     fn fetch_next(&mut self) -> Result<Option<HashMap<String, Vec<u8>>>, String> {
+
         if self.index >= self.rows.len() {
             return Ok(None);
         }
@@ -290,6 +293,7 @@ impl SqlCursorSource for VecSqlCursorSource {
         self.index += 1;
 
         Ok(Some(row))
+        
     }
 
     fn close(&mut self) -> Result<(), String> {

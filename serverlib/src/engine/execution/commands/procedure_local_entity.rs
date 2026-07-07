@@ -130,9 +130,13 @@ impl ProcedureLocalEntityScope {
         let normalized = common::normalize_identifier!(name);
 
         match self.entities.get(&normalized) {
+            
             Some(ProcedureLocalEntity::Variable { value }) => Some(value),
+
             Some(ProcedureLocalEntity::Argument { value }) => Some(value),
+
             _ => None,
+
         }
 
     }
@@ -142,14 +146,18 @@ impl ProcedureLocalEntityScope {
         let mut values = HashMap::new();
 
         for (name, entity) in &self.entities {
+
             match entity {
+
                 ProcedureLocalEntity::Variable { value }
                 | ProcedureLocalEntity::Argument { value } => {
                     values.insert(name.clone(), value.clone());
-                }
+                },
 
                 _ => {}
+
             }
+
         }
 
         values
@@ -161,12 +169,15 @@ impl ProcedureLocalEntityScope {
         let normalized = common::normalize_identifier!(logical_name);
 
         match self.entities.get(&normalized) {
+
             Some(ProcedureLocalEntity::TemporaryTable {
                 physical_table_id,
                 dropped,
                 ..
             }) if !*dropped => Some(physical_table_id.as_str()),
+
             _ => None,
+
         }
 
     }
@@ -196,7 +207,7 @@ impl ProcedureLocalEntityScope {
             }) => Ok(Some(physical_table_id.as_str())),
 
             _ => Ok(None),
-            
+
         }
 
     }
@@ -206,6 +217,7 @@ impl ProcedureLocalEntityScope {
         let normalized = common::normalize_identifier!(logical_name);
 
         match self.entities.get_mut(&normalized) {
+
             Some(ProcedureLocalEntity::TemporaryTable {
                 physical_table_id,
                 dropped,
@@ -213,9 +225,10 @@ impl ProcedureLocalEntityScope {
             }) if !*dropped => {
                 *dropped = true;
                 self.table_scope.mark_table_released(physical_table_id)
-            }
+            },
 
             _ => false,
+
         }
 
     }

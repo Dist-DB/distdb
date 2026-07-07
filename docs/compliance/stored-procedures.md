@@ -23,8 +23,16 @@
 - Handler control-flow execution support in CALL action interpreter:
   - parse `DECLARE CONTINUE HANDLER FOR SQLEXCEPTION <statement>`
   - parse `DECLARE EXIT HANDLER FOR SQLEXCEPTION <statement>`
+  - parse `DECLARE CONTINUE/EXIT HANDLER FOR SQLWARNING <statement>`
+  - parse `DECLARE CONTINUE/EXIT HANDLER FOR NOT FOUND <statement>`
   - execute handler statement when action execution returns a SQL exception error
+  - execute `SQLWARNING` handler statement for currently classified non-fatal warning/error flow in the CALL action interpreter
+  - execute `NOT FOUND` handler statement when cursor fetch reaches end-of-result-set
   - `CONTINUE` resumes at next statement; `EXIT` leaves current action scope
+- Cursor statement support in CALL action interpreter:
+  - parse `DECLARE <name> CURSOR FOR <SELECT ...>` declarations
+  - parse and execute `OPEN <name>`, `FETCH <name> INTO <vars...>`, and `CLOSE <name>`
+  - `FETCH ... INTO` uses positional variable assignment and emits `NOT FOUND` when exhausted
 - Invocation primitives in execution layer:
   - direct invocation helper
   - cursor-backed invocation helper
@@ -47,13 +55,14 @@
 | CALL execution path | Supported | Server query mapping resolves procedure, binds args, invokes routine, returns action result | Cleanup is attempted after invocation and errors are surfaced |
 | CALL argument arity validation | Supported | Mismatch between procedure params and call args is rejected | Error path returns explicit argument mismatch message |
 | CALL argument expression shapes | Partial | Supports literals (boolean/number/string), signed numeric unary, identifier and compound identifier forms | Subquery args, placeholders, NULL, and many general expressions are rejected |
-| Procedure body control flow | Partial | IF/ELSEIF/ELSE/END IF and CASE/WHEN/THEN/ELSE/END CASE planning/execution are supported | Execution model is intentionally narrow compared with full MySQL routine language |
+| Procedure body control flow | Partial | IF/ELSEIF/ELSE/END IF, CASE/WHEN/THEN/ELSE/END CASE, LOOP/WHILE/REPEAT, and basic cursor statements (DECLARE/OPEN/FETCH/CLOSE) are supported in the CALL action interpreter | Execution model is intentionally narrow compared with full MySQL routine language |
 | Non-IF top-level procedure body execution | Limited | Invocation currently executes planned IF/ELSE actions; bodies that do not map to that model may produce no branch action result | Not full statement-block interpreter coverage |
 | CASE resolution semantics | Supported | CASE execution reuses the existing condition processor semantics used by query control flow | Supports searched and simple CASE branches in the implemented routine model |
 | Stored-procedure variable resolution order | Supported | Local argument/variable bindings resolve first, then row/global provider values | Matches procedure-scoped isolation intent for control-flow evaluation |
 | Stored-procedure binding bleed prevention | Supported | Cursor execution restores local bindings after normal completion, return, and error paths | Regression tests cover no-bleed behavior across repeated executions |
 | Procedure-local temporary tables | Supported | Temporary table creation in CALL actions is scoped, aliased, and cleaned up | Name rewrite maps logical names to scoped physical IDs during action execution |
-| Cursor-driven invocation helper | Supported | Cursor-frame helper executes procedure per frame/row | Primarily execution-layer primitive, not full SQL cursor syntax coverage |
+| Cursor-driven invocation helper | Supported | Cursor-frame helper executes procedure per frame/row | Execution-layer primitive remains available |
+| SQL cursor statements inside routine actions | Partial | `DECLARE CURSOR`, `OPEN`, `FETCH ... INTO`, `CLOSE`, plus `NOT FOUND` handler trigger on cursor exhaustion | Cursor declaration/options and diagnostics are still a subset of MySQL 8 semantics |
 | Delimiter-driven multi-statement routine creation (console/e2e) | Partial | E2E smoke includes delimiter switch, procedure creation, CALLs, and expected result checks | Validates practical creation/call flow in scripted usage |
 | Full MySQL stored routine language | Not Supported | No complete implementation of MySQL procedural constructs (labels, cursor SQL syntax surface, broad condition-handler variants, full variable semantics, etc.) | Current support is focused on implemented control-flow/action model |
 

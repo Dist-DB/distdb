@@ -48,17 +48,13 @@ where
 {
 
     for branch in &block.branches {
-
         if predicate_matches(provider, &branch.condition)? {
             return Ok(Some(execute_branch(&branch.action)?));
         }
-
     }
 
     if let Some(else_action) = block.else_branch.as_ref() {
-
         return Ok(Some(execute_branch(else_action)?));
-
     }
 
     Ok(None)

@@ -456,6 +456,8 @@ fn execute_call_stored_procedure(
             let mut last_response: Option<ConnectorResponse> = None;
             let mut handler_runtime = LocalHandlerRuntime::default();
             let mut loop_runtime = LocalControlFlowRuntime::default();
+            let mut cursor_runtime = LocalCursorRuntime::default();
+            
             let control = execute_call_action_sql(
                 action_sql,
                 request_id,
@@ -466,6 +468,7 @@ fn execute_call_stored_procedure(
                 false,
                 &mut handler_runtime,
                 &mut loop_runtime,
+                &mut cursor_runtime,
             )?;
 
             if !matches!(control, serverlib::LoopControlDirective::None) {
@@ -696,6 +699,7 @@ fn rewrite_sql_with_call_aliases(
 }
 
 const MAX_CALL_LOOP_ITERATIONS: usize = 10_000;
+const CALL_HANDLER_NOT_FOUND_SIGNAL: &str = "__distdb_cursor_not_found__";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalHandlerActionKind {
@@ -706,6 +710,8 @@ enum LocalHandlerActionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalHandlerCondition {
     SqlException,
+    SqlWarning,
+    NotFound,
 }
 
 #[derive(Clone, Debug)]
@@ -730,12 +736,63 @@ impl LocalHandlerRuntime {
         self.handlers.truncate(len);
     }
 
-    fn resolve_for_error(&self, _message: &str) -> Option<LocalDeclaredHandler> {
-        self.handlers
-            .iter()
+    fn resolve_for_error(&self, condition: LocalHandlerCondition) -> Option<LocalDeclaredHandler> {
+        let find_condition = |candidate: LocalHandlerCondition| {
+            self.handlers
+                .iter()
+                .rev()
+                .find(|handler| handler.condition == candidate)
+                .cloned()
+        };
+
+        find_condition(condition).or_else(|| {
+            if matches!(condition, LocalHandlerCondition::SqlException | LocalHandlerCondition::NotFound) {
+                find_condition(LocalHandlerCondition::SqlWarning)
+            } else {
+                None
+            }
+        })
+    }
+
+}
+
+#[derive(Clone, Debug, Default)]
+struct LocalOpenedCursor {
+    rows: Vec<Vec<Vec<u8>>>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct LocalDeclaredCursor {
+    name: String,
+    select_sql: String,
+    opened: Option<LocalOpenedCursor>,
+}
+
+#[derive(Default)]
+struct LocalCursorRuntime {
+    cursors: Vec<LocalDeclaredCursor>,
+}
+
+impl LocalCursorRuntime {
+
+    fn push(&mut self, cursor: LocalDeclaredCursor) {
+        self.cursors.push(cursor);
+    }
+
+    fn len(&self) -> usize {
+        self.cursors.len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.cursors.truncate(len);
+    }
+
+    fn resolve_mut(&mut self, cursor_name: &str) -> Option<&mut LocalDeclaredCursor> {
+        self.cursors
+            .iter_mut()
             .rev()
-            .find(|handler| matches!(handler.condition, LocalHandlerCondition::SqlException))
-            .cloned()
+            .find(|cursor| cursor.name.eq_ignore_ascii_case(cursor_name))
     }
 
 }
@@ -924,9 +981,11 @@ fn execute_call_action_sql(
     allow_loop_control: bool,
     handler_runtime: &mut LocalHandlerRuntime,
     loop_runtime: &mut LocalControlFlowRuntime,
+    cursor_runtime: &mut LocalCursorRuntime,
 ) -> Result<serverlib::LoopControlDirective, String> {
 
     let scope_start = handler_runtime.handlers.len();
+    let cursor_scope_start = cursor_runtime.len();
 
     for raw_statement in split_sql_statements_for_call_action(action_sql) {
 
@@ -940,6 +999,7 @@ fn execute_call_action_sql(
             allow_loop_control,
             handler_runtime,
             loop_runtime,
+            cursor_runtime,
         );
 
         let control = match statement_result {
@@ -948,9 +1008,12 @@ fn execute_call_action_sql(
             
             Err(err) => {
 
-                let Some(handler) = handler_runtime.resolve_for_error(err.as_str()) else {
+                let (condition, rendered_error) = classify_call_action_error(err.as_str());
+
+                let Some(handler) = handler_runtime.resolve_for_error(condition) else {
                     handler_runtime.truncate(scope_start);
-                    return Err(err);
+                    cursor_runtime.truncate(cursor_scope_start);
+                    return Err(rendered_error);
                 };
 
                 let handler_control = execute_call_action_sql(
@@ -963,15 +1026,18 @@ fn execute_call_action_sql(
                     allow_loop_control,
                     handler_runtime,
                     loop_runtime,
+                    cursor_runtime,
                 )?;
 
                 if !matches!(handler_control, serverlib::LoopControlDirective::None) {
                     handler_runtime.truncate(scope_start);
+                    cursor_runtime.truncate(cursor_scope_start);
                     return Ok(handler_control);
                 }
 
                 if matches!(handler.action_kind, LocalHandlerActionKind::Exit) {
                     handler_runtime.truncate(scope_start);
+                    cursor_runtime.truncate(cursor_scope_start);
                     return Ok(serverlib::LoopControlDirective::None);
                 }
 
@@ -983,12 +1049,14 @@ fn execute_call_action_sql(
 
         if !matches!(control, serverlib::LoopControlDirective::None) {
             handler_runtime.truncate(scope_start);
+            cursor_runtime.truncate(cursor_scope_start);
             return Ok(control);
         }
 
     }
 
     handler_runtime.truncate(scope_start);
+    cursor_runtime.truncate(cursor_scope_start);
     
     Ok(serverlib::LoopControlDirective::None)
 
@@ -1004,6 +1072,7 @@ fn execute_call_action_statement(
     allow_loop_control: bool,
     handler_runtime: &mut LocalHandlerRuntime,
     loop_runtime: &mut LocalControlFlowRuntime,
+    cursor_runtime: &mut LocalCursorRuntime,
 ) -> Result<serverlib::LoopControlDirective, String> {
 
     let lowered_raw = raw_statement.trim().to_ascii_lowercase();
@@ -1013,6 +1082,19 @@ fn execute_call_action_statement(
         if let Some(handler) = parse_local_handler_declare_statement(raw_statement)? {
 
             handler_runtime.push(handler);
+
+            *last_response = Some(ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            ));
+
+            return Ok(serverlib::LoopControlDirective::None);
+
+        }
+
+        if let Some(cursor) = parse_local_cursor_declare_statement(raw_statement)? {
+
+            cursor_runtime.push(cursor);
 
             *last_response = Some(ConnectorResponse::applied(
                 request_id.to_string(),
@@ -1043,6 +1125,51 @@ fn execute_call_action_statement(
             ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
         ));
         
+        return Ok(serverlib::LoopControlDirective::None);
+
+    }
+
+    if lowered_raw.starts_with("open ") {
+
+        execute_local_cursor_open_statement(
+            raw_statement,
+            query,
+            ctx,
+            local_entities,
+            cursor_runtime,
+        )?;
+
+        *last_response = Some(ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        ));
+
+        return Ok(serverlib::LoopControlDirective::None);
+
+    }
+
+    if lowered_raw.starts_with("fetch ") {
+
+        execute_local_cursor_fetch_statement(raw_statement, local_entities, cursor_runtime)?;
+
+        *last_response = Some(ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        ));
+
+        return Ok(serverlib::LoopControlDirective::None);
+
+    }
+
+    if lowered_raw.starts_with("close ") {
+
+        execute_local_cursor_close_statement(raw_statement, cursor_runtime)?;
+
+        *last_response = Some(ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        ));
+
         return Ok(serverlib::LoopControlDirective::None);
 
     }
@@ -1102,6 +1229,7 @@ fn execute_call_action_statement(
                 local_entities,
                 &mut |scope, condition_sql| evaluate_local_condition(condition_sql, scope),
                 &mut |scope, body_sql| {
+                    
                     execute_call_action_sql(
                         body_sql,
                         request_id,
@@ -1112,7 +1240,9 @@ fn execute_call_action_statement(
                         true,
                         handler_runtime,
                         loop_runtime,
+                        cursor_runtime,
                     )
+
                 },
             )?;
             
@@ -1136,6 +1266,7 @@ fn execute_call_action_statement(
             local_entities,
             &mut |scope, condition_sql| evaluate_local_condition(condition_sql, scope),
             &mut |scope, body_sql| {
+
                 execute_call_action_sql(
                     body_sql,
                     request_id,
@@ -1146,7 +1277,9 @@ fn execute_call_action_statement(
                     true,
                     handler_runtime,
                     loop_runtime,
+                    cursor_runtime,
                 )
+
             },
         )?;
 
@@ -1181,6 +1314,7 @@ fn execute_call_action_statement(
                     true,
                     handler_runtime,
                     loop_runtime,
+                    cursor_runtime,
                 )
             },
         )?;
@@ -1211,6 +1345,7 @@ fn execute_call_action_statement(
             allow_loop_control,
             handler_runtime,
             loop_runtime,
+            cursor_runtime,
         )?;
 
         loop_runtime.pop();
@@ -1259,7 +1394,7 @@ fn execute_call_action_statement(
             ));
 
             return Ok(serverlib::LoopControlDirective::None);
-            
+
         }
 
     }
@@ -1362,34 +1497,300 @@ fn parse_local_handler_declare_statement(sql: &str) -> Result<Option<LocalDeclar
         return Ok(None);
     };
 
-    let mut parts = after_prefix.splitn(2, char::is_whitespace);
-    let condition_token = parts.next().unwrap_or("").trim().to_ascii_lowercase();
-    let action_sql = parts.next().unwrap_or("").trim().to_string();
+    let lowered_after_prefix = after_prefix.to_ascii_lowercase();
+
+    let (condition, action_sql) = if lowered_after_prefix == "sqlexception" {
+        (
+            LocalHandlerCondition::SqlException,
+            String::new(),
+        )
+    } else if lowered_after_prefix.starts_with("sqlexception ") {
+        (
+            LocalHandlerCondition::SqlException,
+            after_prefix["sqlexception".len()..].trim().to_string(),
+        )
+    } else if lowered_after_prefix == "not found" {
+        (
+            LocalHandlerCondition::NotFound,
+            String::new(),
+        )
+    } else if lowered_after_prefix.starts_with("not found ") {
+        (
+            LocalHandlerCondition::NotFound,
+            after_prefix["not found".len()..].trim().to_string(),
+        )
+    } else if lowered_after_prefix == "sqlwarning" {
+        (
+            LocalHandlerCondition::SqlWarning,
+            String::new(),
+        )
+    } else if lowered_after_prefix.starts_with("sqlwarning") {
+        (
+            LocalHandlerCondition::SqlWarning,
+            after_prefix["sqlwarning".len()..].trim().to_string(),
+        )
+    } else {
+        let condition_token = lowered_after_prefix
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        return Err(format!(
+            "declare handler parse failed: unsupported handler condition '{}'",
+            condition_token,
+        ));
+    };
 
     if action_sql.is_empty() {
         return Err("declare handler parse failed: handler action statement is missing".to_string());
     }
-
-    let condition = match condition_token.as_str() {
-        "sqlexception" => LocalHandlerCondition::SqlException,
-        "sqlwarning" | "not" => {
-            return Err(
-                "declare handler parse failed: only SQLEXCEPTION handlers are supported".to_string(),
-            )
-        }
-        _ => {
-            return Err(format!(
-                "declare handler parse failed: unsupported handler condition '{}'",
-                condition_token,
-            ))
-        }
-    };
 
     Ok(Some(LocalDeclaredHandler {
         action_kind,
         condition,
         action_sql,
     }))
+
+}
+
+fn normalize_local_identifier(raw: &str, subject: &str) -> Result<String, String> {
+
+    let ident = raw.trim().trim_matches('`').trim_matches('"');
+    if ident.is_empty() {
+        return Err(format!("{} parse failed: identifier is empty", subject));
+    }
+
+    if !ident
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(format!(
+            "{} parse failed: identifier '{}' is invalid",
+            subject,
+            ident,
+        ));
+    }
+
+    Ok(common::normalize_identifier!(ident))
+
+}
+
+fn parse_local_cursor_declare_statement(sql: &str) -> Result<Option<LocalDeclaredCursor>, String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("declare ") {
+        return Ok(None);
+    }
+
+    let body = trimmed["declare".len()..].trim();
+    let mut parts = body.splitn(2, char::is_whitespace);
+
+    let Some(raw_name) = parts.next() else {
+        return Err("declare cursor parse failed: cursor name is missing".to_string());
+    };
+
+    let Some(rest) = parts.next() else {
+        return Ok(None);
+    };
+
+    let lowered_rest = rest.trim().to_ascii_lowercase();
+    if !lowered_rest.starts_with("cursor for ") {
+        return Ok(None);
+    }
+
+    let cursor_name = normalize_local_identifier(raw_name, "declare cursor")?;
+    let select_sql = rest.trim()["cursor for".len()..].trim().to_string();
+    if select_sql.is_empty() {
+        return Err("declare cursor parse failed: SELECT statement is missing".to_string());
+    }
+
+    Ok(Some(LocalDeclaredCursor {
+        name: cursor_name,
+        select_sql,
+        opened: None,
+    }))
+
+}
+
+fn execute_local_cursor_open_statement(
+    sql: &str,
+    query: &DataQuery,
+    ctx: &mut QueryExecutionContext<'_>,
+    local_entities: &serverlib::ProcedureLocalEntityScope,
+    cursor_runtime: &mut LocalCursorRuntime,
+) -> Result<(), String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("open ") {
+        return Err("cursor open parse failed: statement is not OPEN".to_string());
+    }
+
+    let cursor_name = normalize_local_identifier(trimmed["open".len()..].trim(), "open cursor")?;
+
+    let cursor = cursor_runtime
+        .resolve_mut(cursor_name.as_str())
+        .ok_or_else(|| format!("cursor open failed: cursor '{}' was not declared", cursor_name))?;
+
+    let rewritten_sql = rewrite_sql_with_call_aliases(cursor.select_sql.as_str(), local_entities)?;
+    let parsed = serverlib::parse_mysql8_sql_requests(&rewritten_sql, &query.database_id)
+        .map_err(|err| format!("cursor open parse failed: {err}"))?;
+
+    if parsed.len() != 1 {
+        return Err("cursor open parse failed: cursor SELECT must be a single statement".to_string());
+    }
+
+    let parsed_statement = parsed
+        .first()
+        .ok_or_else(|| "cursor open parse failed: cursor SELECT is missing".to_string())?;
+
+    if !matches!(parsed_statement.operation, SqlOperation::Select | SqlOperation::UnionQuery) {
+        return Err("cursor open parse failed: cursor FOR statement must be a SELECT query".to_string());
+    }
+
+    let action_query = DataQuery {
+        database_id: query.database_id.clone(),
+        sql: rewritten_sql,
+    };
+
+    let response = execute_parsed_query(
+        "cursor-open",
+        &action_query,
+        ctx.catalogs,
+        ctx.wal,
+        ctx.node_data_dir,
+        ctx.runtime_indexes,
+        parsed,
+        ctx.external_write_group_id,
+        None,
+        ctx.session_id,
+    );
+
+    if matches!(response.status, connector::ResponseStatus::Rejected) {
+        let message = match response.result {
+            ConnectorResult::Error(message) => message,
+            _ => "cursor open failed".to_string(),
+        };
+
+        return Err(message);
+    }
+
+    let ConnectorResult::Query(result) = response.result else {
+        return Err("cursor open failed: cursor SELECT did not return a result set".to_string());
+    };
+
+    cursor.opened = Some(LocalOpenedCursor {
+        rows: result.rows,
+        index: 0,
+    });
+
+    Ok(())
+
+}
+
+fn execute_local_cursor_fetch_statement(
+    sql: &str,
+    local_entities: &mut serverlib::ProcedureLocalEntityScope,
+    cursor_runtime: &mut LocalCursorRuntime,
+) -> Result<(), String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("fetch ") {
+        return Err("cursor fetch parse failed: statement is not FETCH".to_string());
+    }
+
+    let body = trimmed["fetch".len()..].trim();
+    let lowered_body = body.to_ascii_lowercase();
+
+    let Some(into_index) = lowered_body.find(" into ") else {
+        return Err("cursor fetch parse failed: INTO clause is missing".to_string());
+    };
+
+    let cursor_name = normalize_local_identifier(body[..into_index].trim(), "fetch cursor")?;
+    let variables_csv = body[(into_index + " into ".len())..].trim();
+    if variables_csv.is_empty() {
+        return Err("cursor fetch parse failed: target variables are missing".to_string());
+    }
+
+    let targets = variables_csv
+        .split(',')
+        .map(|entry| normalize_local_identifier(entry, "fetch cursor"))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let cursor = cursor_runtime
+        .resolve_mut(cursor_name.as_str())
+        .ok_or_else(|| format!("cursor fetch failed: cursor '{}' was not declared", cursor_name))?;
+
+    let opened = cursor
+        .opened
+        .as_mut()
+        .ok_or_else(|| format!("cursor fetch failed: cursor '{}' is not open", cursor_name))?;
+
+    if opened.index >= opened.rows.len() {
+        return Err(CALL_HANDLER_NOT_FOUND_SIGNAL.to_string());
+    }
+
+    let row = opened
+        .rows
+        .get(opened.index)
+        .ok_or_else(|| "cursor fetch failed: row index out of bounds".to_string())?;
+
+    if row.len() != targets.len() {
+        return Err(format!(
+            "cursor fetch failed: INTO variable count ({}) does not match cursor column count ({})",
+            targets.len(),
+            row.len(),
+        ));
+    }
+
+    for (target, value) in targets.iter().zip(row.iter()) {
+        local_entities.set_variable(target.as_str(), value.clone());
+    }
+
+    opened.index += 1;
+
+    Ok(())
+
+}
+
+fn execute_local_cursor_close_statement(
+    sql: &str,
+    cursor_runtime: &mut LocalCursorRuntime,
+) -> Result<(), String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("close ") {
+        return Err("cursor close parse failed: statement is not CLOSE".to_string());
+    }
+
+    let cursor_name = normalize_local_identifier(trimmed["close".len()..].trim(), "close cursor")?;
+
+    let cursor = cursor_runtime
+        .resolve_mut(cursor_name.as_str())
+        .ok_or_else(|| format!("cursor close failed: cursor '{}' was not declared", cursor_name))?;
+
+    cursor.opened = None;
+
+    Ok(())
+
+}
+
+fn classify_call_action_error(message: &str) -> (LocalHandlerCondition, String) {
+
+    if message == CALL_HANDLER_NOT_FOUND_SIGNAL {
+        return (
+            LocalHandlerCondition::NotFound,
+            "cursor fetch reached end of result set".to_string(),
+        );
+    }
+
+    (LocalHandlerCondition::SqlException, message.to_string())
 
 }
 

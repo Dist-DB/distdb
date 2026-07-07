@@ -27,17 +27,15 @@ where
                 if loop_target_matches_label(target.as_deref(), loop_label.as_deref()) {
                     continue;
                 }
-
-                return Ok(LoopControlDirective::Iterate(target));
+                return Ok(LoopControlDirective::Iterate(target));                
             },
 
             LoopControlDirective::Leave(target) => {
                 if loop_target_matches_label(target.as_deref(), loop_label.as_deref()) {
                     return Ok(LoopControlDirective::None);
                 }
-
                 return Ok(LoopControlDirective::Leave(target));
-            }
+            },
 
         }
 
@@ -50,6 +48,7 @@ where
 fn parse_local_loop_block(action_sql: &str) -> Result<(Option<String>, String), String> {
 
     let normalized = action_sql.trim().trim_end_matches(';').trim();
+
     let lowered = normalized.to_ascii_lowercase();
 
     let (loop_label, loop_start_index) = find_loop_start_label_and_index(&lowered)
@@ -79,6 +78,7 @@ fn find_loop_start_label_and_index(lowered: &str) -> Option<(Option<String>, usi
 
     let colon_index = lowered.find(':')?;
     let label = lowered[..colon_index].trim();
+    
     if label.is_empty() || !label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
         return None;
     }
