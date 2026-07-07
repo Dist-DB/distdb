@@ -105,6 +105,9 @@ The implementation should:
 
 - SELECT architecture assumptions and implementation notes:
 	- [select-architecture.md](select-architecture.md)
+- SQL implementation/compliance coverage index and per-feature matrices:
+	- [sql-compliance.md](sql-compliance.md)
+	- [compliance/readme.md](compliance/readme.md)
 - Optional enterprise at-rest encryption direction:
 	- [at-rest-encryption.md](at-rest-encryption.md)
 
