@@ -92,6 +92,21 @@ impl ScopedEphemeralTableScope {
 
     }
 
+    pub fn mark_table_released(&mut self, table_id: &str) -> bool {
+
+        let normalized = common::normalize_identifier!(table_id);
+
+        for handle in self.handles.iter_mut().rev() {
+            if handle.table_id == normalized {
+                handle.released = true;
+                return true;
+            }
+        }
+
+        false
+
+    }
+
 }
 
 pub fn make_scoped_ephemeral_table_id(

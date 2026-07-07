@@ -40,6 +40,8 @@ pub use select_plan::{
     parse_create_view_dependencies_from_sql,
 };
 pub use routine_plan::{
+    bind_call_procedure_arguments,
+    parse_create_procedure_parameter_names_from_statement,
     parse_if_else_end_plan_from_create_procedure_statement,
     parse_if_else_end_plan_from_statement,
 };

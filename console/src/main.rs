@@ -29,7 +29,7 @@
 
 use console::{
     bootstrap_peers_from_cli_args, connector_tls_config_from_cli_args,
-    parse_console_command, ConsoleCommand, ConsoleSession,
+    parse_console_command_with_delimiter, ConsoleCommand, ConsoleSession,
 };
 
 use rustyline::error::ReadlineError;
@@ -128,9 +128,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Distdb console (www.distdb.com)");
     println!("Copyright (c) 2026 Sam Colak. All rights reserved.");
     println!("Type help for commands, or \\q to quit");
-    println!("All commands must end with ';' to execute");
+    println!("Default delimiter is ';' (use delimiter <token> to change)");
 
     let mut accumulated_command = String::new();
+    let mut active_delimiter = ";".to_string();
 
     loop {
 
@@ -146,12 +147,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 accumulated_command.push_str(&line);
                 accumulated_command.push('\n');
 
-                match parse_console_command(&accumulated_command) {
+                match parse_console_command_with_delimiter(
+                    &accumulated_command,
+                    &active_delimiter,
+                ) {
 
                     Ok(Some(command)) => {
                         // Add completed command to history (trimmed, without trailing newline)
                         let _ = editor.add_history_entry(accumulated_command.trim());
                         accumulated_command.clear();
+
+                        if let ConsoleCommand::SetDelimiter(next_delimiter) = &command {
+                            active_delimiter = next_delimiter.clone();
+                        }
+
                         match session.execute(command) {
                             Ok(should_continue) => {
                                 if !should_continue {

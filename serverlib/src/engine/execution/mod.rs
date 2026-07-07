@@ -42,6 +42,8 @@ pub use commands::{
     CursorDiagnostics, CursorDirective, IfElseEndBlock,
     SelectExecutionAdvice,
     ScopedEphemeralTableHandle, ScopedEphemeralTableScope,
+    ProcedureLocalEntity, ProcedureLocalEntityScope,
+    RoutineLocalEntity, RoutineLocalEntityScope,
     SelectReadPlanCursorSource,
     SqlCursorFrame, SqlCursorSource, VecSqlCursorSource,
 };

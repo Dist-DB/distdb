@@ -69,3 +69,59 @@ fn parse_if_else_end_plan_from_create_procedure_returns_none_when_body_is_not_if
 
     assert!(plan.is_none());
 }
+
+#[test]
+fn parse_create_procedure_parameter_names_from_statement_extracts_names() {
+    let names = parse_create_procedure_parameter_names_from_statement(
+        "create procedure p_sync(arg_user_id int, arg_state varchar(20)) begin select 1; end",
+    )
+    .expect("parameter list should parse");
+
+    assert_eq!(names, vec!["arg_user_id".to_string(), "arg_state".to_string()]);
+}
+
+#[test]
+fn bind_call_procedure_arguments_maps_values_by_parameter_name() {
+    let call_statement = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::MySqlDialect {},
+        "call p_sync(42, 'ready')",
+    )
+    .expect("call statement should parse")
+    .into_iter()
+    .next()
+    .expect("single call statement should exist");
+
+    let bindings = bind_call_procedure_arguments(
+        "create procedure p_sync(arg_user_id int, arg_state varchar(20)) begin select 1; end",
+        &call_statement,
+    )
+    .expect("call arguments should bind");
+
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0], ("arg_user_id".to_string(), b"42".to_vec()));
+    assert_eq!(bindings[1], ("arg_state".to_string(), b"ready".to_vec()));
+}
+
+#[test]
+fn bind_call_procedure_arguments_rejects_count_mismatch() {
+    let call_statement = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::MySqlDialect {},
+        "call p_sync(42)",
+    )
+    .expect("call statement should parse")
+    .into_iter()
+    .next()
+    .expect("single call statement should exist");
+
+    let err = bind_call_procedure_arguments(
+        "create procedure p_sync(arg_user_id int, arg_state varchar(20)) begin select 1; end",
+        &call_statement,
+    )
+    .expect_err("count mismatch should fail");
+
+    assert!(matches!(
+        err,
+        crate::SqlParseError::UnsupportedStatement(message)
+            if message.contains("CALL argument mismatch")
+    ));
+}

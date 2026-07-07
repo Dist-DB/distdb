@@ -416,13 +416,30 @@ fn execute_call_stored_procedure(
         );
     };
 
-    let provider = HashMap::<String, Vec<u8>>::new();
-    let mut scope = serverlib::ScopedEphemeralTableScope::new(format!(
+    let mut local_entities = serverlib::ProcedureLocalEntityScope::new(format!(
         "proc_{}_{}",
         common::normalize_identifier!(ctx.session_id),
         procedure.procedure_id,
     ));
-    let mut alias_map = HashMap::<String, String>::new();
+
+    if let Some(parsed_call_statement) = statement.parsed_statement.as_ref() {
+        let argument_bindings =
+            match serverlib::bind_call_procedure_arguments(&procedure.sql, parsed_call_statement) {
+                Ok(bindings) => bindings,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("call procedure argument binding failed: {err}"),
+                    );
+                }
+            };
+
+        for (name, value) in argument_bindings {
+            local_entities.set_argument(name, value);
+        }
+    }
+
+    let provider = local_entities.materialize_value_bindings();
 
     let invocation_result = serverlib::execute_stored_procedure_invocation(
         &provider,
@@ -442,21 +459,16 @@ fn execute_call_stored_procedure(
                         .map_err(|err| format!("call action create table parse failed: {err}"))?;
 
                     if plan.temporary {
-
-                        let logical_table_id = common::normalize_identifier!(plan.table_id.clone());
-
                         let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
                             return Err(format!("database '{}' not found", query.database_id));
                         };
 
-                        let scoped_table_id = scope.create_table(
+                        local_entities.create_temporary_table(
                             catalog,
                             ctx.wal,
                             plan.table_id,
                             plan.schema,
                         )?;
-
-                        alias_map.insert(logical_table_id, scoped_table_id);
 
                         last_response = Some(ConnectorResponse::applied(
                             request_id.to_string(),
@@ -469,7 +481,10 @@ fn execute_call_stored_procedure(
 
                 }
 
-                let rewritten_sql = rewrite_sql_with_call_aliases(&parsed_statement.sql, &alias_map);
+                let rewritten_sql = rewrite_sql_with_call_aliases(
+                    &parsed_statement.sql,
+                    &local_entities,
+                )?;
                 let rewritten_parsed = serverlib::parse_mysql8_sql_requests(
                     &rewritten_sql,
                     &query.database_id,
@@ -506,6 +521,12 @@ fn execute_call_stored_procedure(
                     return Err(message);
                 }
 
+                if matches!(parsed_statement.operation, SqlOperation::DropTable)
+                    && let Some(dropped_name) = parsed_statement.object_name.as_deref()
+                {
+                    local_entities.mark_temporary_table_dropped(dropped_name);
+                }
+
                 last_response = Some(response);
             }
 
@@ -519,7 +540,7 @@ fn execute_call_stored_procedure(
     );
 
     let cleanup_result = match resolve_catalog_mut(ctx.catalogs, &query.database_id) {
-        Some(catalog) => scope.cleanup(catalog, ctx.wal),
+        Some(catalog) => local_entities.cleanup(catalog, ctx.wal),
         None => Err(format!("database '{}' not found", query.database_id)),
     };
 
@@ -549,9 +570,12 @@ fn execute_call_stored_procedure(
 
 }
 
-fn rewrite_sql_with_call_aliases(sql: &str, alias_map: &HashMap<String, String>) -> String {
-    if alias_map.is_empty() {
-        return sql.to_string();
+fn rewrite_sql_with_call_aliases(
+    sql: &str,
+    local_entities: &serverlib::ProcedureLocalEntityScope,
+) -> Result<String, String> {
+    if !local_entities.has_temporary_tables() {
+        return Ok(sql.to_string());
     }
 
     let mut out = String::with_capacity(sql.len());
@@ -604,8 +628,7 @@ fn rewrite_sql_with_call_aliases(sql: &str, alias_map: &HashMap<String, String>)
             }
 
             let token = chars[start..i].iter().collect::<String>();
-            let normalized = common::normalize_identifier!(token.as_str());
-            if let Some(mapped) = alias_map.get(&normalized) {
+            if let Some(mapped) = local_entities.resolve_temporary_table_id_checked(token.as_str())? {
                 out.push('`');
                 out.push_str(mapped);
                 out.push('`');
@@ -619,6 +642,6 @@ fn rewrite_sql_with_call_aliases(sql: &str, alias_map: &HashMap<String, String>)
         i += 1;
     }
 
-    out
+    Ok(out)
 }
 

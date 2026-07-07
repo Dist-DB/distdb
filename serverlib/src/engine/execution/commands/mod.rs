@@ -4,6 +4,7 @@ mod mutation_select;
 mod control_flow;
 mod invocation;
 mod scoped_table;
+mod procedure_local_entity;
 
 pub use select_execute::{
 	execute_joined_select_plan, execute_projection_only_select_plan,
@@ -37,4 +38,9 @@ pub use invocation::{
 pub use scoped_table::{
 	create_scoped_ephemeral_table, release_scoped_ephemeral_table,
 	ScopedEphemeralTableHandle, ScopedEphemeralTableScope,
+};
+
+pub use procedure_local_entity::{
+	ProcedureLocalEntity, ProcedureLocalEntityScope,
+	RoutineLocalEntity, RoutineLocalEntityScope,
 };

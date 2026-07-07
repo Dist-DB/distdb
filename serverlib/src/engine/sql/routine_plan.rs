@@ -1,6 +1,9 @@
 use super::{
     parse_select_read_plan_from_statement, IfElseEndBranchPlan, IfElseEndPlan, SqlParseError,
 };
+use sqlparser::ast::{
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Statement, Value,
+};
 
 pub fn parse_if_else_end_plan_from_statement(
     statement: &str,
@@ -129,6 +132,67 @@ pub fn parse_if_else_end_plan_from_create_procedure_statement(
 
 }
 
+pub fn parse_create_procedure_parameter_names_from_statement(
+    statement: &str,
+) -> Result<Vec<String>, SqlParseError> {
+
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("create procedure") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not CREATE PROCEDURE".to_string(),
+        ));
+    }
+
+    let begin_index = lowered.find(" begin ").ok_or_else(|| {
+        SqlParseError::UnsupportedStatement(
+            "CREATE PROCEDURE block is missing BEGIN".to_string(),
+        )
+    })?;
+
+    let header = &trimmed[..begin_index];
+    let Some(open_index) = header.find('(') else {
+        return Ok(Vec::new());
+    };
+
+    let close_index = matching_close_parenthesis(header, open_index).ok_or_else(|| {
+        SqlParseError::UnsupportedStatement(
+            "CREATE PROCEDURE parameter list is malformed".to_string(),
+        )
+    })?;
+
+    let raw_params = &header[(open_index + 1)..close_index];
+    split_top_level_csv(raw_params)
+        .into_iter()
+        .map(|param| parse_procedure_parameter_name(&param))
+        .collect()
+
+}
+
+pub fn bind_call_procedure_arguments(
+    create_procedure_sql: &str,
+    call_statement: &Statement,
+) -> Result<Vec<(String, Vec<u8>)>, SqlParseError> {
+
+    let parameter_names = parse_create_procedure_parameter_names_from_statement(create_procedure_sql)?;
+
+    let argument_values = parse_call_argument_values(call_statement).map_err(|message| {
+        SqlParseError::UnsupportedStatement(format!("CALL argument parse failed: {message}"))
+    })?;
+
+    if parameter_names.len() != argument_values.len() {
+        return Err(SqlParseError::UnsupportedStatement(format!(
+            "CALL argument mismatch: expected {} values but received {}",
+            parameter_names.len(),
+            argument_values.len(),
+        )));
+    }
+
+    Ok(parameter_names.into_iter().zip(argument_values).collect())
+
+}
+
 fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError> {
 
     let trimmed = statement.trim().trim_end_matches(';').trim();
@@ -177,6 +241,190 @@ fn parse_if_branch_condition(condition_sql: &str) -> Result<crate::SelectConditi
             "IF/ELSE/END branch condition could not be parsed".to_string(),
         )
     })
+
+}
+
+fn parse_call_argument_values(statement: &Statement) -> Result<Vec<Vec<u8>>, String> {
+
+    let Statement::Call(function) = statement else {
+        return Err("statement is not CALL".to_string());
+    };
+
+    let call_args: &[FunctionArg] = match &function.args {
+        FunctionArguments::None => &[],
+        FunctionArguments::List(list) => list.args.as_slice(),
+        FunctionArguments::Subquery(_) => {
+            return Err("CALL subquery arguments are not supported".to_string());
+        }
+    };
+
+    call_args
+        .iter()
+        .map(call_argument_to_bytes)
+        .collect()
+
+}
+
+fn call_argument_to_bytes(argument: &FunctionArg) -> Result<Vec<u8>, String> {
+
+    let expression = match argument {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => expr,
+        FunctionArg::Named {
+            arg: FunctionArgExpr::Expr(expr),
+            ..
+        } => expr,
+        _ => return Err("unsupported CALL argument".to_string()),
+    };
+
+    expression_to_bytes(expression)
+
+}
+
+fn expression_to_bytes(expression: &Expr) -> Result<Vec<u8>, String> {
+
+    match expression {
+        Expr::Value(value) => value_to_bytes(value),
+
+        Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
+            (sqlparser::ast::UnaryOperator::Plus, Expr::Value(Value::Number(value, _))) => {
+                Ok(value.clone().into_bytes())
+            }
+            (sqlparser::ast::UnaryOperator::Minus, Expr::Value(Value::Number(value, _))) => {
+                Ok(format!("-{value}").into_bytes())
+            }
+            _ => Err("unsupported CALL unary argument".to_string()),
+        },
+
+        Expr::Identifier(ident) => Ok(common::normalize_identifier!(&ident.value).into_bytes()),
+
+        Expr::CompoundIdentifier(identifiers) => Ok(identifiers
+            .iter()
+            .map(|ident| common::normalize_identifier!(&ident.value))
+            .collect::<Vec<_>>()
+            .join(".")
+            .into_bytes()),
+
+        _ => Err("unsupported CALL argument expression".to_string()),
+    }
+
+}
+
+fn value_to_bytes(value: &Value) -> Result<Vec<u8>, String> {
+
+    match value {
+        Value::Boolean(v) => Ok(v.to_string().into_bytes()),
+        Value::Number(v, _) => Ok(v.to_string().into_bytes()),
+
+        Value::SingleQuotedString(v)
+        | Value::DoubleQuotedString(v)
+        | Value::TripleSingleQuotedString(v)
+        | Value::TripleDoubleQuotedString(v)
+        | Value::EscapedStringLiteral(v)
+        | Value::UnicodeStringLiteral(v)
+        | Value::SingleQuotedByteStringLiteral(v)
+        | Value::DoubleQuotedByteStringLiteral(v)
+        | Value::TripleSingleQuotedByteStringLiteral(v)
+        | Value::TripleDoubleQuotedByteStringLiteral(v)
+        | Value::SingleQuotedRawStringLiteral(v)
+        | Value::DoubleQuotedRawStringLiteral(v)
+        | Value::TripleSingleQuotedRawStringLiteral(v)
+        | Value::TripleDoubleQuotedRawStringLiteral(v)
+        | Value::NationalStringLiteral(v)
+        | Value::HexStringLiteral(v) => Ok(v.as_bytes().to_vec()),
+
+        Value::DollarQuotedString(v) => Ok(v.value.as_bytes().to_vec()),
+
+        Value::Null => Err("CALL NULL arguments are not supported".to_string()),
+
+        Value::Placeholder(v) => Err(format!(
+            "CALL placeholder argument '{}' is not supported",
+            v
+        )),
+    }
+
+}
+
+fn parse_procedure_parameter_name(parameter: &str) -> Result<String, SqlParseError> {
+
+    let mut tokens = parameter.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CREATE PROCEDURE parameter definition is empty".to_string(),
+        ));
+    };
+
+    let candidate = if first.eq_ignore_ascii_case("in")
+        || first.eq_ignore_ascii_case("out")
+        || first.eq_ignore_ascii_case("inout")
+    {
+        tokens.next().ok_or_else(|| {
+            SqlParseError::UnsupportedStatement(
+                "CREATE PROCEDURE parameter name is missing".to_string(),
+            )
+        })?
+    } else {
+        first
+    };
+
+    Ok(common::normalize_identifier!(candidate.trim_matches('`').trim_matches('"')))
+
+}
+
+fn matching_close_parenthesis(text: &str, open_index: usize) -> Option<usize> {
+
+    let mut depth = 0usize;
+
+    for (index, ch) in text.char_indices().skip(open_index) {
+        if ch == '(' {
+            depth += 1;
+            continue;
+        }
+
+        if ch == ')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+
+    None
+
+}
+
+fn split_top_level_csv(text: &str) -> Vec<String> {
+
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+
+    for ch in text.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+
+    parts
 
 }
 

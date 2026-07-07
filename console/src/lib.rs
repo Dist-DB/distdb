@@ -44,6 +44,7 @@ fn show_peers_request_timeout_secs() -> u64 {
 pub enum ConsoleCommand {
     Help,
     Exit,
+    SetDelimiter(String),
     ShowP2p,
     ShowLog,
     ShowPeers,
@@ -184,6 +185,12 @@ impl ConsoleSession {
                 self.runtime.transport().disconnect_active_peer();
                 self.push_log("session exit requested".to_string());
                 Ok(false)
+            },
+
+            ConsoleCommand::SetDelimiter(delimiter) => {
+                log::info!("delimiter set to {}", delimiter);
+                self.push_log(format!("delimiter set to {}", delimiter));
+                Ok(true)
             },
 
             ConsoleCommand::ShowP2p => {
@@ -1004,6 +1011,14 @@ fn resolve_database_for_sql(
 
 pub fn parse_console_command(input: &str) -> Result<Option<ConsoleCommand>, String> {
     commands::parse_console_command(input, TEMP_CONNECT_USER)
+
+}
+
+pub fn parse_console_command_with_delimiter(
+    input: &str,
+    delimiter: &str,
+) -> Result<Option<ConsoleCommand>, String> {
+    commands::parse_console_command_with_delimiter(input, TEMP_CONNECT_USER, delimiter)
 
 }
 

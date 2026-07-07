@@ -43,17 +43,39 @@ pub fn parse_console_command(
     temp_connect_user: &str,
 ) -> Result<Option<ConsoleCommand>, String> {
 
+    parse_console_command_with_delimiter(input, temp_connect_user, ";")
+
+}
+
+pub fn parse_console_command_with_delimiter(
+    input: &str,
+    temp_connect_user: &str,
+    delimiter: &str,
+) -> Result<Option<ConsoleCommand>, String> {
+
+    if delimiter.is_empty() {
+        return Err("active delimiter cannot be empty".to_string());
+    }
+
     let trimmed = input.trim();
 
     if trimmed.is_empty() {
         return Ok(None);
     }
 
-    if !trimmed.ends_with(';') {
+    if let Some(next_delimiter) = parse_delimiter_directive(trimmed, delimiter)? {
+        return Ok(Some(ConsoleCommand::SetDelimiter(next_delimiter)));
+    }
+
+    if !trimmed.ends_with(delimiter) {
         return Ok(None);
     }
 
-    let command_text = trimmed.trim_end_matches(';').trim();
+    let Some(command_text) = trimmed.strip_suffix(delimiter) else {
+        return Ok(None);
+    };
+
+    let command_text = command_text.trim();
     if command_text.contains('\n') {
         let lines: Vec<&str> = command_text
             .lines()
@@ -168,9 +190,10 @@ pub fn print_help() {
     println!("  connect <user@peer-id>;   switch session to a discovered peer");
     println!("  disconnect;               close the active peer session connection");
     println!("  import <file.sql>;        stream SQL file into active database");
+    println!("  delimiter <token>         change SQL terminator for this console session");
     println!("  <sql>;                    run SQL statements (multi-line supported)");
     println!();
-    println!("Note: all commands must end with ';' to execute");
+    println!("Note: default delimiter is ';' (override with `delimiter <token>`)");
 }
 
 pub fn parse_connect_target(
@@ -260,6 +283,50 @@ fn is_console_command_fragment(line: &str) -> bool {
     ) || lowered.starts_with("use ")
         || lowered.starts_with("import ")
         || lowered.starts_with("connect ")
+        || lowered.starts_with("delimiter ")
+
+}
+
+fn parse_delimiter_directive(
+    trimmed_input: &str,
+    active_delimiter: &str,
+) -> Result<Option<String>, String> {
+
+    let normalized = trimmed_input.trim();
+
+    let mut parts = normalized.split_whitespace();
+    let Some(first) = parts.next() else {
+        return Ok(None);
+    };
+
+    if !first.eq_ignore_ascii_case("delimiter") {
+        return Ok(None);
+    }
+
+    let mut next_delimiter = parts
+        .next()
+        .ok_or_else(|| "delimiter requires a token".to_string())?
+        .to_string();
+
+    if parts.next().is_some() {
+        return Err("delimiter accepts exactly one token".to_string());
+    }
+
+    if active_delimiter != ";" && next_delimiter.ends_with(active_delimiter) {
+        if let Some(without_suffix) = next_delimiter.strip_suffix(active_delimiter) {
+            next_delimiter = without_suffix.to_string();
+        }
+    }
+
+    if active_delimiter == ";" && next_delimiter.ends_with(';') && next_delimiter != ";" {
+        next_delimiter = next_delimiter.trim_end_matches(';').to_string();
+    }
+
+    if next_delimiter.is_empty() {
+        return Err("delimiter requires a token".to_string());
+    };
+
+    Ok(Some(next_delimiter))
 
 }
 
@@ -278,6 +345,37 @@ mod tests {
         assert!(matches!(
             parse_console_command("show peers;", TEMP_CONNECT_USER),
             Ok(Some(ConsoleCommand::ShowPeers))
+        ));
+    }
+
+    #[test]
+    fn parse_delimiter_directive_updates_delimiter() {
+        assert!(matches!(
+            parse_console_command_with_delimiter("delimiter //", TEMP_CONNECT_USER, ";"),
+            Ok(Some(ConsoleCommand::SetDelimiter(delimiter))) if delimiter == "//"
+        ));
+    }
+
+    #[test]
+    fn parse_custom_delimiter_executes_sql_with_suffix() {
+        assert!(matches!(
+            parse_console_command_with_delimiter("select 1//", TEMP_CONNECT_USER, "//"),
+            Ok(Some(ConsoleCommand::Sql(sql))) if sql == "select 1"
+        ));
+
+        assert!(matches!(
+            parse_console_command_with_delimiter("select 1;", TEMP_CONNECT_USER, "//"),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn parse_delimiter_requires_token() {
+        assert!(parse_console_command_with_delimiter("delimiter", TEMP_CONNECT_USER, ";").is_err());
+        assert!(parse_console_command_with_delimiter("delimiter ;", TEMP_CONNECT_USER, ";").is_ok());
+        assert!(matches!(
+            parse_console_command_with_delimiter("delimiter //;", TEMP_CONNECT_USER, ";"),
+            Ok(Some(ConsoleCommand::SetDelimiter(delimiter))) if delimiter == "//"
         ));
     }
 
