@@ -21,7 +21,7 @@ jobs:
 
       - name: Run coverage script
         env:
-          COVERAGE_MIN_LINES: "35"
+          COVERAGE_MIN_LINES: "50"
         run: bash scripts/coverage.sh
 
       - name: Upload coverage artifacts

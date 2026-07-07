@@ -31,7 +31,7 @@ if [[ -n "${LLVM_COV:-}" && -n "${LLVM_PROFDATA:-}" ]]; then
   echo "  LLVM_PROFDATA=$LLVM_PROFDATA"
 fi
 
-MIN_LINES="${COVERAGE_MIN_LINES:-0}"
+MIN_LINES="${COVERAGE_MIN_LINES:-50}"
 echo "Using coverage line threshold: ${MIN_LINES}%"
 
 mkdir -p "$OUT_DIR"
