@@ -61,6 +61,7 @@ pub struct DatabaseIndex {
 impl DatabaseIndex {
 
 	pub fn from_table_field(table_id: &str, field: &FieldDef) -> Self {
+		
 		let kind = match field.indexed {
 			FieldIndex::PrimaryKey => DatabaseIndexKind::PrimaryKey,
 			_ => DatabaseIndexKind::Indexed,

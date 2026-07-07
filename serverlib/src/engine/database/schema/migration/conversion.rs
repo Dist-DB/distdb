@@ -38,6 +38,7 @@ pub fn apply_schema_rules_to_payload(
     };
 
     for rule in &rules.type_changes {
+
         let key = common::normalize_identifier!(&rule.field_name);
 
         if let Some(current) = row.get(&key).cloned() {
@@ -45,15 +46,18 @@ pub fn apply_schema_rules_to_payload(
                 .map_err(|_| DatabaseError::SchemaChange(crate::engine::database::schema::error::SchemaError::InvalidFieldType))?;
             row.insert(key, converted);
         }
+
     }
 
     for (from, to) in &rules.renames {
+
         let from_key = common::normalize_identifier!(from);
         let to_key = common::normalize_identifier!(to);
 
         if let Some(value) = row.remove(&from_key) {
             row.entry(to_key).or_insert(value);
         }
+
     }
 
     for field in &rules.removals {
@@ -165,9 +169,13 @@ pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Order
     let right_numeric = decode_numeric_value(right);
 
     match (left_numeric, right_numeric) {
+
         (Some(StoredNumericValue::Signed(lhs)), Some(StoredNumericValue::Signed(rhs))) => lhs.cmp(&rhs),
+        
         (Some(StoredNumericValue::Unsigned(lhs)), Some(StoredNumericValue::Unsigned(rhs))) => lhs.cmp(&rhs),
+        
         (Some(lhs), Some(rhs)) => compare_mixed_numeric_values(lhs, rhs),
+        
         _ => {
             let left_rendered = render_stored_field_value(left);
             let right_rendered = render_stored_field_value(right);
@@ -175,6 +183,7 @@ pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Order
             let right_text = String::from_utf8_lossy(&right_rendered);
             left_text.cmp(&right_text)
         }
+        
     }
 
 }

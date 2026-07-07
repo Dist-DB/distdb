@@ -415,6 +415,7 @@ pub fn decode_row_payload(
     let ordered_field_names = field_names_by_ordinal(schema);
 
     if let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
+        
         let mut row_map = HashMap::with_capacity(ordered_field_names.len());
 
         for (idx, field_name) in ordered_field_names.iter().enumerate() {

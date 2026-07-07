@@ -7,6 +7,7 @@ SERVERLIB_DIR="$ROOT_DIR/serverlib"
 SERVER_DIR="$ROOT_DIR/server"
 COMMON_DIR="$ROOT_DIR/common"
 CONNECTOR_DIR="$ROOT_DIR/connector"
+PEERLIB_DIR="$ROOT_DIR/peerlib"
 
 OUT_DIR="$ROOT_DIR/coverage"
 
@@ -61,6 +62,7 @@ run_cov "$SERVERLIB_DIR" "serverlib"
 run_cov "$SERVER_DIR" "server"
 run_cov "$CONNECTOR_DIR" "connector"
 run_cov "$COMMON_DIR" "common"
+run_cov "$PEERLIB_DIR" "peerlib"
 
 echo
 echo "Coverage reports generated:"
@@ -68,3 +70,4 @@ echo "  $OUT_DIR/serverlib.lcov"
 echo "  $OUT_DIR/server.lcov"
 echo "  $OUT_DIR/connector.lcov"
 echo "  $OUT_DIR/common.lcov"
+echo "  $OUT_DIR/peerlib.lcov"

@@ -465,6 +465,7 @@ impl RuntimeIndexStore {
     where
         I: IntoIterator<Item = &'a DatabaseIndex>,
     {
+        
         for index in indexes {
             
             if !self.should_track_index(index) {
@@ -475,6 +476,7 @@ impl RuntimeIndexStore {
             self.index_mut(&index.index_id.0).remove(&key);
 
         }
+
     }
 
     pub fn remove_table_row_for_table<'a, I>(
@@ -712,6 +714,7 @@ impl RuntimeIndexStore {
                         )
                     })
                 {
+
                     let snapshot = &snapshot_info.snapshot;
                     bootstrapped_tables += 1;
                     bootstrapped_indexes += tracked_indexes.len();
@@ -1018,6 +1021,7 @@ impl RuntimeIndexStore {
                     live_rows,
                     &warm_fields,
                 );
+                
                 let warm_elapsed_ms = warm_started_at.elapsed().as_millis();
 
                 if let Some(data_dir) = snapshot_data_dir.as_ref()

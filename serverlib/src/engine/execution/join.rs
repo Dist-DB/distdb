@@ -61,11 +61,13 @@ where
     let primary_allow_index_short_circuit = primary_condition
         .as_ref()
         .map(|condition| {
+
             collect_indexable_equality_filters_for_schema(
                 primary_schema,
                 condition,
                 &mut primary_filter_map,
             )
+
         })
         .unwrap_or(true);
 
@@ -85,6 +87,7 @@ where
     )
     .into_iter()
     .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+
         if row_matches(&row_map, primary_condition)? {
             acc.push(JoinedRowTuple::from_relation_row(
                 primary_relation,
@@ -93,6 +96,7 @@ where
         }
 
         Ok::<_, String>(acc)
+
     })?;
 
     for (join_index, join) in joins.iter().enumerate() {
@@ -126,11 +130,13 @@ where
         let right_allow_index_short_circuit = right_condition
             .as_ref()
             .map(|condition| {
+
                 collect_indexable_equality_filters_for_schema(
                     right_schema,
                     condition,
                     &mut right_filter_map,
                 )
+
             })
             .unwrap_or(true);
 
@@ -150,14 +156,17 @@ where
         )
         .into_iter()
         .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+
             if row_matches(&row_map, right_condition)? {
                 acc.push(MaterializedRelationRow { row_id, row_map });
             }
 
             Ok::<_, String>(acc)
+
         })?;
 
         if matches!(join.kind, SelectJoinKind::Cross) {
+            
             let mut next_rows = Vec::new();
 
             for left_row in joined_rows {
@@ -168,6 +177,7 @@ where
 
             joined_rows = next_rows;
             continue;
+
         }
 
         let simple_join = join_condition_field_names(join);
@@ -204,9 +214,11 @@ where
         let mut next_rows = Vec::new();
 
         for left_row in joined_rows {
+
             let mut matched_left = false;
 
             if let Some((left_join_field_name, _right_join_field_name)) = simple_join {
+
                 let Some(left_value) = left_row.value(left_join_field_name) else {
                     continue;
                 };
@@ -230,8 +242,11 @@ where
                         }
                     }
                 }
+
             } else {
+
                 for right_row in &right_rows {
+                    
                     let provider = JoinedRowCandidateProvider {
                         left: &left_row,
                         right_relation: &join.relation,
@@ -249,7 +264,9 @@ where
                         matched_right_ids.insert(right_row.row_id);
                         next_rows.push(left_row.append(&join.relation, right_row));
                     }
+                
                 }
+
             }
 
             if !matched_left && matches!(join.kind, SelectJoinKind::Left | SelectJoinKind::Full) {
