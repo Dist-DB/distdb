@@ -85,6 +85,8 @@ pub(super) fn execute_parsed_query(
         SqlOperation::CreateTrigger => Some(execute_create_trigger),
         
         SqlOperation::CreateStoredProcedure => Some(execute_create_stored_procedure),
+
+        SqlOperation::CallStoredProcedure => Some(execute_call_stored_procedure),
         
         SqlOperation::AlterTable => Some(execute_alter_table),
         
@@ -384,5 +386,239 @@ fn execute_create_stored_procedure(
         statement,
     )
 
+}
+
+fn execute_call_stored_procedure(
+    ctx: &mut QueryExecutionContext<'_>,
+    request_id: &str,
+    query: &DataQuery,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let Some(procedure_id) = statement.object_name.as_deref() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "call procedure missing identifier",
+        );
+    };
+
+    let Some(catalog) = resolve_catalog(ctx.catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let Some(procedure) = catalog.stored_procedure(procedure_id).cloned() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("stored procedure '{}' not found", procedure_id),
+        );
+    };
+
+    let provider = HashMap::<String, Vec<u8>>::new();
+    let mut scope = serverlib::ScopedEphemeralTableScope::new(format!(
+        "proc_{}_{}",
+        common::normalize_identifier!(ctx.session_id),
+        procedure.procedure_id,
+    ));
+    let mut alias_map = HashMap::<String, String>::new();
+
+    let invocation_result = serverlib::execute_stored_procedure_invocation(
+        &provider,
+        &procedure,
+        serverlib::EntityInvocationSource::DirectedUser,
+        &mut |action_sql| {
+            let parsed_action_sql = serverlib::parse_mysql8_sql_requests(action_sql, &query.database_id)
+                .map_err(|err| format!("call action parse failed: {err}"))?;
+
+            let mut last_response: Option<ConnectorResponse> = None;
+
+            for parsed_statement in parsed_action_sql {
+
+                if matches!(parsed_statement.operation, SqlOperation::CreateTable) {
+
+                    let plan = serverlib::create_table_plan_from_statement(&parsed_statement.sql)
+                        .map_err(|err| format!("call action create table parse failed: {err}"))?;
+
+                    if plan.temporary {
+
+                        let logical_table_id = common::normalize_identifier!(plan.table_id.clone());
+
+                        let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
+                            return Err(format!("database '{}' not found", query.database_id));
+                        };
+
+                        let scoped_table_id = scope.create_table(
+                            catalog,
+                            ctx.wal,
+                            plan.table_id,
+                            plan.schema,
+                        )?;
+
+                        alias_map.insert(logical_table_id, scoped_table_id);
+
+                        last_response = Some(ConnectorResponse::applied(
+                            request_id.to_string(),
+                            ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+                        ));
+                        
+                        continue;
+                    
+                    }
+
+                }
+
+                let rewritten_sql = rewrite_sql_with_call_aliases(&parsed_statement.sql, &alias_map);
+                let rewritten_parsed = serverlib::parse_mysql8_sql_requests(
+                    &rewritten_sql,
+                    &query.database_id,
+                )
+                .map_err(|err| format!("call action parse failed after alias rewrite: {err}"))?;
+
+                if rewritten_parsed.len() != 1 {
+                    return Err("call action rewrite produced unsupported multi-statement execution".to_string());
+                }
+
+                let action_query = DataQuery {
+                    database_id: query.database_id.clone(),
+                    sql: rewritten_sql,
+                };
+
+                let response = execute_parsed_query(
+                    request_id,
+                    &action_query,
+                    ctx.catalogs,
+                    ctx.wal,
+                    ctx.node_data_dir,
+                    ctx.runtime_indexes,
+                    rewritten_parsed,
+                    ctx.external_write_group_id,
+                    None,
+                    ctx.session_id,
+                );
+
+                if matches!(response.status, connector::ResponseStatus::Rejected) {
+                    let message = match response.result {
+                        ConnectorResult::Error(message) => message,
+                        _ => "call action execution failed".to_string(),
+                    };
+                    return Err(message);
+                }
+
+                last_response = Some(response);
+            }
+
+            Ok(last_response.unwrap_or_else(|| {
+                ConnectorResponse::applied(
+                    request_id.to_string(),
+                    ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+                )
+            }))
+        },
+    );
+
+    let cleanup_result = match resolve_catalog_mut(ctx.catalogs, &query.database_id) {
+        Some(catalog) => scope.cleanup(catalog, ctx.wal),
+        None => Err(format!("database '{}' not found", query.database_id)),
+    };
+
+    match (invocation_result, cleanup_result) {
+        (Ok(Some(response)), Ok(())) => response,
+
+        (Ok(None), Ok(())) => ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        ),
+
+        (Err(err), Ok(())) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("call procedure failed: {err}"),
+        ),
+
+        (Ok(_), Err(cleanup_err)) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("call procedure cleanup failed: {cleanup_err}"),
+        ),
+
+        (Err(err), Err(cleanup_err)) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("call procedure failed: {err}; cleanup failed: {cleanup_err}"),
+        ),
+    }
+
+}
+
+fn rewrite_sql_with_call_aliases(sql: &str, alias_map: &HashMap<String, String>) -> String {
+    if alias_map.is_empty() {
+        return sql.to_string();
+    }
+
+    let mut out = String::with_capacity(sql.len());
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c == '\'' && !in_double_quote && !in_backtick {
+            in_single_quote = !in_single_quote;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '"' && !in_single_quote && !in_backtick {
+            in_double_quote = !in_double_quote;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '`' && !in_single_quote && !in_double_quote {
+            in_backtick = !in_backtick;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if in_single_quote || in_double_quote || in_backtick {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            i += 1;
+            while i < chars.len() {
+                let next = chars[i];
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+
+            let token = chars[start..i].iter().collect::<String>();
+            let normalized = common::normalize_identifier!(token.as_str());
+            if let Some(mapped) = alias_map.get(&normalized) {
+                out.push('`');
+                out.push_str(mapped);
+                out.push('`');
+            } else {
+                out.push_str(&token);
+            }
+            continue;
+        }
+
+        out.push(c);
+        i += 1;
+    }
+
+    out
 }
 

@@ -54,6 +54,7 @@ pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {
                 .unwrap_or_else(|| "NULL".to_string());
 
             vec![
+                b"table".to_vec(),
                 field.field_name.clone().into_bytes(),
                 field
                     .metadata
@@ -70,13 +71,35 @@ pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {
 
     SelectExecutionResult {
         columns: vec![
-            text_column(1, "field"),
-            text_column(2, "type"),
-            text_column(3, "null"),
-            text_column(4, "key"),
-            text_column(5, "default"),
+            text_column(1, "object_type"),
+            text_column(2, "field"),
+            text_column(3, "type"),
+            text_column(4, "null"),
+            text_column(5, "key"),
+            text_column(6, "default"),
         ],
         rows,
+    }
+
+}
+
+pub fn describe_sql_object_result(
+    object_type: &str,
+    object_name: &str,
+    sql: &str,
+) -> SelectExecutionResult {
+
+    SelectExecutionResult {
+        columns: vec![
+            text_column(1, "object_type"),
+            text_column(2, "object_name"),
+            text_column(3, "sql"),
+        ],
+        rows: vec![vec![
+            object_type.as_bytes().to_vec(),
+            object_name.as_bytes().to_vec(),
+            sql.as_bytes().to_vec(),
+        ]],
     }
 
 }

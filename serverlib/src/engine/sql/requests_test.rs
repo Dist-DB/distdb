@@ -452,6 +452,28 @@ fn drop_procedure_maps_to_drop_stored_procedure_operation() {
 }
 
 #[test]
+fn drop_procedure_if_exists_maps_to_drop_stored_procedure_operation() {
+    let requests = parse_mysql8_sql_requests("drop procedure if exists p_sync", "main")
+        .expect("drop procedure if exists should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
+    assert_eq!(requests[0].operation, SqlOperation::DropStoredProcedure);
+    assert_eq!(requests[0].object_name.as_deref(), Some("p_sync"));
+}
+
+#[test]
+fn call_procedure_maps_to_call_stored_procedure_operation() {
+    let requests = parse_mysql8_sql_requests("call p_sync()", "main")
+        .expect("call procedure should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::CallStoredProcedure);
+    assert_eq!(requests[0].object_name.as_deref(), Some("p_sync"));
+}
+
+#[test]
 fn create_trigger_maps_to_create_trigger_operation() {
     let requests = parse_mysql8_sql_requests(
             "create trigger trg_users_bi before insert on users for each row execute function audit_users()",

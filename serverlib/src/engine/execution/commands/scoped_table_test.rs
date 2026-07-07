@@ -7,6 +7,7 @@ use crate::{
 
 use super::{
     create_scoped_ephemeral_table, release_scoped_ephemeral_table,
+    ScopedEphemeralTableScope,
 };
 
 fn users_schema() -> TableSchema {
@@ -117,4 +118,54 @@ fn release_scoped_ephemeral_table_is_idempotent() {
         .expect("second release should succeed");
 
     assert!(handle.released());
+}
+
+#[test]
+fn scoped_ephemeral_table_scope_generates_unique_table_ids() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let wal = ConcurrentWalManager::new();
+
+    let mut scope_a = ScopedEphemeralTableScope::new("proc_sessiona");
+    let mut scope_b = ScopedEphemeralTableScope::new("proc_sessionb");
+
+    let table_a = scope_a
+        .create_table(&mut catalog, &wal, "tmp_users", users_schema())
+        .expect("scope a table should be created");
+    let table_b = scope_b
+        .create_table(&mut catalog, &wal, "tmp_users", users_schema())
+        .expect("scope b table should be created");
+
+    assert_ne!(table_a, table_b);
+    assert!(catalog.table(&table_a).is_some());
+    assert!(catalog.table(&table_b).is_some());
+}
+
+#[test]
+fn scoped_ephemeral_table_scope_cleanup_is_isolated_per_scope() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let wal = ConcurrentWalManager::new();
+
+    let mut scope_a = ScopedEphemeralTableScope::new("proc_sessiona");
+    let mut scope_b = ScopedEphemeralTableScope::new("proc_sessionb");
+
+    let table_a = scope_a
+        .create_table(&mut catalog, &wal, "tmp_users", users_schema())
+        .expect("scope a table should be created");
+    let table_b = scope_b
+        .create_table(&mut catalog, &wal, "tmp_users", users_schema())
+        .expect("scope b table should be created");
+
+    scope_a
+        .cleanup(&mut catalog, &wal)
+        .expect("scope a cleanup should succeed");
+
+    assert!(catalog.table(&table_a).is_none());
+    assert!(catalog.table(&table_b).is_some());
+
+    scope_b
+        .cleanup(&mut catalog, &wal)
+        .expect("scope b cleanup should succeed");
+    assert!(catalog.table(&table_b).is_none());
 }

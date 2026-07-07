@@ -10,7 +10,9 @@ use super::{
     cleanup_temporary_tables, execute_automatic_triggers_for_event,
     execute_stored_procedure_invocation, execute_stored_procedure_invocation_over_cursor,
     execute_stored_procedure_invocation_over_cursor_with_cleanup,
+    execute_stored_procedure_invocation_over_cursor_with_scoped_teardown,
     execute_stored_procedure_invocation_with_cleanup, EntityInvocationSource,
+    execute_stored_procedure_invocation_with_scoped_teardown,
 };
 
 #[test]
@@ -329,5 +331,140 @@ fn execute_stored_procedure_invocation_over_cursor_with_cleanup_runs_cleanup() {
 
     assert_eq!(outcomes, vec!["select 'on'".to_string()]);
     assert!(catalog.table("tmp_users").is_none());
+
+}
+
+#[test]
+fn execute_stored_procedure_invocation_with_scoped_teardown_cleans_up_owned_tables() {
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+    let wal = ConcurrentWalManager::new();
+
+    catalog
+        .register_stored_procedure(
+            "refresh_accounts",
+            "create procedure refresh_accounts() begin select 1; end",
+            vec!["accounts".to_string()],
+        )
+        .expect("procedure register should succeed");
+
+    let procedure = catalog
+        .stored_procedure("refresh_accounts")
+        .expect("procedure should exist")
+        .clone();
+
+    let result = execute_stored_procedure_invocation_with_scoped_teardown(
+        &mut catalog,
+        &wal,
+        &HashMap::new(),
+        &procedure,
+        EntityInvocationSource::DirectedUser,
+        "session-a",
+        &mut |_sql, scope, catalog, wal| {
+            let scoped_table_id = scope
+                .create_table(
+                    catalog,
+                    wal,
+                    "tmp_users",
+                    TableSchema::new(Vec::new()),
+                )?;
+
+            assert!(catalog.table(&scoped_table_id).is_some());
+
+            Ok("ok".to_string())
+        },
+    )
+    .expect("scoped invocation should succeed");
+
+    assert_eq!(result, None);
+    assert!(catalog
+        .table_ids()
+        .into_iter()
+        .all(|table_id| !table_id.contains("tmp_users")));
+
+}
+
+#[test]
+fn scoped_teardown_does_not_bleed_between_procedure_instances() {
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+    let wal = ConcurrentWalManager::new();
+
+    catalog
+        .register_stored_procedure(
+            "refresh_accounts",
+            "create procedure refresh_accounts() begin if active = 1 then select 'on'; end if; end",
+            vec!["accounts".to_string()],
+        )
+        .expect("procedure register should succeed");
+
+    let procedure = catalog
+        .stored_procedure("refresh_accounts")
+        .expect("procedure should exist")
+        .clone();
+
+    let mut rows = Vec::new();
+    let mut row = HashMap::new();
+    row.insert("active".to_string(), b"1".to_vec());
+    rows.push(row);
+
+    let mut cursor_source = VecSqlCursorSource::new(rows);
+    let mut cursor_frame = SqlCursorFrame::new();
+
+    let mut first_scope_table_ids = Vec::new();
+
+    let outcomes = execute_stored_procedure_invocation_over_cursor_with_scoped_teardown(
+        &mut catalog,
+        &wal,
+        &mut cursor_source,
+        &mut cursor_frame,
+        &procedure,
+        EntityInvocationSource::DirectedUser,
+        "session-a",
+        &mut |_sql, _frame, scope, catalog, wal| {
+            let table_id = scope
+                .create_table(
+                    catalog,
+                    wal,
+                    "tmp_users",
+                    TableSchema::new(Vec::new()),
+                )?;
+            first_scope_table_ids.push(table_id);
+            Ok("ok".to_string())
+        },
+    )
+    .expect("scoped cursor invocation should succeed");
+
+    assert_eq!(outcomes, vec!["ok".to_string()]);
+
+    for table_id in &first_scope_table_ids {
+        assert!(catalog.table(table_id).is_none());
+    }
+
+    let result = execute_stored_procedure_invocation_with_scoped_teardown(
+        &mut catalog,
+        &wal,
+        &HashMap::new(),
+        &procedure,
+        EntityInvocationSource::DirectedUser,
+        "session-b",
+        &mut |_sql, scope, catalog, wal| {
+            let table_id = scope
+                .create_table(
+                    catalog,
+                    wal,
+                    "tmp_users",
+                    TableSchema::new(Vec::new()),
+                )?;
+
+            assert!(table_id.contains("session"));
+            Ok("ok2".to_string())
+        },
+    )
+    .expect("second scoped invocation should succeed");
+
+    assert_eq!(result, None);
 
 }

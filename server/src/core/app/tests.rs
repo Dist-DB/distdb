@@ -3852,7 +3852,7 @@ fn describe_table_query_returns_schema_rows() {
 
     assert_eq!(
         column_names,
-        vec!["field", "type", "null", "key", "default"]
+        vec!["object_type", "field", "type", "null", "key", "default"]
     );
     assert_eq!(result.rows.len(), 2);
 
@@ -3860,15 +3860,162 @@ fn describe_table_query_returns_schema_rows() {
         .rows
         .first()
         .expect("describe should return first row");
-    assert_eq!(String::from_utf8_lossy(&first_row[0]), "id");
-    assert_eq!(String::from_utf8_lossy(&first_row[3]), "PRI");
+    assert_eq!(String::from_utf8_lossy(&first_row[0]), "table");
+    assert_eq!(String::from_utf8_lossy(&first_row[1]), "id");
+    assert_eq!(String::from_utf8_lossy(&first_row[4]), "PRI");
 
     let second_row = result
         .rows
         .get(1)
         .expect("describe should return second row");
 
-    assert_eq!(String::from_utf8_lossy(&second_row[0]), "email");
+    assert_eq!(String::from_utf8_lossy(&second_row[1]), "email");
+}
+
+#[test]
+fn describe_sql_backed_objects_returns_original_sql_and_object_type() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-describe-sql-object-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::Int(64),
+                nullable: false,
+                indexed: FieldIndex::PrimaryKey,
+                default_value: None,
+                metadata: None,
+            }]),
+        )
+        .expect("users table should register");
+
+    let trigger_sql =
+        "create trigger trg_users_bi before insert on users for each row begin end";
+    let procedure_sql = "create procedure p_sync() begin select 1; end";
+
+    catalog
+        .register_trigger("trg_users_bi", trigger_sql, vec!["users".to_string()])
+        .expect("trigger should register");
+    catalog
+        .register_stored_procedure("p_sync", procedure_sql, Vec::new())
+        .expect("procedure should register");
+
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let describe_trigger = ConnectorRequest::new(
+        "req-describe-trigger-1",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "describe trg_users_bi".to_string(),
+            },
+        },
+    );
+
+    let describe_procedure = ConnectorRequest::new(
+        "req-describe-procedure-1",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "describe p_sync".to_string(),
+            },
+        },
+    );
+
+    let trigger_response = app.handle_connector_request(&describe_trigger);
+    let procedure_response = app.handle_connector_request(&describe_procedure);
+
+    assert_eq!(trigger_response.status, ResponseStatus::Applied);
+    assert_eq!(procedure_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(trigger_result) = trigger_response.result else {
+        panic!("expected query result for trigger describe");
+    };
+    let ConnectorResult::Query(procedure_result) = procedure_response.result else {
+        panic!("expected query result for procedure describe");
+    };
+
+    assert_eq!(String::from_utf8_lossy(&trigger_result.rows[0][0]), "trigger");
+    assert_eq!(String::from_utf8_lossy(&trigger_result.rows[0][1]), "trg_users_bi");
+    assert_eq!(String::from_utf8_lossy(&trigger_result.rows[0][2]), trigger_sql);
+
+    assert_eq!(
+        String::from_utf8_lossy(&procedure_result.rows[0][0]),
+        "stored_procedure"
+    );
+    assert_eq!(String::from_utf8_lossy(&procedure_result.rows[0][1]), "p_sync");
+    assert_eq!(String::from_utf8_lossy(&procedure_result.rows[0][2]), procedure_sql);
+}
+
+#[test]
+fn drop_if_exists_for_sql_backed_objects_is_idempotent() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-drop-if-exists-sql-objects-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table("users", TableSchema::new(Vec::new()))
+        .expect("users table should register");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let drop_missing_trigger = ConnectorRequest::new(
+        "req-drop-missing-trigger-if-exists",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "drop trigger if exists trg_missing".to_string(),
+            },
+        },
+    );
+
+    let drop_missing_procedure = ConnectorRequest::new(
+        "req-drop-missing-procedure-if-exists",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "drop procedure if exists p_missing".to_string(),
+            },
+        },
+    );
+
+    let trigger_response = app.handle_connector_request(&drop_missing_trigger);
+    let procedure_response = app.handle_connector_request(&drop_missing_procedure);
+
+    assert_eq!(trigger_response.status, ResponseStatus::Applied);
+    assert_eq!(procedure_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Mutation(trigger_mutation) = trigger_response.result else {
+        panic!("expected mutation result for trigger drop if exists");
+    };
+    let ConnectorResult::Mutation(procedure_mutation) = procedure_response.result else {
+        panic!("expected mutation result for procedure drop if exists");
+    };
+
+    assert_eq!(trigger_mutation.affected_rows, 0);
+    assert_eq!(procedure_mutation.affected_rows, 0);
 }
 
 #[test]

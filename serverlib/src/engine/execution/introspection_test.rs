@@ -62,15 +62,34 @@ fn describe_table_result_uses_schema_metadata() {
 
     let result = describe_table_result(&schema);
 
-    assert_eq!(result.columns.len(), 5);
+    assert_eq!(result.columns.len(), 6);
     assert_eq!(result.rows.len(), 2);
-    assert_eq!(String::from_utf8(result.rows[0][0].clone()).unwrap(), "id");
-    assert_eq!(String::from_utf8(result.rows[0][2].clone()).unwrap(), "NO");
-    assert_eq!(String::from_utf8(result.rows[0][3].clone()).unwrap(), "PRI");
-    assert_eq!(String::from_utf8(result.rows[1][2].clone()).unwrap(), "YES");
-    assert_eq!(String::from_utf8(result.rows[1][3].clone()).unwrap(), "MUL");
+    assert_eq!(String::from_utf8(result.rows[0][0].clone()).unwrap(), "table");
+    assert_eq!(String::from_utf8(result.rows[0][1].clone()).unwrap(), "id");
+    assert_eq!(String::from_utf8(result.rows[0][3].clone()).unwrap(), "NO");
+    assert_eq!(String::from_utf8(result.rows[0][4].clone()).unwrap(), "PRI");
+    assert_eq!(String::from_utf8(result.rows[1][3].clone()).unwrap(), "YES");
+    assert_eq!(String::from_utf8(result.rows[1][4].clone()).unwrap(), "MUL");
     assert_eq!(
-        String::from_utf8(result.rows[1][4].clone()).unwrap(),
+        String::from_utf8(result.rows[1][5].clone()).unwrap(),
         "sam@example.com"
+    );
+}
+
+#[test]
+fn describe_sql_object_result_returns_original_sql() {
+    let result = describe_sql_object_result(
+        "stored_procedure",
+        "p_sync",
+        "create procedure p_sync() begin select 1; end",
+    );
+
+    assert_eq!(result.columns.len(), 3);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(String::from_utf8(result.rows[0][0].clone()).unwrap(), "stored_procedure");
+    assert_eq!(String::from_utf8(result.rows[0][1].clone()).unwrap(), "p_sync");
+    assert_eq!(
+        String::from_utf8(result.rows[0][2].clone()).unwrap(),
+        "create procedure p_sync() begin select 1; end"
     );
 }

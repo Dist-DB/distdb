@@ -207,37 +207,95 @@ pub(super) fn execute_select_impl(
             );
         };
 
-        let Some((catalog, table_id)) = resolve_catalog_for_table_reference(
-            catalogs,
-            &query.database_id,
-            object_name,
-        ) else {
-            let database_name = if query.database_id.trim().is_empty() {
-                object_name
-                    .rsplit_once('.')
-                    .map(|(database_name, _)| database_name)
-                    .unwrap_or(object_name)
+        let (catalog, normalized_object_id) = if query.database_id.trim().is_empty() {
+            
+            if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+                
+                let Some(catalog) = resolve_catalog(catalogs, database_name) else {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("database '{}' not found", database_name),
+                    );
+                };
+                
+                (catalog, common::normalize_identifier!(object_id))
+
             } else {
-                &query.database_id
+
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!(
+                        "database '{}' not found",
+                        if query.database_id.is_empty() {
+                            object_name
+                        } else {
+                            &query.database_id
+                        }
+                    ),
+                );
+
+            }
+
+        } else if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+            
+            let Some(catalog) = resolve_catalog(catalogs, database_name) else {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("database '{}' not found", database_name),
+                );
             };
 
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("database '{}' not found", database_name),
-            );
+            (catalog, common::normalize_identifier!(object_id))
+
+        } else {
+
+            let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("database '{}' not found", query.database_id),
+                );
+            };
+
+            (catalog, common::normalize_identifier!(object_name))
+
         };
 
-        let Some(schema) = catalog.table_schema(&table_id) else {
+        let result = if let Some(schema) = catalog.table_schema(&normalized_object_id) {
+            
+            serverlib::describe_table_result(schema)
+
+        } else if let Some(view) = catalog.view(&normalized_object_id) {
+
+            serverlib::describe_sql_object_result("view", &view.view_id, &view.sql)
+
+        } else if let Some(trigger) = catalog.trigger(&normalized_object_id) {
+
+            serverlib::describe_sql_object_result("trigger", &trigger.trigger_id, &trigger.sql)
+
+        } else if let Some(procedure) = catalog.stored_procedure(&normalized_object_id) {
+
+            serverlib::describe_sql_object_result(
+                "stored_procedure",
+                &procedure.procedure_id,
+                &procedure.sql,
+            )
+
+        } else {
+
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!(
-                    "table '{}' not found in database '{}'",
-                    table_id, query.database_id
+                    "object '{}' not found in database '{}'",
+                    normalized_object_id,
+                    if query.database_id.trim().is_empty() {
+                        catalog.database_id.0.as_str()
+                    } else {
+                        query.database_id.as_str()
+                    }
                 ),
             );
-        };
 
-        let result = serverlib::describe_table_result(schema);
+        };
 
         return ConnectorResponse::applied(
             request_id.to_string(),
@@ -693,6 +751,7 @@ pub(super) fn execute_select_with_ctes(
             .map_err(|message| format!("cte execution failed: {message}"))?;
 
             scoped_handles.push(scoped_handle);
+
         }
 
         let mut main_plan = read_plan.clone();

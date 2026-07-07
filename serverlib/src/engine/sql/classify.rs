@@ -104,6 +104,12 @@ pub(super) fn classify_statement(
             Some(name.to_string()),
         ),
 
+        Statement::Call(function) => (
+            SqlDirective::Retrieve,
+            SqlOperation::CallStoredProcedure,
+            Some(function.name.to_string()),
+        ),
+
         Statement::CreateIndex(create_index) => (
             SqlDirective::Create,
             SqlOperation::CreateOther,
@@ -244,6 +250,7 @@ pub(super) fn classify_statement(
             | SqlOperation::CreateView
             | SqlOperation::CreateTrigger
             | SqlOperation::CreateStoredProcedure
+            | SqlOperation::CallStoredProcedure
             | SqlOperation::DropDatabase
             | SqlOperation::DropTable
             | SqlOperation::DropView
@@ -366,11 +373,11 @@ fn use_target_to_object_name(use_target: &Use) -> Option<String> {
 
     match use_target {
 
-        Use::Catalog(name)
-        | Use::Schema(name)
-        | Use::Database(name)
-        | Use::Warehouse(name)
-        | Use::Object(name) => Some(name.to_string()),
+        Use::Catalog(name) |
+        Use::Schema(name) |
+        Use::Database(name) |
+        Use::Warehouse(name) |
+        Use::Object(name) => Some(name.to_string()),
 
         Use::Default => None,
 
@@ -403,9 +410,24 @@ pub(super) fn classify_text_fallback(
 
     let first = tokens.first()?;
     let verb = first.to_ascii_lowercase();
-    
-    if verb != "create" && verb != "drop" {
-        return None;
+
+    match verb.as_str() {
+
+        "create" | "drop" => {},
+
+        "call" => {
+            let object_name = tokens
+                .get(1)
+                .map(|name| name.trim_matches(|c| c == ';' || c == '(' || c == ')').to_string());
+            return Some((
+                SqlDirective::Retrieve,
+                SqlOperation::CallStoredProcedure,
+                object_name,
+            ));
+        },
+
+        _ => return None,
+
     }
 
     let mut object_idx = 1usize;
@@ -423,42 +445,24 @@ pub(super) fn classify_text_fallback(
 
     match (verb.as_str(), object_kind.as_str()) {
 
-        ("create", "trigger") => {
-            Some((SqlDirective::Create, SqlOperation::CreateTrigger, object_name))
-        },
+        ("create", "trigger")   => Some((SqlDirective::Create, SqlOperation::CreateTrigger, object_name)),
 
-        ("drop", "trigger") => {
-            Some((SqlDirective::AlterSchema, SqlOperation::DropTrigger, object_name))
-        },
+        ("drop", "trigger")     => Some((SqlDirective::AlterSchema, SqlOperation::DropTrigger, object_name)),
 
-        ("create", "procedure") => Some((
-            SqlDirective::Create,
-            SqlOperation::CreateStoredProcedure,
-            object_name,
-        )),
+        ("create", "procedure") => Some((SqlDirective::Create, SqlOperation::CreateStoredProcedure, object_name)),
 
-        ("drop", "procedure") => Some((
-            SqlDirective::AlterSchema,
-            SqlOperation::DropStoredProcedure,
-            object_name,
-        )),
+        ("drop", "procedure")   => Some((SqlDirective::AlterSchema, SqlOperation::DropStoredProcedure, object_name)),
 
-        ("drop", "database") => Some((
-            SqlDirective::AlterSchema,
-            SqlOperation::DropDatabase,
-            object_name,
-        )),
+        ("drop", "database")    => Some((SqlDirective::AlterSchema, SqlOperation::DropDatabase, object_name)),
 
-        ("create", "database") | ("create", "schema") => Some((
-            SqlDirective::Create,
-            SqlOperation::CreateDatabase,
-            object_name,
-        )),
+        ("create", "database") | 
+        ("create", "schema")    => Some((SqlDirective::Create, SqlOperation::CreateDatabase, object_name)),
 
         // Intentionally unsupported for now.
-        ("create", "function") | ("drop", "function") => None,
+        ("create", "function") | 
+        ("drop", "function")    => None,
         
-        _ => None,
+        _                       => None,
 
     }
     

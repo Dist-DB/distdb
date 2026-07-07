@@ -46,7 +46,6 @@ use serverlib::{
 
 use super::catalogs::{
     resolve_catalog,
-    resolve_catalog_for_table_reference,
     resolve_catalog_for_table_reference_mut,
     resolve_catalog_mut,
 };

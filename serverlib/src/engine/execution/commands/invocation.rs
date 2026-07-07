@@ -3,6 +3,7 @@ use crate::{
     DatabaseTrigger, TriggerEventKind, TriggerTiming,
 };
 
+use super::scoped_table::ScopedEphemeralTableScope;
 use super::super::ConditionValueProvider;
 use super::control_flow::{
     execute_if_else_end_from_create_procedure_sql, execute_if_else_end_plan,
@@ -45,6 +46,7 @@ pub fn cleanup_temporary_tables(
         .collect::<Vec<_>>();
 
     for table_id in temporary_tables {
+        
         match catalog.drop_table(&table_id) {
             Ok(()) | Err(DatabaseError::TableNotFound) => {}
             Err(err) => {
@@ -54,6 +56,7 @@ pub fn cleanup_temporary_tables(
 
         wal.delete_stream(&table_id)
             .map_err(|err| format!("temporary table cleanup failed: {err}"))?;
+    
     }
 
     Ok(())
@@ -86,6 +89,43 @@ where
         (Err(err), Ok(())) => Err(err),
         (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
         (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
+    }
+
+}
+
+pub fn execute_stored_procedure_invocation_with_scoped_teardown<R, E>(
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    provider: &dyn ConditionValueProvider,
+    procedure: &DatabaseStoredProcedure,
+    source: EntityInvocationSource,
+    session_id: &str,
+    execute_action: &mut E,
+) -> Result<Option<R>, String>
+where
+    E: FnMut(&str, &mut ScopedEphemeralTableScope, &mut DatabaseCatalog, &ConcurrentWalManager) -> Result<R, String>,
+{
+
+    let mut scope = ScopedEphemeralTableScope::new(format!(
+        "proc_{}_{}",
+        common::normalize_identifier!(session_id),
+        &procedure.procedure_id,
+    ));
+
+    let invocation_result = execute_stored_procedure_invocation(
+        provider,
+        procedure,
+        source,
+        &mut |sql| execute_action(sql, &mut scope, catalog, wal),
+    );
+
+    let cleanup_result = scope.cleanup(catalog, wal);
+
+    match (invocation_result, cleanup_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(cleanup_err)) => Err(format!("temporary table scoped cleanup failed: {cleanup_err}")),
+        (Err(err), Err(cleanup_err)) => Err(format!("{err}; temporary table scoped cleanup failed: {cleanup_err}")),
     }
 
 }
@@ -150,6 +190,52 @@ where
         (Err(err), Ok(())) => Err(err),
         (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
         (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
+    }
+
+}
+
+pub fn execute_stored_procedure_invocation_over_cursor_with_scoped_teardown<S, R, E>(
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    cursor_source: &mut S,
+    cursor_frame: &mut SqlCursorFrame,
+    procedure: &DatabaseStoredProcedure,
+    source: EntityInvocationSource,
+    session_id: &str,
+    execute_action: &mut E,
+) -> Result<Vec<R>, String>
+where
+    S: SqlCursorSource,
+    E: FnMut(
+        &str,
+        &SqlCursorFrame,
+        &mut ScopedEphemeralTableScope,
+        &mut DatabaseCatalog,
+        &ConcurrentWalManager,
+    ) -> Result<R, String>,
+{
+
+    let mut scope = ScopedEphemeralTableScope::new(format!(
+        "proc_{}_{}",
+        common::normalize_identifier!(session_id),
+        &procedure.procedure_id,
+    ));
+
+    let result = execute_stored_procedure_invocation_over_cursor(
+        cursor_source,
+        cursor_frame,
+        procedure,
+        source,
+        &mut |sql, frame| execute_action(sql, frame, &mut scope, catalog, wal),
+    );
+
+    let cleanup_result = scope.cleanup(catalog, wal);
+
+    match (result, cleanup_result) {
+        (Ok(outcomes), Ok(())) => Ok(outcomes),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(cleanup_err)) => Err(format!("temporary table scoped cleanup failed: {cleanup_err}")),
+        (Err(err), Err(cleanup_err)) => Err(format!("{err}; temporary table scoped cleanup failed: {cleanup_err}")),
     }
 
 }

@@ -33,6 +33,7 @@ pub enum SqlOperation {
     CreateView,
     CreateTrigger,
     CreateStoredProcedure,
+    CallStoredProcedure,
     CreateOther,
     DropDatabase,
     DropTable,

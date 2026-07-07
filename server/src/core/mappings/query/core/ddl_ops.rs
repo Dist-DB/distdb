@@ -539,6 +539,8 @@ fn execute_drop_database(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
+    let has_if_exists = drop_statement_has_if_exists(&statement.sql);
+
     let Some(database_name) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -560,6 +562,12 @@ fn execute_drop_database(
     };
 
     let Some(catalog) = removed else {
+        if has_if_exists {
+            return ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            );
+        }
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -594,6 +602,8 @@ fn execute_drop_entity_object(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
+    let has_if_exists = drop_statement_has_if_exists(&statement.sql);
+
     let Some(object_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -626,6 +636,12 @@ fn execute_drop_entity_object(
     };
 
     if catalog.object(object_type, &normalized_object_id).is_none() {
+        if has_if_exists {
+            return ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            );
+        }
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("drop {kind_label} failed: '{normalized_object_id}' not found"),
@@ -746,6 +762,11 @@ fn execute_drop_entity_object(
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
 
+}
+
+fn drop_statement_has_if_exists(sql: &str) -> bool {
+    let lowered = sql.to_ascii_lowercase();
+    lowered.starts_with("drop ") && lowered.contains(" if exists ")
 }
 
 pub(crate) fn execute_create_view_impl(

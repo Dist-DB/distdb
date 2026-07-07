@@ -307,6 +307,180 @@ fn commit_is_explicitly_recognized() {
 }
 
 #[test]
+fn call_procedure_executes_branch_sql_as_smoke_test() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_sync",
+            "create procedure p_sync() begin if active = 1 then select abs(42); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_sync()".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-smoke",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["0".to_string()]]);
+}
+
+#[test]
+fn call_procedure_tears_down_scoped_temporary_tables() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_temp",
+            "create procedure p_temp() begin if active = 1 then create temporary table tmp_users (id bigint primary key); else create temporary table tmp_users (id bigint primary key); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_temp()".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-temp",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let catalog = catalogs
+        .values()
+        .next()
+        .expect("catalog should be present after call");
+
+    assert!(catalog
+        .table_ids()
+        .into_iter()
+        .all(|table_id| !table_id.contains("tmp_users")));
+}
+
+#[test]
+fn call_procedure_temp_table_insert_and_select_returns_rows_and_cleans_up() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_temp_items",
+            "create procedure p_temp_items() begin if active = 1 then create temporary table tmp_items (id bigint primary key); insert into tmp_items (id) values (1); select id from tmp_items order by id; else create temporary table tmp_items (id bigint primary key); insert into tmp_items (id) values (11); insert into tmp_items (id) values (22); select id from tmp_items order by id; end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_temp_items()".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-temp-items",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Query(result) = response.result else {
+        panic!("expected query response from CALL")
+    };
+
+    let column_names = result
+        .columns
+        .iter()
+        .map(|field| field.field_name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(column_names, vec!["id".to_string()]);
+
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8(cell).expect("cell should be utf8"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows, vec![vec!["11".to_string()], vec!["22".to_string()]]);
+
+    let catalog = catalogs
+        .values()
+        .next()
+        .expect("catalog should be present after call");
+
+    assert!(catalog
+        .table_ids()
+        .into_iter()
+        .all(|table_id| !table_id.contains("tmp_items")));
+}
+
+#[test]
 fn append_row_payload_record_rejects_missing_refid() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
