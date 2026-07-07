@@ -62,13 +62,14 @@ pub fn parse_if_else_end_plan_from_statement(
             },
 
             NextClause::ElseIfSpaced => {
-                remaining =
-                    branch_tail[split.next_clause_index + "else if ".len()..].trim_start();
+                remaining = branch_tail[split.next_clause_index + "else if ".len()..].trim_start();
             },
 
             NextClause::Else => {
+
                 let else_tail = branch_tail[split.next_clause_index + "else ".len()..].trim_start();
                 let lower_else = else_tail.to_ascii_lowercase();
+                
                 let end_index = lower_else.rfind(" end if").or_else(|| {
                     if lower_else.ends_with("end if") {
                         Some(lower_else.len() - "end if".len())
@@ -98,6 +99,7 @@ pub fn parse_if_else_end_plan_from_statement(
                     branches,
                     else_action_sql: Some(else_action_sql),
                 });
+
             },
 
             NextClause::EndIf => {
@@ -232,6 +234,7 @@ fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError>
 }
 
 fn find_keyword_boundary_index(haystack: &str, keyword: &str) -> Option<usize> {
+
     let bytes = haystack.as_bytes();
     let mut from = 0usize;
 
@@ -249,6 +252,7 @@ fn find_keyword_boundary_index(haystack: &str, keyword: &str) -> Option<usize> {
     }
 
     None
+
 }
 
 fn parse_if_branch_condition(condition_sql: &str) -> Result<crate::SelectCondition, SqlParseError> {
@@ -303,6 +307,7 @@ fn call_argument_to_bytes(argument: &FunctionArg) -> Result<Vec<u8>, String> {
 fn expression_to_bytes(expression: &Expr) -> Result<Vec<u8>, String> {
 
     match expression {
+
         Expr::Value(value) => value_to_bytes(value),
 
         Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
@@ -325,6 +330,7 @@ fn expression_to_bytes(expression: &Expr) -> Result<Vec<u8>, String> {
             .into_bytes()),
 
         _ => Err("unsupported CALL argument expression".to_string()),
+
     }
 
 }
@@ -332,7 +338,9 @@ fn expression_to_bytes(expression: &Expr) -> Result<Vec<u8>, String> {
 fn value_to_bytes(value: &Value) -> Result<Vec<u8>, String> {
 
     match value {
+
         Value::Boolean(v) => Ok(v.to_string().into_bytes()),
+
         Value::Number(v, _) => Ok(v.to_string().into_bytes()),
 
         Value::SingleQuotedString(v)
@@ -360,6 +368,7 @@ fn value_to_bytes(value: &Value) -> Result<Vec<u8>, String> {
             "CALL placeholder argument '{}' is not supported",
             v
         )),
+
     }
 
 }
@@ -419,24 +428,31 @@ fn split_top_level_csv(text: &str) -> Vec<String> {
     let mut depth = 0usize;
 
     for ch in text.chars() {
+
         match ch {
+
             '(' => {
                 depth += 1;
                 current.push(ch);
-            }
+            },
+
             ')' => {
                 depth = depth.saturating_sub(1);
                 current.push(ch);
-            }
+            },
+
             ',' if depth == 0 => {
                 let trimmed = current.trim();
                 if !trimmed.is_empty() {
                     parts.push(trimmed.to_string());
                 }
                 current.clear();
-            }
+            },
+
             _ => current.push(ch),
+
         }
+
     }
 
     let trimmed = current.trim();
@@ -479,7 +495,7 @@ fn split_action_and_next_clause(branch_tail: &str) -> Result<ClauseSplit, SqlPar
     for (marker, clause, clause_len) in candidates {
         if let Some(index) = lowered.find(marker) {
             match earliest {
-                Some((current, _, _)) if current <= index => {}
+                Some((current, _, _)) if current <= index => {},
                 _ => earliest = Some((index, clause, clause_len)),
             }
         }

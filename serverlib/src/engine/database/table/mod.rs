@@ -133,6 +133,7 @@ impl DatabaseTable {
         }
 
         self.status = next;
+        
         log::info!(
             "database entity status changed: kind=table entity_id={} table_id={} previous={} next={}",
             self.entity_id,
@@ -140,6 +141,7 @@ impl DatabaseTable {
             current,
             next,
         );
+
         Ok(())
         
     }

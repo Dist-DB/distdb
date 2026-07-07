@@ -83,6 +83,7 @@ impl SchemaChangeTx {
     {
 
         catalog.transition_schema_change_phase(&self.table_id, SchemaChangePhase::Rewriting)?;
+        
         catalog.checkpoint_schema_change_progress(&self.table_id, 0, None, None)?;
 
         let payload = SchemaChangePayload {

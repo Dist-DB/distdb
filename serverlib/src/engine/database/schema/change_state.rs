@@ -75,6 +75,7 @@ impl ActiveSchemaChange {
         if rows_total.is_some() {
             self.rows_total = rows_total;
         }
+        
         if resume_token.is_some() {
             self.resume_token = resume_token;
         }
