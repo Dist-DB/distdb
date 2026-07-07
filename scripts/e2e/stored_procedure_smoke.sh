@@ -30,24 +30,17 @@ create table users (id uint64 primary key, email text);
 insert into users (id, email) values (1, 'sam@example.com');
 insert into users (id, email) values (2, 'alex@example.com');
 
-create procedure p_arg_route(p_mode uint64) as begin if p_mode = 1 then select count(*) as c_arg_route from users where email = 'sam@example.com'; else select count(*) as c_arg_route from users where email = 'nobody@example.com'; end if; end;
-call p_arg_route(1);
-call p_arg_route(2);
-
-create procedure p_temp_scope(p_flag uint64) as begin if p_flag = 1 then create temporary table users (id uint64 primary key, email text); insert into users (id, email) values (900, 'temp@example.com'); select count(*) as c_proc_tmp from users; else select 0 as c_proc_tmp; end if; end;
-call p_temp_scope(1);
-
 delimiter //
-create procedure p_delim_route(p_mode uint64)
-as begin
-	if p_mode = 1 then
-		select count(*) as c_delim_route from users where email like '%@example.com';
-	else
-		select count(*) as c_delim_route from users where email = 'none@example.com';
-	end if;
-end//
+create procedure p_arg_route(p_mode uint64) as begin if p_mode = 1 then select count(*) as c_arg_route from users where email = 'sam@example.com'; else select count(*) as c_arg_route from users where email = 'nobody@example.com'; end if; end//
+
+create procedure p_temp_scope(p_flag uint64) as begin if p_flag = 1 then create temporary table users (id uint64 primary key, email text); insert into users (id, email) values (900, 'temp@example.com'); select count(*) as c_proc_tmp from users; else select 0 as c_proc_tmp; end if; end//
+
+create procedure p_delim_route(p_mode uint64) as begin if p_mode = 1 then select count(*) as c_delim_route from users where email like '%@example.com'; else select count(*) as c_delim_route from users where email = 'none@example.com'; end if; end//
 delimiter ;
 
+call p_arg_route(1);
+call p_arg_route(2);
+call p_temp_scope(1);
 call p_delim_route(1);
 call p_delim_route(2);
 

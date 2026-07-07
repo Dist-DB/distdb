@@ -145,7 +145,7 @@ pub fn parse_create_procedure_parameter_names_from_statement(
         ));
     }
 
-    let begin_index = lowered.find(" begin ").ok_or_else(|| {
+    let begin_index = find_keyword_boundary_index(&lowered, "begin").ok_or_else(|| {
         SqlParseError::UnsupportedStatement(
             "CREATE PROCEDURE block is missing BEGIN".to_string(),
         )
@@ -204,14 +204,14 @@ fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError>
         ));
     }
 
-    let begin_index = lowered.find(" begin ").ok_or_else(|| {
+    let begin_index = find_keyword_boundary_index(&lowered, "begin").ok_or_else(|| {
         SqlParseError::UnsupportedStatement(
             "CREATE PROCEDURE block is missing BEGIN".to_string(),
         )
     })?;
 
-    let after_begin = begin_index + " begin ".len();
-    let body_and_end = &trimmed[after_begin..];
+    let after_begin = begin_index + "begin".len();
+    let body_and_end = trimmed[after_begin..].trim_start();
     let lowered_body_and_end = body_and_end.to_ascii_lowercase();
 
     let end_index = lowered_body_and_end.rfind(" end").or_else(|| {
@@ -229,6 +229,26 @@ fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError>
 
     Ok(body_and_end[..end_index].trim())
 
+}
+
+fn find_keyword_boundary_index(haystack: &str, keyword: &str) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let mut from = 0usize;
+
+    while let Some(found) = haystack[from..].find(keyword) {
+        let idx = from + found;
+        let before_ok = idx == 0 || bytes[idx - 1].is_ascii_whitespace();
+        let after_idx = idx + keyword.len();
+        let after_ok = after_idx >= bytes.len() || bytes[after_idx].is_ascii_whitespace();
+
+        if before_ok && after_ok {
+            return Some(idx);
+        }
+
+        from = after_idx;
+    }
+
+    None
 }
 
 fn parse_if_branch_condition(condition_sql: &str) -> Result<crate::SelectCondition, SqlParseError> {

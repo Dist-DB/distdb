@@ -418,7 +418,7 @@ pub(super) fn classify_text_fallback(
         "call" => {
             let object_name = tokens
                 .get(1)
-                .map(|name| name.trim_matches(|c| c == ';' || c == '(' || c == ')').to_string());
+                .and_then(|name| normalize_fallback_object_name(name));
             return Some((
                 SqlDirective::Retrieve,
                 SqlOperation::CallStoredProcedure,
@@ -484,9 +484,46 @@ fn fallback_object_name_after_tokens(tokens: &[&str], verb: &str, object_idx: us
 
     let name = tokens.get(name_idx)?;
 
-    Some(
-        name.trim_matches(|c| c == ';' || c == '(' || c == ')')
-            .to_string(),
-    )
+    normalize_fallback_object_name(name)
+
+}
+
+fn normalize_fallback_object_name(token: &str) -> Option<String> {
+
+    let trimmed = token.trim_matches(';');
+    let head = trimmed.split_once('(').map_or(trimmed, |(name, _)| name);
+    let normalized = head.trim_matches(|c| c == ';' || c == '`' || c == '"');
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_extracts_parameterized_procedure_name_for_create() {
+        let classified = classify_text_fallback(
+            "create procedure p_arg_route(p_mode uint64) begin if p_mode = 1 then select 1; end if; end;",
+        )
+        .expect("create procedure should classify");
+
+        assert_eq!(classified.1, SqlOperation::CreateStoredProcedure);
+        assert_eq!(classified.2.as_deref(), Some("p_arg_route"));
+    }
+
+    #[test]
+    fn fallback_extracts_parameterized_procedure_name_for_call() {
+        let classified = classify_text_fallback("call p_arg_route(1);")
+            .expect("call procedure should classify");
+
+        assert_eq!(classified.1, SqlOperation::CallStoredProcedure);
+        assert_eq!(classified.2.as_deref(), Some("p_arg_route"));
+    }
     
 }

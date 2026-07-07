@@ -81,6 +81,16 @@ fn parse_create_procedure_parameter_names_from_statement_extracts_names() {
 }
 
 #[test]
+fn parse_create_procedure_parameter_names_from_multiline_as_begin_statement_extracts_names() {
+    let names = parse_create_procedure_parameter_names_from_statement(
+        "create procedure p_sync(arg_user_id int, arg_state varchar(20))\nas begin\nselect 1;\nend",
+    )
+    .expect("multiline parameter list should parse");
+
+    assert_eq!(names, vec!["arg_user_id".to_string(), "arg_state".to_string()]);
+}
+
+#[test]
 fn bind_call_procedure_arguments_maps_values_by_parameter_name() {
     let call_statement = sqlparser::parser::Parser::parse_sql(
         &sqlparser::dialect::MySqlDialect {},
