@@ -1,0 +1,37 @@
+name: architecture-boundaries
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/architecture-boundaries.yml"
+      - "scripts/check_architecture_boundaries.sh"
+      - "server/**"
+      - "serverlib/**"
+      - "docs/architecture-boundaries.md"
+      - "docs/readme.md"
+  pull_request:
+    paths:
+      - ".github/workflows/architecture-boundaries.yml"
+      - "scripts/check_architecture_boundaries.sh"
+      - "server/**"
+      - "serverlib/**"
+      - "docs/architecture-boundaries.md"
+      - "docs/readme.md"
+
+concurrency:
+  group: architecture-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boundaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run architecture boundary checks
+        run: bash scripts/check_architecture_boundaries.sh

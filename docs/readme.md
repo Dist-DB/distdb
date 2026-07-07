@@ -103,6 +103,8 @@ The implementation should:
 
 ## Additional Notes
 
+- Architecture ownership boundaries and layering contract:
+	- [architecture-boundaries.md](architecture-boundaries.md)
 - SELECT architecture assumptions and implementation notes:
 	- [select-architecture.md](select-architecture.md)
 - SQL implementation/compliance coverage index and per-feature matrices:

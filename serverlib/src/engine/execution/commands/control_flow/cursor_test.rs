@@ -282,6 +282,86 @@ fn sql_cursor_frame_resolves_qualified_and_local_bindings() {
 }
 
 #[test]
+fn sql_cursor_frame_prefers_local_binding_over_row_value() {
+    let mut source = VecSqlCursorSource::new(vec![row("status", "global")]);
+    let mut frame = SqlCursorFrame::new();
+    frame.set_local_binding("status", b"local".to_vec());
+
+    execute_sql_cursor(&mut source, &mut frame, &mut |_cursor_frame| {
+        Ok(CursorDirective::<()>::Break)
+    })
+    .expect("cursor execution should succeed");
+
+    assert_eq!(frame.value("status"), Some(&b"local".to_vec()));
+}
+
+#[test]
+fn execute_sql_cursor_restores_local_bindings_to_avoid_bleed_between_runs() {
+    let mut frame = SqlCursorFrame::new();
+    frame.set_local_binding("seed", b"base".to_vec());
+
+    let mut first_source = VecSqlCursorSource::new(vec![row("id", "1")]);
+    execute_sql_cursor(&mut first_source, &mut frame, &mut |cursor_frame| {
+        assert_eq!(cursor_frame.value("seed"), Some(&b"base".to_vec()));
+
+        cursor_frame.set_local_binding("seed", b"mutated".to_vec());
+        cursor_frame.set_local_binding("ephemeral", b"temp".to_vec());
+
+        Ok(CursorDirective::<()>::Break)
+    })
+    .expect("first cursor execution should succeed");
+
+    assert_eq!(frame.local_binding("seed"), Some(&b"base".to_vec()));
+    assert_eq!(frame.local_binding("ephemeral"), None);
+
+    let mut second_source = VecSqlCursorSource::new(vec![row("id", "2")]);
+    execute_sql_cursor(&mut second_source, &mut frame, &mut |cursor_frame| {
+        assert_eq!(cursor_frame.value("seed"), Some(&b"base".to_vec()));
+        assert_eq!(cursor_frame.value("ephemeral"), None);
+        Ok(CursorDirective::<()>::Break)
+    })
+    .expect("second cursor execution should succeed");
+}
+
+#[test]
+fn execute_sql_cursor_restores_local_bindings_after_return_directive() {
+    let mut frame = SqlCursorFrame::new();
+    frame.set_local_binding("seed", b"base".to_vec());
+
+    let mut source = VecSqlCursorSource::new(vec![row("id", "1")]);
+
+    let result = execute_sql_cursor(&mut source, &mut frame, &mut |cursor_frame| {
+        cursor_frame.set_local_binding("seed", b"mutated".to_vec());
+        cursor_frame.set_local_binding("ephemeral", b"temp".to_vec());
+        Ok(CursorDirective::Return("done".to_string()))
+    })
+    .expect("cursor execution should succeed");
+
+    assert_eq!(result, Some("done".to_string()));
+    assert_eq!(frame.local_binding("seed"), Some(&b"base".to_vec()));
+    assert_eq!(frame.local_binding("ephemeral"), None);
+}
+
+#[test]
+fn execute_sql_cursor_restores_local_bindings_after_callback_error() {
+    let mut frame = SqlCursorFrame::new();
+    frame.set_local_binding("seed", b"base".to_vec());
+
+    let mut source = VecSqlCursorSource::new(vec![row("id", "1")]);
+
+    let err = execute_sql_cursor(&mut source, &mut frame, &mut |cursor_frame| {
+        cursor_frame.set_local_binding("seed", b"mutated".to_vec());
+        cursor_frame.set_local_binding("ephemeral", b"temp".to_vec());
+        Result::<CursorDirective<()>, String>::Err("forced callback failure".to_string())
+    })
+    .expect_err("cursor execution should fail");
+
+    assert!(err.contains("forced callback failure"));
+    assert_eq!(frame.local_binding("seed"), Some(&b"base".to_vec()));
+    assert_eq!(frame.local_binding("ephemeral"), None);
+}
+
+#[test]
 fn select_read_plan_cursor_source_supports_projection_only_plans() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();

@@ -126,11 +126,17 @@ pub fn parse_if_else_end_plan_from_create_procedure_statement(
         return Ok(None);
     }
 
-    if !trimmed_body.to_ascii_lowercase().starts_with("if ") {
-        return Ok(None);
+    let lowered_body = trimmed_body.to_ascii_lowercase();
+
+    if lowered_body.starts_with("if ") {
+        return parse_if_else_end_plan_from_statement(trimmed_body).map(Some);
     }
 
-    parse_if_else_end_plan_from_statement(trimmed_body).map(Some)
+    if lowered_body.starts_with("case ") {
+        return parse_case_plan_from_statement(trimmed_body).map(Some);
+    }
+
+    Ok(None)
 
 }
 
@@ -513,6 +519,219 @@ fn split_action_and_next_clause(branch_tail: &str) -> Result<ClauseSplit, SqlPar
         action_sql,
         next_clause: clause,
         next_clause_index: index + 1,
+    })
+
+}
+
+fn parse_case_plan_from_statement(statement: &str) -> Result<IfElseEndPlan, SqlParseError> {
+
+    let normalized = statement.trim().trim_end_matches(';').trim();
+    let lowered = normalized.to_ascii_lowercase();
+
+    if !lowered.starts_with("case") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE routine block must start with CASE".to_string(),
+        ));
+    }
+
+    let after_case = normalized["case".len()..].trim_start();
+    let lowered_after_case = after_case.to_ascii_lowercase();
+    let when_index = find_keyword_boundary_index(&lowered_after_case, "when").ok_or_else(|| {
+        SqlParseError::UnsupportedStatement(
+            "CASE routine block must contain at least one WHEN branch".to_string(),
+        )
+    })?;
+
+    let prefix = after_case[..when_index].trim();
+    let case_operand = if prefix.is_empty() {
+        None
+    } else {
+        Some(prefix.to_string())
+    };
+
+    let mut remaining = after_case[when_index..].trim_start().to_string();
+    let mut branches = Vec::new();
+    let mut else_action_sql = None;
+
+    loop {
+        let lowered_remaining = remaining.to_ascii_lowercase();
+
+        if lowered_remaining.starts_with("when") {
+            let parsed = parse_case_when_clause(&remaining, case_operand.as_deref())?;
+            branches.push(parsed.branch);
+            remaining = parsed.remaining;
+            continue;
+        }
+
+        if lowered_remaining.starts_with("else") {
+            let parsed_else = parse_case_else_clause(&remaining)?;
+            else_action_sql = Some(parsed_else);
+            break;
+        }
+
+        if lowered_remaining.starts_with("end") {
+            ensure_case_end_clause(&remaining)?;
+            break;
+        }
+
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE routine block must continue with WHEN, ELSE, or END CASE".to_string(),
+        ));
+    }
+
+    if branches.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE routine block must include at least one WHEN branch".to_string(),
+        ));
+    }
+
+    Ok(IfElseEndPlan {
+        branches,
+        else_action_sql,
+    })
+
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaseWhenParseResult {
+    branch: IfElseEndBranchPlan,
+    remaining: String,
+}
+
+fn parse_case_when_clause(
+    remaining: &str,
+    case_operand: Option<&str>,
+) -> Result<CaseWhenParseResult, SqlParseError> {
+
+    let lowered_remaining = remaining.to_ascii_lowercase();
+    if !lowered_remaining.starts_with("when") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE branch must start with WHEN".to_string(),
+        ));
+    }
+
+    let after_when = remaining["when".len()..].trim_start();
+    let lowered_after_when = after_when.to_ascii_lowercase();
+    let then_index = find_keyword_boundary_index(&lowered_after_when, "then").ok_or_else(|| {
+        SqlParseError::UnsupportedStatement(
+            "CASE branch is missing THEN".to_string(),
+        )
+    })?;
+
+    let when_fragment = after_when[..then_index].trim();
+    if when_fragment.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE WHEN fragment is empty".to_string(),
+        ));
+    }
+
+    let condition_sql = if let Some(operand) = case_operand {
+        format!("{operand} = {when_fragment}")
+    } else {
+        when_fragment.to_string()
+    };
+
+    let condition = parse_if_branch_condition(&condition_sql)?;
+
+    let after_then = after_when[(then_index + "then".len())..].trim_start();
+    let split = split_case_action_and_next_clause(after_then)?;
+
+    let action_sql = split.action_sql.trim().trim_end_matches(';').trim().to_string();
+    if action_sql.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE branch action is empty".to_string(),
+        ));
+    }
+
+    let remaining_tail = after_then[split.next_clause_index..].trim_start().to_string();
+
+    Ok(CaseWhenParseResult {
+        branch: IfElseEndBranchPlan {
+            condition,
+            action_sql,
+        },
+        remaining: remaining_tail,
+    })
+
+}
+
+fn parse_case_else_clause(remaining: &str) -> Result<String, SqlParseError> {
+
+    let lowered_remaining = remaining.to_ascii_lowercase();
+    if !lowered_remaining.starts_with("else") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE ELSE clause must start with ELSE".to_string(),
+        ));
+    }
+
+    let after_else = remaining["else".len()..].trim_start();
+    let lowered_after_else = after_else.to_ascii_lowercase();
+    let end_index = find_keyword_boundary_index(&lowered_after_else, "end").ok_or_else(|| {
+        SqlParseError::UnsupportedStatement(
+            "CASE ELSE clause is missing END CASE".to_string(),
+        )
+    })?;
+
+    ensure_case_end_clause(&after_else[end_index..])?;
+
+    let else_action_sql = after_else[..end_index]
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_string();
+
+    if else_action_sql.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE ELSE action is empty".to_string(),
+        ));
+    }
+
+    Ok(else_action_sql)
+
+}
+
+fn ensure_case_end_clause(fragment: &str) -> Result<(), SqlParseError> {
+    let lowered = fragment.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    if lowered.starts_with("end case") {
+        Ok(())
+    } else {
+        Err(SqlParseError::UnsupportedStatement(
+            "CASE routine block must terminate with END CASE".to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaseClauseSplit {
+    action_sql: String,
+    next_clause_index: usize,
+}
+
+fn split_case_action_and_next_clause(branch_tail: &str) -> Result<CaseClauseSplit, SqlParseError> {
+
+    let lowered = branch_tail.to_ascii_lowercase();
+    let mut earliest: Option<usize> = None;
+
+    for keyword in ["when", "else", "end"] {
+        if let Some(index) = find_keyword_boundary_index(&lowered, keyword) {
+            match earliest {
+                Some(current) if current <= index => {}
+                _ => earliest = Some(index),
+            }
+        }
+    }
+
+    let Some(index) = earliest else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CASE branch must end with WHEN, ELSE, or END CASE".to_string(),
+        ));
+    };
+
+    let action_sql = branch_tail[..index].trim().to_string();
+
+    Ok(CaseClauseSplit {
+        action_sql,
+        next_clause_index: index,
     })
 
 }

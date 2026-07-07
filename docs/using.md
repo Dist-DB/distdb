@@ -120,6 +120,26 @@ There is also a 'help' feature that will provide other commands. The service WIL
 
 The console will present information relating to the connectivity between client and server.
 
+## Stored Procedure Notes
+
+When defining multi-statement stored procedures from the console, set a temporary delimiter so the client does not split the routine body at `;` before `CREATE PROCEDURE` is submitted.
+
+Example:
+
+```sql
+delimiter //
+create procedure p_sync(p_active bigint) as begin if p_active = 1 then select abs(1); else select abs(0); end if; end//
+delimiter ;
+call p_sync(1);
+```
+
+Current routine control-flow support includes:
+
+- `IF / ELSEIF / ELSE / END IF`
+- searched `CASE` and simple `CASE` in routine control-flow form
+
+For condition resolution in stored procedures, local routine bindings (arguments and local variables) are evaluated first, then row/global structures are used as fallback. Procedure-local bindings and temporary resources are scoped to invocation and cleaned up to avoid cross-call bleed.
+
 ## Current Isolation Contract
 
 The current explicit transaction behavior is equivalent to a read-committed style contract for staged DML:

@@ -71,6 +71,34 @@ fn parse_if_else_end_plan_from_create_procedure_returns_none_when_body_is_not_if
 }
 
 #[test]
+fn parse_if_else_end_plan_from_create_procedure_extracts_searched_case_block() {
+    let plan = parse_if_else_end_plan_from_create_procedure_statement(
+        "create procedure p_sync() begin case when active = 1 then select 'on'; when active = 0 then select 'off'; else select 'unknown'; end case; end",
+    )
+    .expect("create procedure searched CASE should parse")
+    .expect("searched CASE block should be detected");
+
+    assert_eq!(plan.branches.len(), 2);
+    assert_eq!(plan.branches[0].action_sql, "select 'on'");
+    assert_eq!(plan.branches[1].action_sql, "select 'off'");
+    assert_eq!(plan.else_action_sql.as_deref(), Some("select 'unknown'"));
+}
+
+#[test]
+fn parse_if_else_end_plan_from_create_procedure_extracts_simple_case_block() {
+    let plan = parse_if_else_end_plan_from_create_procedure_statement(
+        "create procedure p_sync() begin case active when 1 then select 'on'; when 0 then select 'off'; else select 'unknown'; end case; end",
+    )
+    .expect("create procedure simple CASE should parse")
+    .expect("simple CASE block should be detected");
+
+    assert_eq!(plan.branches.len(), 2);
+    assert_eq!(plan.branches[0].action_sql, "select 'on'");
+    assert_eq!(plan.branches[1].action_sql, "select 'off'");
+    assert_eq!(plan.else_action_sql.as_deref(), Some("select 'unknown'"));
+}
+
+#[test]
 fn parse_create_procedure_parameter_names_from_statement_extracts_names() {
     let names = parse_create_procedure_parameter_names_from_statement(
         "create procedure p_sync(arg_user_id int, arg_state varchar(20)) begin select 1; end",

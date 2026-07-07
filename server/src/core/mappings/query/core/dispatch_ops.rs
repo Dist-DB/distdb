@@ -446,88 +446,21 @@ fn execute_call_stored_procedure(
         &procedure,
         serverlib::EntityInvocationSource::DirectedUser,
         &mut |action_sql| {
-            let parsed_action_sql = serverlib::parse_mysql8_sql_requests(action_sql, &query.database_id)
-                .map_err(|err| format!("call action parse failed: {err}"))?;
-
             let mut last_response: Option<ConnectorResponse> = None;
+            let mut handler_runtime = LocalHandlerRuntime::default();
+            let control = execute_call_action_sql(
+                action_sql,
+                request_id,
+                query,
+                ctx,
+                &mut local_entities,
+                &mut last_response,
+                false,
+                &mut handler_runtime,
+            )?;
 
-            for parsed_statement in parsed_action_sql {
-
-                if matches!(parsed_statement.operation, SqlOperation::CreateTable) {
-
-                    let plan = serverlib::create_table_plan_from_statement(&parsed_statement.sql)
-                        .map_err(|err| format!("call action create table parse failed: {err}"))?;
-
-                    if plan.temporary {
-                        let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
-                            return Err(format!("database '{}' not found", query.database_id));
-                        };
-
-                        local_entities.create_temporary_table(
-                            catalog,
-                            ctx.wal,
-                            plan.table_id,
-                            plan.schema,
-                        )?;
-
-                        last_response = Some(ConnectorResponse::applied(
-                            request_id.to_string(),
-                            ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
-                        ));
-                        
-                        continue;
-                    
-                    }
-
-                }
-
-                let rewritten_sql = rewrite_sql_with_call_aliases(
-                    &parsed_statement.sql,
-                    &local_entities,
-                )?;
-                let rewritten_parsed = serverlib::parse_mysql8_sql_requests(
-                    &rewritten_sql,
-                    &query.database_id,
-                )
-                .map_err(|err| format!("call action parse failed after alias rewrite: {err}"))?;
-
-                if rewritten_parsed.len() != 1 {
-                    return Err("call action rewrite produced unsupported multi-statement execution".to_string());
-                }
-
-                let action_query = DataQuery {
-                    database_id: query.database_id.clone(),
-                    sql: rewritten_sql,
-                };
-
-                let response = execute_parsed_query(
-                    request_id,
-                    &action_query,
-                    ctx.catalogs,
-                    ctx.wal,
-                    ctx.node_data_dir,
-                    ctx.runtime_indexes,
-                    rewritten_parsed,
-                    ctx.external_write_group_id,
-                    None,
-                    ctx.session_id,
-                );
-
-                if matches!(response.status, connector::ResponseStatus::Rejected) {
-                    let message = match response.result {
-                        ConnectorResult::Error(message) => message,
-                        _ => "call action execution failed".to_string(),
-                    };
-                    return Err(message);
-                }
-
-                if matches!(parsed_statement.operation, SqlOperation::DropTable)
-                    && let Some(dropped_name) = parsed_statement.object_name.as_deref()
-                {
-                    local_entities.mark_temporary_table_dropped(dropped_name);
-                }
-
-                last_response = Some(response);
+            if !matches!(control, serverlib::LoopControlDirective::None) {
+                return Err("loop control directive used outside a loop block".to_string());
             }
 
             Ok(last_response.unwrap_or_else(|| {
@@ -570,10 +503,92 @@ fn execute_call_stored_procedure(
 
 }
 
+fn split_sql_statements_for_call_action(sql: &str) -> Vec<String> {
+
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick = false;
+
+    for ch in sql.chars() {
+        match ch {
+            '\'' if !in_double_quote && !in_backtick => {
+                in_single_quote = !in_single_quote;
+                current.push(ch);
+            }
+            '"' if !in_single_quote && !in_backtick => {
+                in_double_quote = !in_double_quote;
+                current.push(ch);
+            }
+            '`' if !in_single_quote && !in_double_quote => {
+                in_backtick = !in_backtick;
+                current.push(ch);
+            }
+            ';' if !in_single_quote && !in_double_quote && !in_backtick => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    statements.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+
+    coalesce_compound_blocks(statements)
+}
+
+fn coalesce_compound_blocks(statements: Vec<String>) -> Vec<String> {
+
+    let mut merged = Vec::new();
+    let mut idx = 0usize;
+
+    while idx < statements.len() {
+        let current = statements[idx].trim().to_string();
+        let lowered = current.to_ascii_lowercase();
+
+        let end_marker = if lowered.starts_with("while ") {
+            Some("end while")
+        } else if lowered.starts_with("repeat ") {
+            Some("end repeat")
+        } else if is_loop_block_statement(lowered.as_str()) {
+            Some("end loop")
+        } else {
+            None
+        };
+
+        let Some(marker) = end_marker else {
+            merged.push(current);
+            idx += 1;
+            continue;
+        };
+
+        let mut block_sql = current;
+        while !block_sql.to_ascii_lowercase().contains(marker) && idx + 1 < statements.len() {
+            idx += 1;
+            block_sql.push_str("; ");
+            block_sql.push_str(statements[idx].trim());
+        }
+
+        merged.push(block_sql);
+        idx += 1;
+    }
+
+    merged
+
+}
+
 fn rewrite_sql_with_call_aliases(
     sql: &str,
     local_entities: &serverlib::ProcedureLocalEntityScope,
 ) -> Result<String, String> {
+
     if !local_entities.has_temporary_tables() {
         return Ok(sql.to_string());
     }
@@ -643,5 +658,537 @@ fn rewrite_sql_with_call_aliases(
     }
 
     Ok(out)
+
+}
+
+const MAX_CALL_LOOP_ITERATIONS: usize = 10_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalHandlerActionKind {
+    Continue,
+    Exit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalHandlerCondition {
+    SqlException,
+}
+
+#[derive(Clone, Debug)]
+struct LocalDeclaredHandler {
+    action_kind: LocalHandlerActionKind,
+    condition: LocalHandlerCondition,
+    action_sql: String,
+}
+
+#[derive(Default)]
+struct LocalHandlerRuntime {
+    handlers: Vec<LocalDeclaredHandler>,
+}
+
+impl LocalHandlerRuntime {
+    fn push(&mut self, handler: LocalDeclaredHandler) {
+        self.handlers.push(handler);
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.handlers.truncate(len);
+    }
+
+    fn resolve_for_error(&self, _message: &str) -> Option<LocalDeclaredHandler> {
+        self.handlers
+            .iter()
+            .rev()
+            .find(|handler| matches!(handler.condition, LocalHandlerCondition::SqlException))
+            .cloned()
+    }
+}
+
+fn is_loop_block_statement(lowered_raw: &str) -> bool {
+
+    let trimmed = lowered_raw.trim_start();
+    if trimmed.starts_with("loop") {
+        return true;
+    }
+
+    let Some(colon_index) = trimmed.find(':') else {
+        return false;
+    };
+
+    let label = trimmed[..colon_index].trim();
+    if label.is_empty() || !label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return false;
+    }
+
+    trimmed[(colon_index + 1)..].trim_start().starts_with("loop")
+
+}
+
+fn execute_call_action_sql(
+    action_sql: &str,
+    request_id: &str,
+    query: &DataQuery,
+    ctx: &mut QueryExecutionContext<'_>,
+    local_entities: &mut serverlib::ProcedureLocalEntityScope,
+    last_response: &mut Option<ConnectorResponse>,
+    allow_loop_control: bool,
+    handler_runtime: &mut LocalHandlerRuntime,
+) -> Result<serverlib::LoopControlDirective, String> {
+
+    let scope_start = handler_runtime.handlers.len();
+
+    for raw_statement in split_sql_statements_for_call_action(action_sql) {
+        let statement_result = execute_call_action_statement(
+            raw_statement.as_str(),
+            request_id,
+            query,
+            ctx,
+            local_entities,
+            last_response,
+            allow_loop_control,
+            handler_runtime,
+        );
+
+        let control = match statement_result {
+            Ok(control) => control,
+            Err(err) => {
+                let Some(handler) = handler_runtime.resolve_for_error(err.as_str()) else {
+                    handler_runtime.truncate(scope_start);
+                    return Err(err);
+                };
+
+                let handler_control = execute_call_action_sql(
+                    handler.action_sql.as_str(),
+                    request_id,
+                    query,
+                    ctx,
+                    local_entities,
+                    last_response,
+                    allow_loop_control,
+                    handler_runtime,
+                )?;
+
+                if !matches!(handler_control, serverlib::LoopControlDirective::None) {
+                    handler_runtime.truncate(scope_start);
+                    return Ok(handler_control);
+                }
+
+                if matches!(handler.action_kind, LocalHandlerActionKind::Exit) {
+                    handler_runtime.truncate(scope_start);
+                    return Ok(serverlib::LoopControlDirective::None);
+                }
+
+                continue;
+            }
+        };
+
+        if !matches!(control, serverlib::LoopControlDirective::None) {
+            handler_runtime.truncate(scope_start);
+            return Ok(control);
+        }
+    }
+
+    handler_runtime.truncate(scope_start);
+    Ok(serverlib::LoopControlDirective::None)
+}
+
+fn execute_call_action_statement(
+    raw_statement: &str,
+    request_id: &str,
+    query: &DataQuery,
+    ctx: &mut QueryExecutionContext<'_>,
+    local_entities: &mut serverlib::ProcedureLocalEntityScope,
+    last_response: &mut Option<ConnectorResponse>,
+    allow_loop_control: bool,
+    handler_runtime: &mut LocalHandlerRuntime,
+) -> Result<serverlib::LoopControlDirective, String> {
+
+    let lowered_raw = raw_statement.trim().to_ascii_lowercase();
+
+    if lowered_raw.starts_with("declare ") {
+        if let Some(handler) = parse_local_handler_declare_statement(raw_statement)? {
+            handler_runtime.push(handler);
+            *last_response = Some(ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            ));
+            return Ok(serverlib::LoopControlDirective::None);
+        }
+
+        apply_local_declare_statement(raw_statement, local_entities)?;
+        *last_response = Some(ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        ));
+        return Ok(serverlib::LoopControlDirective::None);
+    }
+
+    if lowered_raw.starts_with("set ") {
+        apply_local_set_statement(raw_statement, local_entities)?;
+        *last_response = Some(ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        ));
+        return Ok(serverlib::LoopControlDirective::None);
+    }
+
+    if lowered_raw.starts_with("leave") {
+        if !allow_loop_control {
+            return Err("LEAVE directive is only valid inside a loop block".to_string());
+        }
+        return Ok(serverlib::LoopControlDirective::Leave);
+    }
+
+    if lowered_raw.starts_with("iterate") {
+        if !allow_loop_control {
+            return Err("ITERATE directive is only valid inside a loop block".to_string());
+        }
+        return Ok(serverlib::LoopControlDirective::Iterate);
+    }
+
+    if lowered_raw.starts_with("while ") || lowered_raw.starts_with("repeat ") {
+
+        if lowered_raw.starts_with("while ") {
+            serverlib::execute_local_while_block(
+                raw_statement,
+                MAX_CALL_LOOP_ITERATIONS,
+                local_entities,
+                &mut |scope, condition_sql| evaluate_local_condition(condition_sql, scope),
+                &mut |scope, body_sql| {
+                    execute_call_action_sql(
+                        body_sql,
+                        request_id,
+                        query,
+                        ctx,
+                        scope,
+                        last_response,
+                        true,
+                        handler_runtime,
+                    )
+                },
+            )?;
+
+            return Ok(serverlib::LoopControlDirective::None);
+        }
+
+        serverlib::execute_local_repeat_block(
+            raw_statement,
+            MAX_CALL_LOOP_ITERATIONS,
+            local_entities,
+            &mut |scope, condition_sql| evaluate_local_condition(condition_sql, scope),
+            &mut |scope, body_sql| {
+                execute_call_action_sql(
+                    body_sql,
+                    request_id,
+                    query,
+                    ctx,
+                    scope,
+                    last_response,
+                    true,
+                    handler_runtime,
+                )
+            },
+        )?;
+
+        return Ok(serverlib::LoopControlDirective::None);
+
+    }
+
+    if is_loop_block_statement(lowered_raw.as_str()) {
+        serverlib::execute_local_loop_block(
+            raw_statement,
+            MAX_CALL_LOOP_ITERATIONS,
+            local_entities,
+            &mut |scope, body_sql| {
+                execute_call_action_sql(
+                    body_sql,
+                    request_id,
+                    query,
+                    ctx,
+                    scope,
+                    last_response,
+                    true,
+                    handler_runtime,
+                )
+            },
+        )?;
+
+        return Ok(serverlib::LoopControlDirective::None);
+
+    }
+
+    let parsed_action_sql = serverlib::parse_mysql8_sql_requests(raw_statement, &query.database_id)
+        .map_err(|err| format!("call action parse failed: {err}"))?;
+
+    if parsed_action_sql.len() != 1 {
+        return Err("call action parse produced unsupported multi-statement execution".to_string());
+    }
+
+    let parsed_statement = parsed_action_sql
+        .into_iter()
+        .next()
+        .ok_or_else(|| "call action parse produced no statements".to_string())?;
+
+    if matches!(parsed_statement.operation, SqlOperation::CreateTable) {
+
+        let plan = serverlib::create_table_plan_from_statement(&parsed_statement.sql)
+            .map_err(|err| format!("call action create table parse failed: {err}"))?;
+
+        if plan.temporary {
+            let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
+                return Err(format!("database '{}' not found", query.database_id));
+            };
+
+            local_entities.create_temporary_table(catalog, ctx.wal, plan.table_id, plan.schema)?;
+
+            *last_response = Some(ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+            ));
+
+            return Ok(serverlib::LoopControlDirective::None);
+        }
+
+    }
+
+    let rewritten_sql = rewrite_sql_with_call_aliases(&parsed_statement.sql, local_entities)?;
+    let rewritten_parsed = serverlib::parse_mysql8_sql_requests(&rewritten_sql, &query.database_id)
+        .map_err(|err| format!("call action parse failed after alias rewrite: {err}"))?;
+
+    if rewritten_parsed.len() != 1 {
+        return Err("call action rewrite produced unsupported multi-statement execution".to_string());
+    }
+
+    let action_query = DataQuery {
+        database_id: query.database_id.clone(),
+        sql: rewritten_sql,
+    };
+
+    let response = execute_parsed_query(
+        request_id,
+        &action_query,
+        ctx.catalogs,
+        ctx.wal,
+        ctx.node_data_dir,
+        ctx.runtime_indexes,
+        rewritten_parsed,
+        ctx.external_write_group_id,
+        None,
+        ctx.session_id,
+    );
+
+    if matches!(response.status, connector::ResponseStatus::Rejected) {
+        let message = match response.result {
+            ConnectorResult::Error(message) => message,
+            _ => "call action execution failed".to_string(),
+        };
+        return Err(message);
+    }
+
+    if matches!(parsed_statement.operation, SqlOperation::DropTable)
+        && let Some(dropped_name) = parsed_statement.object_name.as_deref()
+    {
+        local_entities.mark_temporary_table_dropped(dropped_name);
+    }
+
+    *last_response = Some(response);
+    
+    Ok(serverlib::LoopControlDirective::None)
+
+}
+
+
+fn evaluate_local_condition(
+    condition_sql: &str,
+    local_entities: &serverlib::ProcedureLocalEntityScope,
+) -> Result<bool, String> {
+
+    let wrapped = format!("select __loop_eval from __loop_eval where {condition_sql}");
+    let plan = serverlib::parse_select_read_plan_from_statement(&wrapped)
+        .map_err(|err| format!("loop condition parse failed: {err}"))?;
+
+    let Some(condition) = plan.where_condition.as_ref() else {
+        return Err("loop condition parse failed: WHERE condition is missing".to_string());
+    };
+
+    let provider = local_entities.materialize_value_bindings();
+
+    Ok(serverlib::row_matches_condition_with(
+        &provider,
+        Some(condition),
+        &mut |_, _| std::collections::HashSet::new(),
+        &mut |_, _| false,
+        &mut |_, _| None,
+    ))
+
+}
+
+fn parse_local_handler_declare_statement(sql: &str) -> Result<Option<LocalDeclaredHandler>, String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("declare ") {
+        return Ok(None);
+    }
+
+    let body = trimmed["declare".len()..].trim();
+    let lowered_body = body.to_ascii_lowercase();
+
+    let (action_kind, after_prefix) = if lowered_body.starts_with("continue handler for ") {
+        (
+            LocalHandlerActionKind::Continue,
+            body["continue handler for ".len()..].trim(),
+        )
+    } else if lowered_body.starts_with("exit handler for ") {
+        (
+            LocalHandlerActionKind::Exit,
+            body["exit handler for ".len()..].trim(),
+        )
+    } else {
+        return Ok(None);
+    };
+
+    let mut parts = after_prefix.splitn(2, char::is_whitespace);
+    let condition_token = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let action_sql = parts.next().unwrap_or("").trim().to_string();
+
+    if action_sql.is_empty() {
+        return Err("declare handler parse failed: handler action statement is missing".to_string());
+    }
+
+    let condition = match condition_token.as_str() {
+        "sqlexception" => LocalHandlerCondition::SqlException,
+        "sqlwarning" | "not" => {
+            return Err(
+                "declare handler parse failed: only SQLEXCEPTION handlers are supported".to_string(),
+            )
+        }
+        _ => {
+            return Err(format!(
+                "declare handler parse failed: unsupported handler condition '{}'",
+                condition_token,
+            ))
+        }
+    };
+
+    Ok(Some(LocalDeclaredHandler {
+        action_kind,
+        condition,
+        action_sql,
+    }))
+
+}
+
+fn apply_local_declare_statement(
+    sql: &str,
+    local_entities: &mut serverlib::ProcedureLocalEntityScope,
+) -> Result<(), String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("declare ") {
+        return Err("local declare parse failed: statement is not DECLARE".to_string());
+    }
+
+    let body = trimmed["declare".len()..].trim();
+    let tokens = body.split_whitespace().collect::<Vec<_>>();
+
+    let Some(name_token) = tokens.first() else {
+        return Err("local declare parse failed: variable name is missing".to_string());
+    };
+
+    let variable_name = name_token.trim_matches('`').trim_matches('"');
+    if variable_name.is_empty() {
+        return Err("local declare parse failed: variable name is empty".to_string());
+    }
+
+    let default_index = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("default"));
+
+    let value = if let Some(idx) = default_index {
+        let rhs = tokens[(idx + 1)..].join(" ");
+        parse_local_scalar_value(&rhs, local_entities)?
+    } else {
+        Vec::new()
+    };
+
+    local_entities.set_variable(variable_name, value);
+    Ok(())
+
+}
+
+fn apply_local_set_statement(
+    sql: &str,
+    local_entities: &mut serverlib::ProcedureLocalEntityScope,
+) -> Result<(), String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("set ") {
+        return Err("local set parse failed: statement is not SET".to_string());
+    }
+
+    let body = trimmed["set".len()..].trim();
+    let Some(eq_index) = body.find('=') else {
+        return Err("local set parse failed: '=' is missing".to_string());
+    };
+
+    let variable_name = body[..eq_index].trim().trim_matches('`').trim_matches('"');
+    if variable_name.is_empty() {
+        return Err("local set parse failed: variable name is empty".to_string());
+    }
+
+    let rhs = body[(eq_index + 1)..].trim();
+    let value = parse_local_scalar_value(rhs, local_entities)?;
+    local_entities.set_variable(variable_name, value);
+
+    Ok(())
+
+}
+
+fn parse_local_scalar_value(
+    rhs: &str,
+    local_entities: &serverlib::ProcedureLocalEntityScope,
+) -> Result<Vec<u8>, String> {
+
+    let value = rhs.trim();
+    if value.is_empty() {
+        return Err("local assignment parse failed: value is empty".to_string());
+    }
+
+    if (value.starts_with('\'') && value.ends_with('\''))
+        || (value.starts_with('"') && value.ends_with('"'))
+    {
+        if value.len() < 2 {
+            return Err("local assignment parse failed: quoted value is malformed".to_string());
+        }
+        return Ok(value[1..(value.len() - 1)].as_bytes().to_vec());
+    }
+
+    let lowered = value.to_ascii_lowercase();
+    if lowered == "true" || lowered == "false" {
+        return Ok(lowered.into_bytes());
+    }
+
+    if value.chars().all(|ch| ch.is_ascii_digit() || ch == '-' || ch == '+')
+        && value.chars().any(|ch| ch.is_ascii_digit())
+    {
+        return Ok(value.as_bytes().to_vec());
+    }
+
+    let ident = common::normalize_identifier!(value.trim_matches('`').trim_matches('"'));
+    if let Some(local_value) = local_entities.resolve_value(&ident) {
+        return Ok(local_value.clone());
+    }
+
+    Err(format!(
+        "local assignment parse failed: unsupported value expression '{}'",
+        value
+    ))
+    
 }
 

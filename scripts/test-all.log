@@ -1,0 +1,779 @@
+=== crate: common ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/common-4a757f3273050d63)
+
+running 35 tests
+test helpers::base64::tests::decode_accepts_mixed_alphabet_fallback ... ok
+test helpers::base64::tests::decode_accepts_url_safe_variants ... ok
+test helpers::base64::tests::decode_accepts_standard_and_padded_input ... ok
+test helpers::format::tests::make_header_round_trips_through_verify ... ok
+test helpers::format::tests::file_kind_formats_extension_and_name ... ok
+test helpers::base64::tests::encode_matches_standard_no_pad_vectors ... ok
+test helpers::format::tests::verify_rejects_bad_magic ... ok
+test helpers::base64::tests::decode_invalid_returns_empty ... ok
+test helpers::format::tests::verify_rejects_wrong_version ... ok
+test helpers::format::tests::verify_rejects_too_short ... ok
+test helpers::tphashset::tests::insert_and_get_roundtrip ... ok
+test helpers::tphashset::tests::prefix_search_returns_sorted_matches ... ok
+test helpers::tphashset::tests::prefix_search_can_ignore_ascii_case ... ok
+test helpers::tphashset::tests::remove_clears_both_indexes ... ok
+test helpers::tphashset::tests::reverse_lookup_works ... ok
+test helpers::tphashset::tests::gap_search_refines_candidates ... ok
+test helpers::tphashset::tests::suffix_search_can_ignore_ascii_case ... ok
+test helpers::tphashset::tests::suffix_search_uses_reverse_index ... ok
+test helpers::utils::tests::normalize_identifier_strips_backtick_quotes ... ok
+test helpers::utils::tests::normalize_identifier_strips_double_quotes ... ok
+test helpers::utils::tests::normalize_identifier_strips_single_quotes ... ok
+test schema::field_kind::tests::sql_variant_display_name_formats_enum_variants ... ok
+test schema::field_kind::tests::sql_variant_display_name_formats_scalar_types ... ok
+test schema::field_kind::tests::to_sql_string_matches_variant_display_name ... ok
+test schema::peer_session::tests::clear_connection_state_resets_connection_fields ... ok
+test schema::peer_session::tests::default_service_type_is_client ... ok
+test schema::peer_session::tests::service_type_is_copy ... ok
+test schema::peer_session::tests::with_service_type_sets_data_node ... ok
+test schema::validation::tests::normalize_field_name_rejects_empty ... ok
+test schema::validation::tests::validate_field_kind_rejects_empty_enum ... ok
+test schema::validation::tests::validate_field_kind_rejects_invalid_bit_width ... ok
+test helpers::aes::test::aes_tests ... ok
+test helpers::io::tests::write_and_read_text_round_trip ... ok
+test helpers::io::tests::write_creates_parent_directories ... ok
+test helpers::io::tests::write_bytes_atomic_round_trip ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests common
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== crate: peerlib ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/peerlib-3a5cad8d4af53c51)
+
+running 22 tests
+test connector::runtime::tests::runtime_returns_error_for_error_event ... ok
+test connector::transport::tests::extract_session_id_supports_both_labels ... ok
+test connector::transport::tests::first_discovered_peer_becomes_active_session_peer ... ok
+test connector::transport::tests::connector_timeout_env_values_are_clamped_and_defaulted ... ok
+test connector::runtime::tests::runtime_can_run_from_swarm_source ... ok
+test connector::transport::tests::normalize_peer_addr_keeps_host_port_and_defaults_port ... ok
+test connector::transport::tests::normalize_peer_addr_parses_supported_multiaddrs ... ok
+test connector::runtime::tests::runtime_processes_peer_and_response_events ... ok
+test connector::transport::tests::queued_response_is_returned_for_matching_request ... ok
+test connector::transport::tests::connect_active_peer_surfaces_bootstrap_rejection ... FAILED
+test connector::transport::tests::connect_active_peer_and_request_roundtrip_over_plain_tcp ... FAILED
+test connector::transport::tests::request_returns_selected_peer_error_when_no_active_peer ... ok
+test connector::transport::tests::request_fails_when_no_peers_are_available ... ok
+test connector::transport::tests::select_peer_switches_active_session_peer ... ok
+test connector::transport::tests::server_name_parser_supports_ip_and_hostname_and_rejects_empty ... ok
+test connector::transport::tests::shared_session_token_changes_with_server_token ... ok
+test connector::transport::tests::transport_uses_kademlia_mode ... ok
+test connector::transport::tests::upsert_peer_replaces_stale_identity_when_addr_matches ... ok
+test error::tests::peer_error_display_formats_all_variants ... ok
+test error::tests::result_alias_supports_ok_and_err ... ok
+test interface::tests::transfer_codec_roundtrip_works ... ok
+test interface::tests::transfer_envelope_builder_sets_fields_and_headers ... ok
+
+failures:
+
+---- connector::transport::tests::connect_active_peer_surfaces_bootstrap_rejection stdout ----
+
+thread 'connector::transport::tests::connect_active_peer_surfaces_bootstrap_rejection' (4744868) panicked at src/connector/transport.rs:1383:57:
+listener should bind: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+
+---- connector::transport::tests::connect_active_peer_and_request_roundtrip_over_plain_tcp stdout ----
+
+thread 'connector::transport::tests::connect_active_peer_and_request_roundtrip_over_plain_tcp' (4744867) panicked at src/connector/transport.rs:1325:57:
+listener should bind: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    connector::transport::tests::connect_active_peer_and_request_roundtrip_over_plain_tcp
+    connector::transport::tests::connect_active_peer_surfaces_bootstrap_rejection
+
+test result: FAILED. 20 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+=== crate: serverlib ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/serverlib-d3962dcc8fefa241)
+
+running 424 tests
+test engine::affinity::storage::tests::checkpoint_step_tracking ... ok
+test engine::affinity::tests::schema_change_requires_at_least_one_partner ... ok
+test engine::affinity::storage::tests::processor_checkpoint_integration ... ok
+test engine::affinity::tests::processor_builds_sync_plan_sorted_by_schema_identifier ... ok
+test engine::affinity::storage::tests::checkpoint_serialization ... ok
+test engine::affinity::storage::tests::storage_path_generation ... ok
+test engine::affinity::storage::tests::document_serialization_roundtrip ... ok
+test engine::database::catalog::tests::at_rest_encryption_key_reference_can_be_set_once ... ok
+test engine::database::catalog::tests::at_rest_encryption_key_reference_is_immutable_after_set ... ok
+test engine::database::catalog::tests::begin_schema_change_records_locked_state ... ok
+test engine::database::catalog::tests::catalog_and_table_start_in_load_state ... ok
+test engine::database::catalog::tests::begin_schema_change_rejects_when_another_is_in_progress ... ok
+test engine::database::catalog::tests::create_empty_catalog_from_name_sets_obscured_id ... ok
+test engine::database::catalog::tests::checkpoint_schema_change_progress_updates_active_state ... ok
+test engine::database::catalog::tests::cross_type_entity_id_collision_is_rejected ... ok
+test engine::database::catalog::tests::create_table_moves_load_sync_ready ... ok
+test engine::database::catalog::tests::drop_table_removes_registered_table ... ok
+test engine::database::catalog::tests::drop_helpers_remove_sql_backed_entities ... ok
+test engine::database::catalog::tests::duplicate_table_registration_is_rejected ... ok
+test engine::database::catalog::tests::empty_database_name_is_rejected ... ok
+test engine::database::catalog::tests::drop_object_removes_entity_from_catalog ... ok
+test engine::database::catalog::tests::lock_moves_to_sync_then_ready ... ok
+test engine::database::catalog::tests::entity_aspects_expose_status_and_wal_stream ... ok
+test engine::database::catalog::tests::lock_to_ready_is_valid_for_abort_path ... ok
+test engine::affinity::storage::tests::checkpoint_save_and_load_roundtrip ... ok
+test engine::database::catalog::tests::schema_can_be_retrieved_from_table ... ok
+test engine::database::catalog::tests::object_accessor_routes_all_supported_types ... ok
+test engine::database::catalog::tests::normalize_loaded_entities_rekeys_and_rebuilds_indexes ... ok
+test engine::database::catalog::tests::schema_change_payload_updates_existing_table ... ok
+test engine::database::catalog::tests::object_by_index_returns_untyped_object_by_id ... ok
+test engine::database::catalog::tests::active_schema_change_state_is_persisted_in_catalog_file ... ok
+test engine::database::catalog::tests::index_in_table_scopes_lookup_to_target_table ... ok
+test engine::database::catalog::tests::schema_change_commit_releases_global_schema_change_guard ... ok
+test engine::database::catalog::tests::schema_change_tx_abort_returns_table_to_ready_without_schema_change ... ok
+test engine::database::catalog::tests::schema_change_tx_commit_aborts_when_persist_fails ... ok
+test engine::database::catalog::tests::schema_change_tx_commit_applies_schema_and_returns_ready ... ok
+test engine::database::catalog::tests::schema_epoch_advances_for_object_lifecycle_mutations ... ok
+test engine::database::catalog::tests::schema_epoch_advances_for_schema_change_and_sql_update ... ok
+test engine::database::catalog::tests::metadata_and_sql_definition_replay_builds_view_state ... ok
+test engine::database::catalog::tests::transition_schema_change_phase_rejects_invalid_order ... ok
+test engine::database::catalog::tests::transition_schema_change_phase_updates_active_state ... ok
+test engine::database::entity::kind::kind_test::entity_kind_equality ... ok
+test engine::database::catalog::tests::trigger_and_procedure_registration_and_updates_work ... ok
+test engine::database::catalog::tests::write_requires_database_and_table_ready ... ok
+test engine::database::entity::kind::kind_test::entity_kind_is_copy ... ok
+test engine::database::entity::object_type::object_type_test::object_type_equality ... ok
+test engine::database::catalog::tests::table_lifecycle_replay_honors_create_then_drop ... ok
+test engine::database::entity::object_type::object_type_test::object_type_is_copy ... ok
+test engine::database::catalog::tests::schema_replay_uses_latest_transaction_payload ... ok
+test engine::database::catalog::tests::stored_procedure_caches_if_else_end_plan_on_register_and_update ... ok
+test engine::database::field_def::tests::to_sql_string_includes_auto_increment_from_metadata ... ok
+test engine::database::field_def::tests::to_sql_string_includes_character_set_and_collation_together ... ok
+test engine::database::field_def::tests::to_sql_string_includes_character_set_from_metadata ... ok
+test engine::database::field_def::tests::to_sql_string_includes_collation_and_auto_increment_together ... ok
+test engine::database::field_def::tests::to_sql_string_includes_collation_from_metadata ... ok
+test engine::database::field_def::tests::to_sql_string_marks_signed_integer_fields ... ok
+test engine::database::field_def::tests::to_sql_string_marks_unsigned_integer_fields ... ok
+test engine::database::field_def::tests::to_sql_string_skips_signedness_for_non_integer_fields ... ok
+test engine::database::field_def::tests::to_sql_string_uses_original_sql_type_for_temporal_fields ... ok
+test engine::database::catalog::tests::temporary_tables_are_not_persisted_in_catalog_file ... ok
+test engine::database::id::tests::database_id_is_obscured_from_normalized_name ... ok
+test engine::database::inbuilt::advanced::tests::advanced_function_registry_exposes_expected_functions ... ok
+test engine::database::inbuilt::datetime::tests::datetime_function_registry_exposes_expected_functions ... ok
+test engine::database::inbuilt::geo::distance::tests::distance_handles_antimeridian_crossing ... ok
+test engine::database::inbuilt::geo::distance::tests::distance_returns_expected_meters_for_known_points ... ok
+test engine::database::inbuilt::geo::tests::geo_function_registry_exposes_expected_functions ... ok
+test engine::database::inbuilt::numeric::tests::numeric_function_registry_exposes_expected_functions ... ok
+test engine::database::inbuilt::datetime::tests::current_datetime_functions_return_values ... ok
+test engine::database::inbuilt::geo::distance::tests::distance_returns_zero_for_identical_points ... ok
+test engine::database::inbuilt::strings::tests::string_function_registry_exposes_mysql_aliases ... ok
+test engine::database::inbuilt::numeric::tests::rand_is_deterministic_with_seed_and_bounded_without_seed ... ok
+test engine::database::inbuilt::numeric::tests::numeric_functions_propagate_null_or_invalid_mysql_results ... ok
+test engine::database::index::tests::composite_index_id_uses_field_list ... ok
+test engine::database::index::tests::index_id_is_normalized_from_kind_and_field ... ok
+test engine::database::index::tests::primary_key_index_uses_pri_prefix ... ok
+test engine::database::index::tests::temporary_index_uses_temp_id_in_identity ... ok
+test engine::database::inbuilt::strings::tests::string_functions_propagate_null_when_mysql_requires_it ... ok
+test engine::database::inbuilt::advanced::tests::advanced_functions_match_expected_outputs ... ok
+test engine::database::row_payload::tests::decode_accepts_legacy_name_map ... ok
+test engine::database::row_payload::tests::decode_round_trips_ordinal_with_nulls ... ok
+test engine::database::row_payload::tests::decode_rejects_encrypted_payload_without_decryption ... ok
+test engine::database::row_payload::tests::encrypted_row_payload_envelope_roundtrip ... ok
+test engine::database::row_payload::tests::encode_uses_seqno_ordinal_and_null_slots ... ok
+test engine::database::row_payload::tests::encrypted_row_payload_transform_can_preserve_opaque_payloads ... ok
+test engine::database::row_payload::tests::encrypted_row_payload_transform_can_reject_encrypted_payloads ... ok
+test engine::database::row_payload::tests::encrypted_row_payload_transform_ignores_plaintext_payloads ... ok
+test engine::database::row_payload::tests::encrypted_row_payload_write_transform_can_reject_encrypted_payloads ... ok
+test engine::database::row_payload::tests::encrypted_row_payload_write_transform_can_preserve_opaque_payloads ... ok
+test engine::database::row_payload::tests::row_payload_decryption_transform_ignores_encrypted_payload_without_encryption_context ... ok
+test engine::database::row_payload::tests::row_payload_decryption_transform_reports_unconfigured_provider_when_context_requires_encryption ... ok
+test engine::database::row_payload::tests::row_payload_decryption_transform_uses_provider_when_encryption_context_is_present ... ok
+test engine::database::row_payload::tests::row_payload_encryption_write_transform_ignores_plaintext_without_encryption_context ... ok
+test engine::database::row_payload::tests::row_payload_encryption_write_transform_reports_unconfigured_provider_when_context_requires_encryption ... ok
+test engine::database::row_payload::tests::row_payload_encryption_write_transform_uses_provider_when_encryption_context_is_present ... ok
+test engine::database::runtime_index::tests::derived_indexes_for_table_and_primary_key_index_prefer_expected_entries ... ok
+test engine::database::runtime_index::tests::index_value_tuple_uses_field_names_and_empty_fallbacks ... ok
+test engine::database::runtime_index::tests::parsed_allowlist_entries_are_trimmed_normalized_and_deduplicated ... ok
+test engine::database::runtime_index::tests::runtime_index_state_tracks_membership_and_rebuilds ... ok
+test engine::database::schema::change_state::change_state_test::active_schema_change_begin_assigns_job_id ... ok
+test engine::database::schema::change_state::change_state_test::active_schema_change_progress_checkpoint_updates_fields ... ok
+test engine::database::schema::change_state::change_state_test::schema_change_phase_enforces_ordered_transitions ... ok
+test engine::database::schema::migration::conversion::tests::convert_invalid_to_int_force_mode_coerces ... ok
+test engine::database::schema::migration::conversion::tests::convert_invalid_to_int_safe_mode_fails ... ok
+test engine::database::schema::migration::conversion::tests::convert_numeric_string_to_int ... ok
+test engine::database::schema::migration::conversion::tests::convert_text_preserves_valid_utf8 ... ok
+test engine::database::inbuilt::numeric::tests::evaluate_numeric_functions_matches_mysql_like_samples ... ok
+test engine::database::schema::migration::executor::tests::disk_executor_set_rules_normalizes_table_id ... ok
+test engine::database::schema::migration::executor::tests::noop_executor_returns_empty_progress ... ok
+test engine::database::inbuilt::strings::tests::evaluate_string_functions_matches_mysql_like_samples ... ok
+test engine::database::schema::migration::io::tests::load_records_from_nonexistent_path_returns_empty ... ok
+test engine::database::schema::migration::io::tests::payload_context_for_table_includes_catalog_encryption_metadata ... ok
+test engine::database::schema::migration::io::tests::stream_key_for_empty_table_fails ... ok
+test engine::database::schema::migration::io::tests::stream_key_for_table_normalizes_identifier ... ok
+test engine::database::inbuilt::datetime::tests::datetime_functions_match_expected_outputs_for_stable_inputs ... ok
+test engine::database::schema::migration::tests::run_schema_migration_requires_active_lock ... ok
+test engine::database::status::tests::object_status_lock_to_ready_is_valid_for_abort_path ... ok
+test engine::database::status::tests::object_status_supports_indexing_transitions ... ok
+test engine::database::schema::migration::tests::run_schema_migration_updates_progress_and_order ... ok
+test engine::database::table::schema_def::schema_def_test::add_field_rejects_duplicate_name ... ok
+test engine::database::table::schema_def::schema_def_test::add_field_normalizes_name ... ok
+test engine::database::table::schema_def::schema_def_test::add_field_rejects_duplicate_seqno ... ok
+test engine::database::table::schema_def::schema_def_test::remove_field_removes_by_normalized_name ... ok
+test engine::database::schema::migration::io::tests::load_records_from_path_with_context_rejects_encrypted_payload_without_provider ... ok
+test engine::database::table::schema_def::schema_def_test::update_field_replaces_existing_definition ... ok
+test engine::database::table::schema_def::schema_def_test::update_field_returns_error_when_not_found ... ok
+test engine::database::table::schema_def::schema_def_test::remove_field_returns_error_when_not_found ... ok
+test engine::database::table::schema_def::schema_def_test::update_field_rejects_seqno_conflict_with_other_field ... ok
+test engine::database::table::schema_def::schema_def_test::validate_rejects_duplicate_seqno_from_raw_schema ... ok
+test engine::database::transaction::payload::tests::kind_dispatch_decodes_entity_metadata_payload ... ok
+test engine::database::transaction::payload::tests::schema_change_payload_round_trips_through_common_codec ... ok
+test engine::database::transaction::record::tests::chained_payload_resolver_applies_transforms_in_order ... ok
+test engine::database::transaction::record::tests::chained_payload_resolver_leaves_payload_unchanged_when_no_transform_matches ... ok
+test engine::database::transaction::record::tests::chained_payload_writer_applies_transforms_in_order ... ok
+test engine::database::transaction::record::tests::chained_payload_writer_passes_context_to_transforms ... ok
+test engine::database::transaction::record::tests::chained_payload_writer_leaves_payload_unchanged_when_no_transform_matches ... ok
+test engine::database::transaction::record::tests::plain_payload_resolver_preserves_none_payload ... ok
+test engine::database::transaction::record::tests::plain_payload_resolver_returns_raw_bytes_and_caches_once ... ok
+test engine::database::transaction::record::tests::resolve_payload_with_context_recomputes_when_context_changes ... ok
+test engine::database::transaction::record::tests::wal_frame_decode_accepts_legacy_hex ... ok
+test engine::database::transaction::record::tests::wal_frame_roundtrip_uses_base64 ... ok
+test engine::execution::access::tests::build_relation_probe_index_groups_duplicate_keys ... ok
+test engine::execution::access::tests::collect_indexable_equality_filters_rejects_or ... ok
+test engine::execution::access::tests::collect_indexable_prefix_like_filter_for_schema_extracts_simple_prefix ... ok
+test engine::execution::access::tests::count_condition_predicates_counts_nested_boolean_tree ... ok
+test engine::database::schema::migration::tests::disk_executor_safe_type_change_rejects_invalid_value ... ok
+test engine::execution::access::tests::load_live_rows_ignores_uncommitted_write_group ... ok
+test engine::execution::access::tests::choose_index_lookup_returns_lookup_for_matching_index ... ok
+test engine::execution::access::tests::field_has_single_column_index_detects_indexed_columns ... ok
+test engine::execution::access::tests::load_live_rows_applies_committed_write_group ... ok
+test engine::execution::access::tests::load_live_rows_filters_deleted_records ... ok
+test engine::database::schema::migration::tests::disk_executor_force_type_change_coerces_invalid_value ... ok
+test engine::database::schema::migration::tests::disk_executor_rewrites_flushes_and_cuts_over ... ok
+test engine::execution::access::tests::load_live_row_count_tracks_latest_version_chain_and_delete ... ok
+test engine::database::schema::migration::tests::disk_executor_applies_schema_mutation_rules_to_row_payloads ... ok
+test engine::execution::commands::control_flow::case_when::tests::evaluate_case_projection_returns_first_matching_branch ... ok
+test engine::execution::access::tests::materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_state_missing ... ok
+test engine::execution::commands::control_flow::case_when::tests::evaluate_case_projection_supports_simple_case_with_function_result ... ok
+test engine::execution::access::tests::materialize_relation_rows_supports_full_scan_and_equality_probe ... ok
+test engine::execution::commands::control_flow::case_when::tests::evaluate_case_projection_uses_else_when_no_branch_matches ... ok
+test engine::execution::access::tests::materialize_relation_rows_returns_empty_when_runtime_lookup_key_misses ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_closes_source_when_callback_fails ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_closes_source_when_fetch_fails ... ok
+test engine::execution::access::tests::plan_relation_access_selects_prefix_like_probe_when_available ... ok
+test engine::execution::access::tests::load_live_rows_tracks_latest_version_chain_and_delete ... ok
+test engine::execution::access::tests::plan_relation_access_selects_equality_probe_and_full_scan ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_iterates_all_rows_and_sets_not_found ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_restores_local_bindings_after_callback_error ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_restores_local_bindings_after_return_directive ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_restores_local_bindings_to_avoid_bleed_between_runs ... ok
+test engine::execution::access::tests::runtime_index_bootstrap_uses_latest_live_row_keys ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_supports_break_directive ... ok
+test engine::execution::commands::control_flow::cursor::tests::execute_sql_cursor_supports_return_directive ... ok
+test engine::execution::commands::control_flow::cursor::tests::sql_cursor_frame_prefers_local_binding_over_row_value ... ok
+test engine::execution::commands::control_flow::cursor::tests::sql_cursor_frame_resolves_qualified_and_local_bindings ... ok
+test engine::execution::commands::control_flow::cursor::tests::select_read_plan_cursor_source_supports_projection_only_plans ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_if_else_end_block_runs_first_matching_branch ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_if_else_end_block_uses_else_when_no_branch_matches ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_case_from_create_procedure_prefers_local_binding_over_row_value_in_cursor_frame ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_if_else_end_from_create_procedure_sql_executes_matching_action ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_if_else_end_plan_runs_branch_action_sql ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_if_else_end_plan_prefers_local_binding_over_row_value_in_cursor_frame ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_if_else_end_from_create_procedure_sql_executes_searched_case_branch ... ok
+test engine::execution::commands::invocation::tests::cleanup_temporary_tables_drops_temp_tables_and_streams ... ok
+test engine::execution::commands::control_flow::if_else_end::tests::execute_if_else_end_from_create_procedure_sql_executes_simple_case_branch ... ok
+test engine::execution::commands::invocation::tests::execute_automatic_triggers_for_event_runs_only_matching_triggers ... ok
+test engine::execution::commands::invocation::tests::execute_stored_procedure_invocation_over_cursor_propagates_action_errors ... ok
+test engine::execution::commands::invocation::tests::execute_stored_procedure_invocation_over_cursor_runs_for_each_row ... ok
+test engine::execution::commands::invocation::tests::execute_stored_procedure_invocation_over_cursor_skips_rows_without_matching_branch ... ok
+test engine::execution::commands::invocation::tests::execute_stored_procedure_invocation_over_cursor_with_cleanup_runs_cleanup ... ok
+test engine::execution::commands::invocation::tests::execute_stored_procedure_invocation_uses_cached_if_else_plan ... ok
+test engine::execution::commands::procedure_local_entity::tests::arguments_are_resolved_as_values_when_present ... ok
+test engine::execution::commands::invocation::tests::execute_stored_procedure_invocation_with_cleanup_runs_cleanup_even_on_success ... ok
+test engine::execution::commands::invocation::tests::execute_stored_procedure_invocation_with_scoped_teardown_cleans_up_owned_tables ... ok
+test engine::execution::commands::procedure_local_entity::tests::variable_storage_supports_normalized_lookup_and_remove ... ok
+test engine::execution::commands::control_flow::cursor::tests::select_read_plan_cursor_source_supports_joined_plans ... ok
+test engine::execution::commands::scoped_table::tests::create_scoped_ephemeral_table_registers_table_and_marks_stream_ephemeral ... ok
+test engine::execution::commands::invocation::tests::scoped_teardown_does_not_bleed_between_procedure_instances ... ok
+test engine::execution::commands::control_flow::cursor::tests::select_read_plan_cursor_source_supports_relation_plans ... ok
+test engine::execution::commands::scoped_table::tests::release_scoped_ephemeral_table_is_idempotent ... ok
+test engine::execution::introspection::tests::describe_sql_object_result_returns_original_sql ... ok
+test engine::execution::commands::scoped_table::tests::scoped_ephemeral_table_scope_cleanup_is_isolated_per_scope ... ok
+test engine::execution::introspection::tests::describe_table_result_uses_schema_metadata ... ok
+test engine::execution::introspection::tests::show_databases_result_sorts_names ... ok
+test engine::execution::introspection::tests::show_tables_result_sorts_names ... ok
+test engine::execution::commands::scoped_table::tests::scoped_ephemeral_table_scope_generates_unique_table_ids ... ok
+test engine::execution::join::tests::build_joined_row_tuples_returns_empty_when_no_relations_exist ... ok
+test engine::execution::commands::scoped_table::tests::release_scoped_ephemeral_table_drops_catalog_and_wal_stream ... ok
+test engine::execution::runtime::tests::compare_provider_fields_reads_from_tuple_and_candidate_provider ... ok
+test engine::execution::runtime::tests::compare_row_value_supports_numeric_and_text_ordering ... ok
+test engine::execution::runtime::tests::join_condition_field_names_extracts_eq_operands ... ok
+test engine::execution::runtime::tests::joined_row_tuple_missing_relation_helpers_preserve_available_rows ... ok
+test engine::execution::runtime::tests::joined_tuple_field_comparison_matches ... ok
+test engine::execution::mutation_test::select_mutation_target_rows_deduplicates_join_matches_by_base_row_id ... ok
+test engine::execution::join::tests::build_joined_row_tuples_supports_cross_join ... ok
+test engine::execution::join::tests::build_joined_row_tuples_supports_non_field_comparison_join_conditions ... ok
+test engine::execution::select::tests::execute_joined_select_plan_expands_qualified_wildcard_projection ... ok
+test engine::execution::mutation_test::select_mutation_target_rows_propagates_scalar_subquery_errors ... ok
+test engine::execution::select::tests::execute_joined_select_plan_expands_unqualified_wildcard_projection ... ok
+test engine::execution::mutation_test::select_mutation_target_rows_skips_right_join_rows_without_base_relation ... ok
+test engine::execution::join::tests::build_joined_row_tuples_supports_all_join_kinds ... ok
+test engine::execution::join::tests::build_joined_row_tuples_supports_and_field_comparison_join_conditions ... ok
+test engine::execution::select::tests::execute_projection_only_select_plan_accepts_order_by_ordinal ... ok
+test engine::execution::select::tests::execute_projection_only_select_plan_returns_inbuilt_row ... ok
+test engine::execution::select::tests::execute_joined_select_plan_projects_null_extended_rows ... ok
+test engine::execution::select::tests::execute_projection_only_select_plan_supports_row_independent_case_projection ... ok
+test engine::execution::select::tests::execute_joined_select_plan_supports_case_projection ... ok
+test engine::execution::select::tests::execute_joined_select_plan_supports_case_projection_function_values ... ok
+test engine::execution::select::tests::execute_joined_select_plan_supports_case_projection_function_values_with_columns ... ok
+test engine::execution::select::tests::execute_joined_select_plan_supports_inbuilt_function_projection ... ok
+test engine::execution::select::tests::execute_joined_select_plan_supports_row_dependent_inbuilt_function_projection ... ok
+test engine::execution::select::tests::execute_joined_select_plan_supports_complex_join_on_conditions ... ok
+test engine::execution::select::tests::execute_joined_select_plan_returns_explain_rows_when_requested ... ok
+test engine::execution::select::tests::execute_relation_select_plan_applies_limit_and_offset ... ok
+test engine::execution::select::tests::execute_relation_select_plan_count_star_falls_back_when_pk_cardinality_is_zero ... ok
+test engine::execution::select::tests::execute_relation_select_plan_count_star_materializes_rows_when_full_table ... ok
+test engine::execution::select::tests::execute_relation_select_plan_rejects_multi_row_scalar_subqueries ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_all_subquery_predicates ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_count_star_projection ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_correlated_exists_predicates ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_any_subquery_predicates ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_correlated_in_predicates ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_exists_predicates ... ok
+test engine::execution::select::tests::row_matches_select_condition_supports_simple_predicates ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_in_subquery_with_inbuilt_projection ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_exists_predicates_with_inbuilt_projection ... ok
+test engine::replication_executor::tests::executor_detects_completion ... ok
+test engine::replication_executor::tests::executor_marks_steps_complete ... ok
+test engine::replication_executor::tests::executor_rejects_schema_phase_without_database ... ok
+test engine::replication_executor::tests::executor_tracks_phase_progression ... ok
+test engine::sql::classify::tests::fallback_extracts_parameterized_procedure_name_for_call ... ok
+test engine::sql::classify::tests::fallback_extracts_parameterized_procedure_name_for_create ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_not_exists_predicates ... ok
+test engine::sql::delete_plan::tests::delete_rows_helper_extracts_table_and_where ... ok
+test engine::sql::delete_plan::tests::delete_rows_helper_parses_complex_join_on_condition ... ok
+test engine::sql::delete_plan::tests::delete_rows_helper_parses_join_information ... ok
+test engine::sql::delete_plan::tests::delete_rows_helper_parses_multiple_joins ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_passthrough_derived_wrapper ... ok
+test engine::sql::delete_plan::tests::delete_rows_helper_supports_delete_without_where ... ok
+test engine::sql::expression::tests::expression_references_column_detects_column_arg_functions ... ok
+test engine::sql::expression::tests::expression_references_column_ignores_literal_only_functions ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_passthrough_derived_wrapper_with_outer_projection_aliases ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_passthrough_derived_wrapper_with_outer_where_and_window ... ok
+test engine::sql::insert_plan::tests::insert_select_helper_extracts_select_plan ... ok
+test engine::sql::insert_plan::tests::insert_values_helper_extracts_rows ... ok
+test engine::sql::insert_plan::tests::insert_select_join_helper_extracts_join_plan ... ok
+test engine::sql::predicates::tests::compare_like_value_escape_can_be_custom_character ... ok
+test engine::sql::predicates::tests::compare_like_value_supports_case_insensitive_simple_prefix ... ok
+test engine::sql::insert_plan::tests::insert_values_supports_unary_signed_numbers ... ok
+test engine::sql::insert_plan::tests::insert_values_supports_inbuilt_commands ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_scalar_subquery_with_inbuilt_projection ... ok
+test engine::sql::predicates::tests::compare_like_value_supports_escape_character ... ok
+test engine::sql::predicates::tests::compare_like_value_supports_ordered_multi_segment_patterns ... ok
+test engine::sql::predicates::tests::compare_like_value_supports_simple_prefix_pattern ... ok
+test engine::sql::predicates::tests::compare_row_value_supports_native_numeric_storage ... ok
+test engine::execution::select::tests::execute_relation_select_plan_supports_scalar_subquery_comparisons ... ok
+test engine::sql::requests::tests::call_procedure_maps_to_call_stored_procedure_operation ... ok
+test engine::sql::requests::tests::alter_view_operation_maps_to_alter_schema ... ok
+test engine::sql::requests::tests::create_database_operation_parses_object_name ... ok
+test engine::sql::requests::tests::create_database_with_aes_suffix_parses_object_name ... ok
+test engine::sql::requests::tests::create_function_is_unsupported ... ok
+test engine::sql::requests::tests::create_index_maps_to_create_other_operation ... ok
+test engine::sql::requests::tests::create_schema_operation_maps_to_create_database ... ok
+test engine::sql::requests::tests::create_procedure_maps_to_create_stored_procedure_operation ... ok
+test engine::sql::requests::tests::create_or_replace_trigger_maps_to_create_trigger_operation ... ok
+test engine::sql::requests::tests::create_trigger_maps_to_create_trigger_operation ... ok
+test engine::sql::requests::tests::create_view_operation_parses_object_name ... ok
+test engine::sql::requests::tests::describe_table_maps_to_retrieve_operation ... ok
+test engine::sql::requests::tests::drop_database_operation_maps_to_drop_database ... ok
+test engine::sql::requests::tests::cte_union_select_maps_to_union_directive ... ok
+test engine::sql::requests::tests::drop_function_is_unsupported ... ok
+test engine::sql::requests::tests::drop_procedure_if_exists_maps_to_drop_stored_procedure_operation ... ok
+test engine::sql::requests::tests::drop_procedure_maps_to_drop_stored_procedure_operation ... ok
+test engine::sql::requests::tests::drop_schema_operation_maps_to_drop_database ... ok
+test engine::sql::requests::tests::drop_statement_maps_to_alter_schema_directive ... ok
+test engine::sql::requests::tests::drop_trigger_if_exists_maps_to_drop_trigger_operation ... ok
+test engine::sql::requests::tests::drop_trigger_maps_to_drop_trigger_operation ... ok
+test engine::sql::requests::tests::drop_view_operation_maps_to_alter_schema ... ok
+test engine::sql::requests::tests::except_select_maps_to_union_directive ... ok
+test engine::sql::requests::tests::explain_create_table_is_rejected ... ok
+test engine::sql::requests::tests::explain_delete_maps_to_delete_operation ... ok
+test engine::sql::requests::tests::explain_insert_maps_to_insert_operation ... ok
+test engine::sql::requests::tests::explain_select_maps_to_retrieve_operation ... ok
+test engine::sql::requests::tests::grant_statement_maps_to_alter_schema_other_operation ... ok
+test engine::sql::requests::tests::explain_update_maps_to_update_operation ... ok
+test engine::sql::requests::tests::insert_select_union_maps_to_insert_operation ... ok
+test engine::sql::requests::tests::intersect_select_maps_to_union_directive ... ok
+test engine::sql::requests::tests::revoke_statement_maps_to_alter_schema_other_operation ... ok
+test engine::sql::requests::tests::parenthesized_union_select_maps_to_union_directive ... ok
+test engine::sql::requests::tests::rollback_to_savepoint_maps_savepoint_name ... ok
+test engine::sql::requests::tests::set_names_maps_to_alter_schema_other_operation ... ok
+test engine::sql::requests::tests::parser_returns_directives_for_multiple_statements ... ok
+test engine::sql::requests::tests::select_from_qualified_table_keeps_database_and_table_name ... ok
+test engine::sql::requests::tests::set_variable_maps_to_alter_schema_other_operation ... ok
+test engine::sql::requests::tests::show_tables_from_database_maps_to_retrieve_operation ... ok
+test engine::sql::requests::tests::show_columns_maps_to_retrieve_operation ... ok
+test engine::sql::requests::tests::show_create_table_maps_to_retrieve_operation ... ok
+test engine::sql::requests::tests::start_transaction_maps_to_alter_schema_other_operation ... ok
+test engine::sql::requests::tests::truncate_table_maps_to_truncate_operation ... ok
+test engine::sql::requests::tests::use_database_maps_to_alter_schema_other_operation ... ok
+test engine::sql::routine_plan::tests::parse_create_procedure_parameter_names_from_multiline_as_begin_statement_extracts_names ... ok
+test engine::sql::routine_plan::tests::bind_call_procedure_arguments_maps_values_by_parameter_name ... ok
+test engine::sql::requests::tests::union_select_maps_to_union_directive ... ok
+test engine::sql::routine_plan::tests::parse_create_procedure_parameter_names_from_statement_extracts_names ... ok
+test engine::sql::routine_plan::tests::bind_call_procedure_arguments_rejects_count_mismatch ... ok
+test engine::sql::routine_plan::tests::parse_if_else_end_plan_from_create_procedure_returns_none_when_body_is_not_if ... ok
+test engine::sql::routine_plan::tests::parse_if_else_end_plan_from_create_procedure_extracts_if_block ... ok
+test engine::sql::routine_plan::tests::parse_if_else_end_plan_from_create_procedure_extracts_searched_case_block ... ok
+test engine::sql::routine_plan::tests::parse_if_else_end_plan_from_create_procedure_extracts_simple_case_block ... ok
+test engine::sql::routine_plan::tests::parse_if_else_end_plan_rejects_missing_end_if ... ok
+test engine::sql::routine_plan::tests::parse_if_else_end_plan_parses_if_without_else ... ok
+test engine::sql::routine_plan::tests::parse_if_else_end_plan_parses_if_elseif_else_chain ... ok
+test engine::sql::schema_plan::tests::create_table_plan_detects_temporary_flag ... ok
+test engine::sql::schema_plan::tests::alter_table_change_plan_parses_add_drop_and_rename ... ok
+test engine::sql::schema_plan::tests::create_table_schema_helper_maps_fields ... ok
+test engine::sql::schema_plan::tests::create_table_schema_maps_temporal_types_and_preserves_original_sql_type ... ok
+test engine::sql::schema_plan::tests::create_table_schema_maps_varchar_with_length ... ok
+test engine::sql::schema_plan::tests::create_table_schema_captures_auto_increment_and_encoding_metadata ... ok
+test engine::sql::select_plan::tests::create_view_dependency_extraction_collects_base_table ... ok
+test engine::sql::select_plan::tests::except_select_parses_boundary_operation ... ok
+test engine::sql::select_plan::tests::select_alias_qualified_projection_is_valid ... ok
+test engine::sql::select_plan::tests::intersect_select_parses_boundary_operation ... ok
+test engine::sql::select_plan::tests::mixed_set_operators_preserve_parser_precedence_order ... ok
+test engine::sql::select_plan::tests::select_alias_qualified_wildcard_is_valid ... ok
+test engine::sql::select_plan::tests::explain_select_multiple_joins_sets_explain_flag ... ok
+test engine::sql::select_plan::tests::select_distinct_returns_explicit_unsupported_error ... ok
+test engine::sql::select_plan::tests::select_case_projection_parses_with_alias ... ok
+test engine::sql::select_plan::tests::select_cross_join_parses_join_kind ... ok
+test engine::sql::select_plan::tests::select_case_projection_parses_inbuilt_function_values ... ok
+test engine::sql::select_plan::tests::select_group_by_returns_explicit_unsupported_error ... ok
+test engine::sql::select_plan::tests::select_full_outer_join_parses_join_kind ... ok
+test engine::sql::select_plan::tests::select_group_by_having_combines_having_into_filter ... ok
+test engine::sql::schema_plan::tests::create_table_schema_tracks_table_level_keys_defaults_and_enum ... ok
+test engine::sql::select_plan::tests::select_inner_join_parses_relations_and_on_fields ... ok
+test engine::sql::select_plan::tests::select_join_requires_qualified_projection_columns ... ok
+test engine::sql::select_plan::tests::select_join_unqualified_wildcard_is_valid ... ok
+test engine::sql::select_plan::tests::select_join_on_supports_complex_conditions ... ok
+test engine::sql::select_plan::tests::select_left_join_parses_join_kind ... ok
+test engine::sql::select_plan::tests::select_passthrough_derived_wrapper_composes_outer_limit_offset ... ok
+test engine::sql::select_plan::tests::select_order_by_returns_explicit_unsupported_error ... ok
+test engine::sql::select_plan::tests::select_left_outer_join_parses_join_kind ... ok
+test engine::sql::select_plan::tests::select_join_using_parses_equality_condition ... ok
+test engine::sql::select_plan::tests::select_multiple_joins_parse_in_order ... ok
+test engine::sql::select_plan::tests::select_passthrough_derived_wrapper_rewrites_outer_projection_with_aliases ... ok
+test engine::sql::select_plan::tests::select_passthrough_derived_wrapper_parses ... ok
+test engine::sql::select_plan::tests::select_passthrough_derived_wrapper_parses_qualified_wildcard ... ok
+test engine::sql::select_plan::tests::select_passthrough_derived_wrapper_rewrites_outer_where ... ok
+test engine::sql::select_plan::tests::select_projection_only_order_by_ordinal_is_supported ... ok
+test engine::sql::select_plan::tests::select_passthrough_derived_wrapper_rejects_unknown_outer_projection_column ... ok
+test engine::sql::select_plan::tests::select_projection_only_order_by_unknown_alias_is_rejected ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_between_condition ... ok
+test engine::sql::select_plan::tests::select_projection_returns_requested_columns ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_all_subquery_comparison ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_any_subquery_comparison ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_exists_predicates ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_in_subquery_condition ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_inbuilt_function_literals ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_in_and_not_equal ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_in_subquery_with_inbuilt_projection ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_inbuilt_function_projection_with_from ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_inbuilt_function_projection_without_from ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_like_predicates ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_limit_and_offset ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_like_predicates_with_escape ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_or_and_is_null ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_parenthesized_operands ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_not_predicate_forms ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_parenthesized_nested_groups ... ok
+test engine::sql::select_plan::tests::select_simple_case_projection_parses_with_operand ... ok
+test engine::sql::select_plan::tests::select_right_outer_join_parses_join_kind ... ok
+test engine::sql::select_plan::tests::select_star_projection_returns_none ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_scalar_subquery_comparison ... ok
+test engine::sql::select_plan::tests::select_unknown_alias_in_projection_is_rejected ... ok
+test engine::sql::select_plan::tests::select_unknown_alias_qualified_wildcard_is_rejected ... ok
+test engine::sql::select_plan::tests::select_unknown_alias_in_where_is_rejected ... ok
+test engine::sql::select_plan::tests::select_with_cte_parses_cte_plan ... ok
+test engine::sql::select_plan::tests::select_with_window_clause_sets_window_flag ... ok
+test engine::sql::trigger_plan::tests::parse_trigger_invocation_binding_extracts_before_insert_on_table ... ok
+test engine::sql::select_plan::tests::union_select_parses_branch_plans_and_quantifier ... ok
+test engine::sql::trigger_plan::tests::parse_trigger_invocation_binding_returns_none_for_non_trigger_sql ... ok
+test engine::sql::select_plan::tests::union_select_parses_order_by_ordinal_position ... ok
+test engine::sql::select_plan::tests::select_read_plan_parses_regex_predicates ... ok
+test engine::sql::select_plan::tests::union_select_parses_mixed_quantifiers_and_query_level_windowing ... ok
+test engine::sql::trigger_plan::tests::parse_trigger_invocation_binding_supports_create_or_replace ... ok
+test engine::sql::select_plan::tests::union_select_with_cte_propagates_ctes_to_branch_plans ... ok
+test engine::sql::update_plan::tests::update_rows_helper_extracts_assignments_and_where ... ok
+test engine::sql::update_plan::tests::update_rows_helper_parses_join_information ... ok
+test engine::sql::update_plan::tests::update_rows_helper_parses_complex_join_on_condition ... ok
+test engine::sql::update_plan::tests::update_rows_helper_supports_inbuilt_function_assignment ... ok
+test engine::sql::update_plan::tests::update_rows_helper_parses_multiple_joins ... ok
+test engine::wal::tests::decode_storage_record_accepts_legacy_uncompressed_bytes ... ok
+test engine::wal::tests::decoded_storage_record_collapses_to_logical_payload_on_default_decode ... ok
+test engine::wal::tests::encoded_storage_record_compresses_small_non_encrypted_payloads ... ok
+test engine::wal::tests::storage_encode_with_encryption_context_reports_unconfigured_provider ... ok
+test engine::wal::tests::storage_decode_with_encryption_context_reports_unconfigured_provider ... ok
+test engine::wal::tests::in_memory_mode_appends_without_filesystem_backing ... ok
+test engine::wal::tests::compact_prefers_latest_metadata_change_record_when_present ... ok
+test engine::wal::tests::compact_clears_refids_to_removed_records ... ok
+test engine::wal::tests::stream_mode_defaults_to_durable_and_can_be_set_ephemeral ... ok
+test engine::wal::tests::ephemeral_stream_in_file_mode_keeps_data_in_memory_only ... ok
+test engine::wal::tests::storage_write_and_read_chains_roundtrip_plaintext_payload ... ok
+test engine::wal::tests::compact_keeps_latest_schema_metadata_and_appends_truncate_marker ... ok
+test engine::wal::tests::encoded_storage_record_roundtrip_handles_large_payloads ... ok
+test engine::wal::tests::encoded_storage_record_skips_compression_for_encrypted_mutation_payloads ... ok
+test engine::wal::tests::delete_stream_removes_in_memory_and_disk_state ... ok
+
+test result: ok. 424 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests serverlib
+
+running 1 test
+test src/engine/database/schema/change_tx.rs - engine::database::schema::change_tx::SchemaChangeTx (line 13) ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.54s; merged doctests compilation took 0.21s
+=== crate: server ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/server-8c470e0371756cd6)
+
+running 128 tests
+test core::app::tests::connector_client_path_can_query_show_tables_without_simulation ... ok
+test core::app::tests::affinity_schema_sync_failure_returns_database_to_ready ... ok
+test core::app::tests::connector_client_path_can_query_select_without_simulation ... ok
+test core::app::tests::affinity_wal_import_ignores_stale_schema_revision_and_returns_database_to_ready ... ok
+test core::app::tests::create_database_query_creates_catalog ... ok
+test core::app::tests::bootstrap_replays_latest_schema_from_wal ... ok
+test core::app::tests::describe_sql_backed_objects_returns_original_sql_and_object_type ... ok
+test core::app::tests::bootstrap_replays_sql_definition_and_metadata_from_wal ... ok
+test core::app::tests::create_table_query_registers_table_with_schema ... ok
+test core::app::tests::disconnect_rollback_clears_active_session_transaction ... ok
+test core::app::tests::commit_groups_staged_dml_into_one_write_batch ... ok
+test core::app::tests::active_session_transaction_stages_queries_until_commit ... ok
+test core::app::tests::alter_table_query_updates_schema ... ok
+test core::app::tests::drop_if_exists_for_sql_backed_objects_is_idempotent ... ok
+test core::app::tests::explain_insert_update_delete_return_plan_details ... ok
+test core::app::tests::drop_database_query_removes_catalog ... ok
+test core::app::tests::explicit_transaction_rejects_non_dml_schema_statements ... ok
+test core::app::tests::describe_table_query_returns_schema_rows ... ok
+test core::app::tests::drop_table_query_removes_table ... ok
+test core::app::tests::delete_query_removes_live_row ... ok
+test core::app::tests::commit_shares_one_group_id_across_touched_tables ... ok
+test core::app::tests::query_path_stress_respects_timing_thresholds ... ok
+test core::app::tests::failed_commit_validation_leaves_real_wal_and_indexes_clean ... ok
+test core::app::tests::insert_query_appends_insert_record_to_table_wal ... ok
+test core::app::tests::create_and_drop_sql_backed_objects_are_wired ... ok
+test core::app::tests::lightweight_import_commit_failure_clears_transaction_state_for_followup_reads ... ok
+test core::app::tests::delete_query_with_left_outer_join_removes_unmatched_target_row ... ok
+test core::app::tests::rollback_discards_staged_queries_for_session ... ok
+test core::app::tests::rejected_insert_releases_table_write_lock ... ok
+test core::app::tests::select_alias_where_pk_returns_empty_when_runtime_index_is_empty ... ok
+test core::app::tests::insert_select_copies_rows_into_target_table ... ok
+test core::app::tests::select_query_returns_table_schema_columns ... ok
+test core::app::tests::select_from_view_uses_scoped_materialization_without_catalog_residue ... ok
+test core::app::tests::explain_select_with_multiple_joins_returns_join_steps ... ok
+test core::app::tests::session_transaction_control_is_scoped_by_session_id ... ok
+test core::app::tests::show_tables_query_returns_table_name_rows ... ok
+test core::app::tests::insert_select_with_join_materializes_joined_source_rows ... ok
+test core::app::tests::select_inner_join_returns_matching_rows ... ok
+test core::app::tests::select_inner_join_preserves_one_to_many_matches ... ok
+test core::app::tests::select_full_outer_join_null_extends_both_sides ... ok
+test core::app::tests::select_left_join_returns_unmatched_left_rows_with_nulls ... ok
+test core::app::tests::select_left_join_where_right_field_is_null_filters_after_tuple_formation ... ok
+test core::app::tests::snapshot_isolation_transactional_reads_see_own_staged_writes ... ok
+test core::config::tests::default_local_listens_on_all_interfaces ... ok
+test core::control::connector_handler::tests::is_bootstrap_status_query_detects_internal_and_alias ... ok
+test core::control::connector_handler::tests::is_server_peer_discovery_query_detects_internal_and_alias ... ok
+test core::control::connector_handler::tests::is_show_catalog_workers_query_detects_internal_and_alias ... ok
+test core::control::connector_handler::tests::is_show_entities_query_detects_internal_and_alias ... ok
+test core::control::connector_handler::tests::is_valid_server_node_requires_non_empty_id_and_multiaddrs ... ok
+test core::app::tests::select_left_outer_join_null_extends_unmatched_rows ... ok
+test core::app::tests::serializable_rejects_write_skew_across_disjoint_rows ... ok
+test core::app::tests::select_right_outer_join_null_extends_unmatched_rows ... ok
+test core::control::connector_handler::tests::node_announce_dedup_key_is_stable ... ok
+test core::app::tests::snapshot_isolation_keeps_repeatable_reads_within_transaction ... ok
+test core::control::connector_handler::tests::multi_catalog_query_rejects_write_statement ... ok
+test core::control::connector_handler::tests::policy_snapshot_multi_catalog_catalog_status_rejection_message ... ok
+test core::app::tests::snapshot_isolation_rejects_concurrent_write_write_conflicts ... ok
+test core::control::connector_handler::tests::policy_snapshot_multi_catalog_write_rejection_message ... ok
+test core::control::connector_handler::tests::routing_compliance_query_with_explicit_database_id_is_catalog_bound ... ok
+test core::control::connector_handler::tests::routing_compliance_query_infers_single_catalog_from_sql_when_session_db_is_empty ... ok
+test core::control::connector_handler::tests::routing_compliance_schema_and_mutation_are_catalog_bound ... ok
+test core::control::p2p_wire::tests::advertised_listen_addr_defaults_wildcard_to_localhost ... ok
+test core::control::connector_handler::tests::routing_compliance_query_with_multi_catalog_sql_has_no_single_route_key ... ok
+test core::control::p2p_wire::tests::advertised_listen_addr_prefers_explicit_override ... ok
+test core::control::p2p_wire::tests::bootstrap_nodes_use_normalized_addrs ... ok
+test core::control::p2p_wire::tests::multiaddr_to_socket_addr_parses_ip4_and_dns ... ok
+test core::control::p2p_wire::tests::normalize_bootstrap_addr_accepts_multiaddr_passthrough ... ok
+test core::control::p2p_wire::tests::node_announce_wire_encoding_roundtrips ... ok
+test core::control::p2p_wire::tests::normalize_bootstrap_addr_parses_bare_port ... ok
+test core::control::p2p_wire::tests::normalize_bootstrap_addr_parses_host_port ... ok
+test core::control::p2p_wire::tests::schema_catalog_wire_encoding_roundtrips ... ok
+test core::control::tls_support::tests::default_tls_mode_is_optional ... ok
+test core::control::tls_support::tests::explicit_tls_off_overrides_default ... ok
+test core::control::tls_support::tests::explicit_tls_required_is_accepted ... ok
+test core::control::tls_support::tests::invalid_tls_mode_is_rejected ... ok
+test core::mappings::query::tests::append_row_payload_record_rejects_missing_refid ... ok
+test core::mappings::query::tests::append_row_payload_record_rejects_stale_refid ... ok
+test core::app::tests::wal_export_with_stream_cursors_does_not_skip_unseen_streams ... ok
+test core::mappings::query::tests::begin_transaction_is_explicitly_recognized ... ok
+test core::mappings::query::tests::call_procedure_executes_branch_sql_as_smoke_test ... ok
+test core::control::connector_handler::tests::routing_compliance_multi_catalog_coordinator_skips_non_multi_paths ... ok
+test core::mappings::query::tests::call_procedure_supports_declare_continue_handler_for_sqlexception ... ok
+test core::app::tests::transaction_commit_rejects_duplicate_insert_during_validation ... ok
+test core::mappings::query::tests::call_procedure_supports_local_declare_and_set_statements ... ok
+test core::mappings::query::tests::call_procedure_supports_loop_with_leave_directive ... ok
+test core::mappings::query::tests::call_procedure_supports_declare_exit_handler_for_sqlexception ... ok
+test core::mappings::query::tests::call_procedure_supports_iterate_directive_in_while_body ... ok
+test core::mappings::query::tests::call_procedure_supports_repeat_with_local_variable_resolution ... ok
+test core::mappings::query::tests::call_procedure_tears_down_scoped_temporary_tables ... ok
+test core::mappings::query::tests::call_procedure_argument_bindings_do_not_bleed_between_calls ... ok
+test core::mappings::query::tests::call_procedure_supports_while_with_local_variable_resolution ... ok
+test core::mappings::query::tests::call_procedure_temp_table_insert_and_select_returns_rows_and_cleans_up ... ok
+test core::mappings::query::tests::commit_is_explicitly_recognized ... ok
+test core::mappings::query::tests::explain_inner_statement_detects_prefix_case_insensitive ... ok
+test core::mappings::query::tests::explain_join_mutation_plan_includes_join_surface_details ... ok
+test core::mappings::query::tests::explain_mutation_plan_returns_attribute_value_rows ... ok
+test core::mappings::query::tests::except_query_executes_with_distinct_semantics ... ok
+test core::mappings::query::tests::intersect_query_executes_with_distinct_semantics ... ok
+test core::mappings::query::tests::resolve_catalog_supports_user_database_name_lookup ... ok
+test core::mappings::query::tests::create_view_persists_dependencies_from_view_body ... ok
+test core::mappings::query::tests::select_distinct_group_having_order_executes_in_first_pass_model ... ok
+test core::mappings::query::tests::mixed_set_operators_execute_with_precedence_aware_result ... ok
+test core::mappings::query::tests::select_from_dotted_table_with_active_database_strips_matching_prefix ... ok
+test core::mappings::query::tests::select_from_dotted_table_without_active_database_resolves_catalog_prefix ... ok
+test core::mappings::query::tests::select_orders_by_non_projected_field_without_returning_hidden_sort_key ... ok
+test core::app::tests::update_query_updates_live_row ... ok
+test core::mappings::query::tests::select_with_cte_executes_and_orders_rows ... ok
+test core::mappings::query::tests::union_query_applies_order_by_ordinal_position ... ok
+test core::mappings::query::tests::create_database_with_aes_option_enables_at_rest_encryption ... ok
+test core::mappings::query::tests::create_database_with_explicit_aes_key_ref_sets_metadata ... ok
+test core::mappings::query::tests::union_query_coerces_numeric_and_text_column_types_to_text ... ok
+test core::mappings::query::tests::union_query_applies_query_level_order_by_limit_and_offset ... ok
+test core::mappings::query::tests::union_query_executes_and_deduplicates_rows ... ok
+test core::mappings::query::tests::union_query_reconciles_enum_types_to_wider_string_family ... ok
+test core::mappings::query::tests::union_query_deduplicates_case_insensitively_under_ci_collation ... ok
+test core::mappings::query::tests::union_query_rejects_conflicting_collations ... ok
+test core::mappings::query::tests::union_query_keeps_integer_family_for_signed_and_unsigned_columns ... ok
+test core::mappings::query::tests::union_query_rejects_incompatible_blob_and_spatial_types ... ok
+test core::mappings::query::tests::union_query_supports_mixed_union_and_union_all_semantics ... ok
+test engine::wal_probe::tests::wal_accepts_out_of_order_append_and_keeps_sorted_order ... ok
+test engine::wal_probe::tests::wal_replay_with_lower_bound_is_exclusive ... ok
+test engine::wal_probe::tests::wal_replay_without_lower_bound_returns_all_records ... ok
+test core::mappings::query::tests::union_query_widens_fixed_length_strings ... ok
+test core::mappings::query::tests::union_query_with_top_level_cte_executes_branches ... ok
+test core::control::connector_handler::tests::multi_catalog_query_fanout_merges_rows ... ok
+test core::control::connector_handler::tests::multi_catalog_query_rejects_schema_mismatch ... ok
+test core::app::tests::update_query_with_join_updates_matching_target_row ... ok
+test core::control::connector_handler::tests::policy_snapshot_multi_catalog_schema_mismatch_message ... ok
+
+test result: ok. 128 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.40s
+
+     Running unittests src/main.rs (target/debug/deps/server-d1ae301668b40b4f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== crate: connector ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/connector-d8bc5a85d2bb87f4)
+
+running 15 tests
+test core::client::tests::execute_propagates_transport_error ... ok
+test core::client::tests::execute_returns_applied_response ... ok
+test core::client::tests::connector_error_display_formats_messages ... ok
+test core::result::tests::connector_response_applied_constructor_sets_applied_status ... ok
+test core::command::tests::request_serializes_roundtrip ... ok
+test core::client::tests::execute_returns_rejected_error ... ok
+test core::client::tests::execute_returns_invalid_response_on_request_id_mismatch ... ok
+test core::result::tests::query_cache_variants_serialize_roundtrip ... ok
+test core::client::tests::execute_returns_invalid_response_when_rejected_payload_is_not_error ... ok
+test core::result::tests::connector_response_rejected_constructor_sets_error_result ... ok
+test schema::tests::field_spec_builder_defaults_to_non_nullable_non_indexed ... ok
+test core::result::tests::query_result_and_cache_observation_serialize_roundtrip ... ok
+test schema::tests::field_spec_builder_sets_flags ... ok
+test schema::tests::field_spec_builder_sets_primary_key ... ok
+test schema::tests::schema_change_request_builder_collects_operations ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests connector
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== crate: client ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/main.rs (target/debug/deps/client-70836e2326405c2d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== crate: console ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/console-86247561bbe47b0b)
+
+running 36 tests
+test bootstrap::tests::normalize_bootstrap_addr_accepts_multiaddr_passthrough ... ok
+test bootstrap::tests::normalize_bootstrap_addr_parses_bare_port ... ok
+test bootstrap::tests::normalize_bootstrap_addr_parses_host_port ... ok
+test commands::tests::ctrl_d_on_empty_does_not_abort ... ok
+test bootstrap::tests::bootstrap_peers_from_cli_args_dedups_and_preserves_order ... ok
+test commands::tests::parse_command_recognises_keywords ... ok
+test commands::tests::extract_password_token_detects_password_command ... ok
+test commands::tests::parse_command_requires_semicolon ... ok
+test commands::tests::parse_connect_requires_user_at_peer ... ok
+test commands::tests::parse_custom_delimiter_executes_sql_with_suffix ... ok
+test commands::tests::parse_delimiter_directive_updates_delimiter ... ok
+test commands::tests::parse_delimiter_requires_token ... ok
+test commands::tests::parse_import_extracts_file_name ... ok
+test commands::tests::parse_import_requires_file_name ... ok
+test commands::tests::parse_rejects_new_command_when_previous_missing_semicolon ... ok
+test commands::tests::parse_sql_falls_through ... ok
+test commands::tests::parse_use_database_extracts_name ... ok
+test commands::tests::resolve_database_for_auth_without_selection_uses_fallback ... ok
+test commands::tests::resolve_database_without_selection_allows_qualified_select ... ok
+test commands::tests::resolve_database_without_selection_allows_show_databases ... ok
+test commands::tests::resolve_database_without_selection_allows_status_commands ... ok
+test commands::tests::resolve_database_without_selection_rejects_non_auth ... ok
+test import::tests::import_batchable_dml_classifier_matches_expected_statements ... ok
+test import::tests::import_reader_normalizes_mysql_using_clauses_before_execute ... ok
+test import::tests::import_reader_populates_mock_table_structures ... ok
+test import::tests::import_reader_skips_delimiter_directive_without_space ... ok
+test import::tests::import_reader_skips_drop_table_not_found_errors ... ok
+test import::tests::import_reader_skips_mysql_dump_directives ... ok
+test import::tests::import_reader_splits_and_executes_statements ... ok
+test import::tests::import_transport_error_retry_classifier_matches_expected_errors ... ok
+test import::tests::normalize_import_statement_keeps_unsigned_in_non_create_text ... ok
+test import::tests::normalize_import_statement_removes_mysql_using_clauses ... ok
+test import::tests::split_import_insert_values_statement_keeps_non_insert_statement ... ok
+test import::tests::normalize_import_statement_removes_unsigned_modifier_for_create_table ... ok
+test import::tests::split_import_insert_values_statement_respects_tuple_cap ... ok
+test import::tests::split_import_insert_values_statement_splits_large_insert_values ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/console-930f374f61b19f57)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests console
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

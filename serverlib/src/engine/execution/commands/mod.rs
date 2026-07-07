@@ -21,7 +21,10 @@ pub use mutation_select::select_mutation_target_rows;
 pub use control_flow::{
 	condition_matches_provider, evaluate_case_projection, execute_if_else_end_block,
 	execute_if_else_end_from_create_procedure_sql, execute_if_else_end_plan,
+	execute_local_loop_block,
+	execute_local_repeat_block, execute_local_while_block,
 	execute_sql_cursor,
+	LoopControlDirective,
 	ControlFlowBranch, CursorDiagnostics, CursorDirective,
 	IfElseEndBlock, SelectReadPlanCursorSource,
 	SqlCursorFrame, SqlCursorSource, VecSqlCursorSource,

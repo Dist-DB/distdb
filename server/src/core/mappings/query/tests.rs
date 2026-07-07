@@ -481,6 +481,394 @@ fn call_procedure_temp_table_insert_and_select_returns_rows_and_cleans_up() {
 }
 
 #[test]
+fn call_procedure_argument_bindings_do_not_bleed_between_calls() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_arg_scope",
+            "create procedure p_arg_scope(p_active bigint) begin if p_active = 1 then select abs(1); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let call_on = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_arg_scope(1)".to_string(),
+    };
+
+    let response_on = handle_query_command(
+        "req-call-arg-on",
+        &call_on,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response_on.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response_on
+    );
+    assert_eq!(query_result_rows(response_on), vec![vec!["1".to_string()]]);
+
+    let call_off = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_arg_scope(0)".to_string(),
+    };
+
+    let response_off = handle_query_command(
+        "req-call-arg-off",
+        &call_off,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response_off.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response_off
+    );
+    assert_eq!(query_result_rows(response_off), vec![vec!["0".to_string()]]);
+}
+
+#[test]
+fn call_procedure_supports_local_declare_and_set_statements() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_local_scope",
+            "create procedure p_local_scope(p_active bigint) begin if p_active = 1 then declare v_state bigint default 0; set v_state = p_active; else declare v_state bigint default 9; set v_state = 7; end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_local_scope(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-local-scope",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Mutation(mutation) = response.result else {
+        panic!("expected mutation response from CALL with local declare/set actions")
+    };
+
+    assert_eq!(mutation.affected_rows, 0);
+}
+
+#[test]
+fn call_procedure_supports_while_with_local_variable_resolution() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_while_local",
+            "create procedure p_while_local(p_active bigint) begin if p_active = 1 then while p_active = 1 do set p_active = 0 end while; select abs(1); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_while_local(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-while-local",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn call_procedure_supports_repeat_with_local_variable_resolution() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_repeat_local",
+            "create procedure p_repeat_local(p_active bigint) begin if p_active = 1 then repeat set p_active = 0 until p_active = 0 end repeat; select abs(1); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_repeat_local(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-repeat-local",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn call_procedure_supports_loop_with_leave_directive() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_loop_leave",
+            "create procedure p_loop_leave(p_active bigint) begin if p_active = 1 then loop set p_active = 0; leave; end loop; select abs(1); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_loop_leave(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-loop-leave",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn call_procedure_supports_iterate_directive_in_while_body() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_iterate_while",
+            "create procedure p_iterate_while(p_active bigint) begin if p_active = 1 then while p_active = 1 do set p_active = 0; iterate; end while; select abs(1); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_iterate_while(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-loop-iterate",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn call_procedure_supports_declare_continue_handler_for_sqlexception() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_handler_continue",
+            "create procedure p_handler_continue(p_active bigint) begin if p_active = 1 then declare continue handler for sqlexception select abs(2); drop table missing_handler_table; else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_handler_continue(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-handler-continue",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["2".to_string()]]);
+}
+
+#[test]
+fn call_procedure_supports_declare_exit_handler_for_sqlexception() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_handler_exit",
+            "create procedure p_handler_exit(p_active bigint) begin if p_active = 1 then declare exit handler for sqlexception select abs(7); drop table missing_handler_table; select abs(9); else select abs(0); end if; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_handler_exit(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-handler-exit",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    assert_eq!(query_result_rows(response), vec![vec!["7".to_string()]]);
+}
+
+#[test]
 fn append_row_payload_record_rejects_missing_refid() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();

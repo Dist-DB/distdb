@@ -237,6 +237,12 @@ impl ConditionValueProvider for SqlCursorFrame {
 
         let normalized = common::normalize_identifier!(field_name);
 
+        // Stored-procedure resolution prefers local bindings (args/vars/cursors)
+        // and only then falls back to row/global structures.
+        if let Some(value) = self.local_bindings.get(&normalized) {
+            return Some(value);
+        }
+
         if let Some(row) = self.current_row.as_ref() {
             if let Some(value) = row.get(&normalized) {
                 return Some(value);
@@ -257,7 +263,7 @@ impl ConditionValueProvider for SqlCursorFrame {
                 }
         }
 
-        self.local_bindings.get(&normalized)
+        None
     
     }
 
@@ -331,6 +337,8 @@ where
     F: FnMut(&mut SqlCursorFrame) -> Result<CursorDirective<R>, String>,
 {
 
+    let baseline_local_bindings = frame.local_bindings.clone();
+
     source.open()?;
     frame.diagnostics.opened = true;
     frame.diagnostics.closed = false;
@@ -345,6 +353,7 @@ where
             Err(err) => {
                 let _ = source.close();
                 frame.diagnostics.closed = true;
+                frame.local_bindings = baseline_local_bindings.clone();
                 return Err(err);
             }
             
@@ -366,12 +375,14 @@ where
             Ok(CursorDirective::Return(value)) => {
                 source.close()?;
                 frame.diagnostics.closed = true;
+                frame.local_bindings = baseline_local_bindings;
                 return Ok(Some(value));
             },
 
             Err(err) => {
                 let _ = source.close();
                 frame.diagnostics.closed = true;
+                frame.local_bindings = baseline_local_bindings.clone();
                 return Err(err);
             }
 
@@ -381,6 +392,7 @@ where
 
     source.close()?;
     frame.diagnostics.closed = true;
+    frame.local_bindings = baseline_local_bindings;
 
     Ok(None)
 
