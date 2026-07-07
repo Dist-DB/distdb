@@ -13,6 +13,7 @@ pub use indexer::{
 	evaluate_inbuilt_sql_function_with_context,
 	inbuilt_sql_runtime_context,
 	is_inbuilt_function,
+	registered_inbuilt_function_names,
 	with_inbuilt_sql_runtime_context,
 	InbuiltSqlRuntimeContext,
 };

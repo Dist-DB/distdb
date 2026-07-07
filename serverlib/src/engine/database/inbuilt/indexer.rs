@@ -39,6 +39,149 @@ thread_local! {
     static INBUILT_RUNTIME_CONTEXT_STACK: RefCell<Vec<InbuiltSqlRuntimeContext>> = const { RefCell::new(Vec::new()) };
 }
 
+const REGISTERED_INBUILT_FUNCTION_NAMES: &[&str] = &[
+    "distance",
+    "ascii",
+    "char_length",
+    "character_length",
+    "concat",
+    "concat_w",
+    "concat_ws",
+    "field",
+    "find_in_set",
+    "format",
+    "insert",
+    "instr",
+    "left",
+    "length",
+    "locate",
+    "lpad",
+    "rpad",
+    "ltrim",
+    "mid",
+    "position",
+    "repeat",
+    "replace",
+    "reverse",
+    "right",
+    "rtrim",
+    "space",
+    "substr",
+    "substring",
+    "upper",
+    "ucase",
+    "lower",
+    "lcase",
+    "substring_index",
+    "trim",
+    "adddate",
+    "addtime",
+    "curdate",
+    "current_date",
+    "curtime",
+    "current_time",
+    "date",
+    "date_add",
+    "datediff",
+    "date_format",
+    "day",
+    "dayname",
+    "dayofmonth",
+    "dayofweek",
+    "dayofyear",
+    "extract",
+    "from_days",
+    "hour",
+    "last_day",
+    "localtime",
+    "localtimestamp",
+    "makedate",
+    "maketime",
+    "microsecond",
+    "minute",
+    "month",
+    "now",
+    "period_add",
+    "period_diff",
+    "quarter",
+    "sec_to_time",
+    "second",
+    "str_to_date",
+    "subdate",
+    "date_sub",
+    "subtime",
+    "sysdate",
+    "time_format",
+    "time_to_sec",
+    "time",
+    "timediff",
+    "timestamp",
+    "to_days",
+    "unixtimestamp",
+    "unix_timestamp",
+    "week",
+    "weekday",
+    "weekofyear",
+    "year",
+    "yearweek",
+    "abs",
+    "acos",
+    "asin",
+    "atan",
+    "atan2",
+    "avg",
+    "ceil",
+    "ceiling",
+    "cos",
+    "count",
+    "cot",
+    "degrees",
+    "div",
+    "exp",
+    "floor",
+    "greatest",
+    "least",
+    "ln",
+    "log",
+    "log10",
+    "log2",
+    "max",
+    "min",
+    "mod",
+    "pi",
+    "pow",
+    "power",
+    "radians",
+    "rand",
+    "round",
+    "sign",
+    "sin",
+    "sqrt",
+    "sum",
+    "tan",
+    "truncate",
+    "bin",
+    "binary",
+    "case",
+    "cast",
+    "coalesce",
+    "connection_id",
+    "conv",
+    "convert",
+    "current_user",
+    "database",
+    "if",
+    "ifnull",
+    "isnull",
+    "last_insert_id",
+    "nullif",
+    "session_user",
+    "system_user",
+    "user",
+    "version",
+    "lookup",
+];
+
 pub fn with_inbuilt_sql_runtime_context<T>(
     context: &InbuiltSqlRuntimeContext,
     callback: impl FnOnce() -> T,
@@ -72,6 +215,10 @@ pub fn inbuilt_sql_runtime_context() -> InbuiltSqlRuntimeContext {
 
 pub fn is_inbuilt_function(function_name: &str) -> bool {
     resolve_command(function_name).is_some()
+}
+
+pub fn registered_inbuilt_function_names() -> &'static [&'static str] {
+    REGISTERED_INBUILT_FUNCTION_NAMES
 }
 
 pub fn evaluate_inbuilt_sql_function(function: &Function) -> Result<Option<Vec<u8>>, String> {
@@ -495,4 +642,19 @@ fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {
 
     }
     
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_inbuilt_function, registered_inbuilt_function_names};
+
+    #[test]
+    fn exposed_inbuilt_registry_contains_expected_entries() {
+        let names = registered_inbuilt_function_names();
+
+        for function_name in ["abs", "unix_timestamp", "concat_ws", "lookup"] {
+            assert!(names.contains(&function_name));
+            assert!(is_inbuilt_function(function_name));
+        }
+    }
 }

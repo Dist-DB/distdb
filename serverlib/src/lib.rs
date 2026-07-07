@@ -138,6 +138,16 @@ pub use engine::affinity::{
 pub use engine::affinity::storage::AffinityStorage;
 pub use engine::replication_executor::ReplicationPhaseExecutor;
 
+pub use engine::database::inbuilt::{
+	evaluate_inbuilt_sql_function,
+	evaluate_inbuilt_sql_function_with_context,
+	inbuilt_sql_runtime_context,
+	is_inbuilt_function,
+	registered_inbuilt_function_names,
+	with_inbuilt_sql_runtime_context,
+	InbuiltSqlRuntimeContext,
+};
+
 pub use engine::sql::{
 	create_table_schema_from_statement, 
 	create_table_plan_from_statement,
