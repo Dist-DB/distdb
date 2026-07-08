@@ -1,6 +1,9 @@
 use super::*;
 
 use crate::engine::database::inbuilt::evaluate_inbuilt_sql_function;
+use crate::engine::sql::{
+    evaluate_inbuilt_sql_function_with_lookup, with_lookup_sql_function_evaluator,
+};
 use crate::engine::database::transaction::TransactionLog;
 use crate::{
     encode_row_payload, parse_select_read_plan_from_statement, ConcurrentWalManager,
@@ -483,6 +486,10 @@ fn execute_joined_select_plan_supports_row_dependent_inbuilt_function_projection
         strategy: crate::RelationAccessStrategy::FullScan,
     };
 
+    let mut evaluator = with_lookup_sql_function_evaluator(|function, lookup| {
+        evaluate_inbuilt_sql_function_with_lookup(function, lookup)
+    });
+
     let result = execute_relation_select_plan(
             &wal,
             relation,
@@ -490,7 +497,7 @@ fn execute_joined_select_plan_supports_row_dependent_inbuilt_function_projection
             &runtime_indexes,
             &read_plan,
             &access_plan,
-            &mut evaluate_inbuilt_for_test,
+            &mut evaluator,
         &mut |row_map, nested_condition| {
             row_matches_select_condition_result(
                 row_map,
@@ -719,12 +726,16 @@ fn execute_joined_select_plan_supports_case_projection_function_values_with_colu
     )
     .expect("join CASE projection with column-arg function values should parse");
 
+    let mut evaluator = with_lookup_sql_function_evaluator(|function, lookup| {
+        evaluate_inbuilt_sql_function_with_lookup(function, lookup)
+    });
+
     let result = execute_joined_select_plan(
         &catalog,
         &wal,
         &runtime_indexes,
         &read_plan,
-        &mut evaluate_inbuilt_for_test,
+        &mut evaluator,
         &mut |row_map, nested_condition| {
             row_matches_select_condition_result(
                 row_map,
