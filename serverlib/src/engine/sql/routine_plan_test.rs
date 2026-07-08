@@ -61,11 +61,44 @@ fn parse_if_else_end_plan_from_create_procedure_extracts_if_block() {
 }
 
 #[test]
+fn parse_if_else_end_plan_from_create_procedure_extracts_if_block_after_setup_statements() {
+    let plan = parse_if_else_end_plan_from_create_procedure_statement(
+        "create procedure p_sync() begin set @phase = 'boot'; select id from users limit 1; if active = 1 then select 'on'; else select 'off'; end if; end",
+    )
+    .expect("create procedure with setup statements should parse")
+    .expect("if block should be detected after setup statements");
+
+    assert_eq!(plan.branches.len(), 1);
+    assert_eq!(plan.branches[0].action_sql, "select 'on'");
+    assert_eq!(plan.else_action_sql.as_deref(), Some("select 'off'"));
+}
+
+#[test]
 fn parse_if_else_end_plan_from_create_procedure_returns_none_when_body_is_not_if() {
     let plan = parse_if_else_end_plan_from_create_procedure_statement(
         "create procedure p_sync() begin select 1; end",
     )
     .expect("create procedure with non-if body should parse");
+
+    assert!(plan.is_none());
+}
+
+#[test]
+fn parse_if_else_end_plan_from_create_procedure_returns_none_for_setup_only_body() {
+    let plan = parse_if_else_end_plan_from_create_procedure_statement(
+        "create procedure p_sync() begin set @phase = 'boot'; select id from users limit 1; end",
+    )
+    .expect("setup-only create procedure should parse");
+
+    assert!(plan.is_none());
+}
+
+#[test]
+fn parse_if_else_end_plan_from_create_procedure_does_not_match_identifier_tokens() {
+    let plan = parse_if_else_end_plan_from_create_procedure_statement(
+        "create procedure p_sync() begin select if_active from users; select case_count from users; end",
+    )
+    .expect("identifier tokens should not trigger control-flow extraction");
 
     assert!(plan.is_none());
 }
@@ -91,6 +124,20 @@ fn parse_if_else_end_plan_from_create_procedure_extracts_simple_case_block() {
     )
     .expect("create procedure simple CASE should parse")
     .expect("simple CASE block should be detected");
+
+    assert_eq!(plan.branches.len(), 2);
+    assert_eq!(plan.branches[0].action_sql, "select 'on'");
+    assert_eq!(plan.branches[1].action_sql, "select 'off'");
+    assert_eq!(plan.else_action_sql.as_deref(), Some("select 'unknown'"));
+}
+
+#[test]
+fn parse_if_else_end_plan_from_create_procedure_extracts_case_block_after_setup_statements() {
+    let plan = parse_if_else_end_plan_from_create_procedure_statement(
+        "create procedure p_sync() begin set @phase = 'boot'; select id from users limit 1; case active when 1 then select 'on'; when 0 then select 'off'; else select 'unknown'; end case; end",
+    )
+    .expect("create procedure with setup statements should parse")
+    .expect("case block should be detected after setup statements");
 
     assert_eq!(plan.branches.len(), 2);
     assert_eq!(plan.branches[0].action_sql, "select 'on'");

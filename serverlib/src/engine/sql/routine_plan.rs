@@ -136,7 +136,94 @@ pub fn parse_if_else_end_plan_from_create_procedure_statement(
         return parse_case_plan_from_statement(trimmed_body).map(Some);
     }
 
+    if let Some((start_index, control_flow_kind)) =
+        find_top_level_routine_control_flow_start(trimmed_body)
+    {
+        let control_flow_fragment = trimmed_body[start_index..].trim_start();
+
+        return match control_flow_kind {
+
+            RoutineControlFlowKind::If => {
+                parse_if_else_end_plan_from_statement(control_flow_fragment).map(Some)
+            },
+            
+            RoutineControlFlowKind::Case => {
+                parse_case_plan_from_statement(control_flow_fragment).map(Some)
+            }
+
+        };
+    }
+
     Ok(None)
+
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutineControlFlowKind {
+    If,
+    Case,
+}
+
+fn find_top_level_routine_control_flow_start(body: &str) -> Option<(usize, RoutineControlFlowKind)> {
+
+    let lowered = body.to_ascii_lowercase();
+    let mut best_match: Option<(usize, RoutineControlFlowKind)> = None;
+
+    for (token, kind) in [
+        ("if", RoutineControlFlowKind::If),
+        ("case", RoutineControlFlowKind::Case),
+    ] {
+        let mut from = 0usize;
+
+        while let Some(found) = lowered[from..].find(token) {
+
+            let index = from + found;
+            let is_boundary = is_keyword_boundary(&lowered, index, token.len());
+            let statement_start = is_statement_start_boundary(body, index);
+
+            if is_boundary && statement_start {
+                match best_match {
+                    Some((current_index, _)) if current_index <= index => {}
+                    _ => best_match = Some((index, kind)),
+                }
+                break;
+            }
+
+            from = index + token.len();
+
+        }
+    }
+
+    best_match
+
+}
+
+fn is_keyword_boundary(haystack: &str, index: usize, length: usize) -> bool {
+
+    let bytes = haystack.as_bytes();
+    let before_ok = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+    let after_index = index + length;
+    let after_ok = after_index >= bytes.len() || !bytes[after_index].is_ascii_alphanumeric();
+
+    before_ok && after_ok
+
+}
+
+fn is_statement_start_boundary(text: &str, index: usize) -> bool {
+
+    if index == 0 {
+        return true;
+    }
+
+    let prefix = &text[..index];
+    for ch in prefix.chars().rev() {
+        if ch.is_ascii_whitespace() {
+            continue;
+        }
+        return ch == ';';
+    }
+
+    true
 
 }
 
@@ -223,11 +310,13 @@ fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError>
     let lowered_body_and_end = body_and_end.to_ascii_lowercase();
 
     let end_index = lowered_body_and_end.rfind(" end").or_else(|| {
+        
         if lowered_body_and_end.ends_with("end") {
             Some(lowered_body_and_end.len() - "end".len())
         } else {
             None
         }
+
     })
     .ok_or_else(|| {
         SqlParseError::UnsupportedStatement(
@@ -245,6 +334,7 @@ fn find_keyword_boundary_index(haystack: &str, keyword: &str) -> Option<usize> {
     let mut from = 0usize;
 
     while let Some(found) = haystack[from..].find(keyword) {
+
         let idx = from + found;
         let before_ok = idx == 0 || bytes[idx - 1].is_ascii_whitespace();
         let after_idx = idx + keyword.len();
@@ -255,6 +345,7 @@ fn find_keyword_boundary_index(haystack: &str, keyword: &str) -> Option<usize> {
         }
 
         from = after_idx;
+
     }
 
     None
@@ -281,11 +372,15 @@ fn parse_call_argument_values(statement: &Statement) -> Result<Vec<Vec<u8>>, Str
     };
 
     let call_args: &[FunctionArg] = match &function.args {
+        
         FunctionArguments::None => &[],
+        
         FunctionArguments::List(list) => list.args.as_slice(),
+        
         FunctionArguments::Subquery(_) => {
             return Err("CALL subquery arguments are not supported".to_string());
         }
+
     };
 
     call_args
@@ -298,12 +393,16 @@ fn parse_call_argument_values(statement: &Statement) -> Result<Vec<Vec<u8>>, Str
 fn call_argument_to_bytes(argument: &FunctionArg) -> Result<Vec<u8>, String> {
 
     let expression = match argument {
+
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => expr,
+        
         FunctionArg::Named {
             arg: FunctionArgExpr::Expr(expr),
             ..
         } => expr,
+        
         _ => return Err("unsupported CALL argument".to_string()),
+
     };
 
     expression_to_bytes(expression)
@@ -349,22 +448,22 @@ fn value_to_bytes(value: &Value) -> Result<Vec<u8>, String> {
 
         Value::Number(v, _) => Ok(v.to_string().into_bytes()),
 
-        Value::SingleQuotedString(v)
-        | Value::DoubleQuotedString(v)
-        | Value::TripleSingleQuotedString(v)
-        | Value::TripleDoubleQuotedString(v)
-        | Value::EscapedStringLiteral(v)
-        | Value::UnicodeStringLiteral(v)
-        | Value::SingleQuotedByteStringLiteral(v)
-        | Value::DoubleQuotedByteStringLiteral(v)
-        | Value::TripleSingleQuotedByteStringLiteral(v)
-        | Value::TripleDoubleQuotedByteStringLiteral(v)
-        | Value::SingleQuotedRawStringLiteral(v)
-        | Value::DoubleQuotedRawStringLiteral(v)
-        | Value::TripleSingleQuotedRawStringLiteral(v)
-        | Value::TripleDoubleQuotedRawStringLiteral(v)
-        | Value::NationalStringLiteral(v)
-        | Value::HexStringLiteral(v) => Ok(v.as_bytes().to_vec()),
+        Value::SingleQuotedString(v) |
+        Value::DoubleQuotedString(v) |
+        Value::TripleSingleQuotedString(v) |
+        Value::TripleDoubleQuotedString(v) |
+        Value::EscapedStringLiteral(v) |
+        Value::UnicodeStringLiteral(v) |
+        Value::SingleQuotedByteStringLiteral(v) |
+        Value::DoubleQuotedByteStringLiteral(v) |
+        Value::TripleSingleQuotedByteStringLiteral(v) |
+        Value::TripleDoubleQuotedByteStringLiteral(v) |
+        Value::SingleQuotedRawStringLiteral(v) |
+        Value::DoubleQuotedRawStringLiteral(v) |
+        Value::TripleSingleQuotedRawStringLiteral(v) |
+        Value::TripleDoubleQuotedRawStringLiteral(v) |
+        Value::NationalStringLiteral(v) |
+        Value::HexStringLiteral(v) => Ok(v.as_bytes().to_vec()),
 
         Value::DollarQuotedString(v) => Ok(v.value.as_bytes().to_vec()),
 
@@ -410,6 +509,7 @@ fn matching_close_parenthesis(text: &str, open_index: usize) -> Option<usize> {
     let mut depth = 0usize;
 
     for (index, ch) in text.char_indices().skip(open_index) {
+
         if ch == '(' {
             depth += 1;
             continue;
@@ -421,6 +521,7 @@ fn matching_close_parenthesis(text: &str, open_index: usize) -> Option<usize> {
                 return Some(index);
             }
         }
+
     }
 
     None
@@ -500,10 +601,12 @@ fn split_action_and_next_clause(branch_tail: &str) -> Result<ClauseSplit, SqlPar
 
     for (marker, clause, clause_len) in candidates {
         if let Some(index) = lowered.find(marker) {
+            
             match earliest {
                 Some((current, _, _)) if current <= index => {},
                 _ => earliest = Some((index, clause, clause_len)),
             }
+
         }
     }
 
@@ -554,6 +657,7 @@ fn parse_case_plan_from_statement(statement: &str) -> Result<IfElseEndPlan, SqlP
     let mut else_action_sql = None;
 
     loop {
+
         let lowered_remaining = remaining.to_ascii_lowercase();
 
         if lowered_remaining.starts_with("when") {
@@ -577,6 +681,7 @@ fn parse_case_plan_from_statement(statement: &str) -> Result<IfElseEndPlan, SqlP
         return Err(SqlParseError::UnsupportedStatement(
             "CASE routine block must continue with WHEN, ELSE, or END CASE".to_string(),
         ));
+        
     }
 
     if branches.is_empty() {

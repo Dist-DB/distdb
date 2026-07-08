@@ -15,27 +15,31 @@ where
     let (loop_label, condition_sql, body_sql) = parse_local_while_block(action_sql)?;
 
     for _ in 0..max_iterations {
+
         if !evaluate_condition(context, condition_sql.as_str())? {
             return Ok(LoopControlDirective::None);
         }
 
         match execute_body(context, body_sql.as_str())? {
+            
             LoopControlDirective::None => {}
+            
             LoopControlDirective::Iterate(target) => {
                 if loop_target_matches_label(target.as_deref(), loop_label.as_deref()) {
                     continue;
                 }
-
                 return Ok(LoopControlDirective::Iterate(target));
-            }
+            },
+
             LoopControlDirective::Leave(target) => {
                 if loop_target_matches_label(target.as_deref(), loop_label.as_deref()) {
                     return Ok(LoopControlDirective::None);
                 }
-
                 return Ok(LoopControlDirective::Leave(target));
             }
+
         }
+        
     }
 
     Err("call action while execution failed: exceeded max iteration limit".to_string())
@@ -129,7 +133,7 @@ fn find_keyword_boundary_index_in_text(haystack: &str, keyword: &str) -> Option<
         }
 
         from = after_idx;
-        
+
     }
 
     None

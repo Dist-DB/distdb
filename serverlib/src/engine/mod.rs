@@ -1,5 +1,6 @@
 
 pub mod affinity;
+pub mod ir_compiler;
 pub mod replication_executor;
 pub mod database;
 pub mod execution;

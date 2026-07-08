@@ -69,6 +69,38 @@ pub use engine::database::core::{
 	run_schema_migration, SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet,
 	TypeConversionPolicy,
 };
+pub use engine::ir_compiler::{
+	RoutineDeclaration, RoutineKind,
+	SQLProgramaticAnalysisArtifact, SQLProgramaticCompilationArtifact,
+	SQLProgramaticCompilationTarget, SQLProgramaticCompiler,
+	SQLProgramaticCompilerContext, SQLProgramaticCompilerServices,
+	SQLProgramaticDeclaration, SQLProgramaticIr, SQLProgramaticKind,
+	SQLProgramaticResourceDirection, SQLProgramaticResourceEntry,
+	SQLProgramaticResourceKind, SQLProgramaticResourceManifest,
+	SQLProgramaticResultSetShape,
+	StoredProcedureIr,
+	StoredProcedureCompiler, StoredProcedureCompilerContext,
+	StoredProcedureCompilerServices, StoredProcedureAnalysisArtifact,
+	StoredProcedureCompilationArtifact,
+	StoredProcedureResourceDirection, StoredProcedureResourceEntry,
+	StoredProcedureResourceKind, StoredProcedureResourceManifest,
+	StoredProcedureResultSetShape,
+	analyze_sql_programatic_sql, analyze_sql_programatic_sql_with_context,
+	analyze_sql_programatic_sql_with_services, compile_sql_programatic_artifact,
+	compile_and_validate_sql_programatic_function_artifact_with_context,
+	compile_and_validate_sql_programatic_procedure_artifact_with_context,
+	compile_sql_programatic_artifact_with_context,
+	compile_sql_programatic_artifact_with_services, compile_sql_programatic_sql,
+	compile_sql_programatic_sql_with_context,
+	compile_sql_programatic_sql_with_services,
+	format_sql_programatic_resource_manifest,
+	DefaultSQLProgramaticCompilerServices, DefaultStoredProcedureCompilerServices,
+	SQLProgramaticInboundBinding, SQLProgramaticInboundParameter,
+	SQLProgramaticValidationIssue, SQLProgramaticValidationResult,
+	sql_programatic_resource_set_by_direction,
+	validate_sql_programatic_function_artifact,
+	validate_sql_programatic_procedure_artifact,
+};
 
 pub use engine::database::runtime_index::{index_value_tuple, primary_key_index, RuntimeIndexStore};
 pub use engine::execution::{

@@ -26,8 +26,10 @@ where
     E: FnMut(&str) -> Result<R, String>,
 {
 
-    if let Some(plan) = procedure.if_else_end_plan() {
-        return execute_if_else_end_plan(provider, plan, execute_action);
+    if let Some(ir) = procedure.compiled_ir() {
+        if let Some(plan) = ir.if_else_end_plan() {
+            return execute_if_else_end_plan(provider, plan, execute_action);
+        }
     }
 
     execute_if_else_end_from_create_procedure_sql(provider, &procedure.sql, execute_action)

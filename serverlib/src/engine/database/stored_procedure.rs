@@ -4,9 +4,11 @@ use crate::engine::database::entity::aspect::DatabaseEntityAspect;
 use crate::engine::database::entity::kind::DatabaseEntityKind;
 use crate::engine::database::entity::metadata::EntityMetadata;
 use crate::engine::database::table::schema::TableSchema;
-use crate::engine::sql::{
-    parse_if_else_end_plan_from_create_procedure_statement, IfElseEndPlan,
+use crate::engine::ir_compiler::{
+    compile_sql_programatic_sql_with_services, DefaultSQLProgramaticCompilerServices,
+    SQLProgramaticIr,
 };
+use crate::engine::sql::IfElseEndPlan;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseStoredProcedure {
@@ -17,7 +19,7 @@ pub struct DatabaseStoredProcedure {
     pub dependencies: Vec<String>,
     pub metadata: EntityMetadata,
     #[serde(skip)]
-    pub if_else_end_plan: Option<IfElseEndPlan>,
+    pub compiled_ir: Option<SQLProgramaticIr>,
 }
 
 impl DatabaseStoredProcedure {
@@ -30,10 +32,10 @@ impl DatabaseStoredProcedure {
             sql,
             dependencies,
             metadata: EntityMetadata::default(),
-            if_else_end_plan: None,
+            compiled_ir: None,
         };
 
-        procedure.refresh_control_flow_plan_cache();
+        procedure.refresh_compiled_ir_cache();
         procedure
 
     }
@@ -41,21 +43,25 @@ impl DatabaseStoredProcedure {
     pub fn set_sql(&mut self, sql: String) {
 
         self.sql = sql;
-        self.refresh_control_flow_plan_cache();
+        self.refresh_compiled_ir_cache();
         
     }
 
-    pub fn refresh_control_flow_plan_cache(&mut self) {
+    pub fn refresh_compiled_ir_cache(&mut self) {
 
-        self.if_else_end_plan =
-            parse_if_else_end_plan_from_create_procedure_statement(&self.sql)
-                .ok()
-                .flatten();
+        self.compiled_ir = Some(compile_sql_programatic_sql_with_services(
+            &self.sql,
+            &DefaultSQLProgramaticCompilerServices,
+        ));
 
     }
 
     pub fn if_else_end_plan(&self) -> Option<&IfElseEndPlan> {
-        self.if_else_end_plan.as_ref()
+        self.compiled_ir.as_ref().and_then(SQLProgramaticIr::if_else_end_plan)
+    }
+
+    pub fn compiled_ir(&self) -> Option<&SQLProgramaticIr> {
+        self.compiled_ir.as_ref()
     }
     
 }
@@ -108,7 +114,7 @@ impl DatabaseEntityAspect for DatabaseStoredProcedure {
             .map(|dep| common::normalize_identifier!(dep))
             .collect();
 
-        self.refresh_control_flow_plan_cache();
+        self.refresh_compiled_ir_cache();
 
     }
     
