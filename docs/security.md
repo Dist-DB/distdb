@@ -1,60 +1,76 @@
-# Security Model And Options
+# Security
 
-This document describes the currently implemented security controls in DistDB,
-the command-line options that affect them, and how enforcement works at runtime.
+This page describes the current security model in DistDB, the runtime options that affect it, and the main design decisions behind the implementation.
 
-## Overview
+## What Security Covers Today
 
-DistDB secures network traffic with TLS and supports cluster CA bootstrapping,
-certificate enrollment, and CA-root role assignment.
+DistDB currently focuses on transport security and trust bootstrapping rather than full end-to-end policy enforcement.
+
+The implemented areas are:
+
+- TLS for server, peer, and connector paths,
+- CA bootstrapping and certificate enrollment,
+- CA-root role assignment for issuer nodes,
+- connector-side CA discovery and certificate validation.
+
+## Security Layers
 
 Security is enforced across three layers:
 
-1. Server listener and outbound peer transport (`server` crate)
-2. Cluster certificate authority and certificate lifecycle (`serverlib` crate)
-3. Client/console connector transport (`connector` and `console` crates)
+1. server listener and outbound peer transport in `server`,
+2. certificate lifecycle and CA support in `serverlib`,
+3. connector and console transport behavior in `connector` and `console`.
 
-## Server Security Options
+## Why The Model Is Shaped This Way
 
-The server accepts the following security-related runtime args.
+DistDB operates in a distributed environment where nodes may join, discover peers, and exchange replication traffic. That makes two concerns more important than a single-process database:
 
-### TLS mode
+- secure transport between nodes and clients,
+- safe trust bootstrap when certificates are not pre-provisioned.
+
+The current design therefore prioritizes getting nodes onto a trusted transport path without requiring a fully manual certificate lifecycle from the first run.
+
+## Runtime Options
+
+### Server options
+
+#### TLS mode
 
 - `tls=off|optional|required`
-- Default: `optional`
+- default: `optional`
 
 Behavior:
 
 - `off`: plaintext only
-- `optional`: accepts TLS and plaintext inbound; prefers TLS outbound where possible
+- `optional`: accepts both TLS and plaintext inbound; prefers TLS outbound when possible
 - `required`: TLS must succeed for protected paths
 
-### TLS material paths
+#### TLS material
 
 - `tls_cert=/path/to/cert.pem`
 - `tls_key=/path/to/key.pem`
 - `tls_ca=/path/to/ca.pem`
 
-If omitted and TLS is enabled, DistDB can auto-provision or enroll material.
+If these are omitted while TLS is enabled, the runtime can auto-provision or enroll material depending on the path being exercised.
 
-### CA root role
+#### CA issuer role
 
 - `ca_root`
 - `ca_root=1|true|on|yes`
 
-When enabled, this node is treated as a CA issuer node.
+When enabled, the node is allowed to act as a CA issuer for peer enrollment.
 
-### Subject Alt Names for generated/enrolled certs
+#### Certificate SANs
 
 - `tls_san=host-or-ip`
-- Multiple values supported by comma separation and repeated args.
 
-### Service announcements
+Multiple SANs are supported through comma-separated values or repeated args.
+
+#### Service announcements
 
 - `service=name`
-- Multiple values supported by comma separation and repeated args.
 
-Defaults include:
+Default service set includes:
 
 - `sql.query`
 - `p2p.discovery`
@@ -63,100 +79,98 @@ Defaults include:
 
 If `ca_root` is enabled, `tls.enrollment.issuer` is also advertised.
 
-## Client And Console Security Options
-
-Client and console support:
+### Client and console options
 
 - `tls=off|optional|required`
 - `tls_ca=/path/to/ca.pem`
 
 Default mode is `optional`.
 
-If `tls_ca` is not provided, connector logic attempts CA auto-discovery from peers
-before TLS handshake, then uses the discovered CA in-memory for certificate verification.
+If `tls_ca` is not supplied, connector logic attempts CA discovery before TLS verification and uses the discovered CA in memory.
 
-## Enforcement Details
+## Enforcement Model
 
-## 1) TLS enforcement on server inbound connections
+### Inbound server connections
 
-Server connector negotiation is governed by `TlsMode`:
+Inbound negotiation follows `TlsMode`:
 
-- `off`: connection remains plaintext
-- `required`: TLS handshake must succeed
-- `optional`: server probes for TLS ClientHello and upgrades if present
+- `off`: keep plaintext
+- `optional`: probe for TLS and upgrade when appropriate
+- `required`: handshake must succeed
 
-## 2) TLS enforcement on outbound peer calls
+### Outbound peer connections
 
-Server outbound transport follows server TLS mode:
+Outbound peer transport follows the same mode:
 
-- `required`: fails if TLS client config is unavailable or handshake fails
-- `optional`: attempts TLS first, can fall back to plaintext
-- `off`: plaintext only
+- `required`: fail if TLS configuration or handshake is unavailable
+- `optional`: try TLS first and fall back to plaintext when allowed
+- `off`: use plaintext only
 
-## 3) CA-root and certificate issuance enforcement
+### CA-root gating
 
-Enrollment signing is explicitly gated:
+Certificate enrollment signing is intentionally restricted.
 
-- If a node receives `TlsCertEnrollRequest` and `ca_root` is not enabled,
-  it returns a rejection response.
-- Only CA-root nodes should issue certs for enrolling peers.
+- non-issuer nodes reject signing requests,
+- CA-root nodes are the intended issuers for enrollment flows.
 
-## 4) CA uniqueness and race safety
+### Certificate lifecycle safeguards
 
-Auto-TLS generation in `serverlib`:
+Auto-provisioning in `serverlib` includes a few guardrails:
 
-- Reuses existing CA cert/key when present
-- Uses lock-file coordination to avoid concurrent CA creation races
-- Waits for CA material if another process is initializing it
+- existing CA material is reused,
+- lock-file coordination avoids concurrent CA creation races,
+- waiting logic avoids duplicate initialization while another process is generating material.
 
-This enforces one CA per shared `p2p-tls` storage location.
+The result is effectively one CA per shared `p2p-tls` storage root.
 
-## 5) CA distribution and trust bootstrap
+## Trust Bootstrap Paths
 
-Two trust bootstrap paths are implemented:
+Two trust bootstrap paths exist today:
 
-1. Service-level CA distribution (`TlsCaDistribution`) for peer propagation
-2. Lightweight CA bootstrap wire protocol (`CACB`) for connector auto-discovery
+1. service-level CA distribution for peer propagation,
+2. a lightweight CA bootstrap wire path for connector auto-discovery.
 
-CA material transferred is public CA cert only. Private keys are never transported.
+Only public CA material is transferred. Private keys are never distributed through these paths.
 
-## 6) CSR enrollment flow enforcement
+## Enrollment Flow
 
-When a non-CA-root server needs cert material:
+When a non-CA-root node needs certificate material, the intended flow is:
 
-1. Generates private key + CSR locally
-2. Sends `TlsCertEnrollRequest` to peers
-3. Receives signed cert + CA cert from issuer
-4. Installs local key/cert/CA and proceeds with TLS
+1. generate private key and CSR locally,
+2. send enrollment request to peers,
+3. receive signed certificate and CA certificate from an issuer,
+4. install the material locally and proceed with TLS.
 
-If enrollment fails, server can fall back to local generation (depending on runtime path).
+Depending on the runtime path, failed enrollment may fall back to local generation.
 
-## 7) Client certificate validation
+## Client Verification
 
-Connector TLS client builds a rustls root store from:
+Connector-side TLS verification builds a rustls root store from either:
 
-- `tls_ca` file if provided, or
-- auto-discovered CA PEM from bootstrap path
+- an explicit `tls_ca` file, or
+- an auto-discovered CA certificate.
 
-Server identity is validated using hostname/IP-derived `ServerName`.
+Server identity is then validated from the dial target using rustls server-name handling.
 
-## 8) Rustls crypto provider enforcement
+## Key Decisions
 
-Process startup installs rustls crypto provider explicitly (`ring`) before TLS use.
-This avoids runtime ambiguity and panics from implicit provider selection.
+- TLS is treated as a platform concern for both client and node traffic.
+- Trust bootstrap is automated enough for local/distributed development, but still keeps private key ownership local.
+- `tls=optional` exists for staged rollout and mixed environments, not as the preferred long-term production stance.
+- Service announcements help discovery, but they are not yet an authorization policy system.
 
-## Operational Recommendations
+## Operational Guidance
 
-1. Production clusters: use `ca_root=1` on a designated issuer node.
-2. Prefer `tls=required` in production once all clients are configured.
-3. Keep `tls=optional` only during staged rollout or mixed compatibility phases.
-4. Use explicit `tls_san` entries for all expected IP/DNS dial targets.
-5. Protect CA key files and shared `p2p-tls` storage with strict filesystem permissions.
+1. Use `ca_root=1` only on designated issuer nodes.
+2. Prefer `tls=required` once all participants are prepared for TLS-only operation.
+3. Keep `tls=optional` for compatibility transitions, not steady-state hardened deployments.
+4. Provide explicit `tls_san` values for all expected IP and DNS dial targets.
+5. Protect CA keys and shared TLS storage with strict filesystem permissions.
 
-## Current Limitations
+## Current Limits
 
-1. In `tls=optional`, plaintext fallback is still possible when TLS negotiation fails.
-2. CA scope is storage-root based; independent storage roots can form separate trust domains.
-3. Service announcements are informational and not yet policy-authoritative access controls.
+- `tls=optional` still permits plaintext fallback when negotiation fails.
+- CA scope is storage-root based, so separate storage roots can form separate trust domains.
+- Service announcements are descriptive, not yet policy-authoritative.
 
 /

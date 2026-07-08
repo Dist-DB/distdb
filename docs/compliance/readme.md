@@ -1,26 +1,39 @@
-# SQL Compliance Docs
+# SQL Compliance Documents
 
-This container holds implementation-status coverage docs grouped by feature area.
+This directory contains the detailed SQL feature coverage pages for DistDB.
 
-## Scope
-- These documents describe current implementation coverage in distdb.
-- They are not a full MySQL 8 conformance certification.
-- Status labels used throughout:
-  - `Supported`
-  - `Partial`
-  - `Limited`
-  - `Not Supported`
-  - Section headings use `Implemented` for current capabilities and `Gaps` for incomplete areas.
+## Purpose
 
-## Documents
-- [Core Statements](core-statements.md): Coverage for `SELECT`, `INSERT`, `UPDATE`, `DELETE`.
-- [Stored Procedures](stored-procedures.md): `CREATE PROCEDURE`, `DROP PROCEDURE`, `CALL`, and routine execution model.
-- [Functions](functions.md): Inbuilt function support and UDF gaps.
-- [Triggers](triggers.md): Trigger lifecycle and execution coverage.
-- [Joins](joins.md): Join types, join predicates, and join-related planning/runtime scope.
-- [Inbuilt Operations](inbuilt-operations.md): Inbuilt operation pipeline and current limits.
-- [Events](events.md): Event scheduler and DDL support status.
+These documents answer a practical implementation question: what is supported today, how complete is it, and where are the known limits.
 
-## Notes
-- Coverage reflects implemented parser mappings, server execution wiring, and in-tree tests.
-- Update these docs alongside parser/execution changes.
+They are meant to stay aligned with real parser mappings, execution wiring, and in-tree tests.
+
+## How To Read Them
+
+The pages describe current behavior, not aspirational compatibility.
+
+Status labels used throughout:
+
+- `Supported`
+- `Partial`
+- `Limited`
+- `Not Supported`
+
+Within each page:
+
+- `Implemented` lists the current working surface,
+- `Gaps` lists missing or intentionally constrained behavior.
+
+## Coverage Pages
+
+- [core-statements.md](core-statements.md): `SELECT`, `INSERT`, `UPDATE`, `DELETE`
+- [stored-procedures.md](stored-procedures.md): procedure lifecycle, routine execution, and control-flow support
+- [functions.md](functions.md): built-in function support and user-defined function limitations
+- [triggers.md](triggers.md): trigger lifecycle and execution behavior
+- [joins.md](joins.md): join types, predicates, and runtime scope
+- [inbuilt-operations.md](inbuilt-operations.md): built-in operation coverage and limits
+- [events.md](events.md): event-related support status
+
+## Documentation Rule
+
+When parser behavior, planner behavior, or runtime execution changes, update the relevant coverage page in the same change set. That keeps the docs useful as an engineering reference instead of a lagging overview.

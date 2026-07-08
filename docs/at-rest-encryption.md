@@ -1,90 +1,107 @@
-# At-Rest Encryption (Optional Enterprise Mode)
+# At-Rest Encryption
 
-This document captures the current security direction for optional record encryption at rest.
+This page describes the current design direction for optional encryption at rest in DistDB.
 
-## Scope
+## What This Page Covers
 
-- Encryption at rest is optional and configured per database at creation time.
-- Inter-node replication remains plaintext at the application layer and is secured in transit by TLS.
-- AES keys are node-local and are not shared between affinity members.
+- what encrypted-at-rest mode means in DistDB,
+- the current keying and nonce assumptions,
+- why the design avoids self-describing payloads,
+- what remains scaffolding versus fully wired behavior.
+
+## Current Scope
+
+- encryption at rest is optional and configured per database,
+- replication transport is still protected separately by TLS,
+- key material is node-local and not shared automatically across affinity members.
 
 ## Current Direction
 
-- Security state is inferred from metadata key presence (`enc_key_ref` style key reference).
-- If a database has an encryption key reference at creation time, it is treated as encrypted-at-rest.
-- Encryption configuration is immutable after creation.
-- SQL creation option is supported:
-  - `create database <name> --aes` (auto-generates a local key reference)
-  - `create database <name> --aes=<key_ref>` (uses explicit key reference)
+A database is treated as encrypted-at-rest when creation-time metadata includes an encryption key reference.
 
-## Nonce and Keying Notes
+Current SQL creation forms:
 
-- Nonces must be unique; they do not need to be secret.
-- Avoid deriving nonce from previous record hashes or WAL history.
-- No-op records and replay/fork behavior make chain-derived nonces unsafe.
-- Preferred model:
-  - derive encryption context from split metadata sources (catalog-level key reference plus database/table identifiers)
-  - derive deterministic per-row nonces using stable row position/index context under that key scope
-  - bind database/table/key-version context in AEAD additional authenticated data (AAD)
+- `create database <name> --aes`
+- `create database <name> --aes=<key_ref>`
 
-## Architectural Principle
+Current design assumptions:
 
-- The primary design goal is architectural confidentiality by default, not payload self-description.
-- Stored payload bytes should not expose explicit format markers that reveal encryption/compression strategy.
-- Key-resolution context is intentionally distributed:
-  - catalog contributes key reference/version state
-  - database and table identifiers contribute scope partitioning
-  - row-index context contributes per-record nonce uniqueness
-- This split model reduces the utility of raw byte inspection without corresponding catalog + schema context.
+- encryption configuration is immutable after creation,
+- encryption state is inferred from metadata rather than obvious payload markers,
+- decrypt hooks are not yet fully wired through all persistence paths.
 
-## Nonce Derivation Contract
+## Why The Design Looks Like This
 
-- Nonce size is fixed to 12 bytes for AES-GCM compatibility.
-- Nonce derivation must be deterministic for the same logical row event under the same key scope.
-- Nonce derivation inputs:
-  - key reference (`enc_key_ref`)
-  - key version
-  - database identifier
-  - table identifier
-  - stable row index context (for example primary-key tuple digest or canonical row ordinal source)
-  - mutation sequence component to prevent reuse for repeated writes of the same row context
-- Derivation process:
-  - normalize all string identifiers to canonical UTF-8 lower-case forms before hashing
-  - encode numeric components in fixed-width little-endian format
-  - hash the concatenated canonical input using a stable hash function
-  - truncate the digest to 12 bytes for nonce output
-- Safety constraints:
-  - nonce reuse under the same AES key is forbidden
-  - if deterministic inputs could collide, include an additional monotonic sequence component
-  - reject write if nonce uniqueness cannot be guaranteed under active key scope
-- Cross-node consistency:
-  - all affinity members must use identical canonicalization and byte encoding rules
-  - contract changes require a key-version bump or explicit compatibility migration path
-- Testing requirements:
-  - deterministic fixture tests for identical-input equality
-  - collision-avoidance tests for repeated updates on the same row index context
-  - compatibility tests across process restarts and replica nodes
+The goal is architectural confidentiality, not simply wrapping bytes in an obvious envelope.
+
+DistDB intentionally avoids making stored payloads self-describing in a way that reveals too much from raw byte inspection alone. Instead, encryption context is split across catalog metadata, object identity, and row-level positioning inputs.
+
+This design means payload interpretation depends on platform context, not just a standalone byte blob.
+
+## Nonce And Keying Decisions
+
+### Core rules
+
+- nonces must be unique, but do not need to be secret,
+- chain-derived nonces are unsafe because replay, forks, and no-op records can break uniqueness guarantees,
+- deterministic derivation is acceptable only when uniqueness is preserved under the active key scope.
+
+### Preferred derivation inputs
+
+- key reference,
+- key version,
+- database identifier,
+- table identifier,
+- stable row index context,
+- mutation sequence component when repeated writes could otherwise collide.
+
+### Derivation contract
+
+- nonce size is fixed to 12 bytes for AES-GCM compatibility,
+- identifiers are normalized before hashing,
+- numeric values are encoded in fixed-width form,
+- the stable digest is truncated to 12 bytes,
+- writes must be rejected if nonce uniqueness cannot be guaranteed.
+
+## Architectural Decision: Split Context
+
+Key-resolution context is intentionally distributed:
+
+- the catalog contributes key-reference and key-version state,
+- the database and table identifiers contribute scope,
+- row-index context contributes per-record uniqueness.
+
+This reduces the value of inspecting raw bytes without also having the surrounding catalog and schema state.
 
 ## Replication Boundary
 
-- Replication transport is protected by TLS.
-- Replication frame strings may be base64 for transport compatibility.
-- On-disk WAL/table record bytes are never base64 encoded; they are persisted as binary payloads.
-- Encrypted-at-rest mode applies when data is persisted locally.
-- Receiver nodes should encrypt at local write boundaries using local key material.
+- replication transport remains protected by TLS,
+- application-layer replication payloads may use base64 where transport requires it,
+- on-disk WAL and table records remain binary payloads,
+- encrypted-at-rest mode applies when data is persisted locally,
+- receiving nodes are expected to encrypt at their own local write boundaries using their local key material.
 
-## Payload Envelope Scaffold
+## Current Scaffolded Behavior
 
-- Row payload support now includes an encrypted envelope scaffold with:
-  - key version
-  - nonce
-  - auth tag
-  - ciphertext
-- Plain decode paths intentionally reject encrypted envelopes until decrypt hooks are wired.
+Row payload support already includes an encrypted-envelope scaffold containing:
 
-## Next Steps
+- key version,
+- nonce,
+- auth tag,
+- ciphertext.
 
-- Add create-database directive support for encryption key reference injection.
-- Wire encrypt/decrypt hooks in persistence boundaries.
-- Add strict checks to prevent plaintext logging of encrypted payload material.
-- Add key rotation policy only when operational requirements are finalized.
+Plain decode paths intentionally reject encrypted envelopes until full decrypt wiring is in place.
+
+## Testing Expectations
+
+The encryption contract should be backed by:
+
+- deterministic fixture tests for identical-input equality,
+- collision-avoidance tests for repeated updates of the same logical row,
+- restart and replica consistency tests for canonicalization and derivation rules.
+
+## Remaining Work
+
+- complete encrypt/decrypt hook wiring at persistence boundaries,
+- harden logging paths so encrypted payload material is not exposed accidentally,
+- finalize any key-rotation policy only after operational requirements are stable.

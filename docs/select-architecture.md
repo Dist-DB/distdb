@@ -1,46 +1,43 @@
-# SELECT Architecture Notes
+# SELECT Architecture
 
-This document captures implementation assumptions and architectural choices for SELECT support in DistDB.
+This page records the main design decisions behind `SELECT` support in DistDB.
 
-## Purpose
+## What This Page Covers
 
-- Document why the current SELECT pipeline is shaped as it is.
-- Record intentionally constrained behavior vs full MySQL 8 semantics.
-- Provide a stable reference for future extension work.
+- how `SELECT` is planned and executed,
+- why some behaviors are intentionally narrower than full MySQL 8,
+- where hidden internal mechanics are used to preserve compatible results.
 
-## Scope
-
-This note covers:
-
-- `SELECT` planning and execution flow.
-- `ORDER BY`, `DISTINCT`, `GROUP BY`/`HAVING`, `WITH` (CTE), and `UNION` behavior.
-- Hidden internal sort-key handling for non-projected `ORDER BY` fields.
-
-This note does not replace the support matrix in `docs/sqlcompliance.md`.
+This page complements the feature-status view in [sql-compliance.md](sql-compliance.md). It explains design rationale rather than acting as a support matrix.
 
 ## Compatibility Baseline
 
 - MySQL 8.0.x is the compatibility target.
-- Current support is first-pass for several advanced SELECT features.
-- Unsupported syntax should fail explicitly rather than silently normalize.
+- advanced `SELECT` areas are still first-pass in several places.
+- unsupported syntax should fail explicitly rather than being normalized silently.
 
-## Core Planning Model
+## Planning Model
 
-SELECT plans are represented by `SelectReadPlan` and companion types in serverlib.
+`SELECT` plans are represented by `SelectReadPlan` and related types in `serverlib`.
 
-Design assumptions:
+The planner currently chooses one primary execution shape:
 
-- A query is parsed into one execution shape:
-  - projection-only (no FROM),
-  - relation scan,
-  - join plan,
-  - or UNION query handling.
-- Pushdown conditions are derived when feasible, but correctness takes priority over maximal pushdown.
-- Planning remains rule-driven (no cost-based planner currently).
+- projection-only, with no `FROM`,
+- single-relation scan,
+- joined relation execution,
+- set-query handling such as `UNION`, `EXCEPT`, or `INTERSECT`.
+
+Planning is rule-driven rather than cost-based.
+
+## Why The Planner Is Rule-Driven
+
+The current priority is correctness, explainability, and testability over aggressive optimization. A rule-driven planner keeps behavior explicit while the supported SQL surface is still expanding.
+
+Pushdown is used when it is safe, but the system prefers a correct broader execution path over unsafe maximal pushdown.
 
 ## Execution Pipeline
 
-SELECT execution is split into three primary command paths:
+The main execution paths are:
 
 - projection-only execution,
 - single-relation execution,
@@ -48,89 +45,86 @@ SELECT execution is split into three primary command paths:
 
 Common post-processing order is:
 
-1. DISTINCT (visibility-aware keys),
-2. ORDER BY,
-3. LIMIT/OFFSET windowing,
-4. hidden-column strip for client output.
+1. `DISTINCT`
+2. `ORDER BY`
+3. `LIMIT` and `OFFSET`
+4. hidden-column stripping before client output
 
-## Hidden Internal Sort Keys
+## Hidden Sort Keys
 
-### Why this exists
+### Why they exist
 
-MySQL allows ordering by fields not present in the final visible projection. To keep deterministic sorting while preserving output shape, the engine injects internal sort keys.
+MySQL allows ordering by fields that are not visible in the final projection. DistDB preserves that behavior by carrying hidden sort keys internally during execution.
 
-### Current approach
+### How they work
 
-- Missing ORDER BY fields are added to the internal projection for execution.
-- Those internal columns are marked using metadata system visibility.
-- Sorting can use those columns.
-- Final result serialization strips hidden columns.
+- missing `ORDER BY` fields are injected into the internal projection,
+- those fields are marked hidden in metadata,
+- sorting uses the hidden values,
+- final output removes hidden columns before returning rows to the client.
 
-### Metadata choice
+This is why internal projection shape can be wider than the client-visible result set.
 
-Field metadata includes `SystemFieldVisibility` with default `Visible` and optional `Hidden` usage for system/internal fields.
+## Current Area Decisions
 
-## GROUP BY / HAVING (First-Pass)
+### `GROUP BY` and `HAVING`
 
-Current assumptions:
+- current support focuses on direct-column grouping shapes,
+- `HAVING` exists in a constrained first-pass form,
+- full MySQL expression parity is not yet the goal in this area.
 
-- Focus on direct-column grouping shapes.
-- HAVING support is integrated in first-pass form and constrained compared with full MySQL expression semantics.
-- Behavior is documented as intentionally narrower than full MySQL 8.
+### `ORDER BY`
 
-## ORDER BY (Current Assumptions)
+- implemented as post-processing over produced rows,
+- supports non-projected order keys through hidden columns,
+- projection-only queries support constrained alias and ordinal ordering,
+- set-query ordering supports output columns and ordinals,
+- full expression-based ordering parity is still a future extension area.
 
-- ORDER BY is implemented via post-processing over produced rows.
-- Non-projected ORDER BY fields are supported through hidden sort keys.
-- Projection-only SELECT supports constrained ORDER BY using output aliases or ordinal positions.
-- UNION ORDER BY supports direct output columns and ordinal positions.
-- Advanced expression-based ORDER BY remains a future extension area.
+### CTEs
 
-## CTE Model (Common Table Expressions)
+- CTEs use scoped ephemeral materialization,
+- recursive CTEs are not supported yet,
+- materialized/not-materialized modifiers are not supported yet.
 
-- CTEs are handled via scoped ephemeral materialization.
-- Recursive CTEs are not yet supported.
-- Materialized/not-materialized CTE modifiers are not yet supported.
+### Set queries
 
-## Set-Operation Model
+- supports `UNION` and `UNION ALL`,
+- supports `EXCEPT` with distinct semantics,
+- supports `INTERSECT` with distinct semantics,
+- supports query-level `ORDER BY`, `LIMIT`, and `OFFSET` on set results,
+- reconciles branch metadata through first-pass compatibility rules,
+- rejects incompatible collation combinations rather than guessing.
 
-- Supports UNION and UNION ALL, including mixed UNION quantifier chains.
-- Supports EXCEPT (distinct semantics).
-- Supports INTERSECT (distinct semantics).
-- Supports query-level ORDER BY, LIMIT, OFFSET for set-query results.
-- Reconciles branch type metadata using first-pass compatibility rules.
-- Applies simplified collation-aware behavior for set-query dedupe/sort, with conflict rejection for incompatible collations.
-- Mixed operator families (UNION/EXCEPT/INTERSECT) are evaluated according to parser-produced set-expression tree order.
+## Collation And Type Assumptions
 
-## Collation Assumptions
+Current collation handling is intentionally simplified:
 
-Current behavior is intentionally simplified:
+- case-insensitive collations affect dedupe and ordering behavior,
+- conflicting collations are rejected,
+- full MySQL collation precedence and locale-specific details are not fully modeled.
 
-- Case-insensitive collations affect string comparison behavior in set-query dedupe/sort.
-- Conflicting branch collations are rejected.
-- Full MySQL collation precedence and locale-specific behavior are not fully modeled.
+This is a deliberate tradeoff to keep first-pass semantics explicit.
 
 ## Known Gaps
 
-The following remain out of scope today:
-
-- Full window-function runtime semantics.
-- QUALIFY.
-- Locking clauses (`FOR UPDATE`, `FOR SHARE`).
-- Full expression ordering parity for all MySQL shapes.
-- Full MySQL type/coercion/collation precedence edge cases.
+- full window-function runtime semantics,
+- `QUALIFY`,
+- locking clauses such as `FOR UPDATE` and `FOR SHARE`,
+- full expression-ordering parity,
+- full MySQL type and collation precedence edge cases.
 
 ## Design Priorities
 
-1. Correctness and explicit failure over permissive ambiguity.
-2. Deterministic behavior in first-pass feature support.
-3. Backward-compatible evolution where practical.
-4. Clear tracing from parser constraints to runtime behavior.
+1. correctness before permissive ambiguity,
+2. deterministic first-pass behavior,
+3. explicit failure when support is incomplete,
+4. clear traceability from parser constraints to runtime behavior.
 
 ## Change Guidance
 
-When extending SELECT support:
+When extending `SELECT` support:
 
-- Update parser guardrails and execution behavior in the same change set.
-- Add targeted tests for both positive and negative cases.
-- Update `docs/sqlcompliance.md` and this document when assumptions change.
+- update parser constraints and execution behavior together,
+- add positive and negative tests,
+- update [sql-compliance.md](sql-compliance.md) and this page when assumptions change.

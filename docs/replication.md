@@ -1,197 +1,216 @@
 
-# Replication (v2 Principle)
+# Replication
 
-This document defines the replication principle between datanodes in a single affinity group.
+This page describes the current replication principle in DistDB. The core idea is that replication happens inside an explicitly trusted affinity, not across every node visible on the swarm.
 
-## 1. Scope
+## What This Page Covers
 
-- Multiple affinities may coexist on the same swarm.
-- Swarm participation does not imply replication trust or data replication.
-- Replication occurs only between nodes in the same affinity.
-- A datanode may participate in exactly one affinity at a time.
-- An affinity is the replication boundary for metadata, schema, and data.
-- Node/network access security is managed outside this protocol.
-- Replication security is part of affinity state and is synchronized through replication.
+- the replication boundary,
+- the meaning of affinity membership,
+- the synchronization order and why it matters,
+- the decision rules around schema state and recovery.
 
-## 2. Terms
+## Core Principle
 
-- `affinity_id`: Logical identifier for the affinity group.
-- `affinity_password`: Shared secret used to derive replication membership key material.
-- `affinity_key`: Derived value from `affinity_id` + `affinity_password`, used to validate affinity membership.
-- `affinity_document`: Canonical replicated affinity state document. It contains at least:
-	- current affinity member nodes and their addresses,
-	- replicated database identifiers in affinity scope,
-	- each database's current `schema_identifier`,
-	- replication security metadata.
-- `schema_identifier`: Epoch timestamp associated with database schema state. Higher is newer.
+DistDB separates discovery from replication trust.
 
-Example shape (illustrative):
+- a swarm helps nodes find each other,
+- an affinity decides which nodes are allowed to exchange replicated state.
+
+That distinction is intentional. Network visibility alone should not imply access to schema, metadata, or data.
+
+## Scope
+
+- multiple affinities may coexist on one swarm,
+- replication occurs only within a single affinity,
+- a node participates in at most one affinity at a time,
+- an affinity is the boundary for metadata, schema, data, and replication security state.
+
+Node-level transport security is covered separately in [security.md](security.md). Replication security policy is part of affinity state and therefore belongs inside replication scope.
+
+## Why Affinity Exists
+
+The affinity model solves a practical problem: peer discovery and data trust are different concerns.
+
+Without this separation, any discovered node would risk being treated as a replication peer. DistDB instead requires explicit affinity credentials and replicated affinity state before a node can join the data plane.
+
+## Terms
+
+- `affinity_id`: logical identifier for the affinity group.
+- `affinity_password`: shared secret used to derive membership validation material.
+- `affinity_key`: derived value used to verify affinity membership.
+- `affinity_document`: canonical replicated affinity state.
+- `schema_identifier`: monotonically increasing schema-state identifier, currently modeled as an epoch-style value.
+
+The `affinity_document` contains at least:
+
+- current member nodes and addresses,
+- databases in affinity scope,
+- each database's current `schema_identifier`,
+- replication security metadata.
+
+Illustrative shape:
 
 ```json
 {
-	"affinity_id": "finance-eu-01",
-	"affinity_revision": 42,
-	"members": [
-		{
-			"node_id": "sam01",
-			"addrs": ["/ip4/10.0.0.11/tcp/4001"],
-			"status": "online",
-			"last_seen_epoch_ms": 1760419200000
-		},
-		{
-			"node_id": "sam02",
-			"addrs": ["/ip4/10.0.0.12/tcp/4001"],
-			"status": "online",
-			"last_seen_epoch_ms": 1760419201000
-		}
-	],
-	"databases": [
-		{
-			"database_id": "orders",
-			"schema_identifier": 1760419100000,
-			"schema_hash": "4f4c2a..."
-		},
-		{
-			"database_id": "billing",
-			"schema_identifier": 1760419150000,
-			"schema_hash": "a1b29e..."
-		}
-	],
-	"replication_security": {
-		"policy_revision": 9,
-		"key_id": "k-2026-06",
-		"updated_epoch_ms": 1760419180000
-	}
+  "affinity_id": "finance-eu-01",
+  "affinity_revision": 42,
+  "members": [
+    {
+      "node_id": "sam01",
+      "addrs": ["/ip4/10.0.0.11/tcp/4001"],
+      "status": "online",
+      "last_seen_epoch_ms": 1760419200000
+    },
+    {
+      "node_id": "sam02",
+      "addrs": ["/ip4/10.0.0.12/tcp/4001"],
+      "status": "online",
+      "last_seen_epoch_ms": 1760419201000
+    }
+  ],
+  "databases": [
+    {
+      "database_id": "orders",
+      "schema_identifier": 1760419100000,
+      "schema_hash": "4f4c2a..."
+    },
+    {
+      "database_id": "billing",
+      "schema_identifier": 1760419150000,
+      "schema_hash": "a1b29e..."
+    }
+  ],
+  "replication_security": {
+    "policy_revision": 9,
+    "key_id": "k-2026-06",
+    "updated_epoch_ms": 1760419180000
+  }
 }
 ```
 
-## 3. Membership and Identity
+## Membership And Identity
 
-- Membership is by owning valid affinity credentials (`affinity_id` + `affinity_password`).
-- A node requesting join must prove possession of valid affinity credentials.
-- A node with invalid credentials MUST NOT receive affinity metadata or data.
-- A node already in the affinity MAY request resynchronization without re-creating membership state.
-- On successful join, all currently connected nodes in the same affinity MUST converge on updated membership.
-- Membership state is maintained in the `affinity_document` and replicated to all affinity members.
+- membership requires valid affinity credentials,
+- invalid nodes must not receive affinity metadata or replicated data,
+- successful joins must converge membership state across current affinity members,
+- existing members may resynchronize without recreating membership.
 
-## 4. Security Model
+Membership truth is maintained in the `affinity_document` and replicated to the rest of the affinity.
 
-- Replication authentication and authorization are protocol-level concerns and are independent of network-layer controls.
-- Replication security state (for example, trust material, policy, rotation metadata) is replicated within the affinity.
-- When loading or updating from another node, replication security state MUST be synchronized before applying data-plane updates.
-- A node outside the affinity MUST NOT receive affinity document content even if it is on the same swarm.
+## Security Decisions Inside Replication
 
-Security principal model (current target behavior):
+- replication authentication and authorization are protocol-level concerns,
+- replication security metadata is replicated inside the affinity,
+- security state must be synchronized before data-plane updates,
+- being on the same swarm is not enough to read affinity state.
 
-- The datanode user is the default bootstrap database principal (`root`) for initial node access.
-- Bootstrap `root` authentication may use passthrough credentials from the datanode context.
-- Additional database users/roles are stored in the database catalog and replicated via the affinity processor.
+Current principal model target:
 
-Required guardrails:
+- node bootstrap may expose an initial `root` access path,
+- database-defined users, roles, and grants remain the long-term authority for normal data access,
+- security catalog changes must be versioned and replicated transactionally with catalog state.
 
-- Affinity join MUST NOT by itself grant database superuser privileges beyond bootstrap policy.
-- Catalog-defined database users/roles/grants are authoritative for normal data access decisions.
-- Replicated security catalog changes MUST be versioned and applied transactionally with catalog state.
-- Implementations SHOULD support disabling passthrough bootstrap root after first secure initialization.
+## Startup And Join Modes
 
-## 5. Startup and Join Behavior
+At startup, a node falls into one of three broad modes.
 
-At startup, each node follows one of these modes:
+### Existing affinity state available
 
-1. Existing affinity config available:
-- Load local affinity state.
-- Attempt peer contact using node addresses from `affinity_document` (ordered by local policy).
-- On success, run control-plane sync then data-plane sync.
-- On failure, rotate to next peer with retry/backoff.
+1. load local affinity state,
+2. contact peers listed in the `affinity_document`,
+3. run control-plane sync first,
+4. run data-plane sync after control state is current,
+5. retry and rotate peers on failure.
 
-2. No local affinity state, join requested:
-- Attempt join using provided affinity credentials.
-- On success, fetch `affinity_document` including databases and their `schema_identifier` values.
-- Emit membership update into `affinity_document` and propagate to affinity members.
-- For each database, compare known `schema_identifier` values and treat the highest as authoritative for replication start.
-- Continue with full sync sequence (Section 7).
+### Join requested with no local affinity state
 
-3. No local affinity state, bootstrap-init requested explicitly:
-- Create new affinity state locally.
-- Publish `affinity_document` with this node as initial member.
-- Node remains available for subsequent joins.
+1. attempt join using affinity credentials,
+2. fetch the current `affinity_document`,
+3. publish membership update into affinity state,
+4. compare schema identifiers per database,
+5. start synchronization from the highest known schema state.
 
-Nodes MUST NOT auto-create a new affinity if join was requested and peers are temporarily unavailable.
+### Explicit bootstrap-init requested
 
-## 6. Replication API Capabilities
+1. create local affinity state,
+2. publish an initial `affinity_document`,
+3. remain available for later joins.
 
-A node in an affinity MUST support these logical operations for other authenticated affinity members:
+Important rule: if join was requested and peers are temporarily unavailable, the node must not silently create a new affinity.
 
-- Join affinity and retrieve current `affinity_document`.
-- Fetch list of databases in affinity scope.
-- Enumerate database objects (catalog entities and replication checkpoints/indexes).
-- Fetch object-level replication stream (snapshot and/or WAL segments).
-- Fetch and apply control-plane replication security metadata.
+## Required Replication Capabilities
 
-## 7. Synchronization Sequence
+A node participating in affinity replication is expected to support:
 
-Replication from source node to target node MUST run in this order:
+- join and affinity-document retrieval,
+- database list retrieval,
+- catalog and object enumeration,
+- snapshot and WAL stream fetches,
+- replication-security metadata fetch and apply.
 
-1. Control-plane sync
-- affinity metadata (`affinity_document`)
-- membership and database schema summary (from `affinity_document`)
-- replication security state
+## Synchronization Order
 
-2. Schema/catalog sync
-- database list
-- catalog entities
-- schema metadata
-- security catalog entities (users, roles, grants, policy metadata)
+Replication must run in this order:
 
-3. Data snapshot sync
-- object/table baseline at a known checkpoint boundary
+1. control-plane sync,
+2. schema and catalog sync,
+3. data snapshot sync,
+4. WAL catch-up sync.
 
-4. WAL catch-up sync
-- apply changes after snapshot boundary until target is current
+### Why the order matters
 
-## 8. Schema Conflict Rule
+This order prevents the runtime from applying data against stale catalog or security assumptions.
 
-- Each database schema has a `schema_identifier` (epoch timestamp).
-- Higher `schema_identifier` is authoritative.
-- A node MUST NOT downgrade to a lower `schema_identifier`.
-- If two schemas share the same `schema_identifier`, implementation MUST apply a deterministic tie-breaker.
-- During join negotiation, the node MUST receive database -> `schema_identifier` information from `affinity_document` and start replication from the highest known schema state per database.
+- control-plane first establishes trust and scope,
+- schema and catalog next define object meaning,
+- snapshot then provides a consistent baseline,
+- WAL catch-up advances from that baseline to current state.
 
-Schema changes while running in affinity mode:
-- A node MUST validate any schema change with at least one reachable partner in the same affinity before committing.
-- If no same-affinity partner is reachable, schema change MUST be rejected or deferred.
-- Validation request/response MUST include database identifier and proposed `schema_identifier`.
-- Any database catalog security model change (for example users, roles, grants, or auth policy metadata) MUST be treated as a schema change.
-- Security model changes MUST increment or otherwise advance effective `schema_identifier` and MUST be replicated through the schema/catalog replication path.
+## Schema Conflict Rule
 
-Recommended tie-breaker order:
+- higher `schema_identifier` is authoritative,
+- lower schema state must not overwrite higher schema state,
+- ties require deterministic resolution,
+- join negotiation must provide per-database schema identifiers before replication begins.
+
+Recommended deterministic tie-breaker order:
+
 1. lexical `node_id`
 2. stable hash of schema payload
 
-## 9. Idempotency and Ordering
+### Why schema is treated strictly
 
-- Replication apply operations MUST be idempotent.
-- WAL/events MUST include stable operation identity and source ordering information.
-- A node MUST persist replication checkpoints to resume after restart.
-- Partial snapshot apply without matching WAL boundary metadata MUST be rejected.
+Replication correctness depends on shared interpretation of row and catalog data. Applying row changes under the wrong schema is more dangerous than temporarily rejecting or deferring the update.
 
-## 10. Failure Handling
+Schema and security-catalog changes are therefore both treated as schema-level events.
 
-- Peer contact failure MUST trigger retry with bounded backoff.
-- After repeated failures, node SHOULD mark peer temporarily unavailable and rotate.
-- Recovery MUST resume from last durable checkpoint, not restart full sync by default.
-- Authentication failure MUST hard-fail the replication session.
+## Ordering, Idempotency, And Recovery
 
-## 11. Minimal Compliance Criteria
+- replication apply operations must be idempotent,
+- WAL events must carry stable identity and source ordering information,
+- replication checkpoints must be persisted,
+- partial snapshot application without a matching WAL boundary must be rejected.
 
-An implementation is compliant with this principle if it:
+These decisions are meant to make restart and resume behavior deterministic rather than opportunistic.
 
-- enforces affinity credential validation for replication membership,
+## Failure Handling
+
+- peer failures should trigger bounded retry and rotation,
+- repeatedly failing peers may be marked temporarily unavailable,
+- recovery should resume from the last durable checkpoint,
+- authentication failures should hard-fail the replication session.
+
+## Minimal Compliance Criteria
+
+An implementation matches this replication principle if it:
+
+- validates affinity credentials before membership is accepted,
 - synchronizes replication security state before data-plane state,
-- applies schema updates by monotonic `schema_identifier`,
-- treats database catalog security changes as schema changes and replicates them through schema/catalog sync,
-- requires at least one same-affinity partner validation for schema changes in affinity mode,
-- executes sync in control -> schema -> snapshot -> WAL order,
-- and supports checkpoint-based restart after failures.
+- applies schema changes monotonically,
+- treats security catalog changes as schema events,
+- requires same-affinity partner validation for schema changes in affinity mode,
+- runs sync in control -> schema -> snapshot -> WAL order,
+- resumes from durable checkpoints after failure.
 
 

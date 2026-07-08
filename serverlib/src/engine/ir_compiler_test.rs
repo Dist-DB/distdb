@@ -514,7 +514,59 @@ fn function_validation_rejects_multi_column_outbound_sets() {
 }
 
 #[test]
+fn function_validation_requires_outbound_resource_set() {
+
+    let services = DefaultSQLProgramaticCompilerServices;
+
+    let context = StoredProcedureCompilerContext::new(&services)
+        .with_inbound_parameter("active", b"1".to_vec());
+
+    let artifact = compile_sql_programatic_artifact_with_context(
+        "create procedure p() begin if active = 1 then update users set active = 1; else update users set active = 0; end if; end",
+        context,
+    );
+
+    let validation = validate_sql_programatic_function_artifact(&artifact);
+    assert!(validation.is_err());
+
+    let issues = validation.expect_err("function validation should fail");
+    assert!(issues
+        .iter()
+        .any(|issue| issue.code == "FUNCTION_MISSING_OUT_SET"));
+
+}
+
+#[test]
+fn function_validation_rejects_table_side_effects() {
+
+    let services = DefaultSQLProgramaticCompilerServices;
+
+    let context = StoredProcedureCompilerContext::new(&services)
+        .with_routine(Some(RoutineDeclaration {
+            kind: RoutineKind::Function,
+            name: Some("f_table_side_effect".to_string()),
+            return_type: Some("int".to_string()),
+        }))
+        .with_inbound_parameter("active", b"1".to_vec());
+
+    let artifact = compile_sql_programatic_artifact_with_context(
+        "create procedure p() begin if active = 1 then create table tmp_udf_guardrail(id int); else create table tmp_udf_guardrail_fallback(id int); end if; end",
+        context,
+    );
+
+    let validation = validate_sql_programatic_function_artifact(&artifact);
+    assert!(validation.is_err());
+
+    let issues = validation.expect_err("function validation should fail");
+    assert!(issues
+        .iter()
+        .any(|issue| issue.code == "FUNCTION_TABLE_SIDE_EFFECT"));
+
+}
+
+#[test]
 fn procedure_validation_accepts_compiled_artifact_with_inbound_set() {
+
     let services = DefaultSQLProgramaticCompilerServices;
     let context = StoredProcedureCompilerContext::new(&services)
         .with_routine(Some(RoutineDeclaration {
@@ -531,6 +583,7 @@ fn procedure_validation_accepts_compiled_artifact_with_inbound_set() {
 
     let validation = validate_sql_programatic_procedure_artifact(&artifact);
     assert!(validation.is_ok());
+    
 }
 
 #[test]
@@ -564,4 +617,26 @@ fn compile_and_validate_helpers_enforce_routine_specific_rules() {
         procedure_context,
     );
     assert!(procedure_result.is_ok());
+}
+
+#[test]
+fn compile_and_validate_function_helper_accepts_single_outbound_result() {
+
+    let services = DefaultSQLProgramaticCompilerServices;
+
+    let function_context = StoredProcedureCompilerContext::new(&services)
+        .with_routine(Some(RoutineDeclaration {
+            kind: RoutineKind::Function,
+            name: Some("f_compile_validate_ok".to_string()),
+            return_type: Some("varchar".to_string()),
+        }))
+        .with_inbound_parameter("active", b"1".to_vec());
+
+    let function_result = compile_and_validate_sql_programatic_function_artifact_with_context(
+        "create procedure p() begin if active = 1 then select 'on'; else select 'off'; end if; end",
+        function_context,
+    );
+
+    assert!(function_result.is_ok());
+
 }

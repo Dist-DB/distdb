@@ -353,6 +353,52 @@ fn call_procedure_executes_branch_sql_as_smoke_test() {
 }
 
 #[test]
+fn local_function_name_is_checked_before_inbuilt_resolution() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "abs",
+            "create function abs() returns int return 7",
+            Vec::new(),
+        )
+        .expect("local function should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let data_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "select abs(1)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-local-fn-first",
+        &data_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("local SQL function 'abs' is not executable in expression context yet"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
 fn call_procedure_tears_down_scoped_temporary_tables() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");

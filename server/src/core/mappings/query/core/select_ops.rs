@@ -14,7 +14,13 @@ pub(super) fn execute_select_plan_result(
             wal,
             runtime_indexes,
             read_plan,
-            &mut |function| evaluate_inbuilt_sql_function(function),
+            &mut |function| {
+                evaluate_sql_function_with_catalog_precedence(
+                    catalog,
+                    &function.name.to_string(),
+                    || evaluate_inbuilt_sql_function(function),
+                )
+            },
             &mut |row_map, condition| {
                 Ok(serverlib::row_matches_select_condition(
                     row_map,
@@ -39,7 +45,11 @@ pub(super) fn execute_select_plan_result(
 
     if read_plan.table_id.is_empty() {
         return serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
-            evaluate_inbuilt_sql_function(function)
+            evaluate_sql_function_with_catalog_precedence(
+                catalog,
+                &function.name.to_string(),
+                || evaluate_inbuilt_sql_function(function),
+            )
         });
     }
 
@@ -91,7 +101,13 @@ pub(super) fn execute_select_plan_result(
         runtime_indexes,
         read_plan,
         &access_plan,
-        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |function| {
+            evaluate_sql_function_with_catalog_precedence(
+                catalog,
+                &function.name.to_string(),
+                || evaluate_inbuilt_sql_function(function),
+            )
+        },
         &mut |row_map, condition| {
             Ok(serverlib::row_matches_select_condition(
                 row_map,
@@ -440,7 +456,11 @@ pub(super) fn execute_select_impl(
 
         let result =
             match serverlib::execute_projection_only_select_plan(&read_plan, &mut |function| {
-                evaluate_inbuilt_sql_function(function)
+                evaluate_sql_function_with_catalog_precedence(
+                    catalog,
+                    &function.name.to_string(),
+                    || evaluate_inbuilt_sql_function(function),
+                )
             }) {
                 Ok(result) => result,
                 Err(message) => {
@@ -601,7 +621,13 @@ pub(super) fn execute_select_impl(
         runtime_indexes,
         &read_plan,
         &access_plan,
-        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |function| {
+            evaluate_sql_function_with_catalog_precedence(
+                catalog,
+                &function.name.to_string(),
+                || evaluate_inbuilt_sql_function(function),
+            )
+        },
         &mut |row_map, condition| {
             Ok(serverlib::row_matches_select_condition(
                 row_map,
@@ -865,7 +891,13 @@ fn execute_joined_select(
         wal,
         runtime_indexes,
         read_plan,
-        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut |function| {
+            evaluate_sql_function_with_catalog_precedence(
+                catalog,
+                &function.name.to_string(),
+                || evaluate_inbuilt_sql_function(function),
+            )
+        },
         &mut |row_map, condition| {
             Ok(serverlib::row_matches_select_condition(
                 row_map,

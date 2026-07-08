@@ -442,7 +442,13 @@ fn materialize_insert_source_rows<'a>(
                     wal,
                     runtime_indexes,
                     read_plan,
-                    &mut |function| evaluate_inbuilt_sql_function(function),
+                    &mut |function| {
+                        evaluate_sql_function_with_catalog_precedence(
+                            catalog,
+                            &function.name.to_string(),
+                            || evaluate_inbuilt_sql_function(function),
+                        )
+                    },
                     &mut |row_map, condition| {
                         Ok(serverlib::row_matches_select_condition(
                             row_map,
@@ -466,7 +472,11 @@ fn materialize_insert_source_rows<'a>(
             } else if read_plan.table_id.is_empty() {
                 
                 serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
-                    evaluate_inbuilt_sql_function(function)
+                    evaluate_sql_function_with_catalog_precedence(
+                        catalog,
+                        &function.name.to_string(),
+                        || evaluate_inbuilt_sql_function(function),
+                    )
                 })
 
             } else {
@@ -521,7 +531,13 @@ fn materialize_insert_source_rows<'a>(
                     runtime_indexes,
                     read_plan,
                     &access_plan,
-                    &mut |function| evaluate_inbuilt_sql_function(function),
+                    &mut |function| {
+                        evaluate_sql_function_with_catalog_precedence(
+                            catalog,
+                            &function.name.to_string(),
+                            || evaluate_inbuilt_sql_function(function),
+                        )
+                    },
                     &mut |row_map, condition| {
                         Ok(serverlib::row_matches_select_condition(
                             row_map,

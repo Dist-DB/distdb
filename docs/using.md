@@ -1,100 +1,99 @@
-# Using the platform
+# Using DistDB
 
-The platform comprises of a number of elements
+This page is the operator-oriented entry point for running DistDB locally, understanding the main binaries, and exercising the current feature set.
 
-## Common
+## What This Page Covers
 
-A set of commonly used functions and statics that are used throughout the project
+- the main workspace components,
+- how to start the server and console,
+- how to run simple multi-node experiments,
+- the current transaction and routine behavior that matters during manual testing.
 
-## ServerLib
+## Components
 
-The core container for the service stack (as a Cargo Library) - This is used by the connector and also the server components
+### `common`
 
-## Server
+Shared helpers, formats, and low-level utilities used across the workspace.
 
-For the default configuration, use 
+### `serverlib`
+
+The reusable database core. This crate contains most functional behavior such as SQL planning, execution primitives, storage structures, and supporting runtime logic.
+
+### `server`
+
+The main runtime process. It owns orchestration such as query dispatch, session/transaction flow, WAL coordination, security integration, and peer-facing behavior.
+
+### `console`
+
+The most practical interactive client for local development and manual validation.
+
+### `client`
+
+An example client surface. It is useful as a reference, but the console is currently the better first stop for feature exploration.
+
+## Quick Start
+
+### Run a local server
 
 ```bash
 cd ./server
-'./debug.sh'
+./debug.sh
 ```
 
-The server will run in debug mode presenting all output to the console (using log) - This can be supressed by running the service in release mode (cargo run --release) as needed. Since this project is not production ready, i recommend using the debug version at the moment.
+This starts the server with debug-oriented output. For quieter or more production-like behavior, use `cargo run --release` or a custom runtime argument set.
 
-You can provide bootstrap peers for Kademlia discovery at startup:
+### Run the console
+
+```bash
+cd ./console
+./debug.sh
+```
+
+## Common Startup Options
+
+### Bootstrap peers
+
+You can provide bootstrap peers at startup for discovery:
 
 ```bash
 cd ./server
 cargo run datadir=./data servers=127.0.0.1:9400,10.0.0.5:9400
 ```
 
-Bootstrap peer entries accept either `host:port` or multiaddr values such as `/ip4/127.0.0.1/tcp/9400`.
+Accepted peer formats:
 
-### Startup Indexing Mode (Default)
+- `host:port`
+- multiaddr values such as `/ip4/127.0.0.1/tcp/9400`
 
-The default operational mode is to preload runtime accessor caches during bootstrap so the database is query-ready immediately after startup.
+### Runtime index preload mode
+
+The default mode preloads runtime accessor caches during bootstrap so the node is query-ready immediately after startup.
 
 - Default: `DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=true`
-- Effect: higher startup cost, lower first-query latency on large tables
+- Tradeoff: slower startup, lower first-query latency on larger datasets
 
-To optimize for faster process start instead (and accept first-query warmup), disable preloading:
+To favor faster process start and accept first-query warmup:
 
 ```bash
 DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=false cargo run
 ```
 
-## Client
+## Connecting With The Console
 
-An example application featuring a range of features available to the platform - this is (at the moment) behind the core application development cycle - interested parties should look at the console application first
-
-## Console
-
-Using the same function to run server, 
-
-```bash
-cd ./console
-'./debug.sh'
-```
-
-## Multi-Server Testing
-
-On Server 1
-
-```bash
-RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run datadir=./data listen_addr=0.0.0.0 port=4001 node_id=sam01
-```
-
-On Server 2
-
-```bash
-RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run datadir=./data listen_addr=0.0.0.0 port=4002 node_id=sam02 servers=127.0.0.1:4001
-```
-
-Note that server 2 points to server 1 using the 'servers' directive
-
-Then to connect to the cluster
-
-```bash
-RUST_LOG="info,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run servers=127.0.0.1:4001
-```
-
-
-## Connecting the Console
-
-You can also provide bootstrap peer candidates directly when launching console:
+You can provide both a direct target and bootstrap peer candidates when launching console:
 
 ```bash
 cd ./console
 cargo run 127.0.0.1:9400 servers=127.0.0.1:4001
 ```
 
-You should specify the server address that you wish to connect to - This will discover other datanodes in the p2p network
+The direct address tells console where to connect first. Bootstrap peers help discover additional nodes in the swarm.
 
-## Testing Console Functionality
+## First Manual Session
 
-When the console loads, use the following directives (if this is the first time)
+If you are starting from a clean environment, a simple first session looks like this:
 
-```bash
+```sql
 connect root@server-node-01;
 password password;
 create database main;
@@ -103,9 +102,9 @@ use main;
 disconnect;
 ```
 
-If the table is already created
+If the database already exists:
 
-```bash
+```sql
 connect root@server-node-01;
 password password;
 show databases;
@@ -114,17 +113,37 @@ show tables;
 disconnect;
 ```
 
+The console also exposes `help` for additional commands and operator guidance.
 
+## Multi-Node Local Testing
 
-There is also a 'help' feature that will provide other commands. The service WILL BE 100% compatible with the MySQL8.0.x SQL dialect (in time).
+### Node 1
 
-The console will present information relating to the connectivity between client and server.
+```bash
+RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run datadir=./data listen_addr=0.0.0.0 port=4001 node_id=sam01
+```
 
-## Stored Procedure Notes
+### Node 2
 
-When defining multi-statement stored procedures from the console, set a temporary delimiter so the client does not split the routine body at `;` before `CREATE PROCEDURE` is submitted.
+```bash
+RUST_LOG="info,connector::p2p=debug,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run datadir=./data listen_addr=0.0.0.0 port=4002 node_id=sam02 servers=127.0.0.1:4001
+```
 
-Example:
+Node 2 points to Node 1 through the `servers` argument so it can discover the cluster.
+
+### Connect the console to the cluster
+
+```bash
+RUST_LOG="info,serverlib::p2p=debug,console=debug" RUST_BACKTRACE=1 cargo run servers=127.0.0.1:4001
+```
+
+## Stored Routine Notes
+
+### Why delimiters matter
+
+The console splits statements on `;`. Multi-statement routine definitions therefore need a temporary delimiter so the full routine body is submitted as one statement.
+
+### Example
 
 ```sql
 delimiter //
@@ -133,36 +152,36 @@ delimiter ;
 call p_sync(1);
 ```
 
-Current routine control-flow support includes:
+### Current routine behavior
 
-- `IF / ELSEIF / ELSE / END IF`
-- searched `CASE` and simple `CASE` in routine control-flow form
+- `IF / ELSEIF / ELSE / END IF` is supported.
+- searched and simple `CASE` control-flow forms are supported.
+- local routine bindings are checked before row/global structures during condition resolution.
+- invocation-scoped temporary resources are cleaned up after each call.
 
-For condition resolution in stored procedures, local routine bindings (arguments and local variables) are evaluated first, then row/global structures are used as fallback. Procedure-local bindings and temporary resources are scoped to invocation and cleaned up to avoid cross-call bleed.
+## Current Transaction Contract
 
-## Current Isolation Contract
+The current explicit transaction behavior is closest to a staged DML model with snapshot-aware reads.
 
-The current explicit transaction behavior is equivalent to a read-committed style contract for staged DML:
+### What happens today
 
-- `insert`, `update`, and `delete` statements are staged per session while a transaction is active.
-- Staged writes are not visible to other sessions before `commit`.
-- On `commit`, staged writes are applied as a single grouped publish.
-- On `rollback`, staged writes are discarded.
+- `INSERT`, `UPDATE`, and `DELETE` are staged per session while a transaction is active.
+- Staged writes are not visible to other sessions before `COMMIT`.
+- `COMMIT` publishes staged writes as one grouped durable change.
+- `ROLLBACK` discards staged writes.
 
-Within an explicit transaction:
+### Reads inside a transaction
 
-- `select` statements execute against the transaction snapshot plus that session's staged writes.
-- schema and other non-DML statement types are still rejected.
+- `SELECT` executes against the transaction snapshot plus that session's staged writes.
+- non-DML statements such as schema changes are still rejected in explicit transaction scope.
 
-## Next Isolation Milestone
+## Why The Contract Looks Like This
 
-The next target is fuller snapshot isolation behavior:
+DistDB prioritizes commit-gated visibility and WAL-backed recovery semantics first. That has allowed the project to harden grouped commit behavior and conflict detection before broadening schema-in-transaction support.
 
-- Reads inside one transaction are repeatable against its snapshot.
-- A transaction sees its own staged writes.
-- Concurrent write-write conflicts on the same logical row are rejected at commit for the later committer.
+## Next Isolation Milestones
 
-Write-write conflict behavior and repeatable-read behavior are both covered by active server tests.
-
-Write-skew prevention for predicate-based invariants is now covered by an active server test.
-Range/phantom conflict handling is the next serializable gap to close.
+- stronger repeatable-read style guarantees across the full transaction lifetime,
+- continued write-write conflict enforcement at commit,
+- broader predicate and range conflict handling,
+- eventual closing of the remaining phantom/serializable gaps.

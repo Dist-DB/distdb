@@ -1,116 +1,112 @@
 
-# A Distributed Database
+# DistDB Documentation
 
-This project is orientated to the development of a P2P distributed database
+DistDB is a distributed SQL database project built around a Rust execution core, a server runtime, and a peer-to-peer replication model. This documentation is organized to explain three things clearly:
 
-## Current Status
+- what each part of the platform does,
+- why the design is shaped that way,
+- what is implemented today versus what remains intentionally incomplete.
 
-The platform current features the following:-
+## Start Here
 
-### Core Capabilities
+If you are new to the codebase, read these pages in order:
 
-```bash
-✓ SQL Support (MySQL 8.0 Compatible)
-✓ CREATE/ALTER/DROP TABLE
-✓ INSERT/UPDATE/DELETE/SELECT
-✓ Complex JOINs (INNER, LEFT, RIGHT, FULL OUTER)
-✓ WHERE conditions, ORDER BY, LIMIT
-✓ Indexes (Primary key, indexed fields)
-✓ SHOW TABLES/DATABASES
-```
+1. [using.md](using.md): how to run the platform and what the main components do.
+2. [readme.md](readme.md): this page, for the platform map and design summary.
+3. [security.md](security.md): transport security, CA bootstrapping, and trust decisions.
+4. [replication.md](replication.md): affinity-based replication model and synchronization order.
+5. [sql-compliance.md](sql-compliance.md): feature coverage and limits relative to MySQL 8.x.
 
-### Transactional Behavior:
+For design constraints and implementation ownership:
 
-```bash
-✓ Explicit transactions (BEGIN/COMMIT/ROLLBACK)
-✓ Per-session staged DML during active transaction
-✓ Snapshot isolation for reads within transaction
-✓ Write-write conflict detection & rejection
-✓ Predicate conflict detection (write-skew prevention)
-✓ Grouped atomic commits to WAL
-✓ Transaction markers in WAL for recovery
-```
+- [architecture-boundaries.md](architecture-boundaries.md)
+- [select-architecture.md](select-architecture.md)
+- [at-rest-encryption.md](at-rest-encryption.md)
 
-### Infrastructure:
+## Platform Overview
 
-```bash
-✓ WAL (Write-Ahead Log) for durability & recovery
-✓ Transaction log replay on startup
-✓ Catalog persistence (schema storage)
-✓ Runtime index store (in-memory query optimization)
-✓ AES encryption for client-server transport
-✓ P2P networking foundation (Kademlia DHT)
-```
+DistDB is split into a few major surfaces:
 
-## Architectural Overview
+- `common`: shared helpers, formats, and low-level utilities.
+- `serverlib`: reusable database behavior, SQL planning, execution primitives, runtime data structures, and replication/security building blocks.
+- `server`: orchestration layer for query handling, sessions, transactions, WAL coordination, security, and peer interaction.
+- `connector`: client/server transport types and protocol-facing integration.
+- `console`: operator-facing CLI for exercising the platform.
+- `client`: example client surface.
 
-This platform features a number of optimizations that provide extensive improvements over many traditional databases
+## Current Platform Shape
 
-- Use of WAL - WAL (or Write Ahead Logging) is a true tranactional log of events that occur on the platform - Each Database Entity (a table, view, procedure, function) feature their own WAL. Each database entity features a state-machine (load->ready<->lock->sync->ready) that gates the DML
-- Internal data representation to Rust native types - No exotics
-- High-speed tombstoning of records (using refid)
-- Seamless P2P Replication topology - using Kademlia DHT
-- All opensource (Server, ServerLib and Console under GNU-GPL3 Licensing)
+### SQL and execution
 
-## Guiding Principles
+- MySQL 8.0.x is the compatibility target for supported syntax.
+- Core DDL and DML are implemented for the currently supported statement set.
+- `SELECT`, joins, ordering, limits, and several routine/trigger surfaces are available.
+- Unsupported syntax is expected to fail explicitly rather than being silently rewritten.
 
-The database platform conforms to the following principles
+### Transactions and durability
 
-```bash
-- The platform is architected to be a number (1 or more) server nodes 
-- A servernode has a distinct identifier - this must be expressed at startup together with a data directory
-- All nodes are interconnected over a p2p network using a common swarm/version identifier
-- The p2p network uses Kademlia for IP discovery for remote nodes
-- A database may reside on any of the server nodes (one or more)
-- Each database instance coordinates transactions with other database replicas
-- A database follows a versioned SQL compatibility target based on MySQL 8.0.x for the supported statement set
-- Each database maintains a transactional log of all data changes
-- Security is defined on a node & database instance
-- A standard set of SQL directives are supported by the service
-- p2p clients may receive notifications on data changes pub/sub on a table/database level
-- Changes to data are replicated to connected instances of a datanode sharing the same database
-- Servers are interconnected using the pub/sub notification pump
-- Subscriptions are managed using unique identifers using a hash!{databaseid:tableid}
-- When a database modification occurs at a datanode, this is informed to the other datanodes that maybe connected via a publication
-- A publication consists of 4 pieces of information - timestamp, serviceid, transactionid, eventtype
-- All commited transactions are placed inside the transaction log - a notification of update is then published - then connected clients request transactions since the last transaction identifier
-- Deletions are not considered in the transaction log as entry removals
-- All content is stored in binary format and deserialized by the client
-- Schema changes to tables are permitted and informed accordingly - A schema change is also a record in the transactional log
-- Security structures are maintained in the transactional log
-- When a schema change is noted, the data entries should conform to the schema format there after
-- All transactions are recorded with timestamp (epochabs), userid, transaction-type and then data
-- user-identifiers are hash!{username.lowercase}
-- password-keys are hash!{databaseid:username.lowercase:password}
-- tables comprise of fields {seqno:fieldname:fieldtype:size:nullability:indexed:default}
-- fieldtypes may be int, uint, float, string[fixedsize], text, enum, spatial (long,lat,elevation), blob
-- fieldsizes for int, uint and float are 8,16,32,64
-- nullability for int, uint and float default to 0
-- spatial default is {long: 0.0, lat: 0.0, ele: 0.0}
-- tables have indexes based upon the schema definition
-- all tables are subject to crud directives (create, retreive, update, delete)
-```
+- Explicit transaction entry points exist through `BEGIN`, `COMMIT`, and `ROLLBACK` handling.
+- Staged DML is tracked per session.
+- WAL-backed durability and replay are central to recovery behavior.
+- Grouped WAL commit markers are used to keep transaction visibility commit-gated.
 
-## SQL Compatibility Target
+### Replication and runtime infrastructure
 
-The platform should treat MySQL 8.0.x as the compatibility baseline for SQL parsing, statement planning, and builder output.
+- Peer discovery is built on a Kademlia-based P2P foundation.
+- Catalog and runtime index state are persisted and reconstructed on startup.
+- Replication is affinity-scoped rather than swarm-global.
+- TLS-secured transport is available for server, peer, and connector paths.
 
-The implementation should:
+## Design Rationale
 
-- parse the supported statement set using MySQL 8.0.x-compatible syntax rules
-- translate parsed statements into one or more execution actions
-- reject unsupported MySQL 8.0.x syntax explicitly rather than silently normalizing it
+The platform makes a few deliberate architectural choices.
 
-## Additional Notes
+### WAL-first state management
 
-- Architecture ownership boundaries and layering contract:
-	- [architecture-boundaries.md](architecture-boundaries.md)
-- SELECT architecture assumptions and implementation notes:
-	- [select-architecture.md](select-architecture.md)
-- SQL implementation/compliance coverage index and per-feature matrices:
-	- [sql-compliance.md](sql-compliance.md)
-	- [compliance/readme.md](compliance/readme.md)
-- Optional enterprise at-rest encryption direction:
-	- [at-rest-encryption.md](at-rest-encryption.md)
+DistDB treats WAL as a core source of truth for durable changes, recovery, and replication catch-up. This keeps restart and sync flows aligned around the same durable event stream instead of separate persistence models.
+
+### Separation between behavior and orchestration
+
+Reusable SQL behavior belongs in `serverlib`, while cross-domain runtime coordination belongs in `server`. The goal is to keep dialect semantics and execution logic deterministic and testable without depending on server lifecycle state.
+
+### Explicit compatibility boundaries
+
+The project targets MySQL 8.x syntax where practical, but it does not claim full conformance. Where support is partial, the preferred behavior is a clear rejection path and corresponding documentation rather than ambiguous best-effort behavior.
+
+### Affinity-scoped replication
+
+Swarm membership is not the same as replication trust. DistDB uses the idea of an affinity to define who shares metadata, schema, and data. That keeps replication policy explicit and separate from raw network discovery.
+
+## Key Decisions
+
+- SQL compatibility is version-targeted, not "accept anything vaguely MySQL-like".
+- Runtime behavior is favored over silent normalization when a feature is incomplete.
+- Security and replication are treated as first-class platform areas, not add-ons around query execution.
+- Documentation is intended to describe both current behavior and the rationale behind constraints.
+
+## Documentation Map
+
+### Platform operation
+
+- [using.md](using.md): running the server, console, and local multi-node setups.
+- [security.md](security.md): TLS modes, CA flow, and runtime security tradeoffs.
+- [replication.md](replication.md): affinity model, sync sequence, and failure handling.
+
+### Architecture and decisions
+
+- [architecture-boundaries.md](architecture-boundaries.md): ownership rules between `serverlib` and `server`.
+- [select-architecture.md](select-architecture.md): SELECT planning and execution decisions.
+- [at-rest-encryption.md](at-rest-encryption.md): current at-rest encryption direction and constraints.
+
+### Feature coverage
+
+- [sql-compliance.md](sql-compliance.md): top-level SQL support index.
+- [compliance/readme.md](compliance/readme.md): per-area compliance documents.
+
+## Reading Guidance
+
+- If you want to run the system, start with [using.md](using.md).
+- If you want to understand security or deployment posture, read [security.md](security.md) and [replication.md](replication.md).
+- If you are changing execution behavior, read [architecture-boundaries.md](architecture-boundaries.md), [select-architecture.md](select-architecture.md), and the relevant compliance page before editing code.
 
 
