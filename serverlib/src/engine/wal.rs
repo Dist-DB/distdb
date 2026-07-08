@@ -42,31 +42,42 @@ fn next_wal_cache_scope_id() -> usize {
 struct WalCompressionPayloadTransform;
 
 impl TransactionPayloadTransform for WalCompressionPayloadTransform {
+
     fn transform_payload(
         &self,
         payload: &[u8],
         _context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         match maybe_decode_compressed_payload_bytes(payload) {
+
             Ok(Some(decoded)) => Ok(Some(decoded)),
+
             Ok(None) => Ok(None),
+
             Err("failed to decompress WAL payload") => {
                 Err(PayloadTransformError::InvalidCompressedPayload)
-            }
+            },
+
             Err("decompressed WAL payload length mismatch") => {
                 Err(PayloadTransformError::IntegrityCheckFailed)
-            }
+            },
+
             Err(message) => Err(PayloadTransformError::InternalTransformError(
                 message.to_string(),
             )),
+
         }
+
     }
+
 }
 
 fn resolve_wal_storage_payload(
     raw_payload: Option<&[u8]>,
     context: &TransactionPayloadContext,
 ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
     let Some(payload) = raw_payload else {
         return Ok(None);
     };
@@ -93,18 +104,21 @@ fn resolve_wal_storage_payload(
         Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
         Cow::Owned(bytes) => Ok(Some(bytes)),
     }
+
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct WalCompressionPayloadWriteTransform;
 
 impl TransactionPayloadWriteTransform for WalCompressionPayloadWriteTransform {
+
     fn transform_payload_for_write(
         &self,
         record: &TransactionRecord,
         payload: &[u8],
         _context: &TransactionPayloadContext,
     ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
         if should_skip_payload_compression(record, payload) {
             return Ok(None);
         }
@@ -123,7 +137,9 @@ impl TransactionPayloadWriteTransform for WalCompressionPayloadWriteTransform {
             ))?;
 
         Ok(Some(compressed))
+    
     }
+
 }
 
 fn write_wal_storage_payload(
@@ -131,6 +147,7 @@ fn write_wal_storage_payload(
     raw_payload: Option<&[u8]>,
     context: &TransactionPayloadContext,
 ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+
     let Some(payload) = raw_payload else {
         return Ok(None);
     };
@@ -163,6 +180,7 @@ fn write_wal_storage_payload(
         Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
         Cow::Owned(bytes) => Ok(Some(bytes)),
     }
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,16 +247,20 @@ impl ConcurrentWalManager {
     where
         F: FnOnce(&[TransactionRecord]) -> T,
     {
+
         let stream_key = obfuscated_stream_key(wal_id).ok()?;
 
         self.hydrate_stream_if_needed(wal_id, &stream_key);
 
         let store = self.storage.lock().ok()?;
         let entries = store.get(&stream_key)?;
+        
         Some(func(entries.as_slice()))
+
     }
 
     fn hydrate_stream_if_needed(&self, wal_id: &str, stream_key: &str) {
+
         if !matches!(self.stream_mode(wal_id), WalStreamMode::Durable) {
             return;
         }
@@ -283,9 +305,11 @@ impl ConcurrentWalManager {
                 }
             }
         }
+
     }
 
     pub fn has_write_after(&self, wal_id: &str, timestamp_epoch_ms: u64) -> bool {
+
         let stream_key = match obfuscated_stream_key(wal_id) {
             Ok(k) => k,
             Err(_) => return false,
@@ -321,6 +345,7 @@ impl ConcurrentWalManager {
         }
 
         max_ts.is_some_and(|max_ts| max_ts > timestamp_epoch_ms)
+
     }
 
     /* Build a memory-resident WAL manager.
@@ -355,6 +380,7 @@ impl ConcurrentWalManager {
         wal_id: &str,
         mode: WalStreamMode,
     ) -> Result<(), &'static str> {
+
         let stream_key = obfuscated_stream_key(wal_id)?;
 
         let mut modes = self
@@ -365,9 +391,11 @@ impl ConcurrentWalManager {
         modes.insert(stream_key, mode);
 
         Ok(())
+
     }
 
     pub fn stream_mode(&self, wal_id: &str) -> WalStreamMode {
+
         let Ok(stream_key) = obfuscated_stream_key(wal_id) else {
             return WalStreamMode::Durable;
         };
@@ -380,6 +408,7 @@ impl ConcurrentWalManager {
             .get(&stream_key)
             .copied()
             .unwrap_or(WalStreamMode::Durable)
+
     }
 
     pub fn is_stream_replicable(&self, wal_id: &str) -> bool {
@@ -433,22 +462,28 @@ impl ConcurrentWalManager {
             .map_err(|_| "failed to receive WAL compact acknowledgement")??;
 
         let stream_key = obfuscated_stream_key(wal_id)?;
+
         if let (Ok(store), Ok(mut high_water)) = (
             self.storage.lock(),
             self.write_high_water_by_stream.lock(),
         ) {
+            
             let max_ts = store
                 .get(&stream_key)
                 .and_then(|entries| latest_write_timestamp(entries));
 
             match max_ts {
+
                 Some(ts) => {
                     high_water.insert(stream_key.clone(), ts);
-                }
+                },
+
                 None => {
                     high_water.remove(&stream_key);
                 }
+
             }
+
         }
 
         Ok(())
@@ -557,15 +592,19 @@ impl ConcurrentWalManager {
         store
             .get(&stream_key)
             .and_then(|entries| entries.last().map(|entry| entry.id))
+
     }
 
     pub fn latest_transaction_id_if_loaded(&self, wal_id: &str) -> Option<TransactionId> {
+
         let stream_key = obfuscated_stream_key(wal_id).ok()?;
 
         let store = self.storage.lock().ok()?;
+        
         store
             .get(&stream_key)
             .and_then(|entries| entries.last().map(|entry| entry.id))
+
     }
 
     pub fn append_batch(
@@ -573,6 +612,7 @@ impl ConcurrentWalManager {
         wal_id: &str,
         records: Vec<TransactionRecord>,
     ) -> Result<(), &'static str> {
+
         if records.is_empty() {
             return Ok(());
         }
@@ -610,6 +650,7 @@ impl ConcurrentWalManager {
             }
 
         Ok(())
+
     }
 
     pub fn since_with_context(
@@ -618,6 +659,7 @@ impl ConcurrentWalManager {
         from: Option<TransactionId>,
         context: &TransactionPayloadContext,
     ) -> Result<Vec<TransactionRecord>, &'static str> {
+        
         if context == &TransactionPayloadContext::default() {
             return Ok(self.since(wal_id, from));
         }
@@ -631,6 +673,7 @@ impl ConcurrentWalManager {
         }
 
         Ok(records)
+
     }
 
 }
@@ -638,6 +681,7 @@ impl ConcurrentWalManager {
 impl TransactionLog for ConcurrentWalManager {
 
     fn append(&self, wal_id: &str, record: TransactionRecord) -> Result<(), &'static str> {
+
         let write_ts = write_timestamp_if_data_write(&record);
         
         let sender = self.get_or_spawn_worker(wal_id)?;
@@ -768,8 +812,10 @@ pub(crate) fn encode_record_for_storage_with_context(
 ) -> Result<Vec<u8>, &'static str> {
 
     let mut record_for_storage = record.clone();
+
     let stored_payload = write_wal_storage_payload(record, record_for_storage.payload_raw(), context)
         .map_err(map_payload_write_transform_error)?;
+
     record_for_storage.set_payload(stored_payload);
 
     bincode::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record")
@@ -781,6 +827,7 @@ pub(crate) fn decode_record_from_storage(
 ) -> Result<TransactionRecord, &'static str> {
 
     let context = TransactionPayloadContext::default();
+
     let mut record = bincode::deserialize::<TransactionRecord>(encoded)
         .map_err(|_| "failed to deserialize WAL record")?;
 
@@ -803,6 +850,7 @@ pub(crate) fn decode_record_from_storage_with_context(
 
     let resolved_payload =
         resolve_wal_storage_payload(record.payload_raw(), context).map_err(map_payload_transform_error)?;
+
     record.set_payload(resolved_payload);
 
     Ok(record)
@@ -828,10 +876,10 @@ fn map_payload_transform_error(error: PayloadTransformError) -> &'static str {
         
         PayloadTransformError::UnsupportedFormat => "unsupported WAL payload format",
 
-        PayloadTransformError::InvalidEncryptedPayload
-        | PayloadTransformError::DecryptFailed
-        | PayloadTransformError::EncryptionNotConfigured
-        | PayloadTransformError::InternalTransformError(_) => "failed to deserialize WAL record"
+        PayloadTransformError::InvalidEncryptedPayload |
+        PayloadTransformError::DecryptFailed |
+        PayloadTransformError::EncryptionNotConfigured |
+        PayloadTransformError::InternalTransformError(_) => "failed to deserialize WAL record"
     
     }
 
@@ -853,10 +901,10 @@ fn map_payload_write_transform_error(error: PayloadTransformError) -> &'static s
 
         PayloadTransformError::InvalidCompressedPayload => "failed to compress WAL payload",
         
-        PayloadTransformError::InvalidEncryptedPayload
-        | PayloadTransformError::DecryptFailed
-        | PayloadTransformError::EncryptionNotConfigured
-        | PayloadTransformError::InternalTransformError(_) => "failed to serialize WAL record",
+        PayloadTransformError::InvalidEncryptedPayload |
+        PayloadTransformError::DecryptFailed |
+        PayloadTransformError::EncryptionNotConfigured |
+        PayloadTransformError::InternalTransformError(_) => "failed to serialize WAL record",
 
     }
 }
@@ -936,11 +984,13 @@ const WAL_PARALLEL_DECODE_MIN_FRAMES: usize = 100_000;
 const WAL_PARALLEL_DECODE_MAX_WORKERS: usize = 32;
 
 fn wal_parallel_decode_max_workers() -> usize {
+
     std::env::var("DISTDB_WAL_PARALLEL_DECODE_WORKERS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(WAL_PARALLEL_DECODE_MAX_WORKERS)
+
 }
 
 #[derive(Debug)]
@@ -954,19 +1004,26 @@ fn decode_records_sequential(
     bytes: &[u8],
     frame_ranges: &[(usize, usize)],
 ) -> Vec<TransactionRecord> {
+
     let mut records = Vec::with_capacity(frame_ranges.len());
 
     for &(offset, len) in frame_ranges {
+
         match decode_record_from_storage(&bytes[offset..offset + len]) {
+
             Ok(record) => records.push(record),
+
             Err(e) => {
                 log::error!("failed to deserialize WAL frame at byte {}: {}", offset, e);
                 break;
             }
+
         }
+
     }
 
     records
+
 }
 
 fn decode_records_parallel(
@@ -974,12 +1031,15 @@ fn decode_records_parallel(
     frame_ranges: &[(usize, usize)],
     workers: usize,
 ) -> Vec<TransactionRecord> {
+
     let chunk_size = frame_ranges.len().div_ceil(workers);
 
     let mut chunks = std::thread::scope(|scope| {
+
         let mut handles = Vec::new();
 
         for worker_idx in 0..workers {
+
             let start = worker_idx * chunk_size;
             if start >= frame_ranges.len() {
                 break;
@@ -1008,33 +1068,43 @@ fn decode_records_parallel(
                     first_error,
                 }
             }));
+
         }
 
         let mut decoded = Vec::with_capacity(handles.len());
+
         for handle in handles {
+
             match handle.join() {
                 Ok(chunk) => decoded.push(chunk),
                 Err(_) => {
                     log::error!("parallel WAL decode worker panicked; falling back to partial results");
                 }
             }
+
         }
 
         decoded
+
     });
 
     chunks.sort_by_key(|chunk| chunk.start_frame_idx);
 
     let mut records = Vec::with_capacity(frame_ranges.len());
+
     for chunk in chunks {
+
         records.extend(chunk.records);
+
         if let Some((offset, err)) = chunk.first_error {
             log::error!("failed to deserialize WAL frame at byte {}: {}", offset, err);
             break;
         }
+
     }
 
     records
+
 }
 
 fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
@@ -1072,6 +1142,7 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
 
         frame_ranges.push((pos, len));
         pos += len;
+        
     }
 
     let decode_started_at = Instant::now();
@@ -1079,16 +1150,20 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+
     let should_parallel_decode =
         available > 1 && frame_ranges.len() >= WAL_PARALLEL_DECODE_MIN_FRAMES;
 
     let records = if should_parallel_decode {
+
         let max_workers = wal_parallel_decode_max_workers();
         let workers = std::cmp::min(
             std::cmp::min(available, max_workers),
             frame_ranges.len(),
         );
+        
         decode_records_parallel(&bytes, &frame_ranges, workers)
+
     } else {
         decode_records_sequential(&bytes, &frame_ranges)
     };

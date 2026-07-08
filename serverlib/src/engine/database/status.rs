@@ -77,22 +77,22 @@ impl ObjectStatus {
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Load, Self::Sync)
-            | (Self::Load, Self::Ready)
-            | (Self::Load, Self::Lock)
-            | (Self::Load, Self::Indexing)
-            | (Self::Sync, Self::Ready)
-            | (Self::Sync, Self::Lock)
-            | (Self::Sync, Self::Indexing)
-            | (Self::Ready, Self::Sync)
-            | (Self::Ready, Self::Lock)
-            | (Self::Ready, Self::Indexing)
-            | (Self::Lock, Self::Sync)
-            | (Self::Lock, Self::Ready)
-            | (Self::Lock, Self::Indexing)
-            | (Self::Indexing, Self::Ready)
-            | (Self::Indexing, Self::Sync)
-            | (Self::Indexing, Self::Lock)
+            (Self::Load, Self::Sync) |
+            (Self::Load, Self::Ready) |
+            (Self::Load, Self::Lock) |
+            (Self::Load, Self::Indexing) |
+            (Self::Sync, Self::Ready) |
+            (Self::Sync, Self::Lock) |
+            (Self::Sync, Self::Indexing) |
+            (Self::Ready, Self::Sync) |
+            (Self::Ready, Self::Lock) |
+            (Self::Ready, Self::Indexing) |
+            (Self::Lock, Self::Sync) |
+            (Self::Lock, Self::Ready) |
+            (Self::Lock, Self::Indexing) |
+            (Self::Indexing, Self::Ready) |
+            (Self::Indexing, Self::Sync) |
+            (Self::Indexing, Self::Lock)
         )
     }
 

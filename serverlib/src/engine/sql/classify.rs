@@ -14,6 +14,7 @@ pub(super) fn classify_statement(
     let normalized_lower = normalized.to_ascii_lowercase();
 
     if normalized_lower.starts_with("explain ") {
+
         let inner_statement = normalized["explain".len()..].trim();
         let parsed_inner = parse_mysql_statements(inner_statement)?;
 
@@ -33,6 +34,7 @@ pub(super) fn classify_statement(
         }
 
         return Ok((SqlDirective::Retrieve, inner_operation, inner_object_name));
+        
     }
 
     let (directive, operation, object_name) = match statement {
@@ -187,10 +189,10 @@ pub(super) fn classify_statement(
             db_name.as_ref().map(|name| name.to_string()),
         ),
 
-        Statement::ShowFunctions { .. }
-        | Statement::ShowStatus { .. }
-        | Statement::ShowVariables { .. }
-        | Statement::ShowCollation { .. } => (SqlDirective::Retrieve, SqlOperation::Select, None),
+        Statement::ShowFunctions { .. } |
+        Statement::ShowStatus { .. } |
+        Statement::ShowVariables { .. } |
+        Statement::ShowCollation { .. } => (SqlDirective::Retrieve, SqlOperation::Select, None),
 
         Statement::ShowVariable { variable } => (
             SqlDirective::Retrieve,
@@ -210,14 +212,15 @@ pub(super) fn classify_statement(
             Some(charset_name.clone()),
         ),
 
-        Statement::SetNamesDefault {}
-        | Statement::SetRole { .. }
-        | Statement::SetTimeZone { .. }
-        | Statement::SetTransaction { .. } => {
+        Statement::SetNamesDefault {} |
+        Statement::SetRole { .. } |
+        Statement::SetTimeZone { .. } |
+        Statement::SetTransaction { .. } => {
             (SqlDirective::AlterSchema, SqlOperation::AlterOther, None)
         }
 
-        Statement::StartTransaction { .. } | Statement::Commit { .. } => {
+        Statement::StartTransaction { .. } | 
+        Statement::Commit { .. } => {
             (SqlDirective::AlterSchema, SqlOperation::AlterOther, None)
         }
 
@@ -227,7 +230,8 @@ pub(super) fn classify_statement(
             savepoint.as_ref().map(|name| name.to_string()),
         ),
 
-        Statement::Grant { objects, .. } | Statement::Revoke { objects, .. } => (
+        Statement::Grant { objects, .. } | 
+        Statement::Revoke { objects, .. } => (
             SqlDirective::AlterSchema,
             SqlOperation::AlterOther,
             first_object_name_in_grant_objects(objects),
@@ -245,19 +249,19 @@ pub(super) fn classify_statement(
 
     if matches!(
         operation,
-        SqlOperation::CreateDatabase
-            | SqlOperation::CreateTable
-            | SqlOperation::CreateView
-            | SqlOperation::CreateTrigger
-            | SqlOperation::CreateStoredProcedure
-            | SqlOperation::CallStoredProcedure
-            | SqlOperation::DropDatabase
-            | SqlOperation::DropTable
-            | SqlOperation::DropView
-            | SqlOperation::DropTrigger
-            | SqlOperation::DropStoredProcedure
-            | SqlOperation::AlterTable
-            | SqlOperation::AlterView
+        SqlOperation::CreateDatabase |
+        SqlOperation::CreateTable |
+        SqlOperation::CreateView |
+        SqlOperation::CreateTrigger |
+        SqlOperation::CreateStoredProcedure |
+        SqlOperation::CallStoredProcedure |
+        SqlOperation::DropDatabase |
+        SqlOperation::DropTable |
+        SqlOperation::DropView |
+        SqlOperation::DropTrigger |
+        SqlOperation::DropStoredProcedure |
+        SqlOperation::AlterTable |
+        SqlOperation::AlterView
     ) && object_name.is_none()
     {
         return Err(SqlParseError::MissingIdentifier {
@@ -389,11 +393,11 @@ fn first_object_name_in_grant_objects(objects: &GrantObjects) -> Option<String> 
 
     match objects {
 
-        GrantObjects::AllSequencesInSchema { schemas }
-        | GrantObjects::AllTablesInSchema { schemas }
-        | GrantObjects::Schemas(schemas)
-        | GrantObjects::Sequences(schemas)
-        | GrantObjects::Tables(schemas) => schemas.first().map(|name| name.to_string()),
+        GrantObjects::AllSequencesInSchema { schemas } |
+        GrantObjects::AllTablesInSchema { schemas } |
+        GrantObjects::Schemas(schemas) |
+        GrantObjects::Sequences(schemas) |
+        GrantObjects::Tables(schemas) => schemas.first().map(|name| name.to_string()),
 
     }
 
@@ -503,27 +507,5 @@ fn normalize_fallback_object_name(token: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fallback_extracts_parameterized_procedure_name_for_create() {
-        let classified = classify_text_fallback(
-            "create procedure p_arg_route(p_mode uint64) begin if p_mode = 1 then select 1; end if; end;",
-        )
-        .expect("create procedure should classify");
-
-        assert_eq!(classified.1, SqlOperation::CreateStoredProcedure);
-        assert_eq!(classified.2.as_deref(), Some("p_arg_route"));
-    }
-
-    #[test]
-    fn fallback_extracts_parameterized_procedure_name_for_call() {
-        let classified = classify_text_fallback("call p_arg_route(1);")
-            .expect("call procedure should classify");
-
-        assert_eq!(classified.1, SqlOperation::CallStoredProcedure);
-        assert_eq!(classified.2.as_deref(), Some("p_arg_route"));
-    }
-    
-}
+#[path = "classify_test.rs"]
+mod tests;

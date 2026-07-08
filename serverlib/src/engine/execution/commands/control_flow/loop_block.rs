@@ -94,10 +94,15 @@ fn find_loop_start_label_and_index(lowered: &str) -> Option<(Option<String>, usi
 }
 
 fn loop_target_matches_label(target: Option<&str>, current_label: Option<&str>) -> bool {
+    
     match target {
+
         None => true,
+
         Some(target_label) => current_label
             .map(|label| label.eq_ignore_ascii_case(target_label))
             .unwrap_or(false),
+
     }
+    
 }

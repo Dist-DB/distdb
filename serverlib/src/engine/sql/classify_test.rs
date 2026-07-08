@@ -1,0 +1,21 @@
+use super::*;
+
+#[test]
+fn fallback_extracts_parameterized_procedure_name_for_create() {
+    let classified = classify_text_fallback(
+        "create procedure p_arg_route(p_mode uint64) begin if p_mode = 1 then select 1; end if; end;",
+    )
+    .expect("create procedure should classify");
+
+    assert_eq!(classified.1, SqlOperation::CreateStoredProcedure);
+    assert_eq!(classified.2.as_deref(), Some("p_arg_route"));
+}
+
+#[test]
+fn fallback_extracts_parameterized_procedure_name_for_call() {
+    let classified = classify_text_fallback("call p_arg_route(1);")
+        .expect("call procedure should classify");
+
+    assert_eq!(classified.1, SqlOperation::CallStoredProcedure);
+    assert_eq!(classified.2.as_deref(), Some("p_arg_route"));
+}

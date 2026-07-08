@@ -645,16 +645,5 @@ fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{is_inbuilt_function, registered_inbuilt_function_names};
-
-    #[test]
-    fn exposed_inbuilt_registry_contains_expected_entries() {
-        let names = registered_inbuilt_function_names();
-
-        for function_name in ["abs", "unix_timestamp", "concat_ws", "lookup"] {
-            assert!(names.contains(&function_name));
-            assert!(is_inbuilt_function(function_name));
-        }
-    }
-}
+#[path = "indexer_test.rs"]
+mod tests;

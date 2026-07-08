@@ -83,10 +83,12 @@ struct TableAccessorCacheSnapshot {
 }
 
 fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
+
     let raw = bincode::serialize(value)
         .map_err(|_| "snapshot serialization failed".to_string())?;
 
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+
     encoder
         .write_all(&raw)
         .map_err(|_| "snapshot compression failed".to_string())?;
@@ -94,9 +96,11 @@ fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, St
     encoder
         .finish()
         .map_err(|_| "snapshot compression finish failed".to_string())
+
 }
 
 fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<(T, bool)> {
+
     if let Ok(decoded) = bincode::deserialize::<T>(payload) {
         return Some((decoded, true));
     }
@@ -107,17 +111,21 @@ fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Op
     bincode::deserialize_from::<_, T>(&mut reader)
         .ok()
         .map(|decoded| (decoded, false))
+
 }
 
 fn runtime_index_parallel_build_max_workers() -> usize {
+
     std::env::var("DISTDB_RUNTIME_INDEX_BUILD_WORKERS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS)
+
 }
 
 fn runtime_index_migrate_legacy_snapshot_on_bootstrap() -> bool {
+
     std::env::var("DISTDB_RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP")
         .ok()
         .map(|value| {
@@ -127,9 +135,11 @@ fn runtime_index_migrate_legacy_snapshot_on_bootstrap() -> bool {
             )
         })
         .unwrap_or(false)
+
 }
 
 fn runtime_index_incremental_persistence_on_commit() -> bool {
+
     std::env::var("DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_ON_COMMIT")
         .ok()
         .map(|value| {
@@ -139,16 +149,20 @@ fn runtime_index_incremental_persistence_on_commit() -> bool {
             )
         })
         .unwrap_or(true)
+
 }
 
 fn runtime_index_incremental_persistence_min_interval_ms() -> u64 {
+
     std::env::var("DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_MIN_INTERVAL_MS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(1_000)
+
 }
 
 fn runtime_index_preload_accessors_on_bootstrap() -> bool {
+    
     std::env::var("DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP")
         .ok()
         .map(|value| {

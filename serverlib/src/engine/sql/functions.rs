@@ -23,6 +23,7 @@ pub fn evaluate_sql_function_with_lookup(
     function: &Function,
     lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
 ) -> Result<Option<Vec<u8>>, SqlParseError> {
+
     let mut context = inbuilt_sql_runtime_context();
     context.argument_bindings.clear();
 
@@ -48,6 +49,7 @@ pub fn evaluate_sql_function_with_lookup(
     evaluate_inbuilt_sql_function_with_context(function, &context).map_err(|err| {
         SqlParseError::UnsupportedStatement(format!("SQL function evaluation failed: {err}"))
     })
+
 }
 
 pub fn sql_function_references_column(function: &Function) -> bool {
@@ -55,6 +57,7 @@ pub fn sql_function_references_column(function: &Function) -> bool {
 }
 
 fn sql_function_column_references(function: &Function) -> HashSet<String> {
+
     let mut references = HashSet::new();
 
     let args = match &function.args {
@@ -68,12 +71,14 @@ fn sql_function_column_references(function: &Function) -> HashSet<String> {
     }
 
     references
+
 }
 
 fn collect_function_argument_references(
     argument: &FunctionArg,
     references: &mut HashSet<String>,
 ) {
+
     let expression = match argument {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => expression,
         FunctionArg::Named {
@@ -84,13 +89,16 @@ fn collect_function_argument_references(
     };
 
     collect_expression_references(expression, references);
+
 }
 
 fn collect_expression_references(expression: &Expr, references: &mut HashSet<String>) {
+
     match expression {
+
         Expr::Identifier(identifier) => {
             references.insert(common::normalize_identifier!(&identifier.value));
-        }
+        },
 
         Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
             references.insert(format!(
@@ -98,7 +106,7 @@ fn collect_expression_references(expression: &Expr, references: &mut HashSet<Str
                 common::normalize_identifier!(&parts[0].value),
                 common::normalize_identifier!(&parts[1].value)
             ));
-        }
+        },
 
         Expr::Nested(inner) => collect_expression_references(inner, references),
 
@@ -107,7 +115,7 @@ fn collect_expression_references(expression: &Expr, references: &mut HashSet<Str
         Expr::BinaryOp { left, right, .. } => {
             collect_expression_references(left, references);
             collect_expression_references(right, references);
-        }
+        },
 
         Expr::Function(function) => {
             for nested_ref in sql_function_column_references(function) {
@@ -116,5 +124,7 @@ fn collect_expression_references(expression: &Expr, references: &mut HashSet<Str
         }
 
         _ => {}
+
     }
+    
 }

@@ -37,6 +37,7 @@ pub fn parse_select_read_plan_from_statement(
 
     let trimmed = statement.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
+
     let (inner_statement, is_explain) = if lowered.starts_with("explain ") {
         (trimmed["explain".len()..].trim(), true)
     } else {
@@ -53,6 +54,7 @@ pub fn parse_select_read_plan_from_statement(
     };
 
     parse_select_read_plan_from_query(query, is_explain)
+
 }
 
 pub fn parse_create_view_dependencies_from_statement(
@@ -220,6 +222,7 @@ pub(super) fn parse_select_read_plan_from_query(
         Some(binding) => binding.table_id.clone(),
 
         None => {
+
             if projection_is_wildcard {
                 return Err(SqlParseError::MissingIdentifier {
                     keyword: "from",
@@ -238,6 +241,7 @@ pub(super) fn parse_select_read_plan_from_query(
                     statement: query_sql,
                 });
             }
+
         }
 
     };
@@ -357,6 +361,7 @@ fn parse_group_by_fields(
         )),
 
         GroupByExpr::Expressions(expressions, _) => {
+
             let mut fields = Vec::with_capacity(expressions.len());
 
             for expression in expressions {
@@ -370,6 +375,7 @@ fn parse_group_by_fields(
             }
 
             Ok(fields)
+
         },
 
     }
@@ -443,6 +449,7 @@ fn ensure_group_by_projection_is_supported(
                     .to_string(),
             ));
         }
+
     }
 
     Ok(())
@@ -487,6 +494,7 @@ fn parse_order_by_items(
     }
 
     if relation_bindings.is_empty() {
+
         let projection_outputs = projection_items
             .iter()
             .filter_map(|item| match item {
@@ -512,6 +520,7 @@ fn parse_order_by_items(
         let mut items = Vec::with_capacity(order_by.exprs.len());
 
         for expression in &order_by.exprs {
+
             if expression.nulls_first.is_some() || expression.with_fill.is_some() {
                 return Err(SqlParseError::UnsupportedStatement(
                     "ORDER BY NULLS FIRST/LAST or WITH FILL is not supported yet".to_string(),
@@ -519,7 +528,9 @@ fn parse_order_by_items(
             }
 
             let field_name = match &expression.expr {
+
                 Expr::Identifier(identifier) => {
+
                     let normalized = common::normalize_identifier!(&identifier.value);
 
                     let Some(resolved) = projection_outputs
@@ -539,9 +550,11 @@ fn parse_order_by_items(
                     };
 
                     resolved
-                }
+
+                },
 
                 Expr::Value(sqlparser::ast::Value::Number(position, _)) => {
+
                     let position = position.parse::<usize>().map_err(|_| {
                         SqlParseError::UnsupportedStatement(
                             "ORDER BY without FROM ordinal must be an unsigned numeric literal"
@@ -569,7 +582,8 @@ fn parse_order_by_items(
                             "ORDER BY without FROM could not resolve output field".to_string(),
                         )
                     })?
-                }
+                
+                },
 
                 _ => {
                     return Err(SqlParseError::UnsupportedStatement(
@@ -577,12 +591,14 @@ fn parse_order_by_items(
                             .to_string(),
                     ));
                 }
+
             };
 
             items.push(SelectOrderByItem {
                 field_name,
                 descending: expression.asc == Some(false),
             });
+
         }
 
         return Ok(items);
@@ -591,6 +607,7 @@ fn parse_order_by_items(
     let mut items = Vec::with_capacity(order_by.exprs.len());
     
     for expression in &order_by.exprs {
+
         if expression.nulls_first.is_some() || expression.with_fill.is_some() {
             return Err(SqlParseError::UnsupportedStatement(
                 "ORDER BY NULLS FIRST/LAST or WITH FILL is not supported yet".to_string(),
@@ -607,6 +624,7 @@ fn parse_order_by_items(
             field_name,
             descending: expression.asc == Some(false),
         });
+
     }
 
     Ok(items)
@@ -859,6 +877,7 @@ fn parse_union_order_by_items(
                 }
 
                 format!("{UNION_ORDER_BY_ORDINAL_PREFIX}{position}")
+
             },
 
             _ => {
@@ -910,15 +929,18 @@ fn parse_passthrough_derived_select_plan(
         .map(|alias| common::normalize_identifier!(&alias.name.value));
 
     let is_wildcard_passthrough = match select.projection.as_slice() {
+
         [SelectItem::Wildcard(_)] => true,
+        
         [SelectItem::QualifiedWildcard(prefix, _)] => {
             let Some(alias_name) = alias_name.as_ref() else {
                 return Ok(None);
             };
-
             common::normalize_identifier!(&prefix.to_string()) == *alias_name
-        }
+        },
+
         _ => false,
+
     };
 
     let mut inner_plan = parse_select_read_plan_from_query(subquery.as_ref(), false)?;
@@ -943,11 +965,14 @@ fn parse_passthrough_derived_select_plan(
             rewritten_projection_items
                 .iter()
                 .map(|item| match item {
+
                     SelectProjectionItem::Column { field_name, .. } => Ok(field_name.clone()),
+                    
                     _ => Err(SqlParseError::UnsupportedStatement(
                         "derived wrapper projection currently supports only direct outer column projections"
                             .to_string(),
                     )),
+
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
@@ -997,12 +1022,14 @@ fn parse_passthrough_derived_select_plan(
 
     let outer_limit = parse_query_limit(query.limit.as_ref())?;
     let outer_offset = parse_query_offset(query.offset.as_ref())?;
+    
     let (limit, offset) = compose_row_windows(
         inner_plan.limit,
         inner_plan.offset,
         outer_limit,
         outer_offset,
     );
+
     inner_plan.limit = limit;
     inner_plan.offset = offset;
 
@@ -1040,6 +1067,7 @@ fn rewrite_passthrough_outer_projection_items(
                     "derived wrapper projection currently supports only direct outer column projections"
                         .to_string(),
                 )),
+
             }
 
         })
@@ -1435,6 +1463,7 @@ fn parse_case_projection_item(
     }
 
     let parsed_operand = if let Some(operand) = operand {
+
         if !dialect_capabilities.supports_simple_case_expressions {
             return Err(SqlParseError::UnsupportedStatement(
                 "simple CASE projections are not supported for this SQL compatibility target"
@@ -1443,6 +1472,7 @@ fn parse_case_projection_item(
         }
 
         Some(parse_case_projection_value(operand, relation_bindings)?)
+
     } else {
         None
     };
@@ -1458,6 +1488,7 @@ fn parse_case_projection_item(
     for (condition_expr, result_expr) in conditions.iter().zip(results.iter()) {
 
         if parsed_operand.is_some() {
+            
             branches.push((
                 SelectCaseWhen::Equals(parse_case_projection_value(
                     condition_expr,
@@ -1465,7 +1496,9 @@ fn parse_case_projection_item(
                 )?),
                 parse_case_projection_value(result_expr, relation_bindings)?,
             ));
+
         } else {
+
             let condition = parse_select_condition_expression(condition_expr, relation_bindings)?;
             ensure_condition_has_no_subqueries(&condition, "CASE WHEN")?;
 
@@ -1473,6 +1506,7 @@ fn parse_case_projection_item(
                 SelectCaseWhen::Condition(condition),
                 parse_case_projection_value(result_expr, relation_bindings)?,
             ));
+
         }
 
     }
@@ -1508,7 +1542,7 @@ fn parse_case_projection_value(
             Ok(SelectExpression::Column {
                 field_name: common::normalize_identifier!(&ident.value),
             })
-        }
+        },
 
         Expr::CompoundIdentifier(parts) => Ok(SelectExpression::Column {
             field_name: parse_qualified_field_name(parts, relation_bindings, "CASE THEN/ELSE")?,
@@ -1527,7 +1561,7 @@ fn parse_case_projection_value(
             Ok(SelectExpression::InbuiltFunction {
                 function: function.clone(),
             })
-        }
+        },
 
         _ => Err(SqlParseError::UnsupportedStatement(
             "CASE expressions currently support only literals, direct columns, and inbuilt functions".to_string(),

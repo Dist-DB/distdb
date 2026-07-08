@@ -24,7 +24,9 @@ pub fn parse_sql_requests(
     let trimmed_sql = sql.trim().to_string();
 
     let statements = match parse_or_fallback(sql)? {
+
         ParsedOrFallback::Parsed(statements) => statements,
+
         ParsedOrFallback::Fallback {
             trimmed_sql,
             metadata: (directive, operation, object_name),
@@ -40,6 +42,7 @@ pub fn parse_sql_requests(
                 compatibility_target,
             }]);
         }
+
     };
 
     if statements.is_empty() {
@@ -82,6 +85,7 @@ pub fn parse_sql_requests(
             let statement_sql = statement.to_string();
             let (directive, operation, object_name) =
                 classify::classify_statement(&statement, &statement_sql)?;
+
             let parsed_insert_plan = if operation == SqlOperation::Insert {
                 parse_insert_rows_from_parsed_statement(&statement).ok()
             } else {
@@ -122,7 +126,9 @@ pub fn sql_statement_metadata(
     }
 
     let statement_sql = single.to_string();
+    
     classify::classify_statement(single, &statement_sql)
+
 }
 
 pub fn sql_directive_for_statement(statement: &str) -> Result<SqlDirective, SqlParseError> {

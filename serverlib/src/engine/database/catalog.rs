@@ -231,7 +231,8 @@ impl DatabaseCatalog {
                 
                 DatabaseObjectType::StoredProcedure => DatabaseError::StoredProcedureNotFound,
                 
-                DatabaseObjectType::Relationship | DatabaseObjectType::Index => {
+                DatabaseObjectType::Relationship | 
+                DatabaseObjectType::Index => {
                     DatabaseError::EntityNotFound
                 }
                 
@@ -399,17 +400,25 @@ impl DatabaseCatalog {
         let entity_key = self.resolve_entity_key(object_id);
 
         if let Some(entity) = entity_key.as_deref().and_then(|key| self.entities.get(key)) {
+
             return match entity {
+                
                 DatabaseEntity::Table(table) => Some(DatabaseObjectRef::Table(table)),
+                
                 DatabaseEntity::View(view) => Some(DatabaseObjectRef::View(view)),
+                
                 DatabaseEntity::Relationship(relationship) => {
                     Some(DatabaseObjectRef::Relationship(relationship))
                 }
+                
                 DatabaseEntity::Trigger(trigger) => Some(DatabaseObjectRef::Trigger(trigger)),
+                
                 DatabaseEntity::StoredProcedure(procedure) => {
                     Some(DatabaseObjectRef::StoredProcedure(procedure))
                 }
+
             };
+
         }
 
         self.entities.values().find_map(|entity| match entity {

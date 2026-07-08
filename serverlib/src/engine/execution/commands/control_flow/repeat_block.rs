@@ -105,10 +105,13 @@ fn parse_repeat_start(lowered: &str) -> Option<(Option<String>, usize)> {
 fn loop_target_matches_label(target: Option<&str>, current_label: Option<&str>) -> bool {
 
     match target {
+
         None => true,
+
         Some(target_label) => current_label
             .map(|label| label.eq_ignore_ascii_case(target_label))
             .unwrap_or(false),
+
     }
 
 }
@@ -119,6 +122,7 @@ fn find_keyword_boundary_index_in_text(haystack: &str, keyword: &str) -> Option<
     let mut from = 0usize;
 
     while let Some(found) = haystack[from..].find(keyword) {
+        
         let idx = from + found;
         let before_ok = idx == 0 || bytes[idx - 1].is_ascii_whitespace();
         let after_idx = idx + keyword.len();

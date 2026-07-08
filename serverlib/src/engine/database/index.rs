@@ -102,13 +102,15 @@ impl DatabaseIndex {
 	) -> Self {
 
 		let table_id = common::normalize_identifier!(table_id);
+		
 		let field_names = field_names
 			.into_iter()
 			.map(|field_name| common::normalize_identifier!(field_name))
 			.collect::<Vec<_>>();
+		
 		let field_name = field_names.first().cloned().unwrap_or_default();
-		let index_id =
-			Self::compose_index_id(&table_id, kind, origin, temp_id.as_deref(), &field_names);
+		
+		let index_id = Self::compose_index_id(&table_id, kind, origin, temp_id.as_deref(), &field_names);
 
 		Self {
 			index_id,

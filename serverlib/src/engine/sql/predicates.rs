@@ -83,21 +83,25 @@ fn compare_like_by_literal_segments(
     };
 
     for start in candidate_starts {
+
         let mut cursor = start + first_segment.len();
         let mut matched = true;
 
         for segment in &segments[1..] {
+
             let Some(next_start) = find_segment_from(actual, segment, cursor, case_insensitive) else {
                 matched = false;
                 break;
             };
 
             cursor = next_start + segment.len();
+            
         }
 
         if matched && (trailing_wildcard || cursor == actual.len()) {
             return Some(true);
         }
+
     }
 
     Some(false)
@@ -151,6 +155,7 @@ fn parse_like_literal_segments(
         }
 
         match current {
+
             b'_' => return None,
 
             b'%' => {
@@ -163,12 +168,13 @@ fn parse_like_literal_segments(
                 }
 
                 trailing_wildcard = true;
-            }
+            },
 
             literal => {
                 current_segment.push(literal);
                 trailing_wildcard = false;
             }
+
         }
 
         index += 1;
@@ -272,6 +278,7 @@ fn classify_like_ascii_fast_path(
 
         if let Some(escape) = escape_byte
             && current == escape {
+
                 if index + 1 < pattern.len() {
                     let escaped = pattern[index + 1];
                     if !escaped.is_ascii() {
@@ -285,6 +292,7 @@ fn classify_like_ascii_fast_path(
                 literal.push(current);
                 index += 1;
                 continue;
+
             }
 
         if !current.is_ascii() {
@@ -300,7 +308,7 @@ fn classify_like_ascii_fast_path(
                     return None;
                 }
                 has_trailing_many = true;
-            }
+            },
 
             _ => {
                 if has_trailing_many {
@@ -445,6 +453,7 @@ fn compile_like_tokens(pattern: &[char], escape_char: Option<char>) -> Vec<LikeT
         let current = pattern[index];
 
         if escape_char.is_some_and(|escape| current == escape) {
+
             if index + 1 < pattern.len() {
                 tokens.push(LikeToken::Literal(pattern[index + 1]));
                 index += 2;
@@ -454,12 +463,17 @@ fn compile_like_tokens(pattern: &[char], escape_char: Option<char>) -> Vec<LikeT
             tokens.push(LikeToken::Literal(current));
             index += 1;
             continue;
+
         }
 
         match current {
+
             '_' => tokens.push(LikeToken::AnySingle),
+
             '%' => tokens.push(LikeToken::AnyMany),
+
             literal => tokens.push(LikeToken::Literal(literal)),
+
         }
 
         index += 1;
@@ -477,13 +491,16 @@ fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) 
     let mut retry_index = 0usize;
 
     while actual_index < actual.len() {
+
         if pattern_index < pattern.len() {
+
             match pattern[pattern_index] {
+
                 LikeToken::AnySingle => {
                     actual_index += 1;
                     pattern_index += 1;
                     continue;
-                }
+                },
 
                 LikeToken::Literal(expected) => {
                     if like_char_eq(actual[actual_index], expected, case_insensitive) {
@@ -491,7 +508,7 @@ fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) 
                         pattern_index += 1;
                         continue;
                     }
-                }
+                },
 
                 LikeToken::AnyMany => {
                     last_percent_index = Some(pattern_index);
@@ -499,7 +516,9 @@ fn like_matches(actual: &[char], pattern: &[LikeToken], case_insensitive: bool) 
                     retry_index = actual_index;
                     continue;
                 }
+
             }
+
         }
 
         if let Some(percent_index) = last_percent_index {
@@ -567,97 +586,16 @@ pub fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp
     let ordering = compare_stored_field_values(actual, expected);
 
     match op {
-        SelectComparisonOp::Eq => ordering == std::cmp::Ordering::Equal,
-        SelectComparisonOp::NotEq => ordering != std::cmp::Ordering::Equal,
-        SelectComparisonOp::Gt => ordering == std::cmp::Ordering::Greater,
-        SelectComparisonOp::Gte => ordering != std::cmp::Ordering::Less,
-        SelectComparisonOp::Lt => ordering == std::cmp::Ordering::Less,
-        SelectComparisonOp::Lte => ordering != std::cmp::Ordering::Greater,
+        SelectComparisonOp::Eq      => ordering == std::cmp::Ordering::Equal,
+        SelectComparisonOp::NotEq   => ordering != std::cmp::Ordering::Equal,
+        SelectComparisonOp::Gt      => ordering == std::cmp::Ordering::Greater,
+        SelectComparisonOp::Gte     => ordering != std::cmp::Ordering::Less,
+        SelectComparisonOp::Lt      => ordering == std::cmp::Ordering::Less,
+        SelectComparisonOp::Lte     => ordering != std::cmp::Ordering::Greater,
     }
 
 }
 
 #[cfg(test)]
-mod tests {
-    
-    use super::{compare_like_value, compare_row_value};
-    use crate::{FieldType, TypeConversionPolicy};
-    use crate::engine::database::schema::migration::convert_value_to_field_type;
-    use crate::SelectComparisonOp;
-
-    #[test]
-    fn compare_like_value_supports_escape_character() {
-        assert!(compare_like_value(
-            b"foo_1",
-            b"foo\\_1",
-            false,
-            Some('\\'),
-        ));
-    }
-
-    #[test]
-    fn compare_like_value_escape_can_be_custom_character() {
-        assert!(compare_like_value(
-            b"100%",
-            b"100!%",
-            false,
-            Some('!'),
-        ));
-    }
-
-    #[test]
-    fn compare_like_value_supports_simple_prefix_pattern() {
-        assert!(compare_like_value(
-            b"Amsterdam",
-            b"Ams%",
-            false,
-            None,
-        ));
-        assert!(!compare_like_value(
-            b"Oslo",
-            b"Ams%",
-            false,
-            None,
-        ));
-    }
-
-    #[test]
-    fn compare_like_value_supports_case_insensitive_simple_prefix() {
-        assert!(compare_like_value(
-            b"amsterdam",
-            b"Ams%",
-            true,
-            None,
-        ));
-    }
-
-    #[test]
-    fn compare_like_value_supports_ordered_multi_segment_patterns() {
-        assert!(compare_like_value(
-            b"amsterdam",
-            b"%ter%am",
-            false,
-            None,
-        ));
-        assert!(!compare_like_value(
-            b"amsterdam",
-            b"%am%ter",
-            false,
-            None,
-        ));
-    }
-
-    #[test]
-    fn compare_row_value_supports_native_numeric_storage() {
-        let actual = convert_value_to_field_type(
-            b"42",
-            &FieldType::UInt(64),
-            TypeConversionPolicy::Safe,
-        )
-        .expect("numeric field should encode");
-
-        assert!(compare_row_value(&actual, b"42", &SelectComparisonOp::Eq));
-        assert!(compare_row_value(&actual, b"7", &SelectComparisonOp::Gt));
-    }
-
-}
+#[path = "predicates_test.rs"]
+mod tests;

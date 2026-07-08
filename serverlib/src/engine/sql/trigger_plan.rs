@@ -5,6 +5,7 @@ use super::{
 pub fn parse_trigger_invocation_binding_from_create_trigger_statement(
     statement: &str,
 ) -> Result<Option<TriggerInvocationBinding>, SqlParseError> {
+
     let trimmed = statement.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
 
@@ -78,6 +79,7 @@ pub fn parse_trigger_invocation_binding_from_create_trigger_statement(
         timing,
         event,
     }))
+    
 }
 
 #[cfg(test)]

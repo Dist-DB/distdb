@@ -130,22 +130,22 @@ fn parse_update_value(value: &Value) -> Result<Option<Vec<u8>>, SqlParseError> {
         
         Value::Number(v, _) => Ok(Some(v.to_string().into_bytes())),
         
-        Value::SingleQuotedString(v)
-        | Value::DoubleQuotedString(v)
-        | Value::TripleSingleQuotedString(v)
-        | Value::TripleDoubleQuotedString(v)
-        | Value::EscapedStringLiteral(v)
-        | Value::UnicodeStringLiteral(v)
-        | Value::SingleQuotedByteStringLiteral(v)
-        | Value::DoubleQuotedByteStringLiteral(v)
-        | Value::TripleSingleQuotedByteStringLiteral(v)
-        | Value::TripleDoubleQuotedByteStringLiteral(v)
-        | Value::SingleQuotedRawStringLiteral(v)
-        | Value::DoubleQuotedRawStringLiteral(v)
-        | Value::TripleSingleQuotedRawStringLiteral(v)
-        | Value::TripleDoubleQuotedRawStringLiteral(v)
-        | Value::NationalStringLiteral(v)
-        | Value::HexStringLiteral(v) => Ok(Some(v.as_bytes().to_vec())),
+        Value::SingleQuotedString(v) |
+        Value::DoubleQuotedString(v) |
+        Value::TripleSingleQuotedString(v) |
+        Value::TripleDoubleQuotedString(v) |
+        Value::EscapedStringLiteral(v) |
+        Value::UnicodeStringLiteral(v) |
+        Value::SingleQuotedByteStringLiteral(v) |
+        Value::DoubleQuotedByteStringLiteral(v) |
+        Value::TripleSingleQuotedByteStringLiteral(v) |
+        Value::TripleDoubleQuotedByteStringLiteral(v) |
+        Value::SingleQuotedRawStringLiteral(v) |
+        Value::DoubleQuotedRawStringLiteral(v) |
+        Value::TripleSingleQuotedRawStringLiteral(v) |
+        Value::TripleDoubleQuotedRawStringLiteral(v) |
+        Value::NationalStringLiteral(v) |
+        Value::HexStringLiteral(v) => Ok(Some(v.as_bytes().to_vec())),
         
         Value::DollarQuotedString(v) => Ok(Some(v.value.as_bytes().to_vec())),
         

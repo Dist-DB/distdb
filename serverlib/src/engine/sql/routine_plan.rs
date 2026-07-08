@@ -294,15 +294,19 @@ fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError>
     let lowered = trimmed.to_ascii_lowercase();
 
     if !lowered.starts_with("create procedure") {
+        
         return Err(SqlParseError::UnsupportedStatement(
             "statement is not CREATE PROCEDURE".to_string(),
         ));
+
     }
 
     let begin_index = find_keyword_boundary_index(&lowered, "begin").ok_or_else(|| {
+
         SqlParseError::UnsupportedStatement(
             "CREATE PROCEDURE block is missing BEGIN".to_string(),
         )
+
     })?;
 
     let after_begin = begin_index + "begin".len();
@@ -416,13 +420,17 @@ fn expression_to_bytes(expression: &Expr) -> Result<Vec<u8>, String> {
         Expr::Value(value) => value_to_bytes(value),
 
         Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
+
             (sqlparser::ast::UnaryOperator::Plus, Expr::Value(Value::Number(value, _))) => {
                 Ok(value.clone().into_bytes())
-            }
+            },
+
             (sqlparser::ast::UnaryOperator::Minus, Expr::Value(Value::Number(value, _))) => {
                 Ok(format!("-{value}").into_bytes())
-            }
+            },
+
             _ => Err("unsupported CALL unary argument".to_string()),
+
         },
 
         Expr::Identifier(ident) => Ok(common::normalize_identifier!(&ident.value).into_bytes()),
@@ -491,11 +499,13 @@ fn parse_procedure_parameter_name(parameter: &str) -> Result<String, SqlParseErr
         || first.eq_ignore_ascii_case("out")
         || first.eq_ignore_ascii_case("inout")
     {
+        
         tokens.next().ok_or_else(|| {
             SqlParseError::UnsupportedStatement(
                 "CREATE PROCEDURE parameter name is missing".to_string(),
             )
         })?
+
     } else {
         first
     };
@@ -601,12 +611,10 @@ fn split_action_and_next_clause(branch_tail: &str) -> Result<ClauseSplit, SqlPar
 
     for (marker, clause, clause_len) in candidates {
         if let Some(index) = lowered.find(marker) {
-            
             match earliest {
                 Some((current, _, _)) if current <= index => {},
                 _ => earliest = Some((index, clause, clause_len)),
             }
-
         }
     }
 
@@ -681,7 +689,7 @@ fn parse_case_plan_from_statement(statement: &str) -> Result<IfElseEndPlan, SqlP
         return Err(SqlParseError::UnsupportedStatement(
             "CASE routine block must continue with WHEN, ELSE, or END CASE".to_string(),
         ));
-        
+
     }
 
     if branches.is_empty() {
@@ -796,6 +804,7 @@ fn parse_case_else_clause(remaining: &str) -> Result<String, SqlParseError> {
 }
 
 fn ensure_case_end_clause(fragment: &str) -> Result<(), SqlParseError> {
+
     let lowered = fragment.trim().trim_end_matches(';').trim().to_ascii_lowercase();
     if lowered.starts_with("end case") {
         Ok(())
@@ -804,6 +813,7 @@ fn ensure_case_end_clause(fragment: &str) -> Result<(), SqlParseError> {
             "CASE routine block must terminate with END CASE".to_string(),
         ))
     }
+    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

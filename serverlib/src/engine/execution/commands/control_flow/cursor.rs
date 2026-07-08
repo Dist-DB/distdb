@@ -310,6 +310,7 @@ impl SqlCursorSource for SelectReadPlanCursorSource {
     }
 
     fn fetch_next(&mut self) -> Result<Option<HashMap<String, Vec<u8>>>, String> {
+
         if self.index >= self.rows.len() {
             return Ok(None);
         }
@@ -323,6 +324,7 @@ impl SqlCursorSource for SelectReadPlanCursorSource {
         self.index += 1;
 
         Ok(Some(row))
+
     }
 
     fn close(&mut self) -> Result<(), String> {
@@ -350,6 +352,7 @@ where
     frame.diagnostics.fetched_rows = 0;
 
     loop {
+        
         let next_row = match source.fetch_next() {
             
             Ok(row) => row,
