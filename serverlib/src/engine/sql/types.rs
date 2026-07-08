@@ -1,4 +1,4 @@
-use sqlparser::ast::{Function, Statement};
+use sqlparser::ast::{Function, NamedWindowDefinition, Statement};
 
 use crate::{FieldDef, FieldType};
 use super::SelectExpression;
@@ -283,6 +283,10 @@ pub enum SelectProjectionItem {
         output_name: String,
         function: Function,
     },
+    WindowFunction {
+        output_name: String,
+        function: Function,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +297,7 @@ pub struct SelectReadPlan {
     pub relations: Vec<SelectRelation>,
     pub joins: Vec<SelectJoin>,
     pub pushdown_conditions: Vec<Option<SelectCondition>>,
+    pub named_windows: Vec<NamedWindowDefinition>,
     pub projection: Option<Vec<String>>,
     pub projection_items: Vec<SelectProjectionItem>,
     pub projection_is_wildcard: bool,

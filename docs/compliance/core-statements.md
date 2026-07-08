@@ -4,7 +4,7 @@
 
 | Statement | Status | Coverage | Key Limits |
 | --- | --- | --- | --- |
-| `SELECT` | Partial | Projection-only and relation-backed reads, joins, set queries (`UNION`/`UNION ALL`/`EXCEPT`/`INTERSECT`), `WITH`/CTE materialization, first-pass `DISTINCT`/`GROUP BY`/`HAVING`, `ORDER BY`/`LIMIT`/`OFFSET`, predicate families including `LIKE`/`REGEXP`/subquery variants, `CASE`, and `EXPLAIN` | Window-function semantics, advanced set-query branches/modifiers, full MySQL clause parity, and full optimizer behavior are not implemented |
+| `SELECT` | Partial | Projection-only and relation-backed reads, joins, set queries (`UNION`/`UNION ALL`/`EXCEPT`/`INTERSECT`), `WITH`/CTE materialization, first-pass `DISTINCT`/`GROUP BY`/`HAVING`, `ORDER BY`/`LIMIT`/`OFFSET`, predicate families including `LIKE`/`REGEXP`/subquery variants, `CASE`, `QUALIFY`, `FOR UPDATE`/`FOR SHARE` parse acceptance, first window-function execution slices (`ROW_NUMBER`, `SUM`), and `EXPLAIN` | Window-function coverage is still partial (limited function set and frame units), locking semantics are still no-op, advanced set-query branches/modifiers, full MySQL clause parity, and full optimizer behavior are not implemented |
 | `INSERT` | Partial | `INSERT ... VALUES` and `INSERT ... SELECT` are implemented and wired through parser + execution | Advanced MySQL modifiers and full expression/edge-case parity are not complete |
 | `UPDATE` | Partial | Single-table and join-driven target selection, assignment expressions with inbuilt functions, PK duplicate protection in update path | Full MySQL modifier/hint surface and advanced optimizer semantics are not complete |
 | `DELETE` | Partial | Single-table and join-driven target selection are implemented | Full MySQL modifier/hint surface and advanced optimizer semantics are not complete |
@@ -18,10 +18,16 @@
   - first-pass `DISTINCT`, `GROUP BY`, `HAVING`, and output ordering (including hidden sort-key projections)
   - predicate coverage including comparison, `LIKE`, `REGEXP`, `IN`, `IS NULL`, scalar/`IN`/`EXISTS`/`ANY`/`ALL` subquery variants
   - searched/simple `CASE` projection paths
+  - first window-function execution slices:
+    - `ROW_NUMBER() OVER (...)` with direct `PARTITION BY`/`ORDER BY`, named-window reuse, and named-window chaining
+    - `SUM(<column>) OVER (...)` with a direct single-column argument, including named-window reuse
+    - `ROWS` frame evaluation for supported window-function paths (including explicit bounds)
 - Not complete:
-  - full SQL window-function execution semantics (`WINDOW` currently tracked as metadata)
-  - `QUALIFY`
-  - `FOR UPDATE`/`FOR SHARE`
+  - full SQL window-function execution semantics (implemented set is currently `ROW_NUMBER` and `SUM`)
+  - non-`ROWS` frame units (`RANGE`, `GROUPS`) are not implemented in the current window executor
+  - broader window aggregate/function parity (e.g., `RANK`, `DENSE_RANK`, `AVG`, `MIN`, `MAX`, `LAG`, `LEAD`) is not implemented
+  - `QUALIFY` semantics remain limited to the current row-filter model and do not yet have window-aware evaluation
+  - `FOR UPDATE`/`FOR SHARE` are currently accepted by the parser but remain execution no-ops
   - dialect-specific clause families not in the current model (`TOP`, `PREWHERE`, `LIMIT BY`, `FETCH`, `CLUSTER/DISTRIBUTE/SORT BY`)
 
 ## INSERT/UPDATE/DELETE Details

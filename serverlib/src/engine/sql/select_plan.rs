@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, GroupByExpr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr,
-    SetOperator, SetQuantifier, Statement, TableFactor, With,
+    BinaryOperator, Expr, FunctionArguments, GroupByExpr, JoinConstraint, JoinOperator, Query,
+    NamedWindowDefinition, NamedWindowExpr, SelectItem, SetExpr, SetOperator, SetQuantifier,
+    Statement, TableFactor, WindowSpec, WindowType, With,
 };
 
 use super::literals::parse_default_value;
@@ -111,12 +112,6 @@ pub(super) fn parse_select_read_plan_from_query(
         ));
     }
 
-    if !query.locks.is_empty() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "SELECT FOR UPDATE/SHARE is not supported yet".to_string(),
-        ));
-    }
-
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Err(SqlParseError::UnsupportedStatement(
             "only simple SELECT queries are currently supported for projection parsing".to_string(),
@@ -143,17 +138,13 @@ pub(super) fn parse_select_read_plan_from_query(
         ));
     }
 
-    let has_window_clause = !select.named_window.is_empty();
+    let named_windows = select.named_window.clone();
+
+    let has_window_clause = !named_windows.is_empty();
 
     if !select.cluster_by.is_empty() || !select.distribute_by.is_empty() || !select.sort_by.is_empty() {
         return Err(SqlParseError::UnsupportedStatement(
             "SELECT CLUSTER/DISTRIBUTE/SORT BY is not supported yet".to_string(),
-        ));
-    }
-
-    if select.qualify.is_some() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "SELECT QUALIFY is not supported yet".to_string(),
         ));
     }
 
@@ -251,6 +242,11 @@ pub(super) fn parse_select_read_plan_from_query(
         &relation_bindings,
     )?;
 
+    let qualify_condition = parse_select_condition_from_expr(
+        select.qualify.as_ref(),
+        &relation_bindings,
+    )?;
+
     let group_by = parse_group_by_fields(&select.group_by, &relation_bindings)?;
     let having_condition = parse_select_condition_from_expr(select.having.as_ref(), &relation_bindings)?;
 
@@ -266,6 +262,7 @@ pub(super) fn parse_select_read_plan_from_query(
     }
 
     let where_condition = combine_where_having_conditions(where_condition, having_condition.clone());
+    let where_condition = combine_where_having_conditions(where_condition, qualify_condition);
 
     let order_by = parse_order_by_items(
         query.order_by.as_ref(),
@@ -288,6 +285,7 @@ pub(super) fn parse_select_read_plan_from_query(
         relations: relation_bindings,
         joins,
         pushdown_conditions,
+        named_windows,
         projection,
         projection_items,
         projection_is_wildcard,
@@ -498,6 +496,7 @@ fn parse_order_by_items(
         let projection_outputs = projection_items
             .iter()
             .filter_map(|item| match item {
+                
                 SelectProjectionItem::Column {
                     field_name,
                     output_name,
@@ -508,12 +507,16 @@ fn parse_order_by_items(
                     }
 
                     Some(names)
-                }
+                },
+
                 SelectProjectionItem::Case { output_name, .. }
-                | SelectProjectionItem::InbuiltFunction { output_name, .. } => {
+                | SelectProjectionItem::InbuiltFunction { output_name, .. }
+                | SelectProjectionItem::WindowFunction { output_name, .. } => {
                     Some(vec![output_name.clone()])
-                }
+                },
+
                 SelectProjectionItem::Wildcard { .. } => None,
+
             })
             .collect::<Vec<_>>();
 
@@ -657,12 +660,6 @@ pub fn parse_union_select_read_plans_from_statement(
         ));
     }
 
-    if !query.locks.is_empty() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "set query FOR UPDATE/SHARE is not supported yet".to_string(),
-        ));
-    }
-
     let mut steps = Vec::new();
     collect_set_query_steps(&query.body, query.with.as_ref(), &mut steps)?;
 
@@ -699,6 +696,7 @@ fn collect_set_query_steps(
             left,
             right,
         } => {
+            
             collect_set_query_steps(left, inherited_with, steps)?;
             collect_set_query_steps(right, inherited_with, steps)?;
 
@@ -755,10 +753,9 @@ fn collect_set_query_steps(
                     || !query.limit_by.is_empty()
                     || query.offset.is_some()
                     || query.fetch.is_some()
-                    || !query.locks.is_empty()
                 {
                     return Err(SqlParseError::UnsupportedStatement(
-                        "set-query branch-level ORDER BY/LIMIT/OFFSET/FETCH/LOCK clauses are not supported yet"
+                        "set-query branch-level ORDER BY/LIMIT/OFFSET/FETCH clauses are not supported yet"
                             .to_string(),
                     ));
                 }
@@ -1340,6 +1337,10 @@ fn parse_select_projection_item(
         SelectItem::UnnamedExpr(Expr::Function(function)) => {
             let function_name = function.name.to_string();
 
+            if function.over.is_some() {
+                return parse_window_projection_item(function, common::normalize_identifier!(&function_name));
+            }
+
             if !is_supported_sql_function(&function_name) {
                 return Err(SqlParseError::UnsupportedStatement(format!(
                     "SELECT projection function '{}' is not supported",
@@ -1401,6 +1402,10 @@ fn parse_select_projection_item(
 
             Expr::Function(function) => {
                 let function_name = function.name.to_string();
+
+                if function.over.is_some() {
+                    return parse_window_projection_item(function, common::normalize_identifier!(&alias.value));
+                }
 
                 if !is_supported_sql_function(&function_name) {
                     return Err(SqlParseError::UnsupportedStatement(format!(
@@ -1524,6 +1529,58 @@ fn parse_case_projection_item(
 
 }
 
+fn parse_window_projection_item(
+    function: &sqlparser::ast::Function,
+    output_name: String,
+) -> Result<SelectProjectionItem, SqlParseError> {
+
+    let function_name = function.name.to_string();
+    if !function_name.eq_ignore_ascii_case("row_number") && !function_name.eq_ignore_ascii_case("sum") {
+        return Err(SqlParseError::UnsupportedStatement(format!(
+            "SELECT window function '{}' is not supported yet",
+            function.name
+        )));
+    }
+
+    let has_arguments = match &function.args {
+        FunctionArguments::None => false,
+        FunctionArguments::List(list) => !list.args.is_empty(),
+        FunctionArguments::Subquery(_) => true,
+    };
+
+    if function_name.eq_ignore_ascii_case("row_number") && has_arguments {
+        return Err(SqlParseError::UnsupportedStatement(
+            "ROW_NUMBER window function does not accept arguments in the current execution model"
+                .to_string(),
+        ));
+    }
+
+    if function_name.eq_ignore_ascii_case("sum") {
+        match &function.args {
+            FunctionArguments::List(list) if list.args.len() == 1 => {}
+            _ => {
+                return Err(SqlParseError::UnsupportedStatement(
+                    "SUM window function currently requires exactly one argument".to_string(),
+                ));
+            }
+        }
+    }
+
+    match function.over.as_ref() {
+        Some(WindowType::NamedWindow(_)) | Some(WindowType::WindowSpec(_)) => {
+            Ok(SelectProjectionItem::WindowFunction {
+                output_name,
+                function: function.clone(),
+            })
+        }
+
+        None => Err(SqlParseError::UnsupportedStatement(
+            "window projection requires an OVER clause".to_string(),
+        )),
+    }
+
+}
+
 fn parse_case_projection_value(
     expression: &Expr,
     relation_bindings: &[SelectRelationBinding],
@@ -1604,13 +1661,15 @@ fn ensure_condition_has_no_subqueries(
 }
 
 fn is_inbuilt_projection_item(item: &SelectProjectionItem) -> bool {
-    matches!(item, SelectProjectionItem::InbuiltFunction { .. })
+    matches!(item, SelectProjectionItem::InbuiltFunction { .. } | SelectProjectionItem::WindowFunction { .. })
 }
 
 fn is_projection_only_without_from_item(item: &SelectProjectionItem) -> bool {
     matches!(
         item,
-        SelectProjectionItem::InbuiltFunction { .. } | SelectProjectionItem::Case { .. }
+        SelectProjectionItem::InbuiltFunction { .. }
+            | SelectProjectionItem::Case { .. }
+            | SelectProjectionItem::WindowFunction { .. }
     )
 }
 

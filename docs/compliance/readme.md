@@ -26,7 +26,7 @@ Within each page:
 
 ## Coverage Pages
 
-- [core-statements.md](core-statements.md): `SELECT`, `INSERT`, `UPDATE`, `DELETE`
+- [core-statements.md](core-statements.md): `SELECT`, `INSERT`, `UPDATE`, `DELETE`, including current `QUALIFY` and locking-clause parser acceptance plus partial window-function execution slices
 - [stored-procedures.md](stored-procedures.md): procedure lifecycle, routine execution, and control-flow support
 - [functions.md](functions.md): built-in function support and current user-defined function support/limits
 - [triggers.md](triggers.md): trigger lifecycle and execution behavior

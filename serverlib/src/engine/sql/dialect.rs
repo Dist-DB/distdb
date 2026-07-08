@@ -21,8 +21,8 @@ pub fn dialect_capabilities_for_target(
             supports_simple_case_expressions: true,
             supports_if_expression_function: true,
             supports_if_else_end_statements: true,
-            supports_stored_procedures: false,
-            supports_user_defined_functions: false,
+            supports_stored_procedures: true,
+            supports_user_defined_functions: true,
         },
     
     }

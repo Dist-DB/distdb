@@ -262,6 +262,132 @@ fn select_with_window_clause_sets_window_flag() {
     .expect("window clause should parse");
 
     assert!(plan.has_window_clause);
+    assert_eq!(plan.named_windows.len(), 1);
+    assert_eq!(plan.named_windows[0].0.value, "w");
+    assert!(matches!(
+        plan.named_windows[0].1,
+        sqlparser::ast::NamedWindowExpr::WindowSpec(_)
+    ));
+}
+
+#[test]
+fn select_row_number_over_empty_window_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select row_number() over () as rn from users",
+    )
+    .expect("row_number window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, .. }]
+            if output_name == "rn"
+    ));
+}
+
+#[test]
+fn select_row_number_over_order_by_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select row_number() over (order by email desc) as rn from users",
+    )
+    .expect("row_number window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, function }]
+            if output_name == "rn"
+                && function
+                    .over
+                    .as_ref()
+                    .and_then(|window| match window {
+                        sqlparser::ast::WindowType::WindowSpec(spec) => Some(spec.order_by.len()),
+                        _ => None,
+                    })
+                    == Some(1)
+    ));
+}
+
+#[test]
+fn select_row_number_over_named_window_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select row_number() over w as rn from users window w as (partition by id order by email desc)",
+    )
+    .expect("row_number window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, function }]
+            if output_name == "rn"
+                && matches!(function.over.as_ref(), Some(sqlparser::ast::WindowType::NamedWindow(_)))
+    ));
+}
+
+#[test]
+fn select_row_number_over_partition_by_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select row_number() over (partition by user_id order by id desc) as rn from profiles",
+    )
+    .expect("row_number window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, function }]
+            if output_name == "rn"
+                && function
+                    .over
+                    .as_ref()
+                    .and_then(|window| match window {
+                        sqlparser::ast::WindowType::WindowSpec(spec) => {
+                            Some((spec.partition_by.len(), spec.order_by.len()))
+                        }
+                        _ => None,
+                    })
+                    == Some((1, 1))
+    ));
+}
+
+#[test]
+fn select_sum_over_named_window_with_frame_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select sum(id) over (w rows between unbounded preceding and current row) as running_sum from profiles window w as (partition by user_id order by id)",
+    )
+    .expect("sum window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, function }]
+            if output_name == "running_sum"
+                && function.name.to_string().eq_ignore_ascii_case("sum")
+                && function
+                    .over
+                    .as_ref()
+                    .and_then(|window| match window {
+                        sqlparser::ast::WindowType::WindowSpec(spec) => {
+                            Some((spec.window_name.is_some(), spec.window_frame.is_some()))
+                        }
+                        _ => None,
+                    })
+                    == Some((true, true))
+    ));
+}
+
+#[test]
+fn select_qualify_reuses_filter_pipeline() {
+    let plan = parse_select_read_plan_from_statement(
+        "select id from users qualify id = 1",
+    )
+    .expect("qualify select should parse");
+
+    assert!(plan.where_condition.is_some());
+}
+
+#[test]
+fn select_for_update_is_accepted_as_parse_only_syntax() {
+    let plan = parse_select_read_plan_from_statement(
+        "select id from users for update",
+    )
+    .expect("for update select should parse");
+
+    assert_eq!(plan.table_id, "users");
 }
 
 #[test]

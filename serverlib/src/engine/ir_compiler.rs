@@ -969,7 +969,8 @@ fn collect_result_set_shape(plan: &SelectReadPlan) -> Vec<StoredProcedureResourc
             
             SelectProjectionItem::Column { output_name, .. } |
             SelectProjectionItem::InbuiltFunction { output_name, .. } |
-            SelectProjectionItem::Case { output_name, .. } => {
+            SelectProjectionItem::Case { output_name, .. } |
+            SelectProjectionItem::WindowFunction { output_name, .. } => {
                 resources.push(StoredProcedureResourceEntry {
                     name: output_name.clone(),
                     kind: StoredProcedureResourceKind::ResultSet,
@@ -1141,7 +1142,8 @@ where
 
                     SelectProjectionItem::Column { output_name, .. } |
                     SelectProjectionItem::InbuiltFunction { output_name, .. } |
-                    SelectProjectionItem::Case { output_name, .. } => output_name.clone(),
+                    SelectProjectionItem::Case { output_name, .. } |
+                    SelectProjectionItem::WindowFunction { output_name, .. } => output_name.clone(),
 
                     SelectProjectionItem::Wildcard { relation } => {
                         relation.clone().unwrap_or_else(|| "*".to_string())

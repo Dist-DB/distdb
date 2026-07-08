@@ -19,6 +19,14 @@ That does not mean full MySQL conformance. It means:
 - unsupported syntax should fail explicitly,
 - partial areas should be documented rather than implied.
 
+Current parser and runtime alignment includes support for stored procedures and user-defined
+functions in the MySQL80 compatibility target, along with accepted SELECT qualifier syntax such
+as `QUALIFY` and `FOR UPDATE`/`FOR SHARE` where documented below.
+
+Current SELECT window-function coverage is partial: the runtime includes first execution slices
+for `ROW_NUMBER` and `SUM` with named-window reuse, while broader window function parity and
+non-`ROWS` frame units are still pending.
+
 ## Why The Coverage Is Split By Area
 
 SQL support in DistDB is not one feature. It spans parser acceptance, planner behavior, execution wiring, and runtime limits. Breaking coverage into focused pages makes it easier to answer practical questions such as:

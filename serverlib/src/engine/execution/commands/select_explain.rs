@@ -143,10 +143,10 @@ pub fn explain_select_plan_result(
         } else {
 
             let path = match access_plan.map(|plan| &plan.strategy) {
-                Some(RelationAccessStrategy::FullScan) => "full_scan",
-                Some(RelationAccessStrategy::EqualityProbe { .. }) => "equality_probe",
-                Some(RelationAccessStrategy::PrefixLikeProbe { .. }) => "prefix_like_probe",
-                Some(RelationAccessStrategy::StringLikeProbe { .. }) => "string_like_probe",
+                Some(RelationAccessStrategy::FullScan)                  => "full_scan",
+                Some(RelationAccessStrategy::EqualityProbe { .. })      => "equality_probe",
+                Some(RelationAccessStrategy::PrefixLikeProbe { .. })    => "prefix_like_probe",
+                Some(RelationAccessStrategy::StringLikeProbe { .. })    => "string_like_probe",
                 Some(RelationAccessStrategy::RuntimeIndexLookup { .. }) => "index_lookup_then_scan",
                 None => "full_scan",
             };
@@ -372,6 +372,7 @@ pub fn advise_select_execution(read_plan: &SelectReadPlan) -> SelectExecutionAdv
         .iter()
         .filter(|join| !matches!(join.kind, SelectJoinKind::Inner))
         .count();
+    
     if non_inner_joins > 0 {
         score += non_inner_joins * 2;
         reasons.push("outer_or_cross_join");
@@ -382,6 +383,7 @@ pub fn advise_select_execution(read_plan: &SelectReadPlan) -> SelectExecutionAdv
         .iter()
         .filter(|item| matches!(item, SelectProjectionItem::InbuiltFunction { .. }))
         .count();
+    
     if projection_function_count > 0 {
         score += projection_function_count;
         reasons.push("projection_functions");
@@ -392,6 +394,7 @@ pub fn advise_select_execution(read_plan: &SelectReadPlan) -> SelectExecutionAdv
         .iter()
         .filter(|item| matches!(item, SelectProjectionItem::Case { .. }))
         .count();
+    
     if case_count > 0 {
         score += case_count * 2;
         reasons.push("case_expressions");
@@ -407,6 +410,7 @@ pub fn advise_select_execution(read_plan: &SelectReadPlan) -> SelectExecutionAdv
         .as_ref()
         .map(count_subquery_predicates)
         .unwrap_or(0);
+
     if subquery_count > 0 {
         score += subquery_count * 3;
         reasons.push("subquery_predicates");
