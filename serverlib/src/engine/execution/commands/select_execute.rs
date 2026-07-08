@@ -11,7 +11,7 @@ use crate::{
 };
 use crate::engine::sql::{
     evaluate_sql_function_with_lookup, expression_references_column,
-    sql_function_references_column, SelectCaseWhen,
+    sql_function_references_column, SelectCaseWhen, SqlFunctionEvaluationStrategy,
 };
 
 use super::super::{
@@ -26,10 +26,10 @@ use super::select_explain::explain_joined_select_plan_result;
 
 pub fn execute_projection_only_select_plan<E>(
     read_plan: &SelectReadPlan,
-    evaluate_inbuilt: &mut E,
+    evaluate_function: &mut E,
 ) -> Result<SelectExecutionResult, String>
 where
-    E: FnMut(&Function) -> Result<Option<Vec<u8>>, String>,
+    E: SqlFunctionEvaluationStrategy,
 {
 
     let mut columns = Vec::with_capacity(read_plan.projection_items.len());
@@ -44,7 +44,7 @@ where
                 function,
             } => {
 
-                let value = evaluate_inbuilt(function).map_err(|err| {
+                let value = evaluate_function.evaluate(function, &mut |_| None).map_err(|err| {
                     format!("select failed: inbuilt projection evaluation failed: {err}")
                 })?;
 
@@ -90,6 +90,7 @@ where
                     operand.as_ref(),
                     branches,
                     else_value.as_ref(),
+                    evaluate_function,
                 )?;
 
                 columns.push(FieldDef {
@@ -130,11 +131,11 @@ pub fn execute_relation_select_plan<E, R>(
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
     access_plan: &RelationAccessPlan,
-    evaluate_inbuilt: &mut E,
+    evaluate_function: &mut E,
     row_matches: &mut R,
 ) -> Result<SelectExecutionResult, String>
 where
-    E: FnMut(&Function) -> Result<Option<Vec<u8>>, String>,
+    E: SqlFunctionEvaluationStrategy,
     R: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
 {
 
@@ -246,7 +247,7 @@ where
                 if sql_function_references_column(function) {
                     static_projection_values.push(None);
                 } else {
-                    let value = evaluate_inbuilt(function)
+                    let value = evaluate_function.evaluate(function, &mut |_| None)
                         .map_err(|err| format!("select failed: inbuilt projection evaluation failed: {err}"))?;
                     static_projection_values.push(Some(value));
                 }
@@ -293,7 +294,7 @@ where
                         if let Some(value) = static_value {
                             Ok(value)
                         } else {
-                            evaluate_sql_function_with_lookup(
+                            evaluate_function.evaluate(
                                 function,
                                 &mut |field_name| row_map
                                     .get(field_name)
@@ -317,6 +318,7 @@ where
                             operand.as_ref(),
                             branches,
                             else_value.as_ref(),
+                            evaluate_function,
                         )?
                             .unwrap_or_else(|| b"NULL".to_vec())),
                     ),
@@ -347,12 +349,12 @@ pub fn execute_joined_select_plan<E, RM, RJ>(
     wal: &ConcurrentWalManager,
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
-    evaluate_inbuilt: &mut E,
+    evaluate_function: &mut E,
     row_matches_relation: &mut RM,
     row_matches_joined: &mut RJ,
 ) -> Result<SelectExecutionResult, String>
 where
-    E: FnMut(&Function) -> Result<Option<Vec<u8>>, String>,
+    E: SqlFunctionEvaluationStrategy,
     RM: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
     RJ: FnMut(&JoinedRowTuple, Option<&SelectCondition>) -> Result<bool, String>,
 {
@@ -448,7 +450,7 @@ where
                     None
                 } else {
                     Some(
-                        evaluate_inbuilt(function)
+                        evaluate_function.evaluate(function, &mut |_| None)
                             .map_err(|err| format!(
                                 "select join failed: inbuilt projection evaluation failed: {err}"
                             ))?,
@@ -535,7 +537,7 @@ where
                         if let Some(value) = static_value {
                             Ok(value)
                         } else {
-                            evaluate_sql_function_with_lookup(
+                            evaluate_function.evaluate(
                                 function,
                                 &mut |field_name| row_tuple
                                     .value(field_name)
@@ -561,6 +563,7 @@ where
                             operand.as_ref(),
                             branches,
                             else_value.as_ref(),
+                            evaluate_function,
                         )?
                             .unwrap_or_else(|| b"NULL".to_vec())),
 

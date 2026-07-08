@@ -442,13 +442,15 @@ fn materialize_insert_source_rows<'a>(
                     wal,
                     runtime_indexes,
                     read_plan,
-                    &mut |function| {
-                        evaluate_sql_function_with_catalog_precedence(
+                    &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+                        serverlib::execute_sql_function_with_lookup(
                             catalog,
-                            &function.name.to_string(),
-                            || evaluate_inbuilt_sql_function(function),
+                            wal,
+                            runtime_indexes,
+                            function,
+                            lookup,
                         )
-                    },
+                    }),
                     &mut |row_map, condition| {
                         Ok(serverlib::row_matches_select_condition(
                             row_map,
@@ -471,13 +473,15 @@ fn materialize_insert_source_rows<'a>(
 
             } else if read_plan.table_id.is_empty() {
                 
-                serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
-                    evaluate_sql_function_with_catalog_precedence(
+                serverlib::execute_projection_only_select_plan(read_plan, &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+                    serverlib::execute_sql_function_with_lookup(
                         catalog,
-                        &function.name.to_string(),
-                        || evaluate_inbuilt_sql_function(function),
+                        wal,
+                        runtime_indexes,
+                        function,
+                        lookup,
                     )
-                })
+                }))
 
             } else {
                 
@@ -531,13 +535,15 @@ fn materialize_insert_source_rows<'a>(
                     runtime_indexes,
                     read_plan,
                     &access_plan,
-                    &mut |function| {
-                        evaluate_sql_function_with_catalog_precedence(
+                    &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+                        serverlib::execute_sql_function_with_lookup(
                             catalog,
-                            &function.name.to_string(),
-                            || evaluate_inbuilt_sql_function(function),
+                            wal,
+                            runtime_indexes,
+                            function,
+                            lookup,
                         )
-                    },
+                    }),
                     &mut |row_map, condition| {
                         Ok(serverlib::row_matches_select_condition(
                             row_map,

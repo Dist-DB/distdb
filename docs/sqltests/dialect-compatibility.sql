@@ -60,7 +60,7 @@ DESCRIBE account_fk_probe;
 -- Section C: expected unsupported/rejected in current implementation
 -- -----------------------------------------------------------------------------
 
--- Expected unsupported: functions are intentionally not supported yet.
+-- Expected parser + runtime success for current scalar UDF lifecycle support.
 CREATE FUNCTION f_probe() RETURNS INT RETURN 1;
 DROP FUNCTION f_probe;
 

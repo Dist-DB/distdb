@@ -172,5 +172,3 @@ Server identity is then validated from the dial target using rustls server-name 
 - `tls=optional` still permits plaintext fallback when negotiation fails.
 - CA scope is storage-root based, so separate storage roots can form separate trust domains.
 - Service announcements are descriptive, not yet policy-authoritative.
-
-/

@@ -361,7 +361,7 @@ fn local_function_name_is_checked_before_inbuilt_resolution() {
     catalog
         .register_stored_procedure(
             "abs",
-            "create function abs() returns int return 7",
+            "create function abs(p_value int) returns int return p_value",
             Vec::new(),
         )
         .expect("local function should register");
@@ -373,7 +373,7 @@ fn local_function_name_is_checked_before_inbuilt_resolution() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let data_query = DataQuery {
         database_id: "main".to_string(),
-        sql: "select abs(1)".to_string(),
+        sql: "select abs(7)".to_string(),
     };
 
     let response = handle_query_command(
@@ -388,13 +388,91 @@ fn local_function_name_is_checked_before_inbuilt_resolution() {
         Some("root@localhost".to_string()),
     );
 
-    let ConnectorResult::Error(message) = response.result else {
-        panic!("expected error result")
-    };
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["7".to_string()]]);
+}
+
+#[test]
+fn create_select_and_drop_function_work_end_to_end() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_response = handle_query_command(
+        "req-create-fn",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create function f_add_one(p_value int) returns int return p_value".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
 
     assert!(
-        message.contains("local SQL function 'abs' is not executable in expression context yet"),
-        "unexpected error: {message}"
+        matches!(create_response.status, connector::ResponseStatus::Applied),
+        "unexpected create response: {:?}",
+        create_response
+    );
+
+    let select_response = handle_query_command(
+        "req-select-fn",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select f_add_one(41)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(select_response.status, connector::ResponseStatus::Applied),
+        "unexpected select response: {:?}",
+        select_response
+    );
+
+    let rows = query_result_rows(select_response);
+    assert_eq!(rows, vec![vec!["41".to_string()]]);
+
+    let drop_response = handle_query_command(
+        "req-drop-fn",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "drop function f_add_one".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(drop_response.status, connector::ResponseStatus::Applied),
+        "unexpected drop response: {:?}",
+        drop_response
     );
 }
 

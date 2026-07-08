@@ -14,13 +14,15 @@ pub(super) fn execute_select_plan_result(
             wal,
             runtime_indexes,
             read_plan,
-            &mut |function| {
-                evaluate_sql_function_with_catalog_precedence(
+            &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+                serverlib::execute_sql_function_with_lookup(
                     catalog,
-                    &function.name.to_string(),
-                    || evaluate_inbuilt_sql_function(function),
+                    wal,
+                    runtime_indexes,
+                    function,
+                    lookup,
                 )
-            },
+            }),
             &mut |row_map, condition| {
                 Ok(serverlib::row_matches_select_condition(
                     row_map,
@@ -44,13 +46,15 @@ pub(super) fn execute_select_plan_result(
     }
 
     if read_plan.table_id.is_empty() {
-        return serverlib::execute_projection_only_select_plan(read_plan, &mut |function| {
-            evaluate_sql_function_with_catalog_precedence(
+        return serverlib::execute_projection_only_select_plan(read_plan, &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+            serverlib::execute_sql_function_with_lookup(
                 catalog,
-                &function.name.to_string(),
-                || evaluate_inbuilt_sql_function(function),
+                wal,
+                runtime_indexes,
+                function,
+                lookup,
             )
-        });
+        }));
     }
 
     let table_id = read_plan.table_id.as_str();
@@ -101,13 +105,15 @@ pub(super) fn execute_select_plan_result(
         runtime_indexes,
         read_plan,
         &access_plan,
-        &mut |function| {
-            evaluate_sql_function_with_catalog_precedence(
+        &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+            serverlib::execute_sql_function_with_lookup(
                 catalog,
-                &function.name.to_string(),
-                || evaluate_inbuilt_sql_function(function),
+                wal,
+                runtime_indexes,
+                function,
+                lookup,
             )
-        },
+        }),
         &mut |row_map, condition| {
             Ok(serverlib::row_matches_select_condition(
                 row_map,
@@ -455,13 +461,15 @@ pub(super) fn execute_select_impl(
         }
 
         let result =
-            match serverlib::execute_projection_only_select_plan(&read_plan, &mut |function| {
-                evaluate_sql_function_with_catalog_precedence(
+            match serverlib::execute_projection_only_select_plan(&read_plan, &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+                serverlib::execute_sql_function_with_lookup(
                     catalog,
-                    &function.name.to_string(),
-                    || evaluate_inbuilt_sql_function(function),
+                    wal,
+                    runtime_indexes,
+                    function,
+                    lookup,
                 )
-            }) {
+            })) {
                 Ok(result) => result,
                 Err(message) => {
                     return ConnectorResponse::rejected(request_id.to_string(), message);
@@ -621,13 +629,15 @@ pub(super) fn execute_select_impl(
         runtime_indexes,
         &read_plan,
         &access_plan,
-        &mut |function| {
-            evaluate_sql_function_with_catalog_precedence(
+        &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+            serverlib::execute_sql_function_with_lookup(
                 catalog,
-                &function.name.to_string(),
-                || evaluate_inbuilt_sql_function(function),
+                wal,
+                runtime_indexes,
+                function,
+                lookup,
             )
-        },
+        }),
         &mut |row_map, condition| {
             Ok(serverlib::row_matches_select_condition(
                 row_map,
@@ -891,13 +901,9 @@ fn execute_joined_select(
         wal,
         runtime_indexes,
         read_plan,
-        &mut |function| {
-            evaluate_sql_function_with_catalog_precedence(
-                catalog,
-                &function.name.to_string(),
-                || evaluate_inbuilt_sql_function(function),
-            )
-        },
+        &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+            serverlib::execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+        }),
         &mut |row_map, condition| {
             Ok(serverlib::row_matches_select_condition(
                 row_map,

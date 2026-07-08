@@ -2,11 +2,21 @@ use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::Function;
 
-use crate::engine::database::inbuilt::evaluate_inbuilt_sql_function;
+use crate::engine::sql::{
+    evaluate_expression_sql_to_bytes, evaluate_inbuilt_sql_function_with_lookup,
+    extract_create_function_action_sql, extract_create_function_return_expression,
+    function_argument_values, parse_create_function_parameter_names_from_statement,
+    parse_create_function_return_type_from_statement, parse_select_read_plan_from_statement,
+    SqlFunctionEvaluationStrategy, with_lookup_sql_function_evaluator,
+};
 use crate::{
-    ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseTable, FieldDef, FieldIndex,
-    FieldType, RelationAccessPlan, RuntimeIndexStore, SelectCondition, SelectJoin,
-    SelectJoinKind, SelectProjectionItem, SelectReadPlan, SelectRelation, TableSchema,
+    compile_and_validate_sql_programatic_function_artifact_with_context,
+    ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseTable, DatabaseStoredProcedure,
+    DefaultSQLProgramaticCompilerServices,
+    FieldDef, FieldIndex, FieldType, RelationAccessPlan, RuntimeIndexStore, SelectCondition,
+    RoutineDeclaration, RoutineKind, SQLProgramaticInboundParameter, SelectJoin,
+    SelectJoinKind, SelectProjectionItem, SelectReadPlan, SelectRelation,
+    StoredProcedureCompilerContext, TableSchema,
 };
 use crate::engine::sql::SelectExpression;
 
@@ -125,9 +135,9 @@ fn collect_subquery_exists_with_outer(
 
     if subquery.table_id.is_empty() {
 
-        return execute_projection_only_select_plan(subquery, &mut |function| {
-            evaluate_inbuilt_sql_function(function)
-        })
+        return execute_projection_only_select_plan(subquery, &mut with_lookup_sql_function_evaluator(|function, lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+        }))
         .map(|result| !result.rows.is_empty());
 
     }
@@ -184,7 +194,9 @@ fn collect_subquery_exists_with_outer(
             runtime_indexes,
             subquery,
             &access_plan,
-            &mut |function| evaluate_inbuilt_sql_function(function),
+            &mut with_lookup_sql_function_evaluator(|function, lookup| {
+                execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+            }),
             &mut |row_map, nested_condition| {
 
                 let row_provider = QualifiedRowMapProvider {
@@ -213,7 +225,9 @@ fn collect_subquery_exists_with_outer(
         wal,
         runtime_indexes,
         subquery,
-        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut with_lookup_sql_function_evaluator(|function, lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+        }),
         &mut |row_map, nested_condition| {
 
             row_matches_select_condition_with_outer_result(
@@ -266,9 +280,9 @@ fn collect_subquery_projection_values_with_outer(
     }
 
     if subquery.table_id.is_empty() {
-        return execute_projection_only_select_plan(subquery, &mut |function| {
-            evaluate_inbuilt_sql_function(function)
-        })
+        return execute_projection_only_select_plan(subquery, &mut with_lookup_sql_function_evaluator(|function, lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+        }))
         .map(first_column_values);
     }
 
@@ -318,7 +332,9 @@ fn collect_subquery_projection_values_with_outer(
             runtime_indexes,
             subquery,
             &access_plan,
-            &mut |function| evaluate_inbuilt_sql_function(function),
+            &mut with_lookup_sql_function_evaluator(|function, lookup| {
+                execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+            }),
             &mut |row_map, nested_condition| {
                 row_matches_select_condition_with_outer_result(
                     row_map,
@@ -339,7 +355,9 @@ fn collect_subquery_projection_values_with_outer(
         wal,
         runtime_indexes,
         subquery,
-        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut with_lookup_sql_function_evaluator(|function, lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+        }),
         &mut |row_map, nested_condition| {
 
             row_matches_select_condition_with_outer_result(
@@ -391,9 +409,9 @@ fn collect_subquery_scalar_value_with_outer(
     }
 
     if subquery.table_id.is_empty() {
-        return execute_projection_only_select_plan(subquery, &mut |function| {
-            evaluate_inbuilt_sql_function(function)
-        })
+        return execute_projection_only_select_plan(subquery, &mut with_lookup_sql_function_evaluator(|function, lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+        }))
         .and_then(single_scalar_value);
     }
 
@@ -437,7 +455,9 @@ fn collect_subquery_scalar_value_with_outer(
             runtime_indexes,
             subquery,
             &access_plan,
-            &mut |function| evaluate_inbuilt_sql_function(function),
+            &mut with_lookup_sql_function_evaluator(|function, lookup| {
+                execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+            }),
             &mut |row_map, nested_condition| {
                 row_matches_select_condition_with_outer_result(
                     row_map,
@@ -458,7 +478,9 @@ fn collect_subquery_scalar_value_with_outer(
         wal,
         runtime_indexes,
         subquery,
-        &mut |function| evaluate_inbuilt_sql_function(function),
+        &mut with_lookup_sql_function_evaluator(|function, lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+        }),
         &mut |row_map, nested_condition| {
 
             row_matches_select_condition_with_outer_result(
@@ -519,7 +541,258 @@ fn single_scalar_value(result: SelectExecutionResult) -> Result<Option<Vec<u8>>,
     }
 
     Ok(Some(value))
-    
+
+}
+
+pub fn execute_select_plan_result_with_function_evaluator<E>(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    read_plan: &SelectReadPlan,
+    evaluate_function: &mut E,
+) -> Result<SelectExecutionResult, String>
+where
+    E: SqlFunctionEvaluationStrategy,
+{
+
+    if !read_plan.joins.is_empty() {
+        return execute_joined_select_plan(
+            catalog,
+            wal,
+            runtime_indexes,
+            read_plan,
+            evaluate_function,
+            &mut |row_map, condition| {
+                row_matches_select_condition_with_outer_result(
+                    row_map,
+                    row_map,
+                    condition,
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                )
+            },
+            &mut |row_tuple, condition| {
+                row_matches_select_condition_with_outer_result(
+                    row_tuple,
+                    row_tuple,
+                    condition,
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                )
+            },
+        );
+    }
+
+    if read_plan.table_id.is_empty() {
+        return execute_projection_only_select_plan(read_plan, evaluate_function);
+    }
+
+    let table_id = read_plan.table_id.as_str();
+    let schema = catalog
+        .table_schema(table_id)
+        .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
+    let table = catalog
+        .table(table_id)
+        .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
+
+    let mut scoped_table = table.clone();
+    if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
+        scoped_table.entity_id = stream_id;
+    }
+
+    let mut index_filter_map = HashMap::new();
+    let like_filter = read_plan
+        .where_condition
+        .as_ref()
+        .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+    let allow_index_short_circuit = read_plan
+        .where_condition
+        .as_ref()
+        .map(|condition| {
+            collect_indexable_equality_filters_for_schema(
+                schema,
+                condition,
+                &mut index_filter_map,
+            )
+        })
+        .unwrap_or(true);
+
+    let access_plan = plan_relation_access(
+        &scoped_table,
+        allow_index_short_circuit,
+        index_filter_map,
+        like_filter,
+    );
+
+    execute_relation_select_plan(
+        wal,
+        &scoped_table,
+        schema,
+        runtime_indexes,
+        read_plan,
+        &access_plan,
+        evaluate_function,
+        &mut |row_map, condition| {
+            row_matches_select_condition_with_outer_result(
+                row_map,
+                row_map,
+                condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+        },
+    )
+
+}
+
+pub fn execute_sql_function_with_lookup(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    function: &Function,
+    lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<Option<Vec<u8>>, String> {
+
+    let function_id = common::normalize_identifier!(function.name.to_string());
+
+    if let Some(local_function) = catalog.stored_procedure(&function_id) {
+        return execute_local_sql_function_with_lookup(
+            catalog,
+            wal,
+            runtime_indexes,
+            local_function,
+            function,
+            lookup,
+        );
+    }
+
+    evaluate_inbuilt_sql_function_with_lookup(function, lookup)
+
+}
+
+fn execute_local_sql_function_with_lookup(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    local_function: &DatabaseStoredProcedure,
+    function: &Function,
+    lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<Option<Vec<u8>>, String> {
+
+    let parameter_names = parse_create_function_parameter_names_from_statement(&local_function.sql)
+        .map_err(|err| format!("function '{}' parameter parse failed: {err}", local_function.procedure_id))?;
+
+    let argument_values = function_argument_values(
+        function,
+        lookup,
+        &mut |nested, nested_lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, nested, nested_lookup)
+        },
+    )?;
+
+    if parameter_names.len() != argument_values.len() {
+        return Err(format!(
+            "function '{}' argument mismatch: expected {} values but received {}",
+            local_function.procedure_id,
+            parameter_names.len(),
+            argument_values.len(),
+        ));
+    }
+
+    let inbound_parameters = parameter_names
+        .into_iter()
+        .zip(argument_values)
+        .map(|(name, value)| SQLProgramaticInboundParameter { name, value })
+        .collect::<Vec<_>>();
+
+    let return_type = parse_create_function_return_type_from_statement(&local_function.sql)
+        .map_err(|err| format!("function '{}' return type parse failed: {err}", local_function.procedure_id))?;
+
+    let services = DefaultSQLProgramaticCompilerServices;
+    let context = StoredProcedureCompilerContext::new(&services)
+        .with_routine(Some(RoutineDeclaration {
+            kind: RoutineKind::Function,
+            name: Some(local_function.procedure_id.clone()),
+            return_type,
+        }))
+        .with_inbound_parameters(inbound_parameters);
+
+    let artifact = compile_and_validate_sql_programatic_function_artifact_with_context(
+        &local_function.sql,
+        context,
+    )
+    .map_err(|issues| {
+        let details = issues
+            .into_iter()
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("function '{}' validation failed: {details}", local_function.procedure_id)
+    })?;
+
+    let inbound_provider = artifact.resources.inbound_parameters().iter().fold(
+        HashMap::new(),
+        |mut acc, (name, value)| {
+            acc.insert(name.clone(), value.clone());
+            acc
+        },
+    );
+
+    if let Some(return_expression) = extract_create_function_return_expression(&local_function.sql)
+        .map_err(|err| format!("function '{}' return extraction failed: {err}", local_function.procedure_id))?
+    {
+        let value = evaluate_expression_sql_to_bytes(
+            &return_expression,
+            &mut |field_name| inbound_provider.get(field_name).cloned(),
+            &mut |nested, nested_lookup| {
+                execute_sql_function_with_lookup(catalog, wal, runtime_indexes, nested, nested_lookup)
+            },
+        )?;
+
+        return Ok(Some(value));
+    }
+
+    let action_sql = if let Some(plan) = artifact.ir.if_else_end_plan() {
+        super::commands::execute_if_else_end_plan(&inbound_provider, plan, &mut |sql| {
+            Ok(sql.to_string())
+        })?
+    } else {
+        Some(extract_create_function_action_sql(&local_function.sql).map_err(|err| {
+            format!("function '{}' action extraction failed: {err}", local_function.procedure_id)
+        })?)
+    };
+
+    let Some(action_sql) = action_sql else {
+        return Ok(None);
+    };
+
+    let read_plan = parse_select_read_plan_from_statement(&action_sql)
+        .map_err(|err| format!("function '{}' action parse failed: {err}", local_function.procedure_id))?;
+
+    let result = execute_select_plan_result_with_function_evaluator(
+        catalog,
+        wal,
+        runtime_indexes,
+        &read_plan,
+        &mut with_lookup_sql_function_evaluator(|nested, nested_lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, nested, nested_lookup)
+        }),
+    )?;
+
+    if result.columns.len() > 1 {
+        return Err(format!(
+            "function '{}' returned more than one column",
+            local_function.procedure_id,
+        ));
+    }
+
+    single_scalar_value(result).map_err(|err| {
+        format!("function '{}' scalar evaluation failed: {err}", local_function.procedure_id)
+    })
+
 }
 
 pub use super::commands::{

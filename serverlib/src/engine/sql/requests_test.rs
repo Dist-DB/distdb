@@ -414,19 +414,25 @@ fn revoke_statement_maps_to_alter_schema_other_operation() {
 }
 
 #[test]
-fn create_function_is_unsupported() {
-    let error = parse_mysql8_sql_requests("create function f_add() returns int", "main")
-        .expect_err("create function should be unsupported");
+fn create_function_maps_to_create_stored_procedure_operation() {
+    let requests = parse_mysql8_sql_requests("create function f_add() returns int return 1", "main")
+        .expect("create function should parse");
 
-    assert!(matches!(error, SqlParseError::UnsupportedStatement(_)));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Create);
+    assert_eq!(requests[0].operation, SqlOperation::CreateStoredProcedure);
+    assert_eq!(requests[0].object_name.as_deref(), Some("f_add"));
 }
 
 #[test]
-fn drop_function_is_unsupported() {
-    let error = parse_mysql8_sql_requests("drop function f_add", "main")
-        .expect_err("drop function should be unsupported");
+fn drop_function_maps_to_drop_stored_procedure_operation() {
+    let requests = parse_mysql8_sql_requests("drop function f_add", "main")
+        .expect("drop function should parse");
 
-    assert!(matches!(error, SqlParseError::UnsupportedStatement(_)));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
+    assert_eq!(requests[0].operation, SqlOperation::DropStoredProcedure);
+    assert_eq!(requests[0].object_name.as_deref(), Some("f_add"));
 }
 
 #[test]

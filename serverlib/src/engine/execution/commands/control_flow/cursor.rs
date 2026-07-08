@@ -76,7 +76,7 @@ impl SelectReadPlanCursorSource {
                 wal,
                 runtime_indexes,
                 read_plan,
-                &mut |function| evaluate_inbuilt_sql_function(function),
+                &mut evaluate_inbuilt_sql_function,
                 &mut |row_map, condition| {
                     row_matches_select_condition_result(
                         row_map,
@@ -99,9 +99,7 @@ impl SelectReadPlanCursorSource {
         
         } else if read_plan.table_id.is_empty() {
 
-            execute_projection_only_select_plan(read_plan, &mut |function| {
-                evaluate_inbuilt_sql_function(function)
-            })?
+            execute_projection_only_select_plan(read_plan, &mut evaluate_inbuilt_sql_function)?
         
         } else {
 
@@ -154,7 +152,7 @@ impl SelectReadPlanCursorSource {
                 runtime_indexes,
                 read_plan,
                 &access_plan,
-                &mut |function| evaluate_inbuilt_sql_function(function),
+                &mut evaluate_inbuilt_sql_function,
                 &mut |row_map, condition| {
                     row_matches_select_condition_result(
                         row_map,

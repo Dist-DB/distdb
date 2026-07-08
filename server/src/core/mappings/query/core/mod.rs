@@ -20,7 +20,6 @@ use common::helpers::format::{FileKind, HEADER_SIZE, make_header};
 use common::helpers::write_bytes;
 use connector::{ConnectorResponse, ConnectorResult, DataQuery, MutationResult, QueryResult};
 use serverlib::engine::database::inbuilt::{
-    evaluate_inbuilt_sql_function,
     with_inbuilt_sql_runtime_context,
     InbuiltSqlRuntimeContext,
 };
@@ -94,34 +93,6 @@ pub(crate) fn get_and_clear_last_insert_id() -> Option<i64> {
         }
     })
 }
-
-fn evaluate_sql_function_with_catalog_precedence(
-    catalog: &DatabaseCatalog,
-    function_name: &str,
-    fallback_evaluator: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
-) -> Result<Option<Vec<u8>>, String> {
-
-    let function_id = common::normalize_identifier!(function_name);
-
-    if catalog_contains_local_routine_name(catalog, &function_id) {
-        return Err(format!(
-            "local SQL function '{}' is not executable in expression context yet",
-            function_id
-        ));
-    }
-
-    fallback_evaluator()
-
-}
-
-fn catalog_contains_local_routine_name(catalog: &DatabaseCatalog, routine_id: &str) -> bool {
-    // Local CREATE FUNCTION names currently flow through the same routine
-    // catalog entity used by stored procedures until a distinct function
-    // catalog type exists.
-    catalog.stored_procedure(routine_id).is_some()
-}
-
-
 
 pub(crate) fn handle_query_command(
     request_id: &str,

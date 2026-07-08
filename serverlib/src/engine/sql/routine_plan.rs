@@ -119,7 +119,16 @@ pub fn parse_if_else_end_plan_from_create_procedure_statement(
     statement: &str,
 ) -> Result<Option<IfElseEndPlan>, SqlParseError> {
 
-    let body = extract_create_procedure_body(statement)?;
+    let body = if statement
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("create function")
+    {
+        extract_create_function_action_sql(statement)?
+    } else {
+        extract_create_procedure_body(statement)?.to_string()
+    };
+
     let trimmed_body = body.trim().trim_end_matches(';').trim();
 
     if trimmed_body.is_empty() {
@@ -231,22 +240,164 @@ pub fn parse_create_procedure_parameter_names_from_statement(
     statement: &str,
 ) -> Result<Vec<String>, SqlParseError> {
 
+    parse_create_routine_parameter_names_from_statement(statement)
+
+}
+
+pub fn parse_create_function_parameter_names_from_statement(
+    statement: &str,
+) -> Result<Vec<String>, SqlParseError> {
+
+    parse_create_routine_parameter_names_from_statement(statement)
+
+}
+
+pub fn extract_create_function_action_sql(statement: &str) -> Result<String, SqlParseError> {
+
     let trimmed = statement.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
 
-    if !lowered.starts_with("create procedure") {
+    if !lowered.starts_with("create function") {
         return Err(SqlParseError::UnsupportedStatement(
-            "statement is not CREATE PROCEDURE".to_string(),
+            "statement is not CREATE FUNCTION".to_string(),
         ));
     }
 
-    let begin_index = find_keyword_boundary_index(&lowered, "begin").ok_or_else(|| {
+    if let Some(begin_index) = find_keyword_boundary_index(&lowered, "begin") {
+        let after_begin = begin_index + "begin".len();
+        let body_and_end = trimmed[after_begin..].trim_start();
+        let lowered_body_and_end = body_and_end.to_ascii_lowercase();
+
+        let end_index = lowered_body_and_end.rfind(" end").or_else(|| {
+            if lowered_body_and_end.ends_with("end") {
+                Some(lowered_body_and_end.len() - "end".len())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            SqlParseError::UnsupportedStatement(
+                "CREATE FUNCTION block is missing END".to_string(),
+            )
+        })?;
+
+        return Ok(body_and_end[..end_index].trim().trim_end_matches(';').trim().to_string());
+    }
+
+    let Some(return_index) = find_keyword_boundary_index(&lowered, "return") else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CREATE FUNCTION must contain RETURN or BEGIN".to_string(),
+        ));
+    };
+
+    let return_expression = trimmed[(return_index + "return".len())..]
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+
+    if return_expression.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CREATE FUNCTION RETURN expression is empty".to_string(),
+        ));
+    }
+
+    Ok(format!("select {return_expression}"))
+
+}
+
+pub fn extract_create_function_return_expression(
+    statement: &str,
+) -> Result<Option<String>, SqlParseError> {
+
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("create function") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not CREATE FUNCTION".to_string(),
+        ));
+    }
+
+    if find_keyword_boundary_index(&lowered, "begin").is_some() {
+        return Ok(None);
+    }
+
+    let Some(return_index) = find_keyword_boundary_index(&lowered, "return") else {
+        return Ok(None);
+    };
+
+    let return_expression = trimmed[(return_index + "return".len())..]
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+
+    if return_expression.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(return_expression.to_string()))
+    }
+
+}
+
+pub fn parse_create_function_return_type_from_statement(
+    statement: &str,
+) -> Result<Option<String>, SqlParseError> {
+
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("create function") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not CREATE FUNCTION".to_string(),
+        ));
+    }
+
+    let Some(returns_index) = find_keyword_boundary_index(&lowered, "returns") else {
+        return Ok(None);
+    };
+
+    let after_returns = trimmed[(returns_index + "returns".len())..].trim_start();
+    let lowered_after_returns = after_returns.to_ascii_lowercase();
+
+    let next_keyword_index = find_keyword_boundary_index(&lowered_after_returns, "return")
+        .or_else(|| find_keyword_boundary_index(&lowered_after_returns, "begin"));
+
+    let return_type = next_keyword_index
+        .map(|index| after_returns[..index].trim())
+        .unwrap_or_else(|| after_returns.trim())
+        .trim_end_matches(';')
+        .trim();
+
+    if return_type.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(return_type.to_string()))
+    }
+
+}
+
+fn parse_create_routine_parameter_names_from_statement(
+    statement: &str,
+) -> Result<Vec<String>, SqlParseError> {
+
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("create procedure") && !lowered.starts_with("create function") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not CREATE ROUTINE".to_string(),
+        ));
+    }
+
+    let header_end = find_keyword_boundary_index(&lowered, "begin")
+        .or_else(|| find_keyword_boundary_index(&lowered, "returns"))
+        .ok_or_else(|| {
         SqlParseError::UnsupportedStatement(
-            "CREATE PROCEDURE block is missing BEGIN".to_string(),
+            "CREATE ROUTINE header is missing BEGIN or RETURNS".to_string(),
         )
     })?;
 
-    let header = &trimmed[..begin_index];
+    let header = &trimmed[..header_end];
     let Some(open_index) = header.find('(') else {
         return Ok(Vec::new());
     };

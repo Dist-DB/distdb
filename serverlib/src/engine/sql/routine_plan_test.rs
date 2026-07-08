@@ -166,6 +166,26 @@ fn parse_create_procedure_parameter_names_from_multiline_as_begin_statement_extr
 }
 
 #[test]
+fn parse_create_function_parameter_names_from_statement_extracts_names() {
+    let names = parse_create_function_parameter_names_from_statement(
+        "create function f_sync(arg_user_id int, arg_state varchar(20)) returns varchar(20) return arg_state",
+    )
+    .expect("function parameter list should parse");
+
+    assert_eq!(names, vec!["arg_user_id".to_string(), "arg_state".to_string()]);
+}
+
+#[test]
+fn extract_create_function_action_sql_converts_return_expression_to_select() {
+    let action_sql = extract_create_function_action_sql(
+        "create function f_sync(arg_user_id int) returns int return arg_user_id",
+    )
+    .expect("return expression should convert to scalar select");
+
+    assert_eq!(action_sql, "select arg_user_id");
+}
+
+#[test]
 fn bind_call_procedure_arguments_maps_values_by_parameter_name() {
     let call_statement = sqlparser::parser::Parser::parse_sql(
         &sqlparser::dialect::MySqlDialect {},

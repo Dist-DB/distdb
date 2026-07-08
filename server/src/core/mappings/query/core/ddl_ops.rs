@@ -633,7 +633,7 @@ fn execute_drop_entity_object(
 
     let normalized_object_id = common::normalize_identifier!(object_id);
 
-    let Some((object_type, kind_label, sql_object_kind)) =
+    let Some((object_type, default_kind_label, sql_object_kind)) =
         drop_entity_operation_metadata(statement.operation)
     else {
         return ConnectorResponse::rejected(
@@ -643,6 +643,14 @@ fn execute_drop_entity_object(
                 statement.operation
             ),
         );
+    };
+
+    let kind_label = if object_type == DatabaseObjectType::StoredProcedure
+        && statement.sql.trim().to_ascii_lowercase().starts_with("drop function")
+    {
+        "function"
+    } else {
+        default_kind_label
     };
 
     if catalog.object(object_type, &normalized_object_id).is_none() {
@@ -995,10 +1003,18 @@ pub(super) fn execute_create_stored_procedure_impl(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
+    let is_create_function = statement
+        .sql
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("create function");
+
+    let kind_label = if is_create_function { "function" } else { "procedure" };
+
     let Some(procedure_id) = statement.object_name.as_deref() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            "create procedure missing identifier",
+            format!("create {kind_label} missing identifier"),
         );
     };
 
@@ -1012,20 +1028,56 @@ pub(super) fn execute_create_stored_procedure_impl(
     let wal_id = catalog.database_id.0.clone();
     let created_at = common::epoch_nanos!();
 
+    if is_create_function {
+        let services = serverlib::DefaultSQLProgramaticCompilerServices;
+        let return_type = match serverlib::parse_create_function_return_type_from_statement(&statement.sql) {
+            Ok(return_type) => return_type,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create function validation setup failed: {err}"),
+                );
+            }
+        };
+
+        let context = serverlib::StoredProcedureCompilerContext::new(&services).with_routine(Some(
+            serverlib::RoutineDeclaration {
+                kind: serverlib::RoutineKind::Function,
+                name: Some(common::normalize_identifier!(procedure_id)),
+                return_type,
+            },
+        ));
+
+        if let Err(issues) = serverlib::compile_and_validate_sql_programatic_function_artifact_with_context(
+            &statement.sql,
+            context,
+        ) {
+            let details = issues
+                .into_iter()
+                .map(|issue| issue.message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create function validation failed: {details}"),
+            );
+        }
+    }
+
     let created =
         catalog.register_stored_procedure(procedure_id, statement.sql.clone(), Vec::new());
 
     if let Err(err) = created {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("create procedure failed: {err}"),
+            format!("create {kind_label} failed: {err}"),
         );
     }
 
     let Some(entity_wal_id) = catalog.entity_wal_stream_id(procedure_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            "create procedure WAL stream lookup failed".to_string(),
+            format!("create {kind_label} WAL stream lookup failed"),
         );
     };
 
@@ -1037,7 +1089,7 @@ pub(super) fn execute_create_stored_procedure_impl(
     ) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("create procedure definition apply failed: {err}"),
+            format!("create {kind_label} definition apply failed: {err}"),
         );
     }
 
@@ -1048,7 +1100,7 @@ pub(super) fn execute_create_stored_procedure_impl(
         &entity_wal_id,
         procedure_id,
         created_at,
-        "create procedure",
+        if is_create_function { "create function" } else { "create procedure" },
     ) {
         return ConnectorResponse::rejected(request_id.to_string(), err);
     }
@@ -1063,7 +1115,7 @@ pub(super) fn execute_create_stored_procedure_impl(
         &statement.sql,
         Vec::new(),
         created_at,
-        "create procedure",
+        if is_create_function { "create function" } else { "create procedure" },
     ) {
         return ConnectorResponse::rejected(request_id.to_string(), err);
     }
@@ -1071,7 +1123,7 @@ pub(super) fn execute_create_stored_procedure_impl(
     if let Err(err) = persist_entity_snapshot(catalog, procedure_id, node_data_dir) {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("create procedure entity snapshot write failed: {err}"),
+            format!("create {kind_label} entity snapshot write failed: {err}"),
         );
     }
 

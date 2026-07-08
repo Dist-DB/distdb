@@ -28,7 +28,7 @@ Within each page:
 
 - [core-statements.md](core-statements.md): `SELECT`, `INSERT`, `UPDATE`, `DELETE`
 - [stored-procedures.md](stored-procedures.md): procedure lifecycle, routine execution, and control-flow support
-- [functions.md](functions.md): built-in function support and user-defined function limitations
+- [functions.md](functions.md): built-in function support and current user-defined function support/limits
 - [triggers.md](triggers.md): trigger lifecycle and execution behavior
 - [joins.md](joins.md): join types, predicates, and runtime scope
 - [inbuilt-operations.md](inbuilt-operations.md): built-in operation coverage and limits

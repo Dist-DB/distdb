@@ -46,7 +46,7 @@ Within individual pages, `Implemented` describes the current working surface and
 - [compliance/readme.md](compliance/readme.md): overview of the compliance container
 - [compliance/core-statements.md](compliance/core-statements.md): `SELECT`, `INSERT`, `UPDATE`, `DELETE`
 - [compliance/stored-procedures.md](compliance/stored-procedures.md): procedure lifecycle and execution behavior
-- [compliance/functions.md](compliance/functions.md): inbuilt function coverage and user-defined function limitations
+- [compliance/functions.md](compliance/functions.md): inbuilt function coverage and current user-defined function support/limits
 - [compliance/triggers.md](compliance/triggers.md): trigger lifecycle and execution model
 - [compliance/joins.md](compliance/joins.md): join types and join-planning/runtime scope
 - [compliance/inbuilt-operations.md](compliance/inbuilt-operations.md): built-in operation pipeline and limits

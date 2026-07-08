@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use sqlparser::{dialect::MySqlDialect, parser::Parser};
 
+use crate::engine::database::inbuilt::evaluate_inbuilt_sql_function;
 use crate::{SelectComparisonOp, SelectCondition, SelectPredicate};
 
 use super::evaluate_case_projection;
@@ -31,6 +32,12 @@ fn parse_function_expr(sql: &str) -> sqlparser::ast::Function {
 
 }
 
+fn evaluate_inbuilt_for_case_test(
+    function: &sqlparser::ast::Function,
+) -> Result<Option<Vec<u8>>, String> {
+    evaluate_inbuilt_sql_function(function)
+}
+
 #[test]
 fn evaluate_case_projection_returns_first_matching_branch() {
 
@@ -56,7 +63,7 @@ fn evaluate_case_projection_returns_first_matching_branch() {
         ),
     ];
 
-    let value = evaluate_case_projection(&row, None, &branches, None)
+    let value = evaluate_case_projection(&row, None, &branches, None, &mut evaluate_inbuilt_for_case_test)
         .expect("case projection should evaluate");
 
     assert_eq!(value, Some(b"yes".to_vec()));
@@ -85,6 +92,7 @@ fn evaluate_case_projection_uses_else_when_no_branch_matches() {
         None,
         &branches,
         Some(&SelectExpression::Literal(b"unknown".to_vec())),
+        &mut evaluate_inbuilt_for_case_test,
     )
     .expect("case projection should evaluate");
 
@@ -108,7 +116,13 @@ fn evaluate_case_projection_supports_simple_case_with_function_result() {
         },
     )];
 
-    let value = evaluate_case_projection(&row, Some(&case_operand), &branches, None)
+    let value = evaluate_case_projection(
+        &row,
+        Some(&case_operand),
+        &branches,
+        None,
+        &mut evaluate_inbuilt_for_case_test,
+    )
         .expect("simple CASE projection should evaluate");
 
     assert_eq!(value, Some(b"YES".to_vec()));

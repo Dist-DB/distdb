@@ -106,6 +106,12 @@ pub(super) fn classify_statement(
             Some(name.to_string()),
         ),
 
+        Statement::CreateFunction { name, .. } => (
+            SqlDirective::Create,
+            SqlOperation::CreateStoredProcedure,
+            Some(name.to_string()),
+        ),
+
         Statement::Call(function) => (
             SqlDirective::Retrieve,
             SqlOperation::CallStoredProcedure,
@@ -132,6 +138,12 @@ pub(super) fn classify_statement(
             SqlDirective::AlterSchema,
             SqlOperation::DropStoredProcedure,
             proc_desc.first().map(|desc| desc.name.to_string()),
+        ),
+
+        Statement::DropFunction { func_desc, .. } => (
+            SqlDirective::AlterSchema,
+            SqlOperation::DropStoredProcedure,
+            func_desc.first().map(|desc| desc.name.to_string()),
         ),
 
         Statement::Drop {
@@ -462,9 +474,9 @@ pub(super) fn classify_text_fallback(
         ("create", "database") | 
         ("create", "schema")    => Some((SqlDirective::Create, SqlOperation::CreateDatabase, object_name)),
 
-        // Intentionally unsupported for now.
-        ("create", "function") | 
-        ("drop", "function")    => None,
+        ("create", "function")  => Some((SqlDirective::Create, SqlOperation::CreateStoredProcedure, object_name)),
+
+        ("drop", "function")    => Some((SqlDirective::AlterSchema, SqlOperation::DropStoredProcedure, object_name)),
         
         _                       => None,
 

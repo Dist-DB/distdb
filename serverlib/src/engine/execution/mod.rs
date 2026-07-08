@@ -51,6 +51,7 @@ pub use commands::{
     SqlCursorFrame, SqlCursorSource, VecSqlCursorSource,
 };
 pub use select::{
+    execute_sql_function_with_lookup,
     execute_joined_select_plan, execute_projection_only_select_plan,
     execute_relation_select_plan, explain_joined_select_plan_result,
     explain_select_plan_result, row_matches_select_condition,
