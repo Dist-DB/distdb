@@ -102,6 +102,7 @@ fn evaluate_case_projection_uses_else_when_no_branch_matches() {
 
 #[test]
 fn evaluate_case_projection_supports_simple_case_with_function_result() {
+
     let mut row = HashMap::new();
     row.insert("state".to_string(), b"on".to_vec());
 
@@ -126,4 +127,5 @@ fn evaluate_case_projection_supports_simple_case_with_function_result() {
         .expect("simple CASE projection should evaluate");
 
     assert_eq!(value, Some(b"YES".to_vec()));
+    
 }

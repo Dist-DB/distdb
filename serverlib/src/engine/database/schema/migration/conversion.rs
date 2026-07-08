@@ -121,12 +121,12 @@ pub fn convert_value_to_field_type(
 
         },
 
-        FieldType::StringFixed(_)
-        | FieldType::Text
-        | FieldType::Date
-        | FieldType::DateTime
-        | FieldType::Timestamp
-        | FieldType::Enum(_) => match std::str::from_utf8(&render_stored_field_value(value)) {
+        FieldType::StringFixed(_) |
+        FieldType::Text |
+        FieldType::Date |
+        FieldType::DateTime |
+        FieldType::Timestamp |
+        FieldType::Enum(_) => match std::str::from_utf8(&render_stored_field_value(value)) {
 
             Ok(valid) => Ok(valid.as_bytes().to_vec()),
 

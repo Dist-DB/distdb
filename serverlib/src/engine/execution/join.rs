@@ -55,9 +55,11 @@ where
 
     let primary_condition = pushdown_conditions.first().and_then(|condition| condition.as_ref());
     let mut primary_filter_map = HashMap::new();
+
     let primary_like_filter = primary_condition
         .as_ref()
         .and_then(|condition| collect_indexable_like_filter_for_schema(primary_schema, condition));
+
     let primary_allow_index_short_circuit = primary_condition
         .as_ref()
         .map(|condition| {
@@ -123,10 +125,13 @@ where
         let right_condition = pushdown_conditions
             .get(join_index + 1)
             .and_then(|condition| condition.as_ref());
+
         let mut right_filter_map = HashMap::new();
+
         let right_like_filter = right_condition
             .as_ref()
             .and_then(|condition| collect_indexable_like_filter_for_schema(right_schema, condition));
+        
         let right_allow_index_short_circuit = right_condition
             .as_ref()
             .map(|condition| {

@@ -164,6 +164,7 @@ impl JoinedRowTuple {
     }
 
     pub fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
+
         let (qualifier, column_name) = field_name.split_once('.')?;
 
         self.members
@@ -171,13 +172,17 @@ impl JoinedRowTuple {
             .find(|member| member.qualifier == qualifier)
             .and_then(|member| member.row_map.as_ref())
             .and_then(|row_map| row_map.get(column_name))
+
     }
+
 }
 
 impl ConditionValueProvider for JoinedRowTuple {
+
     fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
         JoinedRowTuple::value(self, field_name)
     }
+    
 }
 
 pub fn row_matches_condition_with(

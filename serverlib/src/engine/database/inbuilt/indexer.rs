@@ -405,11 +405,15 @@ pub(super) fn function_argument_expr(argument: &FunctionArg) -> Result<&Expr, St
 pub(super) fn function_args(function: &Function) -> Result<&[FunctionArg], String> {
 
     match &function.args {
+        
         FunctionArguments::None => Ok(&[]),
+        
         FunctionArguments::List(list) => Ok(&list.args),
+        
         FunctionArguments::Subquery(_) => {
             Err("subquery function arguments are not supported for inbuilt commands".to_string())
         }
+
     }
 
 }
@@ -616,22 +620,22 @@ fn value_to_bytes(value: &Value) -> Result<Option<Vec<u8>>, String> {
 
         Value::Number(v, _) => Ok(Some(v.to_string().into_bytes())),
 
-        Value::SingleQuotedString(v)
-        | Value::DoubleQuotedString(v)
-        | Value::TripleSingleQuotedString(v)
-        | Value::TripleDoubleQuotedString(v)
-        | Value::EscapedStringLiteral(v)
-        | Value::UnicodeStringLiteral(v)
-        | Value::SingleQuotedByteStringLiteral(v)
-        | Value::DoubleQuotedByteStringLiteral(v)
-        | Value::TripleSingleQuotedByteStringLiteral(v)
-        | Value::TripleDoubleQuotedByteStringLiteral(v)
-        | Value::SingleQuotedRawStringLiteral(v)
-        | Value::DoubleQuotedRawStringLiteral(v)
-        | Value::TripleSingleQuotedRawStringLiteral(v)
-        | Value::TripleDoubleQuotedRawStringLiteral(v)
-        | Value::NationalStringLiteral(v)
-        | Value::HexStringLiteral(v) => Ok(Some(v.as_bytes().to_vec())),
+        Value::SingleQuotedString(v) |
+        Value::DoubleQuotedString(v) |
+        Value::TripleSingleQuotedString(v) |
+        Value::TripleDoubleQuotedString(v) |
+        Value::EscapedStringLiteral(v) |
+        Value::UnicodeStringLiteral(v) |
+        Value::SingleQuotedByteStringLiteral(v) |
+        Value::DoubleQuotedByteStringLiteral(v) |
+        Value::TripleSingleQuotedByteStringLiteral(v) |
+        Value::TripleDoubleQuotedByteStringLiteral(v) |
+        Value::SingleQuotedRawStringLiteral(v) |
+        Value::DoubleQuotedRawStringLiteral(v) |
+        Value::TripleSingleQuotedRawStringLiteral(v) |
+        Value::TripleDoubleQuotedRawStringLiteral(v) |
+        Value::NationalStringLiteral(v) |
+        Value::HexStringLiteral(v) => Ok(Some(v.as_bytes().to_vec())),
 
         Value::DollarQuotedString(v) => Ok(Some(v.value.as_bytes().to_vec())),
 

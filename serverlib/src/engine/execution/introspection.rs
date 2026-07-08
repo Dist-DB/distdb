@@ -6,6 +6,7 @@ pub fn show_databases_result<I>(database_ids: I) -> SelectExecutionResult
 where
     I: IntoIterator<Item = String>,
 {
+
     let mut database_ids = database_ids.into_iter().collect::<Vec<_>>();
     database_ids.sort();
 
@@ -16,12 +17,14 @@ where
             .map(|database_id| vec![database_id.into_bytes()])
             .collect(),
     )
+
 }
 
 pub fn show_tables_result<I>(table_ids: I) -> SelectExecutionResult
 where
     I: IntoIterator<Item = (String, String)>,
 {
+
     let mut table_rows = table_ids.into_iter().collect::<Vec<_>>();
     table_rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
 
@@ -33,6 +36,7 @@ where
             .map(|(table_id, store_kind)| vec![table_id.into_bytes(), store_kind.into_bytes()])
             .collect(),
     )
+    
 }
 
 pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {

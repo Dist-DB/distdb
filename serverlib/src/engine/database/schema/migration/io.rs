@@ -84,6 +84,7 @@ pub fn load_records_from_path_with_context(
     let mut pos = HEADER_SIZE;
 
     while pos + 8 <= bytes.len() {
+
         let len = u64::from_le_bytes(
             bytes[pos..pos + 8]
                 .try_into()
@@ -97,8 +98,10 @@ pub fn load_records_from_path_with_context(
 
         let record = decode_record_from_storage_with_context(&bytes[pos..pos + len], context)
             .map_err(|_| DatabaseError::CatalogDeserialize)?;
+        
         records.push(record);
         pos += len;
+        
     }
 
     Ok(records)

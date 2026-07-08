@@ -1707,15 +1707,21 @@ fn build_bootstrap_index_entries(
             let indexes = &tracked_indexes[start..end];
 
             handles.push(scope.spawn(move || {
+
                 let mut chunk = Vec::with_capacity(indexes.len());
+                
                 for index in indexes {
+
                     let mut entries = AHashSet::with_capacity(live_rows.len());
                     for (_, row_map) in live_rows {
                         entries.insert(index_value_tuple(index, row_map));
                     }
                     chunk.push((index.index_id.0.clone(), index.clone(), entries));
+                
                 }
+                
                 (start, chunk)
+
             }));
 
         }
@@ -1762,6 +1768,7 @@ fn build_snapshot_index_entries(
         return tracked_indexes
             .iter()
             .filter_map(|index| {
+
                 snapshot
                     .indexes
                     .iter()
@@ -1773,6 +1780,7 @@ fn build_snapshot_index_entries(
                             item.entries.iter().cloned().collect::<AHashSet<_>>(),
                         )
                     })
+
             })
             .collect();
     }
@@ -1799,6 +1807,7 @@ fn build_snapshot_index_entries(
             let indexes = &tracked_indexes[start..end];
 
             handles.push(scope.spawn(move || {
+
                 let mut chunk = Vec::with_capacity(indexes.len());
 
                 for index in indexes {
@@ -1817,6 +1826,7 @@ fn build_snapshot_index_entries(
                 }
 
                 (start, chunk)
+                
             }));
         }
 

@@ -407,15 +407,11 @@ impl DatabaseCatalog {
                 
                 DatabaseEntity::View(view) => Some(DatabaseObjectRef::View(view)),
                 
-                DatabaseEntity::Relationship(relationship) => {
-                    Some(DatabaseObjectRef::Relationship(relationship))
-                }
+                DatabaseEntity::Relationship(relationship) => Some(DatabaseObjectRef::Relationship(relationship)),
                 
                 DatabaseEntity::Trigger(trigger) => Some(DatabaseObjectRef::Trigger(trigger)),
                 
-                DatabaseEntity::StoredProcedure(procedure) => {
-                    Some(DatabaseObjectRef::StoredProcedure(procedure))
-                }
+                DatabaseEntity::StoredProcedure(procedure) => Some(DatabaseObjectRef::StoredProcedure(procedure)),
 
             };
 
@@ -657,6 +653,7 @@ impl DatabaseCatalog {
     ) -> DatabaseResult<()> {
 
         let normalized = common::normalize_identifier!(table_id);
+
         let active = self
             .active_schema_change
             .as_mut()
@@ -866,9 +863,13 @@ impl DatabaseCatalog {
             SqlDefinitionAction::Upsert => {
 
                 let existed_before = match payload.object_kind {
+
                     SqlObjectKind::View => self.view(&object_id).is_some(),
+
                     SqlObjectKind::Trigger => self.trigger(&object_id).is_some(),
+
                     SqlObjectKind::StoredProcedure => self.stored_procedure(&object_id).is_some(),
+
                 };
 
                 let normalized_dependencies = payload
@@ -1055,11 +1056,11 @@ impl DatabaseCatalog {
         ) {
 
             match record.kind {
-                TransactionKind::SchemaChange
-                | TransactionKind::TableLifecycle
-                | TransactionKind::MetadataChange
-                | TransactionKind::SecurityChange
-                | TransactionKind::SqlDefinitionChange => {
+                TransactionKind::SchemaChange |
+                TransactionKind::TableLifecycle |
+                TransactionKind::MetadataChange |
+                TransactionKind::SecurityChange |
+                TransactionKind::SqlDefinitionChange => {
 
                     let decoded = DecodedTransactionPayload::decode(
                         record.kind,

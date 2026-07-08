@@ -27,6 +27,7 @@ where
 
     for (branch_when, value) in branches {
         let branch_matches = match branch_when {
+
             SelectCaseWhen::Condition(condition) => row_matches_condition_with_result(
                 provider,
                 Some(condition),
@@ -39,6 +40,7 @@ where
                 let resolved_expected = resolve_case_value(provider, expected, evaluate_function)?;
                 matches!((&resolved_operand, resolved_expected), (Some(left), Some(right)) if compare_row_value(left, &right, &SelectComparisonOp::Eq))
             }
+            
         };
 
         if branch_matches {

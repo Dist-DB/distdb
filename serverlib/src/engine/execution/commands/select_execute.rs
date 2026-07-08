@@ -634,6 +634,7 @@ fn apply_select_post_processing(
         let mut seen = HashSet::new();
 
         for row in rows {
+
             let key = if visible_indexes.len() == columns.len() {
                 row.clone()
             } else {
@@ -646,6 +647,7 @@ fn apply_select_post_processing(
             if seen.insert(key) {
                 unique_rows.push(row);
             }
+
         }
 
         rows = unique_rows;
@@ -663,6 +665,7 @@ fn apply_select_post_processing(
         }
 
         if !order_indexes.is_empty() {
+
             rows.sort_by(|left, right| {
                 for (index, descending) in &order_indexes {
                     let ordering = left
@@ -676,6 +679,7 @@ fn apply_select_post_processing(
 
                 Ordering::Equal
             });
+
         }
 
     }
@@ -698,8 +702,8 @@ fn ensure_order_by_projection_items(
                 output_name,
             } => field_name == &order_by.field_name || output_name == &order_by.field_name,
             
-            SelectProjectionItem::Case { output_name, .. }
-            | SelectProjectionItem::InbuiltFunction { output_name, .. } => {
+            SelectProjectionItem::Case { output_name, .. } |
+            SelectProjectionItem::InbuiltFunction { output_name, .. } => {
                 output_name == &order_by.field_name
             }
             
@@ -744,12 +748,15 @@ fn strip_hidden_output_columns(
         .iter()
         .enumerate()
         .filter_map(|(index, column)| {
+
             let hidden = column
                 .metadata
                 .as_ref()
                 .map(|metadata| metadata.is_hidden())
                 .unwrap_or(false);
+            
             if hidden { None } else { Some(index) }
+
         })
         .collect::<Vec<_>>();
 
@@ -761,10 +768,12 @@ fn strip_hidden_output_columns(
         .iter()
         .enumerate()
         .filter_map(|(visible_seq, index)| {
+            
             columns.get(*index).cloned().map(|mut column| {
                 column.seqno = (visible_seq + 1) as u32;
                 column
             })
+
         })
         .collect::<Vec<_>>();
 
@@ -836,9 +845,9 @@ fn projection_output_name(projection_item: &SelectProjectionItem) -> String {
 
     match projection_item {
 
-        SelectProjectionItem::Column { output_name, .. }
-        | SelectProjectionItem::Case { output_name, .. }
-        | SelectProjectionItem::InbuiltFunction { output_name, .. } => output_name.clone(),
+        SelectProjectionItem::Column { output_name, .. } |
+        SelectProjectionItem::Case { output_name, .. } |
+        SelectProjectionItem::InbuiltFunction { output_name, .. } => output_name.clone(),
 
         SelectProjectionItem::Wildcard { relation } => relation.clone().unwrap_or_default(),
 
@@ -1036,6 +1045,7 @@ fn case_projection_requires_row_context(
     branches: &[(SelectCaseWhen, crate::engine::sql::SelectExpression)],
     else_value: Option<&crate::engine::sql::SelectExpression>,
 ) -> bool {
+
     if operand.is_some_and(expression_references_column) {
         return true;
     }
@@ -1052,4 +1062,5 @@ fn case_projection_requires_row_context(
 
         branch_references_row || expression_references_column(value)
     })
+    
 }

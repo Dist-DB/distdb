@@ -68,9 +68,11 @@ impl DatabaseEntityAspect for DatabaseRelationship {
     }
 
     fn normalize_in_place(&mut self) {
+
         self.left_table_id = common::normalize_identifier!(&self.left_table_id);
         self.right_table_id = common::normalize_identifier!(&self.right_table_id);
         self.relation_name = common::normalize_identifier!(&self.relation_name);
+        
     }
 
 }

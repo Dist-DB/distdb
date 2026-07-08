@@ -300,22 +300,27 @@ pub fn explain_joined_select_plan_result(read_plan: &SelectReadPlan) -> SelectEx
 }
 
 fn relation_label(relation: &SelectRelation) -> String {
+
     match relation.alias.as_deref() {
+        
         Some(alias) if alias != relation.table_id => {
             format!("{} {}", relation.table_id, alias)
-        }
+        },
+        
         _ => relation.table_id.clone(),
+
     }
+
 }
 
 fn join_kind_label(kind: &SelectJoinKind) -> &'static str {
 
     match kind {
-        SelectJoinKind::Inner => "inner",
-        SelectJoinKind::Left => "left",
-        SelectJoinKind::Right => "right",
-        SelectJoinKind::Full => "full",
-        SelectJoinKind::Cross => "cross",
+        SelectJoinKind::Inner   => "inner",
+        SelectJoinKind::Left    => "left",
+        SelectJoinKind::Right   => "right",
+        SelectJoinKind::Full    => "full",
+        SelectJoinKind::Cross   => "cross",
     }
 
 }
@@ -448,12 +453,15 @@ fn count_subquery_predicates(condition: &SelectCondition) -> usize {
         SelectCondition::Not(child) => count_subquery_predicates(child),
 
         SelectCondition::Predicate(predicate) => match predicate {
-            SelectPredicate::InSubquery { .. }
-            | SelectPredicate::ScalarSubqueryComparison { .. }
-            | SelectPredicate::AnySubqueryComparison { .. }
-            | SelectPredicate::AllSubqueryComparison { .. }
-            | SelectPredicate::Exists { .. } => 1,
+            
+            SelectPredicate::InSubquery { .. } |
+            SelectPredicate::ScalarSubqueryComparison { .. } |
+            SelectPredicate::AnySubqueryComparison { .. } |
+            SelectPredicate::AllSubqueryComparison { .. } |
+            SelectPredicate::Exists { .. } => 1,
+            
             _ => 0,
+
         },
 
     }

@@ -83,9 +83,9 @@ impl DecodedTransactionPayload {
             TransactionKind::TableLifecycle => TableLifecyclePayload::decode_payload(payload)
                 .map(Self::TableLifecycle),
 
-            TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
-                EntityMetadataPayload::decode_payload(payload).map(Self::EntityMetadata)
-            },
+            TransactionKind::MetadataChange | 
+            TransactionKind::SecurityChange => EntityMetadataPayload::decode_payload(payload)
+                .map(Self::EntityMetadata),
 
             TransactionKind::SqlDefinitionChange => SqlDefinitionPayload::decode_payload(payload)
                 .map(Self::SqlDefinition),

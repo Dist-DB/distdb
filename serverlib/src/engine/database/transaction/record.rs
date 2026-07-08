@@ -152,6 +152,7 @@ impl ChainedTransactionPayloadResolver {
 }
 
 impl TransactionPayloadResolver for ChainedTransactionPayloadResolver {
+    
     fn resolve_payload(
         &self,
         raw_payload: Option<&[u8]>,
@@ -165,9 +166,11 @@ impl TransactionPayloadResolver for ChainedTransactionPayloadResolver {
         let mut current = Cow::Borrowed(payload);
 
         for transform in &self.transforms {
+            
             if let Some(transformed) = transform.transform_payload(current.as_ref(), context)? {
                 current = Cow::Owned(transformed);
             }
+
         }
 
         match current {
@@ -467,12 +470,16 @@ pub fn decode_wal_frame(encoded: &str) -> Result<(String, TransactionRecord), St
     let mut i = 0usize;
 
     while i < chars.len() {
+
         let chunk = std::str::from_utf8(&chars[i..i + 2])
             .map_err(|err| format!("invalid WAL frame utf8: {}", err))?;
+
         let value = u8::from_str_radix(chunk, 16)
             .map_err(|err| format!("invalid WAL frame hex '{}': {}", chunk, err))?;
+
         bytes.push(value);
         i += 2;
+
     }
 
     bincode::deserialize::<(String, TransactionRecord)>(&bytes)

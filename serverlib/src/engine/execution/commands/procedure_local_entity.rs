@@ -149,8 +149,8 @@ impl ProcedureLocalEntityScope {
 
             match entity {
 
-                ProcedureLocalEntity::Variable { value }
-                | ProcedureLocalEntity::Argument { value } => {
+                ProcedureLocalEntity::Variable { value } |
+                ProcedureLocalEntity::Argument { value } => {
                     values.insert(name.clone(), value.clone());
                 },
 
