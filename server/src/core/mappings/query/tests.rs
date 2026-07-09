@@ -7,6 +7,7 @@ use serverlib::{
     ConcurrentWalManager, FieldDef, FieldIndex, FieldType, RuntimeIndexStore, TableSchema,
     TransactionId, TransactionKind,
 };
+use serverlib::engine::security::AccountPrivilege;
 
 use super::*;
 
@@ -49,6 +50,13 @@ fn query_result_columns(response: connector::ConnectorResponse) -> Vec<connector
 
     result.columns
     
+}
+
+fn expected_os_user_identity() -> String {
+    std::env::var("USER")
+        .ok()
+        .map(|user| format!("{}@localhost", user))
+        .unwrap_or_else(|| "root@localhost".to_string())
 }
 
 #[test]
@@ -2719,6 +2727,193 @@ fn union_query_deduplicates_case_insensitively_under_ci_collation() {
         Some("root@localhost".to_string()),
     ));
     assert_eq!(columns[0].metadata.as_ref().and_then(|metadata| metadata.collation.as_deref()), Some("utf8mb4_general_ci"));
+}
+
+#[test]
+fn select_user_returns_current_logged_in_session_user() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-user-runtime",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select user()".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-user-fn",
+        42,
+        Some("alice@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec![expected_os_user_identity()]]);
+}
+
+#[test]
+fn select_session_user_defaults_to_root_without_session_identity() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-session-user-default",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select session_user()".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-user-fn",
+        42,
+        None,
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["root".to_string()]]);
+}
+
+#[test]
+fn select_session_user_returns_explicit_session_identity() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-session-user-explicit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select session_user()".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-user-fn",
+        42,
+        Some("alice@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["alice".to_string()]]);
+}
+
+#[test]
+fn show_user_returns_current_logged_in_session_user() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-show-user-runtime",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show user()".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-user-fn",
+        42,
+        Some("alice@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec![expected_os_user_identity()]]);
+}
+
+#[test]
+fn show_user_without_parentheses_returns_current_logged_in_session_user() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-show-user-runtime-bare",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show user;".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-user-fn",
+        42,
+        Some("alice@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec![expected_os_user_identity()]]);
+}
+
+#[test]
+fn show_privileges_returns_effective_privilege_state() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let mut acl = serverlib::AccountAclEntry::new(serverlib::UserId("alice".to_string()), "main");
+    acl.append_privilege(AccountPrivilege::Select);
+    acl.append_grant_option_for_privilege(AccountPrivilege::Select);
+    acl.append_privilege(AccountPrivilege::Update);
+    catalog.upsert_account_acl_entry(acl);
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-show-privileges",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show privileges".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-user-fn",
+        42,
+        Some("alice@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert!(rows.iter().any(|row| {
+        row == &vec![
+            "alice".to_string(),
+            "*".to_string(),
+            "*".to_string(),
+        ]
+    }));
 }
 
 #[test]

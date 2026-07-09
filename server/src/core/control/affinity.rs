@@ -26,75 +26,6 @@ pub struct AffinityStartupConfig {
 
 pub fn parse_server_list_from_args(args: &[String]) -> Vec<String> {
 
-#[cfg(test)]
-mod tests {
-    
-    use super::*;
-
-    #[test]
-    fn parse_server_list_from_args_dedups_and_normalizes() {
-        let args = vec![
-            "server".to_string(),
-            "servers=127.0.0.1:9400,node.local:9400,127.0.0.1:9400".to_string(),
-        ];
-
-        let parsed = parse_server_list_from_args(&args);
-
-        assert_eq!(
-            parsed,
-            vec![
-                "/ip4/127.0.0.1/tcp/9400".to_string(),
-                "/dns/node.local/tcp/9400".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_affinity_startup_config_parses_key_colon_password() {
-        let args = vec![
-            "server".to_string(),
-            "affinity=team-a:secret".to_string(),
-        ];
-
-        let cfg = parse_affinity_startup_config(&args).expect("config should parse");
-        assert_eq!(cfg.affinity_id, "team-a");
-        assert!(!cfg.affinity_key.is_empty());
-
-        let missing_password = vec!["server".to_string(), "affinity=team-a".to_string()];
-        assert!(parse_affinity_startup_config(&missing_password).is_none());
-
-        let empty_spec = vec!["server".to_string(), "affinity=:".to_string()];
-        assert!(parse_affinity_startup_config(&empty_spec).is_none());
-    }
-
-    #[test]
-    fn build_affinity_document_snapshot_includes_local_and_discovered_nodes() {
-        let cfg = AffinityStartupConfig {
-            affinity_id: "team-a".to_string(),
-            affinity_key: "k1".to_string(),
-        };
-        let local_node = PeerNode {
-            id: "sam01".to_string(),
-            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
-            is_local: true,
-        };
-        let discovered = vec![PeerNode {
-            id: "sam02".to_string(),
-            addrs: vec!["/ip4/127.0.0.1/tcp/4002".to_string()],
-            is_local: false,
-        }];
-
-        let doc = build_affinity_document_snapshot(&cfg, &local_node, discovered);
-        assert_eq!(doc.affinity_id, "team-a");
-        assert_eq!(doc.members.len(), 2);
-        assert!(doc
-            .members
-            .iter()
-            .any(|member| member.node_id.0 == "sam01" && member.status == AffinityMemberStatus::Online));
-        assert!(doc.members.iter().any(|member| member.node_id.0 == "sam02"));
-    }
-}
-
     let server_entries = args
         .iter()
         .find_map(|arg| arg.strip_prefix("servers=").map(ToOwned::to_owned))
@@ -108,6 +39,7 @@ mod tests {
 
     let mut seen = std::collections::HashSet::new();
     let mut server_list = Vec::new();
+
     for addr in server_entries {
         if seen.insert(addr.clone()) {
             server_list.push(addr);
@@ -115,6 +47,7 @@ mod tests {
     }
 
     server_list
+
 }
 
 pub fn parse_affinity_startup_config(args: &[String]) -> Option<AffinityStartupConfig> {
@@ -191,6 +124,7 @@ pub fn build_affinity_document_snapshot(
 }
 
 pub fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<DatabaseSchemaSummary> {
+
     let mut summaries = app
         .catalogs()
         .values()
@@ -215,6 +149,7 @@ pub fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<Database
 
     summaries.sort_by(|a, b| a.database_id.cmp(&b.database_id));
     summaries
+
 }
 
 pub fn send_affinity_join_requests(
@@ -222,9 +157,11 @@ pub fn send_affinity_join_requests(
     local_node: &PeerNode,
     discovered_peers: &[PeerNode],
 ) -> Vec<AffinityJoinResponse> {
+
     let mut responses = Vec::new();
 
     for peer in discovered_peers {
+
         let request_id = format!(
             "{}_{}",
             local_node.id,
@@ -246,6 +183,7 @@ pub fn send_affinity_join_requests(
         let mut delivered = false;
 
         for peer_addr in &peer.addrs {
+
             let Some(socket_addr) = multiaddr_to_socket_addr(peer_addr) else {
                 continue;
             };
@@ -292,6 +230,7 @@ pub fn send_affinity_join_requests(
                     );
                 }
             }
+
         }
 
         if !delivered {
@@ -300,22 +239,27 @@ pub fn send_affinity_join_requests(
                 peer.id
             );
         }
+
     }
 
     responses
+
 }
 
 pub fn merge_affinity_documents_from_responses(
     base_document: &mut AffinityDocument,
     responses: Vec<AffinityJoinResponse>,
 ) {
+
     for response in responses {
+
         if !response.ok {
             log::warn!("affinity join response failed: {:?}", response.error);
             continue;
         }
 
         if let Some(remote_doc) = response.document {
+
             let remote_doc = wire_affinity_document_to_domain(&remote_doc);
             let member_count = remote_doc.members.len();
             let database_count = remote_doc.databases.len();
@@ -333,8 +277,11 @@ pub fn merge_affinity_documents_from_responses(
                 member_count,
                 database_count
             );
+
         }
+
     }
+
 }
 
 pub async fn execute_affinity_join_sequence(
@@ -484,8 +431,14 @@ pub fn initialize_affinity_with_persistence(
 }
 
 fn now_millis() -> u64 {
+    
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+
 }
+
+#[cfg(test)]
+#[path = "affinity_test.rs"]
+mod tests;

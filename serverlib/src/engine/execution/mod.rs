@@ -25,7 +25,8 @@ pub use access::{
 
 pub use join::build_joined_row_tuples;
 pub use introspection::{
-    describe_sql_object_result, describe_table_result, show_databases_result, show_tables_result,
+    describe_sql_object_result, describe_table_result, show_databases_result,
+    show_privileges_result, show_tables_result,
 };
 pub use mutation::select_mutation_target_rows;
 pub use commands::{

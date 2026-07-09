@@ -1,9 +1,14 @@
 use common::helpers::format::FileKind;
 use common::helpers::list_files;
-use serverlib::{DatabaseCatalog, DatabaseId};
+use serverlib::engine::database::transaction::TransactionLog;
+use serverlib::{DatabaseCatalog, DatabaseId, TransactionKind};
 use std::time::Instant;
 
 use crate::core::app::ServerApp;
+use crate::core::control::session::{
+    apply_bootstrap_password_wal_payload,
+    configure_bootstrap_crypto_context,
+};
 use crate::helpers::ServerAppError;
 
 const DEFAULT_SYSTEM_DATABASE: &str = "main";
@@ -43,7 +48,9 @@ impl ServerApp {
                 .ok_or_else(|| ServerAppError::Runtime("invalid catalog file name".to_string()))?;
 
             let catalog = match DatabaseCatalog::load_from_path(&file) {
+
                 Ok(catalog) => catalog,
+
                 Err(_) => {
                     log::warn!(
                         "catalog '{}' could not be deserialized; loading empty catalog from file stem",
@@ -51,6 +58,7 @@ impl ServerApp {
                     );
                     DatabaseCatalog::from_file_stem(stem)
                 }
+
             };
 
             let table_ids = catalog.table_ids();
@@ -75,6 +83,7 @@ impl ServerApp {
                 .any(|catalog| catalog.database_name() == DEFAULT_SYSTEM_DATABASE);
 
         if !default_system_database_loaded {
+
             let catalog = DatabaseCatalog::create_new_database(
                 DEFAULT_SYSTEM_DATABASE,
                 &self.node_data_dir,
@@ -93,6 +102,7 @@ impl ServerApp {
             );
 
             self.catalogs.insert(catalog.database_id.0.clone(), catalog);
+
         } else {
             log::info!(
                 "default system catalog '{}' already present in loaded catalogs",
@@ -141,6 +151,9 @@ impl ServerApp {
 
         }
 
+        let replayed_security_changes = self.replay_bootstrap_security_from_wal()?;
+        replayed_transactions += replayed_security_changes;
+
         let replayed_table_count = self
             .catalogs
             .values()
@@ -157,6 +170,34 @@ impl ServerApp {
 
         Ok(())
 
+    }
+
+    fn replay_bootstrap_security_from_wal(&self) -> Result<usize, ServerAppError> {
+
+        let mut applied = 0usize;
+        let first_wal_ts = self.first_wal_record_timestamp_for_database("main");
+
+        configure_bootstrap_crypto_context(self.config.node_id.clone(), first_wal_ts);
+
+        for catalog in self.catalogs.values() {
+
+            let wal_id = &catalog.database_id.0;
+
+            for record in self.wal.since_kinds(wal_id, None, &[TransactionKind::SecurityChange]) {
+
+                let Some(payload) = record.payload_logical() else {
+                    continue;
+                };
+
+                apply_bootstrap_password_wal_payload(payload).map_err(ServerAppError::Runtime)?;
+                applied += 1;
+            
+            }
+
+        }
+
+        Ok(applied)
+        
     }
     
 }

@@ -381,6 +381,28 @@ fn show_tables_from_database_maps_to_retrieve_operation() {
 }
 
 #[test]
+fn show_privileges_maps_to_retrieve_operation() {
+    let requests = parse_mysql8_sql_requests("show privileges", "main")
+        .expect("show privileges should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::Select);
+    assert!(requests[0].object_name.is_none());
+}
+
+#[test]
+fn show_priviledges_misspelling_maps_to_retrieve_operation() {
+    let requests = parse_mysql8_sql_requests("show priviledges", "main")
+        .expect("show priviledges should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::Select);
+    assert!(requests[0].object_name.is_none());
+}
+
+#[test]
 fn start_transaction_maps_to_alter_schema_other_operation() {
     let requests = parse_mysql8_sql_requests("start transaction", "main")
         .expect("start transaction should parse");

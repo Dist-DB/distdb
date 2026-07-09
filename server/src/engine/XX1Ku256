@@ -60,7 +60,6 @@ pub fn run_wal_probe(wal: &ConcurrentWalManager) -> Result<WalProbeResult, &'sta
     })
 }
 
-
 #[cfg(test)]
 #[path = "wal_probe_test.rs"]
 mod tests;

@@ -176,18 +176,23 @@ fn inbuilt_runtime_context_for_query(
     session_user: Option<String>,
 ) -> InbuiltSqlRuntimeContext {
 
-    let user = session_user.unwrap_or_else(|| {
-        std::env::var("USER")
-            .ok()
-            .map(|user| format!("{}@localhost", user))
-            .unwrap_or_else(|| "root@localhost".to_string())
-    });
+    let system_user = std::env::var("USER")
+        .ok()
+        .map(|user| format!("{}@localhost", user))
+        .unwrap_or_else(|| "root@localhost".to_string());
+
+    let current_user = std::env::var("USER")
+        .ok()
+        .map(|user| format!("{}@localhost", user))
+        .unwrap_or_else(|| "root@localhost".to_string());
+
+    let session_user = session_user.unwrap_or_else(|| "root".to_string());
 
     InbuiltSqlRuntimeContext {
         current_database: Some(query.database_id.clone()),
-        current_user: Some(user.clone()),
-        session_user: Some(user.clone()),
-        system_user: Some(user),
+        current_user: Some(current_user),
+        session_user: Some(session_user),
+        system_user: Some(system_user),
         connection_id: Some(connection_id as i64),
         last_insert_id: None,
         version: None,

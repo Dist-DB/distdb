@@ -113,9 +113,13 @@ pub(super) fn runtime_current_user() -> String {
 
 pub(super) fn runtime_session_user() -> String {
     let context = inbuilt_sql_runtime_context();
-    context
+    let raw = context
         .session_user
-        .unwrap_or_else(runtime_current_user)
+        .unwrap_or_else(runtime_current_user);
+
+    raw.split_once('@')
+        .map(|(user_id, _)| user_id.to_string())
+        .unwrap_or(raw)
 }
 
 pub(super) fn runtime_system_user() -> String {

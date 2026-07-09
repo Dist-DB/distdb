@@ -8,7 +8,14 @@ use crate::core::control::outbound_transport::send_service_message_to_addr;
 use crate::core::control::schema_catalog::{
     build_schema_definitions_for_database, resolve_schema_catalog, schema_catalog_signature,
 };
-use crate::core::control::session::{extract_auth_token, ServerConnectionSession};
+use crate::core::control::session::{
+    apply_bootstrap_password_wal_payload,
+    configure_bootstrap_crypto_context,
+    encode_set_password_wal_payload,
+    extract_auth_token,
+    extract_set_password_directive,
+    ServerConnectionSession,
+};
 use crate::core::control::tcp_transport::TcpServerTransport;
 use crate::core::control::tls_support::BoxedConnectorStream;
 use crate::core::control::wire_io::{write_response_frame, write_service_message_to_stream};
@@ -48,6 +55,21 @@ const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
 const SERVER_BOOTSTRAP_STATUS_SQL: &str = "__distdb_bootstrap_status__";
 const SERVER_SHOW_ENTITIES_SQL: &str = "__distdb_show_entities__";
 const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
+
+async fn append_set_password_wal_record(
+    app: &Arc<RwLock<ServerApp>>,
+    database_hint: &str,
+    actor_user_id: &str,
+    payload: Vec<u8>,
+) -> Result<(), String> {
+
+    let app_read = app.read().await;
+
+    let wal_id = app_read.resolve_catalog_wal_stream_for_database(database_hint);
+
+    app_read.append_security_change_record(&wal_id, actor_user_id, payload)
+
+}
 
 async fn rollback_active_session_transaction(
     app: &Arc<RwLock<ServerApp>>,
@@ -291,6 +313,7 @@ struct CatalogWorkerHandle {
 struct CatalogDispatchMessage {
     request: ConnectorRequest,
     session_id: String,
+    user_id: String,
     connection_id: usize,
     access_mode: CatalogAccessMode,
     response_tx: oneshot::Sender<ConnectorResponse>,
@@ -412,6 +435,7 @@ impl CatalogDispatcher {
                             &app,
                             &message.request,
                             &message.session_id,
+                            &message.user_id,
                             message.connection_id,
                             message.access_mode,
                         )
@@ -424,6 +448,7 @@ impl CatalogDispatcher {
                             &app,
                             &message.request,
                             &message.session_id,
+                            &message.user_id,
                             message.connection_id,
                             message.access_mode,
                         )
@@ -461,6 +486,7 @@ impl CatalogDispatcher {
         catalog_id: &str,
         request: ConnectorRequest,
         session_id: String,
+        user_id: String,
         connection_id: usize,
     ) -> Result<ConnectorResponse, String> {
 
@@ -480,6 +506,7 @@ impl CatalogDispatcher {
             .send(CatalogDispatchMessage {
                 request,
                 session_id,
+                user_id,
                 connection_id,
                 access_mode,
                 response_tx,
@@ -594,6 +621,7 @@ fn explicit_catalog_ids_from_query_sql(sql: &str) -> HashSet<String> {
 async fn maybe_dispatch_multi_catalog_query(
     request: &ConnectorRequest,
     session_id: &str,
+    user_id: &str,
     connection_id: usize,
     catalog_dispatcher: &Arc<CatalogDispatcher>,
 ) -> Option<ConnectorResponse> {
@@ -642,11 +670,13 @@ async fn maybe_dispatch_multi_catalog_query(
                 &catalog_id,
                 routed,
                 session_id.to_string(),
+                user_id.to_string(),
                 connection_id,
             )
             .await
         {
             Ok(response) => response,
+
             Err(err) => {
                 return Some(ConnectorResponse::rejected(
                     request.request_id.clone(),
@@ -657,9 +687,11 @@ async fn maybe_dispatch_multi_catalog_query(
                     ),
                 ));
             }
+
         };
 
         if !matches!(response.status, connector::ResponseStatus::Applied) {
+            
             return Some(ConnectorResponse::rejected(
                 request.request_id.clone(),
                 format!(
@@ -668,9 +700,11 @@ async fn maybe_dispatch_multi_catalog_query(
                     response.status
                 ),
             ));
+
         }
 
         let ConnectorResult::Query(result) = response.result else {
+
             return Some(ConnectorResponse::rejected(
                 request.request_id.clone(),
                 format!(
@@ -678,15 +712,20 @@ async fn maybe_dispatch_multi_catalog_query(
                     catalog_id
                 ),
             ));
+
         };
 
         if let Some(columns) = &merged_columns {
+
             if columns != &result.columns {
+
                 return Some(ConnectorResponse::rejected(
                     request.request_id.clone(),
                     "multi-catalog query produced mismatched schemas across catalogs",
                 ));
+
             }
+
         } else {
             merged_columns = Some(result.columns.clone());
         }
@@ -799,6 +838,7 @@ async fn execute_app_request_for_session(
     app: &Arc<RwLock<ServerApp>>,
     request: &ConnectorRequest,
     session_id: &str,
+    user_id: &str,
     connection_id: usize,
     access_mode: CatalogAccessMode,
 ) -> ConnectorResponse {
@@ -816,7 +856,7 @@ async fn execute_app_request_for_session(
         app.init_session(
             session_id.to_string(),
             connection_id,
-            "root".to_string(),
+            user_id.to_string(),
         );
     }
 
@@ -964,11 +1004,12 @@ fn request_allowed_during_bootstrap(request: &ConnectorRequest) -> bool {
     match &request.command {
 
         ConnectorCommand::Query { query } => {
-            is_server_peer_discovery_query(&query.sql)
-                || is_bootstrap_status_query(&query.sql)
-                || is_show_entities_query(&query.sql)
-                || is_show_catalog_workers_query(&query.sql)
-                || extract_auth_token(&query.sql).is_some()
+            is_server_peer_discovery_query(&query.sql) ||
+            is_bootstrap_status_query(&query.sql) ||
+            is_show_entities_query(&query.sql) ||
+            is_show_catalog_workers_query(&query.sql) ||
+            extract_set_password_directive(&query.sql).is_some() ||
+            extract_auth_token(&query.sql).is_some()
         },
 
         _ => false,
@@ -1008,6 +1049,7 @@ pub async fn maybe_show_catalog_workers_response(
     } else {
 
         for stat in stats {
+
             rows.push(vec![
                 stat.catalog_id.into_bytes(),
                 stat.queue_depth.to_string().into_bytes(),
@@ -1016,6 +1058,7 @@ pub async fn maybe_show_catalog_workers_response(
                 b"running".to_vec(),
                 if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
             ]);
+
         }
 
     }
@@ -1355,11 +1398,13 @@ pub async fn maybe_show_entities_response(
     };
 
     for resolved_database_id in target_database_ids {
+
         let Some(catalog) = app.catalogs().get(&resolved_database_id) else {
             continue;
         };
 
         append_catalog_entity_rows(&mut rows, &resolved_database_id, catalog, bootstrap_ready);
+
     }
 
     let response = ConnectorResponse::applied(
@@ -1574,6 +1619,12 @@ pub async fn handle_connector_stream(
     connection_id: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
+    {
+        let app_read = app.read().await;
+        let first_wal_ts = app_read.first_wal_record_timestamp_for_database("main");
+        configure_bootstrap_crypto_context(local_node.id.0.clone(), first_wal_ts);
+    }
+
     let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
 
     if let Err(err) = write_response_frame(
@@ -1625,29 +1676,37 @@ pub async fn handle_connector_stream(
             };
 
             let response = if let Some(_req) = decode_ca_bootstrap_request(&payload) {
+                
                 match serverlib::load_p2p_ca_pem(&node_data_dir) {
+
                     Ok(Some(ca_cert_pem)) => CaBootstrapResponse {
                         ok: true,
                         ca_cert_pem: Some(ca_cert_pem),
                         error: None,
                     },
+
                     Ok(None) => CaBootstrapResponse {
                         ok: false,
                         ca_cert_pem: None,
                         error: Some("no CA cert is available on this node".to_string()),
                     },
+
                     Err(err) => CaBootstrapResponse {
                         ok: false,
                         ca_cert_pem: None,
                         error: Some(format!("failed loading CA cert: {err}")),
                     },
+
                 }
+
             } else {
+
                 CaBootstrapResponse {
                     ok: false,
                     ca_cert_pem: None,
                     error: Some("malformed CA bootstrap request".to_string()),
                 }
+
             };
 
             if let Some(encoded) = encode_ca_bootstrap_response(&response) {
@@ -1700,19 +1759,22 @@ pub async fn handle_connector_stream(
                 };
 
                 match import_p2p_ca_pem_if_missing(&node_data_dir, &distribution.ca_cert_pem) {
+
                     Ok(true) => {
                         log::info!(
                             "imported p2p CA certificate from issuer_node_id={} via peer={}",
                             distribution.issuer_node_id,
                             peer_addr
                         );
-                    }
+                    },
+
                     Ok(false) => {
                         log::debug!(
                             "ignored p2p CA distribution from issuer_node_id={} because local CA already exists",
                             distribution.issuer_node_id
                         );
-                    }
+                    },
+
                     Err(err) => {
                         log::warn!(
                             "failed importing p2p CA distribution from issuer_node_id={}: {}",
@@ -1720,6 +1782,7 @@ pub async fn handle_connector_stream(
                             err
                         );
                     }
+
                 }
 
                 session.mark_disconnect();
@@ -1766,6 +1829,7 @@ pub async fn handle_connector_stream(
                 };
 
                 let response = match sign_tls_enrollment_csr(&node_data_dir, &enroll_req.csr_pem) {
+
                     Ok((node_cert_pem, ca_cert_pem)) => TlsCertEnrollResponse {
                         request_id: enroll_req.request_id.clone(),
                         ok: true,
@@ -1773,6 +1837,7 @@ pub async fn handle_connector_stream(
                         node_cert_pem: Some(node_cert_pem),
                         ca_cert_pem: Some(ca_cert_pem),
                     },
+
                     Err(err) => TlsCertEnrollResponse {
                         request_id: enroll_req.request_id.clone(),
                         ok: false,
@@ -1780,9 +1845,11 @@ pub async fn handle_connector_stream(
                         node_cert_pem: None,
                         ca_cert_pem: None,
                     },
+
                 };
 
                 let response_message = ServiceMessage::TlsCertEnrollResponse(response);
+
                 if let Err(err) = write_service_message_to_stream(&mut stream, &response_message).await {
                     log::warn!(
                         "failed sending tls enrollment response to {}: {}",
@@ -2338,9 +2405,74 @@ pub async fn handle_connector_stream(
 
         }
 
+        if let ConnectorCommand::Query { query } = &request.command {
+
+            if let Some(set_password) = extract_set_password_directive(&query.sql) {
+                
+                let database_hint = if query.database_id.trim().is_empty() {
+                    "main"
+                } else {
+                    query.database_id.as_str()
+                };
+
+                let response = match encode_set_password_wal_payload(
+                    set_password.user_id,
+                    set_password.password,
+                ) {
+                    Ok(payload) => {
+                        let append_result = append_set_password_wal_record(
+                            &app,
+                            database_hint,
+                            session.user_id(),
+                            payload.clone(),
+                        )
+                        .await;
+
+                        match append_result {
+                            Ok(()) => match apply_bootstrap_password_wal_payload(&payload) {
+                                Ok(()) => ConnectorResponse::applied(
+                                    request.request_id,
+                                    ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+                                ),
+                                Err(message) => ConnectorResponse::rejected(request.request_id, message),
+                            },
+                            Err(message) => ConnectorResponse::rejected(request.request_id, message),
+                        }
+                    }
+                    Err(message) => ConnectorResponse::rejected(request.request_id, message),
+                };
+
+                if let Err(err) = write_response_frame(&mut stream, response).await {
+                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+                    return Err(err);
+                }
+
+                continue;
+
+            }
+
+            if extract_auth_token(&query.sql).is_some() {
+
+                let response = ConnectorResponse::applied(
+                    request.request_id,
+                    ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+                );
+
+                if let Err(err) = write_response_frame(&mut stream, response).await {
+                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+                    return Err(err);
+                }
+
+                continue;
+
+            }
+
+        }
+
         if !bootstrap_ready.load(Ordering::SeqCst)
             && !request_allowed_during_bootstrap(&request)
         {
+
             let response = ConnectorResponse::rejected(
                 request.request_id.clone(),
                 "server is bootstrapping; limited session mode allows only password setup, server peer discovery, entity status (`show entities;`), catalog worker status (`show catalog workers;`), and bootstrap status (`show bootstrap status;`)".to_string(),
@@ -2358,6 +2490,7 @@ pub async fn handle_connector_stream(
             );
 
             continue;
+            
         }
 
         session.record_request(&request);
@@ -2365,6 +2498,7 @@ pub async fn handle_connector_stream(
         let response = if let Some(response) = maybe_dispatch_multi_catalog_query(
             &request,
             &session.session_id,
+            session.user_id(),
             connection_id,
             &catalog_dispatcher,
         )
@@ -2380,6 +2514,7 @@ pub async fn handle_connector_stream(
                     &catalog_id,
                     request.clone(),
                     session.session_id.clone(),
+                    session.user_id().to_string(),
                     connection_id,
                 )
                 .await
@@ -2397,6 +2532,7 @@ pub async fn handle_connector_stream(
                 &app,
                 &request,
                 &session.session_id,
+                session.user_id(),
                 connection_id,
                 classify_catalog_access_mode(&request),
             )
@@ -2447,617 +2583,7 @@ pub async fn handle_connector_stream(
 
 }
 
+
 #[cfg(test)]
-mod tests {
-
-    use super::*;
-    use crate::core::config::ServerRuntimeConfig;
-    use connector::ResponseStatus;
-    use serverlib::DatabaseId;
-
-    fn unique_test_data_dir(prefix: &str) -> std::path::PathBuf {
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock should be after unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), suffix))
-    }
-
-    fn request(request_id: &str, command: ConnectorCommand) -> ConnectorRequest {
-        ConnectorRequest {
-            request_id: request_id.to_string(),
-            command,
-        }
-    }
-
-    fn ensure_applied(response: &ConnectorResponse, context: &str) {
-        assert!(
-            matches!(response.status, ResponseStatus::Applied),
-            "{}: expected applied, got {:?}",
-            context,
-            response
-        );
-    }
-
-    fn seed_catalog(
-        app: &mut ServerApp,
-        session_id: &str,
-        database_name: &str,
-        create_table_sql: &str,
-        insert_sqls: Vec<String>,
-    ) -> String {
-
-        ensure_applied(
-            &app.handle_connector_request_for_session(
-                &request(
-                    &format!("create-db-{}", database_name),
-                    ConnectorCommand::CreateDatabase {
-                        database_name: database_name.to_string(),
-                    },
-                ),
-                session_id,
-            ),
-            "create database",
-        );
-
-        let database_id = DatabaseId::from_database_name(database_name)
-            .expect("database id should be valid")
-            .0;
-
-        ensure_applied(
-            &app.handle_connector_request_for_session(
-                &request(
-                    &format!("create-table-{}", database_name),
-                    ConnectorCommand::Query {
-                        query: connector::DataQuery {
-                            database_id: database_id.clone(),
-                            sql: create_table_sql.to_string(),
-                        },
-                    },
-                ),
-                session_id,
-            ),
-            "create table",
-        );
-
-        for (idx, sql) in insert_sqls.into_iter().enumerate() {
-
-            ensure_applied(
-                &app.handle_connector_request_for_session(
-                    &request(
-                        &format!("insert-{}-{}", database_name, idx),
-                        ConnectorCommand::Query {
-                            query: connector::DataQuery {
-                                database_id: database_id.clone(),
-                                sql,
-                            },
-                        },
-                    ),
-                    session_id,
-                ),
-                "insert row",
-            );
-
-        }
-
-        database_id
-
-    }
-
-    #[tokio::test]
-    async fn multi_catalog_query_fanout_merges_rows() {
-
-        let data_dir = unique_test_data_dir("distdb-multi-cat-merge");
-        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
-        let mut app = ServerApp::new(config).expect("server app should initialize");
-        let session_id = "session-multi";
-        app.init_session(session_id.to_string(), 1, "root".to_string());
-
-        let db_a = seed_catalog(
-            &mut app,
-            session_id,
-            "alpha",
-            "create table users (name text)",
-            vec!["insert into users (name) values ('alice')".to_string()],
-        );
-
-        let db_b = seed_catalog(
-            &mut app,
-            session_id,
-            "beta",
-            "create table users (name text)",
-            vec!["insert into users (name) values ('bob')".to_string()],
-        );
-
-        let app = Arc::new(RwLock::new(app));
-        let dispatcher = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
-
-        let request = request(
-            "multi-read",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: format!(
-                        "select name from users /* from {}.users join {}.users */",
-                        db_a,
-                        db_b
-                    ),
-                },
-            },
-        );
-
-        let response = maybe_dispatch_multi_catalog_query(&request, session_id, 1, &dispatcher)
-            .await
-            .expect("multi-catalog coordinator should handle request");
-
-        assert!(matches!(response.status, ResponseStatus::Applied));
-
-        let ConnectorResult::Query(result) = response.result else {
-            panic!("expected query result");
-        };
-
-        let mut values = result
-            .rows
-            .iter()
-            .filter_map(|row| row.first())
-            .map(|value| String::from_utf8_lossy(value).to_string())
-            .collect::<Vec<_>>();
-        values.sort();
-
-        let mut unique = values.clone();
-        unique.dedup();
-
-        assert_eq!(unique, vec!["alice".to_string(), "bob".to_string()]);
-        assert!(values.len() >= 2, "expected at least two merged rows");
-
-    }
-
-    #[tokio::test]
-    async fn multi_catalog_query_rejects_schema_mismatch() {
-
-        let data_dir = unique_test_data_dir("distdb-multi-cat-mismatch");
-        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
-        let mut app = ServerApp::new(config).expect("server app should initialize");
-        let session_id = "session-mismatch";
-        app.init_session(session_id.to_string(), 1, "root".to_string());
-
-        let db_a = seed_catalog(
-            &mut app,
-            session_id,
-            "gamma",
-            "create table users (name text)",
-            vec!["insert into users (name) values ('alice')".to_string()],
-        );
-
-        let db_b = seed_catalog(
-            &mut app,
-            session_id,
-            "delta",
-            "create table users (name text, age bigint)",
-            vec!["insert into users (name, age) values ('bob', 42)".to_string()],
-        );
-
-        let app = Arc::new(RwLock::new(app));
-        let dispatcher = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
-
-        let request = request(
-            "multi-mismatch",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: format!(
-                        "select * from users /* from {}.users join {}.users */",
-                        db_a,
-                        db_b
-                    ),
-                },
-            },
-        );
-
-        let response = maybe_dispatch_multi_catalog_query(&request, session_id, 1, &dispatcher)
-            .await
-            .expect("multi-catalog coordinator should handle request");
-
-        assert!(matches!(response.status, ResponseStatus::Rejected));
-
-        let ConnectorResult::Error(message) = response.result else {
-            panic!("expected error result");
-        };
-
-        assert!(
-            message.contains("mismatched schemas"),
-            "expected mismatch error, got: {}",
-            message
-        );
-
-    }
-
-    #[tokio::test]
-    async fn multi_catalog_query_rejects_write_statement() {
-
-        let data_dir = unique_test_data_dir("distdb-multi-cat-write");
-        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
-        let app = Arc::new(RwLock::new(
-            ServerApp::new(config).expect("server app should initialize"),
-        ));
-        let dispatcher = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
-
-        let request = request(
-            "multi-write",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: "update users set name = 'x' /* from a.users join b.users */".to_string(),
-                },
-            },
-        );
-
-        let response = maybe_dispatch_multi_catalog_query(&request, "session-write", 1, &dispatcher)
-            .await
-            .expect("multi-catalog coordinator should handle request");
-
-        assert!(matches!(response.status, ResponseStatus::Rejected));
-
-        let ConnectorResult::Error(message) = response.result else {
-            panic!("expected error result");
-        };
-
-        assert!(
-            message.contains("read-only queries only"),
-            "expected write rejection, got: {}",
-            message
-        );
-
-    }
-
-    #[tokio::test]
-    async fn policy_snapshot_multi_catalog_write_rejection_message() {
-
-        let data_dir = unique_test_data_dir("distdb-policy-snapshot-write");
-        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
-        let app = Arc::new(RwLock::new(
-            ServerApp::new(config).expect("server app should initialize"),
-        ));
-        let dispatcher = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
-
-        let request = request(
-            "policy-write",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: "update users set name = 'x' /* from a.users join b.users */".to_string(),
-                },
-            },
-        );
-
-        let response = maybe_dispatch_multi_catalog_query(&request, "session-policy", 1, &dispatcher)
-            .await
-            .expect("multi-catalog coordinator should handle request");
-
-        let ConnectorResult::Error(message) = response.result else {
-            panic!("expected error result");
-        };
-
-        assert_eq!(
-            message,
-            "multi-catalog coordination currently supports read-only queries only"
-        );
-
-    }
-
-    #[tokio::test]
-    async fn policy_snapshot_multi_catalog_schema_mismatch_message() {
-
-        let data_dir = unique_test_data_dir("distdb-policy-snapshot-mismatch");
-        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
-        let mut app = ServerApp::new(config).expect("server app should initialize");
-        let session_id = "session-policy-mismatch";
-        app.init_session(session_id.to_string(), 1, "root".to_string());
-
-        let db_a = seed_catalog(
-            &mut app,
-            session_id,
-            "policy_gamma",
-            "create table users (name text)",
-            vec!["insert into users (name) values ('alice')".to_string()],
-        );
-
-        let db_b = seed_catalog(
-            &mut app,
-            session_id,
-            "policy_delta",
-            "create table users (name text, age bigint)",
-            vec!["insert into users (name, age) values ('bob', 42)".to_string()],
-        );
-
-        let app = Arc::new(RwLock::new(app));
-        let dispatcher = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
-
-        let request = request(
-            "policy-mismatch",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: format!(
-                        "select * from users /* from {}.users join {}.users */",
-                        db_a,
-                        db_b
-                    ),
-                },
-            },
-        );
-
-        let response = maybe_dispatch_multi_catalog_query(&request, session_id, 1, &dispatcher)
-            .await
-            .expect("multi-catalog coordinator should handle request");
-
-        let ConnectorResult::Error(message) = response.result else {
-            panic!("expected error result");
-        };
-
-        assert_eq!(
-            message,
-            "multi-catalog query produced mismatched schemas across catalogs"
-        );
-
-    }
-
-    #[tokio::test]
-    async fn policy_snapshot_multi_catalog_catalog_status_rejection_message() {
-
-        let data_dir = unique_test_data_dir("distdb-policy-snapshot-status");
-        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
-        let app = Arc::new(RwLock::new(
-            ServerApp::new(config).expect("server app should initialize"),
-        ));
-        let dispatcher = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
-
-        let request = request(
-            "policy-status",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: "select * from users /* from alpha.users join beta.users */".to_string(),
-                },
-            },
-        );
-
-        let response = maybe_dispatch_multi_catalog_query(&request, "session-policy", 1, &dispatcher)
-            .await
-            .expect("multi-catalog coordinator should handle request");
-
-        let ConnectorResult::Error(message) = response.result else {
-            panic!("expected error result");
-        };
-
-        assert_eq!(
-            message,
-            "multi-catalog query failed in catalog 'alpha' with status Rejected"
-        );
-
-    }
-
-    #[test]
-    fn routing_compliance_schema_and_mutation_are_catalog_bound() {
-
-        let schema_request = request(
-            "schema-route",
-            ConnectorCommand::Schema {
-                database_id: " Orders_DB ".to_string(),
-                command: connector::SchemaCommand::DropTable {
-                    table_id: "users".to_string(),
-                },
-            },
-        );
-
-        let mutation_request = request(
-            "mutation-route",
-            ConnectorCommand::Mutation {
-                database_id: " Inventory_DB ".to_string(),
-                mutation: connector::DataMutation::Delete {
-                    table_id: "users".to_string(),
-                    predicate_sql: None,
-                },
-            },
-        );
-
-        assert_eq!(
-            request_catalog_route_key(&schema_request),
-            Some("orders_db".to_string())
-        );
-        assert_eq!(
-            request_catalog_route_key(&mutation_request),
-            Some("inventory_db".to_string())
-        );
-
-    }
-
-    #[test]
-    fn routing_compliance_query_with_explicit_database_id_is_catalog_bound() {
-
-        let query_request = request(
-            "query-explicit-db",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: " SALES_DB ".to_string(),
-                    sql: "select * from users".to_string(),
-                },
-            },
-        );
-
-        assert_eq!(
-            request_catalog_route_key(&query_request),
-            Some("sales_db".to_string())
-        );
-
-    }
-
-    #[test]
-    fn routing_compliance_query_infers_single_catalog_from_sql_when_session_db_is_empty() {
-
-        let query_request = request(
-            "query-infer-single",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: "select * from alpha.users".to_string(),
-                },
-            },
-        );
-
-        assert_eq!(
-            request_catalog_route_key(&query_request),
-            Some("alpha".to_string())
-        );
-
-    }
-
-    #[test]
-    fn routing_compliance_query_with_multi_catalog_sql_has_no_single_route_key() {
-
-        let query_request = request(
-            "query-infer-multi",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: "select * from alpha.users join beta.users on alpha.users.id = beta.users.id".to_string(),
-                },
-            },
-        );
-
-        assert_eq!(request_catalog_route_key(&query_request), None);
-
-    }
-
-    #[tokio::test]
-    async fn routing_compliance_multi_catalog_coordinator_skips_non_multi_paths() {
-
-        let data_dir = unique_test_data_dir("distdb-routing-compliance");
-        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
-        let app = Arc::new(RwLock::new(
-            ServerApp::new(config).expect("server app should initialize"),
-        ));
-        let dispatcher = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
-
-        let explicit_db_request = request(
-            "coordinator-explicit-db",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: "alpha".to_string(),
-                    sql: "select * from users".to_string(),
-                },
-            },
-        );
-
-        let single_catalog_request = request(
-            "coordinator-single-catalog",
-            ConnectorCommand::Query {
-                query: connector::DataQuery {
-                    database_id: String::new(),
-                    sql: "select * from alpha.users".to_string(),
-                },
-            },
-        );
-
-        let explicit_db_result = maybe_dispatch_multi_catalog_query(
-            &explicit_db_request,
-            "session-a",
-            1,
-            &dispatcher,
-        )
-        .await;
-
-        let single_catalog_result = maybe_dispatch_multi_catalog_query(
-            &single_catalog_request,
-            "session-b",
-            2,
-            &dispatcher,
-        )
-        .await;
-
-        assert!(
-            explicit_db_result.is_none(),
-            "coordinator should skip requests with explicit database id"
-        );
-        assert!(
-            single_catalog_result.is_none(),
-            "coordinator should skip single-catalog SQL"
-        );
-
-    }
-
-    #[test]
-    fn node_announce_dedup_key_is_stable() {
-        let node = PeerNode {
-            id: "sam01".to_string(),
-            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
-            is_local: false,
-        };
-
-        let key1 = node_announce_dedup_key(&node);
-        let key2 = node_announce_dedup_key(&node);
-        assert_eq!(key1, key2);
-    }
-
-    #[test]
-    fn is_valid_server_node_requires_non_empty_id_and_multiaddrs() {
-
-        let valid = PeerNode {
-            id: "sam01".to_string(),
-            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
-            is_local: false,
-        };
-        
-        assert!(is_valid_server_node(&valid));
-
-        let empty_id = PeerNode {
-            id: "".to_string(),
-            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
-            is_local: false,
-        };
-
-        assert!(!is_valid_server_node(&empty_id));
-
-        let bad_addr = PeerNode {
-            id: "sam01".to_string(),
-            addrs: vec!["127.0.0.1:4001".to_string()],
-            is_local: false,
-        };
-        
-        assert!(!is_valid_server_node(&bad_addr));
-
-    }
-
-    #[test]
-    fn is_server_peer_discovery_query_detects_internal_and_alias() {
-        assert!(is_server_peer_discovery_query("__distdb_show_server_peers__"));
-        assert!(is_server_peer_discovery_query("show server peers"));
-        assert!(is_server_peer_discovery_query("SHOW SERVER PEERS;"));
-        assert!(!is_server_peer_discovery_query("show peers"));
-    }
-
-    #[test]
-    fn is_bootstrap_status_query_detects_internal_and_alias() {
-        assert!(is_bootstrap_status_query("__distdb_bootstrap_status__"));
-        assert!(is_bootstrap_status_query("show bootstrap status"));
-        assert!(is_bootstrap_status_query("SHOW BOOTSTRAP STATUS;"));
-        assert!(!is_bootstrap_status_query("show bootstrap"));
-    }
-
-    #[test]
-    fn is_show_entities_query_detects_internal_and_alias() {
-        assert!(is_show_entities_query("__distdb_show_entities__"));
-        assert!(is_show_entities_query("show entities"));
-        assert!(is_show_entities_query("SHOW ENTITIES;"));
-        assert!(!is_show_entities_query("show entity"));
-    }
-
-    #[test]
-    fn is_show_catalog_workers_query_detects_internal_and_alias() {
-        assert!(is_show_catalog_workers_query("__distdb_show_catalog_workers__"));
-        assert!(is_show_catalog_workers_query("show catalog workers"));
-        assert!(is_show_catalog_workers_query("SHOW CATALOG WORKERS;"));
-        assert!(!is_show_catalog_workers_query("show catalog worker"));
-    }
-
-}
+#[path = "connector_handler_test.rs"]
+mod tests;

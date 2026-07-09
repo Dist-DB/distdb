@@ -209,7 +209,12 @@ pub(super) fn classify_statement(
         Statement::ShowVariable { variable } => (
             SqlDirective::Retrieve,
             SqlOperation::Select,
-            variable.first().map(|name| name.to_string()),
+            match variable.first() {
+                Some(name)
+                    if name.value.eq_ignore_ascii_case("privileges")
+                        || name.value.eq_ignore_ascii_case("priviledges") => None,
+                other => other.map(|name| name.to_string()),
+            },
         ),
 
         Statement::SetVariable { variables, .. } => (
@@ -432,6 +437,15 @@ pub(super) fn classify_text_fallback(
     match verb.as_str() {
 
         "create" | "drop" => {},
+
+        "show" => {
+            if tokens.get(1).is_some_and(|token| {
+                token.eq_ignore_ascii_case("privileges")
+                    || token.eq_ignore_ascii_case("priviledges")
+            }) {
+                return Some((SqlDirective::Retrieve, SqlOperation::Select, None));
+            }
+        },
 
         "debug" => {
             let object_name = tokens

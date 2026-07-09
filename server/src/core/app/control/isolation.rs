@@ -114,6 +114,7 @@ impl ServerApp {
     ) -> ConnectorResponse {
 
         let (snapshot_catalogs, snapshot_runtime_indexes, snapshot_wal) = {
+
             let Some(snapshot) = self.tx_snapshot_by_session.get(session_id) else {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
@@ -137,6 +138,7 @@ impl ServerApp {
             }
 
             (snapshot_catalogs, snapshot_runtime_indexes, snapshot_wal)
+
         };
 
         let mut sandbox_catalogs = snapshot_catalogs.clone();
@@ -163,12 +165,11 @@ impl ServerApp {
                 .map(|duration| duration.as_nanos() as u64)
                 .unwrap_or(common::epoch_nanos!()),
         );
+
         let mut touched_tables = HashSet::new();
 
         let session_state = self.get_session(session_id);
-        let (connection_id, session_user) = session_state
-            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
-            .unwrap_or((0, None));
+        let connection_id = session_state.map(|s| s.connection_id).unwrap_or(0);
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
             let apply_request_id = format!("{}::txread{}", request_id, idx + 1);
@@ -183,7 +184,7 @@ impl ServerApp {
                 &mut touched_tables,
                 session_id,
                 connection_id,
-                session_user.clone(),
+                Some("root@localhost".to_string()),
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
@@ -218,7 +219,7 @@ impl ServerApp {
             &mut sandbox_indexes,
             session_id,
             connection_id,
-            session_user,
+            Some("root@localhost".to_string()),
         );
 
         if matches!(response.status, connector::ResponseStatus::Applied) {
@@ -245,10 +246,13 @@ impl ServerApp {
         for catalog in catalogs.values() {
 
             for table_id in catalog.table_ids() {
+
                 let stream_id = catalog
                     .entity_wal_stream_id(&table_id)
                     .unwrap_or(table_id);
+
                 let records = source_wal.since(&stream_id, None);
+
                 target_wal
                     .append_batch(&stream_id, records)
                     .map_err(|err| {
@@ -273,7 +277,9 @@ impl ServerApp {
     ) -> Result<(), String> {
 
         for catalog in catalogs.values() {
+
             for table_id in catalog.table_ids() {
+
                 if !table_ids.contains(&table_id) {
                     continue;
                 }
@@ -281,7 +287,9 @@ impl ServerApp {
                 let stream_id = catalog
                     .entity_wal_stream_id(&table_id)
                     .unwrap_or(table_id);
+
                 let records = source_wal.since(&stream_id, None);
+
                 target_wal
                     .append_batch(&stream_id, records)
                     .map_err(|err| {
@@ -290,7 +298,9 @@ impl ServerApp {
                             stream_id, err
                         )
                     })?;
+
             }
+            
         }
 
         Ok(())

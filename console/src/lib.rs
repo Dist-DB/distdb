@@ -291,8 +291,9 @@ impl ConsoleSession {
 
     fn execute_sql(&mut self, sql: String) -> Result<bool, Box<dyn std::error::Error>> {
 
+        let auth_password_for_session = auth_password_input(&sql);
         let auth_token_for_session = extract_password_token_input(&sql).map(md5_hash);
-        let is_auth_request = auth_token_for_session.is_some();
+        let is_auth_request = auth_password_for_session.is_some();
 
         let wire_sql = auth_token_for_session
             .as_ref()
@@ -993,6 +994,10 @@ impl ConsoleRequestExt for ConnectorRequest {
 pub fn extract_password_token_input(sql: &str) -> Option<&str> {
     commands::extract_password_token_input(sql)
 
+}
+
+pub fn auth_password_input(sql: &str) -> Option<&str> {
+    commands::auth_password_input(sql)
 }
 
 fn resolve_database_for_sql(

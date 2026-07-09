@@ -2,8 +2,15 @@ use std::cell::RefCell;
 
 use super::*;
 use crate::core::config::ServerRuntimeConfig;
+use crate::core::control::session::{
+    configure_bootstrap_crypto_context,
+    encode_set_password_wal_payload,
+    reset_bootstrap_password_for_tests,
+    ServerConnectionSession,
+};
 use crate::core::mappings::perf::QueryTimingThresholds;
 use common::helpers::format::FileKind;
+use common::helpers::utils::md5_hash;
 use connector::{
     ConnectorClient, ConnectorCommand, ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorResult,
     ConnectorTransport, ResponseStatus,
@@ -34,6 +41,62 @@ fn table_stream_id(app: &ServerApp, database_id: &str, table_id: &str) -> String
         .get(database_id)
         .and_then(|catalog| catalog.entity_wal_stream_id(table_id))
         .unwrap_or_else(|| table_id.to_string())
+}
+
+#[test]
+fn bootstrap_replays_security_change_password_from_wal() {
+
+    reset_bootstrap_password_for_tests();
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-bootstrap-security-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    configure_bootstrap_crypto_context(app.node_id().to_string(), None);
+
+    let payload = encode_set_password_wal_payload("root", "sam")
+        .expect("security payload should encode");
+
+    let wal_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    app.wal
+        .append(
+            &wal_id,
+            TransactionRecord::with_payload(
+                TransactionId(1),
+                None,
+                None,
+                1,
+                UserId::from_username("bootstrap-security-tester"),
+                TransactionKind::SecurityChange,
+                payload,
+            ),
+        )
+        .expect("security transaction should append");
+
+    app.bootstrap()
+        .expect("bootstrap should replay security changes");
+
+    let mut session = ServerConnectionSession::new("127.0.0.1:4001".to_string(), 1);
+    assert!(session.authenticate_if_valid_token(&md5_hash("sam")));
+
+    let mut old_password_session =
+        ServerConnectionSession::new("127.0.0.1:4001".to_string(), 2);
+    assert!(!old_password_session.authenticate_if_valid_token(&md5_hash("root")));
+
+    reset_bootstrap_password_for_tests();
 }
 
 #[test]

@@ -8,6 +8,8 @@ pub mod security;
 pub mod sql;
 pub mod wal;
 
+pub use security::{AccountAclEntry, RoleGrant, UserCredential};
+
 pub use database::core::{
 	DatabaseCatalog, DatabaseError, DatabaseId, DatabaseIndex, DatabaseRelationship,
 	DatabaseReplicaState, DatabaseResult, DatabaseStoredProcedure, DatabaseTable,

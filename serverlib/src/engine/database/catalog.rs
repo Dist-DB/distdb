@@ -30,7 +30,15 @@ use crate::engine::database::transaction::{
 };
 
 use crate::engine::database::view::DatabaseView;
+use crate::engine::security::{AccountAclEntry, PrivilegeSelector};
 use crate::engine::sql::{TriggerEventKind, TriggerTiming};
+use crate::core::identity::UserId;
+
+const ROOT_USER_ID: &str = "root";
+
+fn normalize_acl_user_key(user_id: &str) -> String {
+    user_id.trim().to_ascii_lowercase()
+}
 
 
 
@@ -48,6 +56,8 @@ pub struct DatabaseCatalog {
     schema_epoch: u64,
     #[serde(default)]
     active_schema_change: Option<ActiveSchemaChange>,
+    #[serde(default)]
+    account_acl_entries: HashMap<String, AccountAclEntry>,
     entities: HashMap<String, DatabaseEntity>,
 }
 
@@ -148,6 +158,7 @@ impl DatabaseCatalog {
             status: ObjectStatus::Load,
             schema_epoch: 0,
             active_schema_change: None,
+            account_acl_entries: HashMap::new(),
             entities: HashMap::new(),
         }
     }
@@ -156,6 +167,7 @@ impl DatabaseCatalog {
         let database_id = DatabaseId::from_database_name(name)?;
         let mut catalog = Self::new(database_id);
         catalog.database_name = common::normalize_identifier!(name);
+        catalog.ensure_default_root_account_acl();
         Ok(catalog)
     }
 
@@ -1062,6 +1074,18 @@ impl DatabaseCatalog {
                 TransactionKind::SecurityChange |
                 TransactionKind::SqlDefinitionChange => {
 
+                    if matches!(record.kind, TransactionKind::SecurityChange)
+                        && crate::engine::database::entity::payload::EntityMetadataPayload::decode(
+                            record.payload_logical().unwrap_or_default(),
+                        )
+                        .is_err()
+                    {
+                        // Security WAL can carry non-catalog payloads (for example
+                        // server bootstrap auth changes). Those are replayed by
+                        // server control flow, not catalog reconstruction.
+                        continue;
+                    }
+
                     let decoded = DecodedTransactionPayload::decode(
                         record.kind,
                         record
@@ -1497,6 +1521,24 @@ impl DatabaseCatalog {
         &self.database_name
     }
 
+    pub fn account_acl_entry(&self, user_id: &str) -> Option<&AccountAclEntry> {
+        self.effective_account_acl_entry(user_id)
+    }
+
+    pub fn effective_account_acl_entry(&self, user_id: &str) -> Option<&AccountAclEntry> {
+        let key = normalize_acl_user_key(user_id);
+        self.account_acl_entries.get(&key)
+    }
+
+    pub fn effective_account_acl_entries(&self) -> impl Iterator<Item = &AccountAclEntry> {
+        self.account_acl_entries.values()
+    }
+
+    pub fn upsert_account_acl_entry(&mut self, entry: AccountAclEntry) {
+        let key = normalize_acl_user_key(&entry.user_id.0);
+        self.account_acl_entries.insert(key, entry);
+    }
+
     pub fn at_rest_encryption_enabled(&self) -> bool {
         self.at_rest_encryption_key_ref.is_some()
     }
@@ -1668,9 +1710,30 @@ impl DatabaseCatalog {
         }
 
         self.entities = normalized_entities;
+        self.ensure_default_root_account_acl();
         
         Ok(())
 
+    }
+
+    fn ensure_default_root_account_acl(&mut self) {
+
+        let root_key = normalize_acl_user_key(ROOT_USER_ID);
+
+        if self.account_acl_entries.contains_key(&root_key) {
+            return;
+        }
+
+        let mut root_acl = AccountAclEntry::new(
+            UserId(ROOT_USER_ID.to_string()),
+            self.database_name.clone(),
+        );
+
+        root_acl.append_grant_option_for_selector(&PrivilegeSelector::All);
+
+        self.account_acl_entries
+            .insert(root_key, root_acl);
+        
     }
 
 }

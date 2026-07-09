@@ -33,9 +33,9 @@ pub(super) fn is_staged_dml_query(query: &connector::DataQuery) -> bool {
 
     matches!(
         parsed[0].operation,
-        serverlib::SqlOperation::Insert
-            | serverlib::SqlOperation::Update
-            | serverlib::SqlOperation::Delete
+        serverlib::SqlOperation::Insert |
+        serverlib::SqlOperation::Update |
+        serverlib::SqlOperation::Delete
     )
 
 }
@@ -107,6 +107,7 @@ pub(super) fn command_info(command: &ConnectorCommand) -> CommandInfo {
                 kind: CommandKind::Schema,
                 path,
             }
+
         },
 
         ConnectorCommand::Mutation {
@@ -134,6 +135,7 @@ pub(super) fn command_info(command: &ConnectorCommand) -> CommandInfo {
                 kind: CommandKind::Mutation,
                 path,
             }
+            
         },
 
     }

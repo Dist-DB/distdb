@@ -98,7 +98,7 @@ fn advanced_functions_match_expected_outputs() {
         ("isnull(null)", Some("1")),
         ("last_insert_id()", Some("1234")),
         ("nullif('same', 'same')", None),
-        ("session_user()", Some("alice@localhost")),
+        ("session_user()", Some("alice")),
         ("system_user()", Some("system@localhost")),
         ("user()", Some("alice@localhost")),
         ("version()", Some("distdb-test")),

@@ -1,6 +1,8 @@
 
 use super::*;
 use crate::engine::database::entity::metadata::EntityMetadata;
+use crate::engine::security::{AccountAclEntry, AccountPrivilege};
+use crate::core::identity::UserId;
 
 use std::path::PathBuf;
 
@@ -13,6 +15,44 @@ fn create_empty_catalog_from_name_sets_obscured_id() {
     assert!(!catalog.database_id.0.is_empty());
     assert_ne!(catalog.database_id.0, "maindb");
     assert_eq!(catalog.database_name(), "maindb");
+}
+
+#[test]
+fn create_empty_catalog_seeds_root_with_full_privileges_and_grant_options() {
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    let root_acl = catalog
+        .account_acl_entry("root")
+        .expect("root ACL should exist by default");
+
+    assert_eq!(root_acl.user_id.0, "root");
+    assert!(root_acl.acl.contains("SELECT"));
+    assert!(root_acl.acl.contains("CREATE USER"));
+    assert!(root_acl.grant_acl.contains("SELECT"));
+    assert!(root_acl.grant_acl.contains("CREATE USER"));
+    assert_eq!(root_acl.acl.len(), root_acl.grant_acl.len());
+}
+
+#[test]
+fn effective_account_acl_entry_returns_latest_acl_state_for_user() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    let mut first = AccountAclEntry::new(UserId("Alice".to_string()), "MainDb");
+    first.append_privilege(AccountPrivilege::Select);
+    catalog.upsert_account_acl_entry(first);
+
+    let mut second = AccountAclEntry::new(UserId("alice".to_string()), "MainDb");
+    second.append_privilege(AccountPrivilege::Update);
+    catalog.upsert_account_acl_entry(second);
+
+    let effective = catalog
+        .effective_account_acl_entry("ALICE")
+        .expect("latest ACL entry should be available");
+
+    assert!(effective.acl.contains("UPDATE"));
+    assert!(!effective.acl.contains("SELECT"));
 }
 
 #[test]

@@ -38,6 +38,34 @@ fn show_tables_result_sorts_names() {
 }
 
 #[test]
+fn show_privileges_result_sorts_users_and_emits_three_columns() {
+    let result = show_privileges_result(vec![
+        (
+            "zeta".to_string(),
+            vec!["UPDATE".to_string(), "SELECT".to_string()],
+            vec!["SELECT".to_string()],
+        ),
+        (
+            "alpha".to_string(),
+            vec!["CREATE USER".to_string()],
+            vec![],
+        ),
+    ]);
+
+    assert_eq!(result.columns.len(), 3);
+    assert_eq!(result.columns[0].field_name, "userid");
+    assert_eq!(result.columns[1].field_name, "privileges");
+    assert_eq!(result.columns[2].field_name, "grantable_privileges");
+    assert_eq!(String::from_utf8(result.rows[0][0].clone()).unwrap(), "alpha");
+    assert_eq!(String::from_utf8(result.rows[0][1].clone()).unwrap(), "*");
+    assert_eq!(String::from_utf8(result.rows[0][2].clone()).unwrap(), "");
+    assert_eq!(String::from_utf8(result.rows[1][0].clone()).unwrap(), "zeta");
+    assert_eq!(String::from_utf8(result.rows[1][1].clone()).unwrap(), "*");
+    assert_eq!(String::from_utf8(result.rows[1][2].clone()).unwrap(), "*");
+    
+}
+
+#[test]
 fn describe_table_result_uses_schema_metadata() {
     let schema = TableSchema::new(vec![
         FieldDef {

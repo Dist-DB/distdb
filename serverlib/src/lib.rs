@@ -45,6 +45,7 @@ pub mod security;
 
 pub use core::config::NodeConfig;
 pub use core::identity::{NodeId, PasswordKey, UserId};
+pub use engine::security::{AccountAclEntry, RoleGrant, UserCredential};
 pub use common::schema::{
 	normalize_field_name, validate_field_kind, FieldIndex, FieldKind, SchemaValidationError,
 };
@@ -144,7 +145,7 @@ pub use engine::execution::{
 	EqualityProbeSource,
 	JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 		RelationAccessPlan, RelationAccessStrategy, SelectExecutionResult, show_databases_result,
-		show_tables_result,
+		show_privileges_result, show_tables_result,
 };
 
 pub use engine::database::table::schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};

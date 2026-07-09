@@ -8,6 +8,42 @@ use crate::core::app::ServerApp;
 use crate::core::app::helpers::SessionTxMarkerType;
 
 impl ServerApp {
+
+    pub fn append_security_change_record(
+        &self,
+        wal_id: &str,
+        actor: &str,
+        payload: Vec<u8>,
+    ) -> Result<(), String> {
+
+        let last_id = self.wal.latest_transaction_id(wal_id);
+        let next_id = TransactionId(last_id.map(|id| id.0 + 1).unwrap_or(1));
+
+        self.wal
+            .append(
+                wal_id,
+                TransactionRecord::with_payload(
+                    next_id,
+                    None,
+                    last_id,
+                    common::epoch_nanos!(),
+                    UserId::from_username(actor),
+                    TransactionKind::SecurityChange,
+                    payload,
+                ),
+            )
+            .map_err(|err| format!("set password failed: wal append failed: {}", err))
+
+    }
+
+    pub fn first_wal_record_timestamp_for_database(&self, database_id: &str) -> Option<u64> {
+        let wal_id = self.resolve_catalog_wal_stream_for_database(database_id);
+        self.wal
+            .since(&wal_id, None)
+            .first()
+            .map(|record| record.timestamp_epoch_ms)
+    }
+
     pub(super) fn seed_sandbox_wal(&self, sandbox_wal: &ConcurrentWalManager) -> Result<(), String> {
         for catalog in self.catalogs.values() {
             for table_id in catalog.table_ids() {
@@ -36,6 +72,7 @@ impl ServerApp {
         schema: &serverlib::TableSchema,
         sandbox_wal: &ConcurrentWalManager,
     ) -> Result<(), String> {
+
         if !self.wal.is_stream_replicable(table_id) {
             return Ok(());
         }
@@ -66,9 +103,11 @@ impl ServerApp {
         sandbox_wal
             .append_batch(table_id, records)
             .map_err(|err| format!("failed to seed snapshot live rows for stream '{}': {}", table_id, err))
+
     }
 
     fn copy_wal_stream(&self, wal_id: &str, sandbox_wal: &ConcurrentWalManager) -> Result<(), String> {
+
         if !self.wal.is_stream_replicable(wal_id) {
             return Ok(());
         }
@@ -79,6 +118,7 @@ impl ServerApp {
             .map_err(|err| format!("failed to seed sandbox WAL for stream '{}': {}", wal_id, err))?;
 
         Ok(())
+
     }
 
     pub fn export_wal_records_for_database(
@@ -87,6 +127,7 @@ impl ServerApp {
         from: Option<TransactionId>,
         from_stream_transaction_ids: Option<&std::collections::HashMap<String, TransactionId>>,
     ) -> Result<Vec<(String, TransactionRecord)>, String> {
+
         let database_key = self
             .resolve_catalog_key(database_id)
             .ok_or_else(|| format!("database '{}' not found", database_id))?;
@@ -131,6 +172,7 @@ impl ServerApp {
         });
 
         Ok(frames)
+
     }
 
     pub fn import_wal_records(
@@ -138,9 +180,11 @@ impl ServerApp {
         database_id: &str,
         records: Vec<(String, TransactionRecord)>,
     ) -> Result<(), String> {
+
         self.begin_affinity_sync_lock(database_id)?;
 
         let import_result = (|| {
+
             let mut appended_any = false;
 
             for (stream_id, record) in records {
@@ -182,22 +226,30 @@ impl ServerApp {
             // Rebuild in-memory structures from newly imported WAL records.
             self.replay_catalog_state_from_wal()
                 .map_err(|err| format!("failed replaying imported WAL records: {}", err))?;
+
             self.runtime_indexes
                 .bootstrap_from_catalogs(&self.catalogs, &self.wal);
 
             Ok(())
+
         })();
 
         let release_result = self.finish_affinity_sync_lock(database_id);
 
         match (import_result, release_result) {
+
             (Err(import_err), Err(release_err)) => {
                 Err(format!("{}; cleanup failed: {}", import_err, release_err))
             }
+
             (Err(import_err), Ok(())) => Err(import_err),
+
             (Ok(()), Err(release_err)) => Err(release_err),
+
             (Ok(()), Ok(())) => Ok(()),
+            
         }
+
     }
 
     pub fn rollback_session_transaction(&mut self, session_id: &str) -> bool {
@@ -208,6 +260,7 @@ impl ServerApp {
             .unwrap_or(false);
 
         if rolled_back {
+
             self.tx_begin_epoch_ms_by_session.remove(session_id);
             self.tx_snapshot_by_session.remove(session_id);
             self.tx_read_observations_by_session.remove(session_id);
@@ -220,6 +273,7 @@ impl ServerApp {
             ) {
                 log::warn!("failed to append disconnect rollback marker: {}", err);
             }
+
         }
 
         rolled_back
@@ -243,5 +297,7 @@ impl ServerApp {
         );
 
         Ok(())
+
     }
+
 }

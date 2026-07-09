@@ -216,6 +216,36 @@ fn handle_select_introspection_request(
     statement_sql_lower: &str,
 ) -> Option<ConnectorResponse> {
 
+    let statement_sql_lower = statement_sql_lower.trim().trim_end_matches(';').trim();
+
+    if statement_sql_lower == "show user" || statement_sql_lower == "show user()" {
+
+        let current_user = serverlib::inbuilt_sql_runtime_context()
+            .current_user
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .map(|user| format!("{}@localhost", user))
+            })
+            .unwrap_or_else(|| "distdb@localhost".to_string());
+
+        let result = serverlib::SelectExecutionResult {
+            columns: vec![serverlib::FieldDef {
+                seqno: 1,
+                field_name: "user".to_string(),
+                field_type: serverlib::FieldType::Text,
+                nullable: false,
+                indexed: serverlib::FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            }],
+            rows: vec![vec![current_user.into_bytes()]],
+        };
+
+        return Some(applied_query_response(request_id, result));
+
+    }
+
     if statement_sql_lower.starts_with("show databases") {
 
         let result = serverlib::show_databases_result(
@@ -225,6 +255,38 @@ fn handle_select_introspection_request(
                 } else {
                     catalog.database_name().to_string()
                 }
+            }),
+        );
+
+        return Some(applied_query_response(request_id, result));
+
+    }
+
+    if statement_sql_lower.starts_with("show privileges")
+        || statement_sql_lower.starts_with("show priviledges")
+    {
+
+        let target_db = statement
+            .object_name
+            .as_deref()
+            .unwrap_or(&query.database_id);
+
+        let Some(catalog) = resolve_catalog(catalogs, target_db) else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", target_db),
+            ));
+        };
+
+        let result = serverlib::show_privileges_result(
+            catalog.effective_account_acl_entries().map(|entry| {
+                let mut privileges = entry.acl.iter().cloned().collect::<Vec<_>>();
+                privileges.sort();
+
+                let mut grantable_privileges = entry.grant_acl.iter().cloned().collect::<Vec<_>>();
+                grantable_privileges.sort();
+
+                (entry.user_id.0.clone(), privileges, grantable_privileges)
             }),
         );
 

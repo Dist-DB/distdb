@@ -51,9 +51,7 @@ impl ServerApp {
         let mut catalogs = self.catalogs.clone();
         let mut runtime_indexes = self.runtime_indexes.clone();
         let session_state = self.get_session(session_id);
-        let (connection_id, session_user) = session_state
-            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
-            .unwrap_or((0, None));
+        let connection_id = session_state.map(|s| s.connection_id).unwrap_or(0);
 
         Some(handle_query_command(
             &request.request_id,
@@ -64,14 +62,17 @@ impl ServerApp {
             &mut runtime_indexes,
             session_id,
             connection_id,
-            session_user,
+            Some("root@localhost".to_string()),
         ))
 
     }
 
     fn finalize_group_table_writes(&mut self, table_ids: &HashSet<String>) -> Result<(), String> {
+
         for table_id in table_ids {
+
             for catalog in self.catalogs.values_mut() {
+
                 let should_finalize = catalog
                     .table(table_id)
                     .is_some_and(|table| table.status() == serverlib::ObjectStatus::Lock);
@@ -83,15 +84,21 @@ impl ServerApp {
                 catalog
                     .finalize_table_write(table_id)
                     .map_err(|err| format!("table write finalize failed table='{}': {}", table_id, err))?;
+            
             }
+        
         }
 
         Ok(())
+
     }
 
     fn abort_group_table_writes(&mut self, table_ids: &HashSet<String>) {
+
         for table_id in table_ids {
+
             for catalog in self.catalogs.values_mut() {
+
                 let should_abort = catalog
                     .table(table_id)
                     .is_some_and(|table| table.status() == serverlib::ObjectStatus::Lock);
@@ -99,11 +106,15 @@ impl ServerApp {
                 if should_abort {
                     let _ = catalog.abort_table_write(table_id);
                 }
+
             }
+
         }
+
     }
 
     fn parse_lock_table_ids(sql: &str) -> Vec<String> {
+
         let trimmed = sql.trim().trim_end_matches(';').trim();
         let lowered = trimmed.to_ascii_lowercase();
 
@@ -122,6 +133,7 @@ impl ServerApp {
         let mut out = Vec::new();
 
         for segment in remainder.split(',') {
+
             let segment = segment.trim();
             if segment.is_empty() {
                 continue;
@@ -144,9 +156,11 @@ impl ServerApp {
             if !normalized.is_empty() && !out.iter().any(|existing| existing == &normalized) {
                 out.push(normalized);
             }
+
         }
 
         out
+
     }
 
     pub fn apply_remote_table_lock_state(
@@ -156,6 +170,7 @@ impl ServerApp {
         table_ids: &[String],
         locked: bool,
     ) {
+
         let owner_id = format!("remote:{}:{}", owner_node_id, owner_session_id);
 
         if locked {
@@ -165,11 +180,13 @@ impl ServerApp {
             self.transaction_coordinator
                 .release_remote_table_locks(&owner_id, table_ids.to_vec());
         }
+
     }
 
     fn staged_query_validation_plan(
         staged_queries: &[connector::DataQuery],
     ) -> Option<(HashSet<String>, bool)> {
+
         let mut table_ids = HashSet::new();
         let mut insert_only = true;
 
@@ -196,6 +213,7 @@ impl ServerApp {
         // For pure INSERT dry-runs, runtime index state is sufficient for duplicate checks.
         // Skipping WAL seed avoids replaying full table snapshots into the sandbox.
         Some((table_ids, insert_only))
+
     }
     
     pub fn handle_connector_request(&mut self, request: &ConnectorRequest) -> ConnectorResponse {
@@ -218,7 +236,9 @@ impl ServerApp {
         // );
 
         let response = match command_info.kind {
+
             CommandKind::CreateDatabase => {
+
                 let ConnectorCommand::CreateDatabase { database_name } = &request.command else {
                     unreachable!("command info kind must align with command variant")
                 };
@@ -238,9 +258,11 @@ impl ServerApp {
                         format!("create database failed: {err}"),
                     ),
                 }
-            }
+
+            },
 
             CommandKind::Query => {
+
                 let ConnectorCommand::Query { query } = &request.command else {
                     unreachable!("command info kind must align with command variant")
                 };
@@ -263,6 +285,7 @@ impl ServerApp {
                             query.clone(),
                             is_staged_dml_query(query),
                         ) {
+                            
                             Ok(QueryRoutingDecision::ExecuteImmediately) => {
                                 let session_state = self.get_session(session_id);
                                 let (connection_id, session_user) = session_state
@@ -289,18 +312,25 @@ impl ServerApp {
 
                                 response
                             },
+                            
                             Ok(QueryRoutingDecision::Staged) => ConnectorResponse::applied(
                                 request.request_id.clone(),
                                 ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
                             ),
+                            
                             Ok(QueryRoutingDecision::Rejected(message)) => {
                                 ConnectorResponse::rejected(request.request_id.clone(), message)
                             }
+                            
                             Err(err) => ConnectorResponse::rejected(request.request_id.clone(), err),
                         }
+
+
                     }
+
                 }
-            }
+            
+            },
 
             CommandKind::Schema => ConnectorResponse::rejected(
                 request.request_id.clone(),
@@ -311,9 +341,11 @@ impl ServerApp {
                 request.request_id.clone(),
                 "mutation command execution is not wired yet",
             ),
+
         };
 
         match &response.result {
+
             ConnectorResult::Error(message) => {
                 log::warn!(
                     "connector request completed request_id={} path={} status={:?} error={}",
@@ -322,7 +354,7 @@ impl ServerApp {
                     response.status,
                     message
                 );
-            }
+            },
 
             _ => {
                 // log::info!(
@@ -332,6 +364,7 @@ impl ServerApp {
                 //     response.status
                 // );
             }
+
         }
 
         response
@@ -357,18 +390,22 @@ impl ServerApp {
         let is_unlock_tables =
             normalized.starts_with("unlock table") || normalized.starts_with("unlock tables");
 
-        if normalized.starts_with("begin")
-            || normalized.starts_with("start transaction")
-            || is_lock_tables
+        if normalized.starts_with("begin") ||
+            normalized.starts_with("start transaction") ||
+            is_lock_tables
         {
+
             if is_lock_tables {
+
                 let table_ids = Self::parse_lock_table_ids(&query.sql);
+
                 if let Err(err) = self
                     .transaction_coordinator
                     .begin_with_table_locks(session_id, table_ids)
                 {
                     return Some(ConnectorResponse::rejected(request_id.to_string(), err));
                 }
+
             } else if let Err(err) = self.transaction_coordinator.begin(session_id) {
                 return Some(ConnectorResponse::rejected(request_id.to_string(), err));
             }
@@ -379,7 +416,9 @@ impl ServerApp {
             let is_lightweight_import_begin = normalized.contains("distdb_import") || is_lock_tables;
 
             if !is_lightweight_import_begin {
+
                 let snapshot_wal = ConcurrentWalManager::new();
+
                 if let Err(err) = self.seed_sandbox_wal(&snapshot_wal) {
                     let _ = self.transaction_coordinator.rollback(session_id);
                     self.tx_begin_epoch_ms_by_session.remove(session_id);
@@ -397,8 +436,10 @@ impl ServerApp {
                         wal: snapshot_wal,
                     },
                 );
+
                 self.tx_read_observations_by_session
                     .insert(session_id.to_string(), Vec::new());
+
             }
 
             if let Err(err) = self.append_session_tx_marker(
@@ -440,16 +481,22 @@ impl ServerApp {
                 &staged_queries,
                 snapshot_epoch_ms,
             ) {
+                
                 Ok(total) => total,
+
                 Err(err) => {
+
                     if has_snapshot {
+                        
                         if let Err(rollback_err) = self.transaction_coordinator.rollback(session_id) {
                             log::error!(
                                 "failed to rollback transaction after commit error: {}",
                                 rollback_err
                             );
                         }
+
                     } else {
+
                         if let Err(rollback_err) = self.transaction_coordinator.rollback(session_id) {
                             log::error!(
                                 "failed to rollback snapshotless transaction after commit error: {}",
@@ -472,7 +519,9 @@ impl ServerApp {
                     }
 
                     return Some(ConnectorResponse::rejected(request_id.to_string(), err));
+                
                 }
+
             };
 
             self.tx_begin_epoch_ms_by_session.remove(session_id);
@@ -555,6 +604,7 @@ impl ServerApp {
         let validation_start = Instant::now();
 
         if snapshot_epoch_ms > 0 {
+
             if let Some(conflict) = self.detect_write_write_conflict(snapshot_epoch_ms, staged_queries) {
                 return Err(conflict);
             }
@@ -562,6 +612,7 @@ impl ServerApp {
             if let Some(conflict) = self.detect_predicate_read_conflicts(session_id, snapshot_epoch_ms) {
                 return Err(conflict);
             }
+
         }
 
         self.validate_staged_queries(request_id, session_id, staged_queries)?;
@@ -583,6 +634,7 @@ impl ServerApp {
         let mut touched_tables = std::collections::HashSet::new();
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
+
             let apply_request_id = format!("{}::apply{}", request_id, idx + 1);
             let response = handle_query_command_in_write_group(
                 &apply_request_id,
@@ -599,6 +651,7 @@ impl ServerApp {
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
+                
                 abort_external_write_group(
                     &self.wal,
                     &self.catalogs,
@@ -617,12 +670,15 @@ impl ServerApp {
                     idx + 1,
                     error
                 ));
+
             }
 
             if let ConnectorResult::Mutation(mutation) = response.result {
                 total_affected_rows = total_affected_rows.saturating_add(mutation.affected_rows);
             }
+
         }
+
         let apply_ms = apply_start.elapsed().as_millis() as u64;
 
         let commit_marker_start = Instant::now();
@@ -634,6 +690,7 @@ impl ServerApp {
             &touched_tables,
             write_group_id,
         ) {
+
             abort_external_write_group(
                 &self.wal,
                 &self.catalogs,
@@ -641,8 +698,10 @@ impl ServerApp {
                 &touched_tables,
                 write_group_id,
             );
-                self.abort_group_table_writes(&touched_tables);
+
+            self.abort_group_table_writes(&touched_tables);
             let total_ms = commit_start.elapsed().as_millis() as u64;
+
             log::debug!(
                 "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=failed",
                 request_id,
@@ -654,7 +713,9 @@ impl ServerApp {
                 commit_marker_start.elapsed().as_millis() as u64,
                 total_ms,
             );
+            
             return Err(format!("transaction commit marker append failed: {err}"));
+
         }
 
         if let Err(err) = self.finalize_group_table_writes(&touched_tables) {
@@ -676,6 +737,7 @@ impl ServerApp {
         );
 
         Ok(total_affected_rows)
+
     }
 
     fn validate_staged_queries(
@@ -684,6 +746,7 @@ impl ServerApp {
         session_id: &str,
         staged_queries: &[connector::DataQuery],
     ) -> Result<(), String> {
+
         let validation_start = Instant::now();
 
         let validation_plan = Self::staged_query_validation_plan(staged_queries);
@@ -695,32 +758,40 @@ impl ServerApp {
         let index_clone_ms;
         let wal_seed_ms;
 
-        let (mut sandbox_catalogs, snapshot_runtime_indexes, snapshot_wal) =
+        let (mut sandbox_catalogs, snapshot_runtime_indexes, snapshot_wal) =        
             if let Some(snapshot) = self.tx_snapshot_by_session.get(session_id) {
+                
                 (
                     snapshot.catalogs.clone(),
                     snapshot.runtime_indexes.clone(),
                     Some(&snapshot.wal),
                 )
+
             } else if let Some((table_ids, insert_only)) = &validation_plan {
+
                 if !insert_only {
                     return Err("missing transaction snapshot for validation".to_string());
                 }
 
                 setup_mode = "current_state_insert_only";
                 setup_table_count = table_ids.len();
+                
                 (
                     self.catalogs.clone(),
                     self.runtime_indexes.clone(),
                     None,
                 )
+
             } else {
+
                 return Err("missing transaction snapshot for validation".to_string());
+
             };
 
         let sandbox_wal = ConcurrentWalManager::new();
 
         let mut sandbox_indexes = if let Some((table_ids, skip_wal_seed)) = validation_plan {
+
             setup_table_count = table_ids.len();
 
             let index_clone_start = Instant::now();
@@ -728,29 +799,42 @@ impl ServerApp {
             index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
 
             if skip_wal_seed {
+                
                 if setup_mode != "current_state_insert_only" {
                     setup_mode = "table_scoped_insert_only";
                 }
+
                 wal_seed_ms = 0;
+
             } else {
+
                 setup_mode = "table_scoped";
+                
                 let wal_seed_start = Instant::now();
                 let Some(source_wal) = snapshot_wal else {
                     return Err("missing transaction snapshot for validation".to_string());
                 };
+
                 self.seed_sandbox_wal_from_source_for_tables(&sandbox_catalogs, source_wal, &sandbox_wal, &table_ids)
                     .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
+                
                 wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
+                
             }
 
             scoped_indexes
+
         } else {
+
             let wal_seed_start = Instant::now();
+            
             let Some(source_wal) = snapshot_wal else {
                 return Err("missing transaction snapshot for validation".to_string());
             };
+
             self.seed_sandbox_wal_from_source(&sandbox_catalogs, source_wal, &sandbox_wal)
                 .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
+            
             wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
 
             let index_clone_start = Instant::now();
@@ -758,6 +842,7 @@ impl ServerApp {
             index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
 
             cloned
+
         };
 
         let snapshot_setup_ms = snapshot_start.elapsed().as_millis() as u64;
@@ -785,9 +870,11 @@ impl ServerApp {
                 .map(|duration| duration.as_nanos() as u64)
                 .unwrap_or(common::epoch_nanos!()),
         );
+
         let mut validation_touched_tables = std::collections::HashSet::new();
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
+
             let staged_query_start = Instant::now();
             let dry_run_request_id = format!("{}::dryrun{}", request_id, idx + 1);
             let response = handle_query_command_in_write_group(
@@ -805,6 +892,7 @@ impl ServerApp {
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
+
                 let error = match response.result {
                     ConnectorResult::Error(message) => message,
                     _ => "staged query dry-run failed".to_string(),
@@ -815,9 +903,11 @@ impl ServerApp {
                     idx + 1,
                     error
                 ));
+
             }
 
             dry_run_total_ms = dry_run_total_ms.saturating_add(staged_query_start.elapsed().as_millis() as u64);
+
         }
 
         let total_ms = validation_start.elapsed().as_millis() as u64;

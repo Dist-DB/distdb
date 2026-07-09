@@ -39,6 +39,44 @@ where
     
 }
 
+pub fn show_privileges_result<I>(entries: I) -> SelectExecutionResult
+where
+    I: IntoIterator<Item = (String, Vec<String>, Vec<String>)>,
+{
+
+    let mut rows = entries.into_iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+
+    SelectExecutionResult {
+        columns: vec![
+            text_column(1, "userid"),
+            text_column(2, "privileges"),
+            text_column(3, "grantable_privileges"),
+        ],
+        rows: rows
+            .into_iter()
+            .map(|(user_id, privileges, grantable)| {
+                vec![
+                    user_id.into_bytes(),
+                    privilege_display_token(&privileges).into_bytes(),
+                    privilege_display_token(&grantable).into_bytes(),
+                ]
+            })
+            .collect(),
+    }
+
+}
+
+fn privilege_display_token(privileges: &[String]) -> String {
+    
+    if privileges.is_empty() {
+        String::new()
+    } else {
+        "*".to_string()
+    }
+
+}
+
 pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {
 
     let rows = schema

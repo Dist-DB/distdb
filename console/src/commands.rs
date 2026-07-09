@@ -3,6 +3,7 @@ use crate::ConsoleCommand;
 pub fn extract_password_token_input(sql: &str) -> Option<&str> {
 
     let trimmed = sql.trim().trim_end_matches(';').trim();
+
     let mut parts = trimmed.split_whitespace();
     let command = parts.next()?;
     let password = parts.next()?;
@@ -13,6 +14,66 @@ pub fn extract_password_token_input(sql: &str) -> Option<&str> {
 
     None
 
+}
+
+pub fn auth_password_input(sql: &str) -> Option<&str> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+
+    extract_password_token_input(trimmed)
+        .or_else(|| extract_set_password_password_literal(trimmed))
+}
+
+fn extract_set_password_password_literal(sql: &str) -> Option<&str> {
+
+    let mut rest = sql;
+
+    rest = strip_prefix_ci(rest, "set")?.trim_start();
+    rest = strip_prefix_ci(rest, "password")?.trim_start();
+    rest = strip_prefix_ci(rest, "for")?.trim_start();
+
+    let (_user_id, next) = parse_single_quoted_literal(rest)?;
+    rest = next.trim_start();
+
+    if !rest.starts_with('=') {
+        return None;
+    }
+
+    rest = rest[1..].trim_start();
+    rest = strip_prefix_ci(rest, "password")?.trim_start();
+
+    if !rest.starts_with('(') {
+        return None;
+    }
+
+    rest = rest[1..].trim_start();
+
+    let (password, next) = parse_single_quoted_literal(rest)?;
+    rest = next.trim_start();
+
+    if !rest.starts_with(')') {
+        return None;
+    }
+
+    if !rest[1..].trim().is_empty() {
+        return None;
+    }
+
+    Some(password)
+
+}
+
+fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+fn parse_single_quoted_literal(value: &str) -> Option<(&str, &str)> {
+    let remainder = value.strip_prefix('\'')?;
+    let end_idx = remainder.find('\'')?;
+    let (literal, tail) = remainder.split_at(end_idx);
+    Some((literal, &tail[1..]))
 }
 
 pub fn resolve_database_for_sql(
@@ -465,7 +526,27 @@ mod tests {
     fn extract_password_token_detects_password_command() {
         assert_eq!(extract_password_token_input("password secret;"), Some("secret"));
         assert_eq!(extract_password_token_input("PASSWORD secret"), Some("secret"));
+        assert_eq!(
+            extract_password_token_input("SET PASSWORD FOR 'root' = PASSWORD('secret');"),
+            None
+        );
+        assert_eq!(
+            extract_password_token_input("SET PASSWORD FOR root = PASSWORD(secret);"),
+            None
+        );
         assert_eq!(extract_password_token_input("select 1"), None);
+    }
+
+    #[test]
+    fn auth_password_input_detects_set_password_for_syntax() {
+        assert_eq!(
+            auth_password_input("SET PASSWORD FOR 'root' = PASSWORD('secret');"),
+            Some("secret")
+        );
+        assert_eq!(
+            auth_password_input("SET PASSWORD FOR root = PASSWORD(secret);"),
+            None
+        );
     }
 
     #[test]
