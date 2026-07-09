@@ -1536,7 +1536,15 @@ fn parse_window_projection_item(
 ) -> Result<SelectProjectionItem, SqlParseError> {
 
     let function_name = function.name.to_string();
-    if !function_name.eq_ignore_ascii_case("row_number") && !function_name.eq_ignore_ascii_case("sum") {
+
+    if !function_name.eq_ignore_ascii_case("row_number") &&
+        !function_name.eq_ignore_ascii_case("rank") &&
+        !function_name.eq_ignore_ascii_case("dense_rank") &&
+        !function_name.eq_ignore_ascii_case("sum") &&
+        !function_name.eq_ignore_ascii_case("avg") &&
+        !function_name.eq_ignore_ascii_case("min") &&
+        !function_name.eq_ignore_ascii_case("max")
+    {
         return Err(SqlParseError::UnsupportedStatement(format!(
             "SELECT window function '{}' is not supported yet",
             function.name
@@ -1553,14 +1561,24 @@ fn parse_window_projection_item(
 
     };
 
-    if function_name.eq_ignore_ascii_case("row_number") && has_arguments {
+    if (function_name.eq_ignore_ascii_case("row_number") ||
+        function_name.eq_ignore_ascii_case("rank") ||
+        function_name.eq_ignore_ascii_case("dense_rank")) &&
+        has_arguments
+    {
         return Err(SqlParseError::UnsupportedStatement(
-            "ROW_NUMBER window function does not accept arguments in the current execution model"
-                .to_string(),
+            format!(
+                "{} window function does not accept arguments in the current execution model",
+                function.name.to_string().to_ascii_uppercase()
+            ),
         ));
     }
 
-    if function_name.eq_ignore_ascii_case("sum") {
+    if function_name.eq_ignore_ascii_case("sum") ||
+        function_name.eq_ignore_ascii_case("avg") ||
+        function_name.eq_ignore_ascii_case("min") ||
+        function_name.eq_ignore_ascii_case("max")
+    {
         
         match &function.args {
 
@@ -1568,7 +1586,10 @@ fn parse_window_projection_item(
 
             _ => {
                 return Err(SqlParseError::UnsupportedStatement(
-                    "SUM window function currently requires exactly one argument".to_string(),
+                    format!(
+                        "{} window function currently requires exactly one argument",
+                        function.name.to_string().to_ascii_uppercase()
+                    ),
                 ));
             }
 
@@ -1746,11 +1767,14 @@ pub fn derive_relation_pushdown_conditions(
 fn flatten_and_clauses(condition: &SelectCondition) -> Vec<&SelectCondition> {
 
     match condition {
+        
         SelectCondition::And(children) => children
             .iter()
             .flat_map(flatten_and_clauses)
             .collect::<Vec<_>>(),
+        
         _ => vec![condition],
+
     }
     
 }
@@ -1758,9 +1782,13 @@ fn flatten_and_clauses(condition: &SelectCondition) -> Vec<&SelectCondition> {
 fn combine_conditions(conditions: Vec<SelectCondition>) -> Option<SelectCondition> {
 
     match conditions.len() {
+        
         0 => None,
+
         1 => conditions.into_iter().next(),
+
         _ => Some(SelectCondition::And(conditions)),
+
     }
 
 }
@@ -1910,10 +1938,12 @@ fn localize_condition_for_relation(condition: &SelectCondition) -> Option<Select
 }
 
 fn unqualify_field_name(field_name: &str) -> Option<String> {
+    
     field_name
         .split_once('.')
         .map(|(_, field_name)| field_name.to_string())
         .or_else(|| Some(field_name.to_string()))
+
 }
 
 fn parse_select_condition_expression(

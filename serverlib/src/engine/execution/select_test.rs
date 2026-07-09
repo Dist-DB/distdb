@@ -891,6 +891,221 @@ fn execute_relation_select_plan_supports_sum_over_named_window_with_frame_projec
 }
 
 #[test]
+fn execute_relation_select_plan_supports_rank_and_dense_rank_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let mut third_profile_row = std::collections::HashMap::new();
+    third_profile_row.insert("id".to_string(), b"12".to_vec());
+    third_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    third_profile_row.insert("name".to_string(), b"Zed".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(12),
+            None,
+            None,
+            12,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &third_profile_row)
+                .expect("third profile row should encode"),
+        ),
+    )
+    .expect("third profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, name, rank() over (order by name), dense_rank() over (order by name) from profiles order by id",
+    )
+    .expect("rank window select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("rank window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("name utf8"),
+                String::from_utf8(row[2].clone()).expect("rank utf8"),
+                String::from_utf8(row[3].clone()).expect("dense_rank utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "10".to_string(),
+                "Sam".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ),
+            (
+                "11".to_string(),
+                "Sam".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ),
+            (
+                "12".to_string(),
+                "Zed".to_string(),
+                "3".to_string(),
+                "2".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_avg_min_max_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"1".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam Two".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, avg(id) over (order by id rows between unbounded preceding and current row) as running_avg, min(id) over (order by id rows between unbounded preceding and current row) as running_min, max(id) over (order by id rows between unbounded preceding and current row) as running_max from profiles order by id",
+    )
+    .expect("avg/min/max window select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("avg/min/max window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("avg utf8"),
+                String::from_utf8(row[2].clone()).expect("min utf8"),
+                String::from_utf8(row[3].clone()).expect("max utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "10".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+            ),
+            (
+                "11".to_string(),
+                "10.5".to_string(),
+                "10".to_string(),
+                "11".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn execute_joined_select_plan_supports_complex_join_on_conditions() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();

@@ -31,66 +31,86 @@ pub fn apply_window_projection_values(
     for (column_index, function) in window_indexes {
 
         let window_spec = resolve_window_spec(function, named_windows)?;
+        let (partition_indexes, order_indexes) =
+            window_partition_and_order_indexes(&window_spec, columns)?;
 
         match function.name.to_string().to_ascii_lowercase().as_str() {
 
             "row_number" => {
-                
-                let (partition_indexes, order_indexes) =
-                    window_partition_and_order_indexes(&window_spec, columns)?;
+                apply_row_number_window_projection(
+                    rows,
+                    column_index,
+                    &partition_indexes,
+                    &order_indexes,
+                );
+            },
 
-                let mut partitioned_row_indexes: HashMap<Vec<Vec<u8>>, Vec<usize>> = HashMap::new();
+            "rank" => {
+                apply_rank_window_projection(
+                    rows,
+                    column_index,
+                    &partition_indexes,
+                    &order_indexes,
+                );
+            },
 
-                for (row_index, row) in rows.iter().enumerate() {
-
-                    let partition_key = partition_indexes
-                        .iter()
-                        .filter_map(|index| row.get(*index).cloned())
-                        .collect::<Vec<_>>();
-
-                    partitioned_row_indexes
-                        .entry(partition_key)
-                        .or_default()
-                        .push(row_index);
-
-                }
-
-                for mut partition_row_indexes in partitioned_row_indexes.into_values() {
-
-                    if !order_indexes.is_empty() {
-
-                        partition_row_indexes.sort_by(|left, right| {
-
-                            for (order_index, descending) in &order_indexes {
-
-                                let ordering = rows[*left].get(*order_index).cmp(&rows[*right].get(*order_index));
-
-                                if ordering != Ordering::Equal {
-                                    return if *descending { ordering.reverse() } else { ordering };
-                                }
-
-                            }
-
-                            left.cmp(right)
-
-                        });
-
-                    }
-
-                    for (row_number, row_index) in partition_row_indexes.iter().enumerate() {
-
-                        if let Some(cell) = rows[*row_index].get_mut(column_index) {
-                            *cell = (row_number + 1).to_string().into_bytes();
-                        }
-
-                    }
-
-                }
-            
+            "dense_rank" => {
+                apply_dense_rank_window_projection(
+                    rows,
+                    column_index,
+                    &partition_indexes,
+                    &order_indexes,
+                );
             },
 
             "sum" => {
-                apply_sum_window_projection(rows, columns, column_index, function, &window_spec)?;
+                apply_sum_window_projection(
+                    rows,
+                    columns,
+                    column_index,
+                    function,
+                    &window_spec,
+                    &partition_indexes,
+                    &order_indexes,
+                )?;
+            },
+
+            "avg" => {
+                apply_avg_window_projection(
+                    rows,
+                    columns,
+                    column_index,
+                    function,
+                    &window_spec,
+                    &partition_indexes,
+                    &order_indexes,
+                )?;
+            },
+
+            "min" => {
+                apply_min_max_window_projection(
+                    rows,
+                    columns,
+                    column_index,
+                    function,
+                    &window_spec,
+                    &partition_indexes,
+                    &order_indexes,
+                    false,
+                )?;
+            },
+
+            "max" => {
+                apply_min_max_window_projection(
+                    rows,
+                    columns,
+                    column_index,
+                    function,
+                    &window_spec,
+                    &partition_indexes,
+                    &order_indexes,
+                    true,
+                )?;
             },
 
             _ => {
@@ -105,6 +125,174 @@ pub fn apply_window_projection_values(
     }
 
     Ok(())
+
+}
+
+fn partitioned_row_indexes(
+    rows: &[Vec<Vec<u8>>],
+    partition_indexes: &[usize],
+) -> HashMap<Vec<Vec<u8>>, Vec<usize>> {
+
+    let mut partitioned_row_indexes: HashMap<Vec<Vec<u8>>, Vec<usize>> = HashMap::new();
+
+    for (row_index, row) in rows.iter().enumerate() {
+
+        let partition_key = partition_indexes
+            .iter()
+            .filter_map(|index| row.get(*index).cloned())
+            .collect::<Vec<_>>();
+
+        partitioned_row_indexes
+            .entry(partition_key)
+            .or_default()
+            .push(row_index);
+
+    }
+
+    partitioned_row_indexes
+
+}
+
+fn sort_partition_row_indexes(
+    rows: &[Vec<Vec<u8>>],
+    partition_row_indexes: &mut [usize],
+    order_indexes: &[(usize, bool)],
+) {
+
+    if order_indexes.is_empty() {
+        return;
+    }
+
+    partition_row_indexes.sort_by(|left, right| {
+        compare_rows_by_order(rows, *left, *right, order_indexes)
+    });
+
+}
+
+fn compare_rows_by_order(
+    rows: &[Vec<Vec<u8>>],
+    left: usize,
+    right: usize,
+    order_indexes: &[(usize, bool)],
+) -> Ordering {
+
+    for (order_index, descending) in order_indexes {
+
+        let ordering = rows[left].get(*order_index).cmp(&rows[right].get(*order_index));
+
+        if ordering != Ordering::Equal {
+            return if *descending { ordering.reverse() } else { ordering };
+        }
+
+    }
+
+    left.cmp(&right)
+
+}
+
+fn rows_are_window_peers(
+    rows: &[Vec<Vec<u8>>],
+    left: usize,
+    right: usize,
+    order_indexes: &[(usize, bool)],
+) -> bool {
+
+    if order_indexes.is_empty() {
+        return true;
+    }
+
+    order_indexes.iter().all(|(order_index, _)| {
+        rows[left].get(*order_index) == rows[right].get(*order_index)
+    })
+
+}
+
+fn apply_row_number_window_projection(
+    rows: &mut [Vec<Vec<u8>>],
+    column_index: usize,
+    partition_indexes: &[usize],
+    order_indexes: &[(usize, bool)],
+) {
+
+    for mut partition_row_indexes in partitioned_row_indexes(rows, partition_indexes).into_values() {
+
+        sort_partition_row_indexes(rows, &mut partition_row_indexes, order_indexes);
+
+        for (row_number, row_index) in partition_row_indexes.iter().enumerate() {
+
+            if let Some(cell) = rows[*row_index].get_mut(column_index) {
+                *cell = (row_number + 1).to_string().into_bytes();
+            }
+
+        }
+
+    }
+
+}
+
+fn apply_rank_window_projection(
+    rows: &mut [Vec<Vec<u8>>],
+    column_index: usize,
+    partition_indexes: &[usize],
+    order_indexes: &[(usize, bool)],
+) {
+
+    for mut partition_row_indexes in partitioned_row_indexes(rows, partition_indexes).into_values() {
+
+        sort_partition_row_indexes(rows, &mut partition_row_indexes, order_indexes);
+
+        let mut current_rank = 1usize;
+
+        for (row_position, row_index) in partition_row_indexes.iter().enumerate() {
+
+            if row_position > 0 {
+                let previous_row_index = partition_row_indexes[row_position - 1];
+
+                if !rows_are_window_peers(rows, previous_row_index, *row_index, order_indexes) {
+                    current_rank = row_position + 1;
+                }
+            }
+
+            if let Some(cell) = rows[*row_index].get_mut(column_index) {
+                *cell = current_rank.to_string().into_bytes();
+            }
+
+        }
+
+    }
+
+}
+
+fn apply_dense_rank_window_projection(
+    rows: &mut [Vec<Vec<u8>>],
+    column_index: usize,
+    partition_indexes: &[usize],
+    order_indexes: &[(usize, bool)],
+) {
+
+    for mut partition_row_indexes in partitioned_row_indexes(rows, partition_indexes).into_values() {
+
+        sort_partition_row_indexes(rows, &mut partition_row_indexes, order_indexes);
+
+        let mut current_rank = 1usize;
+
+        for (row_position, row_index) in partition_row_indexes.iter().enumerate() {
+
+            if row_position > 0 {
+                let previous_row_index = partition_row_indexes[row_position - 1];
+
+                if !rows_are_window_peers(rows, previous_row_index, *row_index, order_indexes) {
+                    current_rank = current_rank.saturating_add(1);
+                }
+            }
+
+            if let Some(cell) = rows[*row_index].get_mut(column_index) {
+                *cell = current_rank.to_string().into_bytes();
+            }
+
+        }
+
+    }
 
 }
 
@@ -329,40 +517,15 @@ fn apply_sum_window_projection(
     column_index: usize,
     function: &Function,
     window_spec: &WindowSpec,
+    partition_indexes: &[usize],
+    order_indexes: &[(usize, bool)],
 ) -> Result<(), String> {
 
-    let source_column_index = resolve_window_sum_source_column(function, columns)?;
-    let (partition_indexes, order_indexes) = window_partition_and_order_indexes(window_spec, columns)?;
+    let source_column_index = resolve_window_single_source_column(function, columns)?;
 
-    let mut partitioned_row_indexes: HashMap<Vec<Vec<u8>>, Vec<usize>> = HashMap::new();
+    for mut partition_row_indexes in partitioned_row_indexes(rows, partition_indexes).into_values() {
 
-    for (row_index, row) in rows.iter().enumerate() {
-        let partition_key = partition_indexes
-            .iter()
-            .filter_map(|index| row.get(*index).cloned())
-            .collect::<Vec<_>>();
-
-        partitioned_row_indexes
-            .entry(partition_key)
-            .or_default()
-            .push(row_index);
-    }
-
-    for mut partition_row_indexes in partitioned_row_indexes.into_values() {
-
-        if !order_indexes.is_empty() {
-            partition_row_indexes.sort_by(|left, right| {
-                for (order_index, descending) in &order_indexes {
-                    let ordering = rows[*left].get(*order_index).cmp(&rows[*right].get(*order_index));
-
-                    if ordering != Ordering::Equal {
-                        return if *descending { ordering.reverse() } else { ordering };
-                    }
-                }
-
-                left.cmp(right)
-            });
-        }
+        sort_partition_row_indexes(rows, &mut partition_row_indexes, order_indexes);
 
         let mut partition_values = Vec::with_capacity(partition_row_indexes.len());
         for row_index in &partition_row_indexes {
@@ -399,17 +562,171 @@ fn apply_sum_window_projection(
 
 }
 
-fn resolve_window_sum_source_column(
+fn apply_avg_window_projection(
+    rows: &mut [Vec<Vec<u8>>],
+    columns: &[FieldDef],
+    column_index: usize,
+    function: &Function,
+    window_spec: &WindowSpec,
+    partition_indexes: &[usize],
+    order_indexes: &[(usize, bool)],
+) -> Result<(), String> {
+
+    let source_column_index = resolve_window_single_source_column(function, columns)?;
+
+    for mut partition_row_indexes in partitioned_row_indexes(rows, partition_indexes).into_values() {
+
+        sort_partition_row_indexes(rows, &mut partition_row_indexes, order_indexes);
+
+        let mut partition_values = Vec::with_capacity(partition_row_indexes.len());
+        for row_index in &partition_row_indexes {
+            let value = rows[*row_index]
+                .get(source_column_index)
+                .ok_or_else(|| {
+                    format!(
+                        "window AVG source column index {} is out of range",
+                        source_column_index
+                    )
+                })?;
+            partition_values.push(parse_window_numeric_value(value)?);
+        }
+
+        let mut prefix_sums = Vec::with_capacity(partition_values.len() + 1);
+        let mut prefix_counts = Vec::with_capacity(partition_values.len() + 1);
+        prefix_sums.push(0.0f64);
+        prefix_counts.push(0usize);
+
+        for value in &partition_values {
+            prefix_sums.push(prefix_sums.last().copied().unwrap_or(0.0) + value.unwrap_or(0.0));
+            prefix_counts.push(
+                prefix_counts
+                    .last()
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(usize::from(value.is_some())),
+            );
+        }
+
+        for (row_position, row_index) in partition_row_indexes.iter().enumerate() {
+
+            let frame_bounds =
+                window_frame_bounds(window_spec.window_frame.as_ref(), row_position, partition_row_indexes.len())?;
+
+            let avg_value = match frame_bounds {
+                Some((start, end)) => {
+                    let sum = prefix_sums[end + 1] - prefix_sums[start];
+                    let count = prefix_counts[end + 1].saturating_sub(prefix_counts[start]);
+
+                    if count == 0 {
+                        0.0
+                    } else {
+                        sum / count as f64
+                    }
+                },
+                None => 0.0,
+            };
+
+            if let Some(cell) = rows[*row_index].get_mut(column_index) {
+                *cell = render_window_numeric_value(avg_value);
+            }
+
+        }
+
+    }
+
+    Ok(())
+
+}
+
+fn apply_min_max_window_projection(
+    rows: &mut [Vec<Vec<u8>>],
+    columns: &[FieldDef],
+    column_index: usize,
+    function: &Function,
+    window_spec: &WindowSpec,
+    partition_indexes: &[usize],
+    order_indexes: &[(usize, bool)],
+    is_max: bool,
+) -> Result<(), String> {
+
+    let source_column_index = resolve_window_single_source_column(function, columns)?;
+
+    for mut partition_row_indexes in partitioned_row_indexes(rows, partition_indexes).into_values() {
+
+        sort_partition_row_indexes(rows, &mut partition_row_indexes, order_indexes);
+
+        let mut partition_values = Vec::with_capacity(partition_row_indexes.len());
+        for row_index in &partition_row_indexes {
+            let value = rows[*row_index]
+                .get(source_column_index)
+                .ok_or_else(|| {
+                    format!(
+                        "window {} source column index {} is out of range",
+                        if is_max { "MAX" } else { "MIN" },
+                        source_column_index
+                    )
+                })?;
+            partition_values.push(parse_window_numeric_value(value)?);
+        }
+
+        for (row_position, row_index) in partition_row_indexes.iter().enumerate() {
+
+            let frame_bounds =
+                window_frame_bounds(window_spec.window_frame.as_ref(), row_position, partition_row_indexes.len())?;
+
+            let value = match frame_bounds {
+                Some((start, end)) => {
+                    let mut selected: Option<f64> = None;
+
+                    for candidate in partition_values[start..=end].iter().flatten() {
+                        selected = Some(match selected {
+                            Some(current) => {
+                                if is_max {
+                                    current.max(*candidate)
+                                } else {
+                                    current.min(*candidate)
+                                }
+                            },
+                            None => *candidate,
+                        });
+                    }
+
+                    selected.unwrap_or(0.0)
+                },
+                None => 0.0,
+            };
+
+            if let Some(cell) = rows[*row_index].get_mut(column_index) {
+                *cell = render_window_numeric_value(value);
+            }
+
+        }
+
+    }
+
+    Ok(())
+
+}
+
+fn resolve_window_single_source_column(
     function: &Function,
     columns: &[FieldDef],
 ) -> Result<usize, String> {
 
+    let function_name = function.name.to_string().to_ascii_uppercase();
+
     let FunctionArguments::List(list) = &function.args else {
-        return Err("SUM window function currently requires exactly one argument".to_string());
+        return Err(format!(
+            "{} window function currently requires exactly one argument",
+            function_name
+        ));
     };
 
     let Some(argument) = list.args.first() else {
-        return Err("SUM window function currently requires exactly one argument".to_string());
+        return Err(format!(
+            "{} window function currently requires exactly one argument",
+            function_name
+        ));
     };
 
     let expression = match argument {
@@ -422,7 +739,10 @@ fn resolve_window_sum_source_column(
         } => expression,
 
         _ => {
-            return Err("SUM window function currently supports only a direct column argument".to_string());
+            return Err(format!(
+                "{} window function currently supports only a direct column argument",
+                function_name
+            ));
         }
         
     };
@@ -430,10 +750,16 @@ fn resolve_window_sum_source_column(
     resolve_window_field_index(
         expression,
         columns,
-        "window SUM source",
-        "SUM window function currently supports only a direct column argument",
-        "window SUM source ordinal must be an unsigned numeric literal",
-        "window SUM source ordinal must start at 1",
+        &format!("window {} source", function_name),
+        &format!(
+            "{} window function currently supports only a direct column argument",
+            function_name
+        ),
+        &format!(
+            "window {} source ordinal must be an unsigned numeric literal",
+            function_name
+        ),
+        &format!("window {} source ordinal must start at 1", function_name),
     )
 
 }

@@ -24,7 +24,7 @@ functions in the MySQL80 compatibility target, along with accepted SELECT qualif
 as `QUALIFY` and `FOR UPDATE`/`FOR SHARE` where documented below.
 
 Current SELECT window-function coverage is partial: the runtime includes first execution slices
-for `ROW_NUMBER` and `SUM` with named-window reuse, while broader window function parity and
+for `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `SUM`, `AVG`, `MIN`, and `MAX` with named-window reuse, while broader window function parity and
 non-`ROWS` frame units are still pending.
 
 ## Why The Coverage Is Split By Area

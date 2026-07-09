@@ -371,6 +371,51 @@ fn select_sum_over_named_window_with_frame_parses_as_window_projection() {
 }
 
 #[test]
+fn select_rank_over_order_by_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select rank() over (order by email) as rnk from users",
+    )
+    .expect("rank window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, function }]
+            if output_name == "rnk"
+                && function.name.to_string().eq_ignore_ascii_case("rank")
+    ));
+}
+
+#[test]
+fn select_dense_rank_over_order_by_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select dense_rank() over (order by email) as drnk from users",
+    )
+    .expect("dense_rank window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, function }]
+            if output_name == "drnk"
+                && function.name.to_string().eq_ignore_ascii_case("dense_rank")
+    ));
+}
+
+#[test]
+fn select_avg_over_named_window_with_frame_parses_as_window_projection() {
+    let plan = parse_select_read_plan_from_statement(
+        "select avg(id) over (w rows between unbounded preceding and current row) as running_avg from profiles window w as (partition by user_id order by id)",
+    )
+    .expect("avg window select should parse");
+
+    assert!(matches!(
+        plan.projection_items.as_slice(),
+        [SelectProjectionItem::WindowFunction { output_name, function }]
+            if output_name == "running_avg"
+                && function.name.to_string().eq_ignore_ascii_case("avg")
+    ));
+}
+
+#[test]
 fn select_qualify_reuses_filter_pipeline() {
     let plan = parse_select_read_plan_from_statement(
         "select id from users qualify id = 1",
