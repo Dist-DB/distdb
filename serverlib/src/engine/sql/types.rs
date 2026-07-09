@@ -135,6 +135,40 @@ pub struct IfElseEndPlan {
     pub else_action_sql: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineParameterMode {
+    In,
+    Out,
+    InOut,
+}
+
+impl std::fmt::Display for RoutineParameterMode {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RoutineParameterMode::In => write!(f, "IN"),
+            RoutineParameterMode::Out => write!(f, "OUT"),
+            RoutineParameterMode::InOut => write!(f, "INOUT"),
+        }
+    }
+    
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineParameterDeclaration {
+    pub name: String,
+    pub mode: RoutineParameterMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineArgumentBinding {
+    pub name: String,
+    pub mode: RoutineParameterMode,
+    pub value: Vec<u8>,
+    pub output_target: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectRelation {
     pub table_id: String,
@@ -148,6 +182,20 @@ pub enum SelectJoinKind {
     Right,
     Full,
     Cross,
+}
+
+impl std::fmt::Display for SelectJoinKind {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectJoinKind::Inner => write!(f, "inner"),
+            SelectJoinKind::Left => write!(f, "left"),
+            SelectJoinKind::Right => write!(f, "right"),
+            SelectJoinKind::Full => write!(f, "full"),
+            SelectJoinKind::Cross => write!(f, "cross"),
+        }
+    }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -29,16 +29,20 @@ pub fn apply_window_projection_values(
     }
 
     for (column_index, function) in window_indexes {
+
         let window_spec = resolve_window_spec(function, named_windows)?;
 
         match function.name.to_string().to_ascii_lowercase().as_str() {
+
             "row_number" => {
+                
                 let (partition_indexes, order_indexes) =
                     window_partition_and_order_indexes(&window_spec, columns)?;
 
                 let mut partitioned_row_indexes: HashMap<Vec<Vec<u8>>, Vec<usize>> = HashMap::new();
 
                 for (row_index, row) in rows.iter().enumerate() {
+
                     let partition_key = partition_indexes
                         .iter()
                         .filter_map(|index| row.get(*index).cloned())
@@ -48,35 +52,46 @@ pub fn apply_window_projection_values(
                         .entry(partition_key)
                         .or_default()
                         .push(row_index);
+
                 }
 
                 for mut partition_row_indexes in partitioned_row_indexes.into_values() {
 
                     if !order_indexes.is_empty() {
+
                         partition_row_indexes.sort_by(|left, right| {
+
                             for (order_index, descending) in &order_indexes {
+
                                 let ordering = rows[*left].get(*order_index).cmp(&rows[*right].get(*order_index));
 
                                 if ordering != Ordering::Equal {
                                     return if *descending { ordering.reverse() } else { ordering };
                                 }
+
                             }
 
                             left.cmp(right)
+
                         });
+
                     }
 
                     for (row_number, row_index) in partition_row_indexes.iter().enumerate() {
+
                         if let Some(cell) = rows[*row_index].get_mut(column_index) {
                             *cell = (row_number + 1).to_string().into_bytes();
                         }
+
                     }
+
                 }
-            }
+            
+            },
 
             "sum" => {
                 apply_sum_window_projection(rows, columns, column_index, function, &window_spec)?;
-            }
+            },
 
             _ => {
                 return Err(format!(
@@ -84,7 +99,9 @@ pub fn apply_window_projection_values(
                     function.name
                 ));
             }
+
         }
+
     }
 
     Ok(())
@@ -190,6 +207,7 @@ fn window_partition_and_order_indexes(
         };
 
         order_indexes.push((column_index, expression.asc == Some(false)));
+
     }
 
     Ok((partition_indexes, order_indexes))
@@ -216,8 +234,11 @@ fn resolve_named_or_inline_window_spec(
 ) -> Result<WindowSpec, String> {
 
     match window_type {
+        
         WindowType::NamedWindow(name) => resolve_named_window_spec(name, named_windows, visiting),
+
         WindowType::WindowSpec(window_spec) => resolve_window_spec_from_spec(window_spec, named_windows, visiting),
+
     }
 
 }
@@ -230,10 +251,10 @@ fn resolve_window_spec_from_spec(
 
     if let Some(window_name) = &window_spec.window_name {
         let base_spec = resolve_named_window_spec(window_name, named_windows, visiting)?;
-        return merge_window_specs(base_spec, window_spec);
+        merge_window_specs(base_spec, window_spec)
+    } else {
+        Ok(window_spec.clone())
     }
-
-    Ok(window_spec.clone())
 
 }
 
@@ -392,14 +413,18 @@ fn resolve_window_sum_source_column(
     };
 
     let expression = match argument {
+
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => expression,
+
         FunctionArg::Named {
             arg: FunctionArgExpr::Expr(expression),
             ..
         } => expression,
+
         _ => {
             return Err("SUM window function currently supports only a direct column argument".to_string());
         }
+        
     };
 
     resolve_window_field_index(

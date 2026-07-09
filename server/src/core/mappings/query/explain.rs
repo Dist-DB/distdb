@@ -4,6 +4,7 @@ use serverlib::{SelectCondition, SelectJoin, SelectRelation};
 use super::timings::empty_query_timings;
 
 pub(super) fn connector_field_defs(fields: Vec<serverlib::FieldDef>) -> Vec<FieldDef> {
+
     fields
         .into_iter()
         .map(|field| FieldDef {
@@ -16,12 +17,14 @@ pub(super) fn connector_field_defs(fields: Vec<serverlib::FieldDef>) -> Vec<Fiel
             metadata: field.metadata,
         })
         .collect()
+        
 }
 
 pub(super) fn explain_select_plan(
     request_id: &str,
     result: serverlib::SelectExecutionResult,
 ) -> ConnectorResponse {
+
     ConnectorResponse::applied(
         request_id.to_string(),
         ConnectorResult::Query(QueryResult {
@@ -30,9 +33,11 @@ pub(super) fn explain_select_plan(
             timings: empty_query_timings(),
         }),
     )
+
 }
 
 pub(super) fn explain_inner_statement(statement_sql: &str) -> (&str, bool) {
+
     let trimmed = statement_sql.trim();
     let lowered = trimmed.to_ascii_lowercase();
 
@@ -41,9 +46,11 @@ pub(super) fn explain_inner_statement(statement_sql: &str) -> (&str, bool) {
     } else {
         (trimmed, false)
     }
+
 }
 
 pub(super) fn explain_mutation_plan(request_id: &str, rows: Vec<Vec<String>>) -> ConnectorResponse {
+
     let columns = vec![
         serverlib::FieldDef {
             seqno: 1,
@@ -77,6 +84,7 @@ pub(super) fn explain_mutation_plan(request_id: &str, rows: Vec<Vec<String>>) ->
             rows: result_rows,
         },
     )
+
 }
 
 pub(super) fn explain_join_mutation_plan(
@@ -89,6 +97,7 @@ pub(super) fn explain_join_mutation_plan(
     assignment_count: usize,
     has_where_condition: bool,
 ) -> ConnectorResponse {
+
     let mut rows = vec![
         vec!["operation".to_string(), operation.to_string()],
         vec!["table".to_string(), table_id.to_string()],
@@ -109,14 +118,7 @@ pub(super) fn explain_join_mutation_plan(
     ]);
 
     for (join_index, join) in joins.iter().enumerate() {
-        let kind = match &join.kind {
-            serverlib::SelectJoinKind::Inner => "inner",
-            serverlib::SelectJoinKind::Left => "left",
-            serverlib::SelectJoinKind::Right => "right",
-            serverlib::SelectJoinKind::Full => "full",
-            serverlib::SelectJoinKind::Cross => "cross",
-        };
-
+        
         let on = if let Some((left_field_name, right_field_name)) =
             serverlib::join_condition_field_names(join)
         {
@@ -125,7 +127,7 @@ pub(super) fn explain_join_mutation_plan(
             format!("{:?}", join.on_condition)
         };
 
-        rows.push(vec![format!("join[{}].kind", join_index), kind.to_string()]);
+        rows.push(vec![format!("join[{}].kind", join_index), join.kind.to_string()]);
         rows.push(vec![
             format!("join[{}].relation", join_index),
             join.relation.table_id.clone(),
@@ -141,7 +143,9 @@ pub(super) fn explain_join_mutation_plan(
                 format!("{:?}", condition),
             ]);
         }
+
     }
 
     explain_mutation_plan(request_id, rows)
+
 }

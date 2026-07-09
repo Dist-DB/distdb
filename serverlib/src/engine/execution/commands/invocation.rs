@@ -2,6 +2,7 @@ use crate::{
     ConcurrentWalManager, DatabaseCatalog, DatabaseError, DatabaseStoredProcedure,
     DatabaseTrigger, TriggerEventKind, TriggerTiming,
 };
+use crate::engine::sql::parse_create_procedure_action_statements;
 
 use super::scoped_table::ScopedEphemeralTableScope;
 use super::super::ConditionValueProvider;
@@ -32,7 +33,22 @@ where
         }
     }
 
-    execute_if_else_end_from_create_procedure_sql(provider, &procedure.sql, execute_action)
+    if let Some(result) =
+        execute_if_else_end_from_create_procedure_sql(provider, &procedure.sql, execute_action)?
+    {
+        return Ok(Some(result));
+    }
+
+    let action_statements = parse_create_procedure_action_statements(&procedure.sql)
+        .map_err(|err| format!("stored procedure action parse failed: {err}"))?;
+
+    let mut last_result = None;
+
+    for action_sql in action_statements {
+        last_result = Some(execute_action(&action_sql)?);
+    }
+
+    Ok(last_result)
 
 }
 

@@ -166,6 +166,32 @@ fn parse_create_procedure_parameter_names_from_multiline_as_begin_statement_extr
 }
 
 #[test]
+fn parse_create_procedure_parameter_declarations_extracts_modes() {
+    let parameters = parse_create_procedure_parameter_declarations_from_statement(
+        "create procedure p_sync(in p_in int, out p_out int, inout p_mix varchar(20)) begin select 1; end",
+    )
+    .expect("parameter declarations should parse");
+
+    assert_eq!(
+        parameters,
+        vec![
+            RoutineParameterDeclaration {
+                name: "p_in".to_string(),
+                mode: RoutineParameterMode::In,
+            },
+            RoutineParameterDeclaration {
+                name: "p_out".to_string(),
+                mode: RoutineParameterMode::Out,
+            },
+            RoutineParameterDeclaration {
+                name: "p_mix".to_string(),
+                mode: RoutineParameterMode::InOut,
+            },
+        ]
+    );
+}
+
+#[test]
 fn parse_create_function_parameter_names_from_statement_extracts_names() {
     let names = parse_create_function_parameter_names_from_statement(
         "create function f_sync(arg_user_id int, arg_state varchar(20)) returns varchar(20) return arg_state",
@@ -229,4 +255,123 @@ fn bind_call_procedure_arguments_rejects_count_mismatch() {
         crate::SqlParseError::UnsupportedStatement(message)
             if message.contains("CALL argument mismatch")
     ));
+}
+
+#[test]
+fn bind_call_procedure_arguments_accepts_null_and_placeholder_values() {
+    let call_statement = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::MySqlDialect {},
+        "call p_sync(null, ?)"
+    )
+    .expect("call statement should parse")
+    .into_iter()
+    .next()
+    .expect("single call statement should exist");
+
+    let bindings = bind_call_procedure_arguments(
+        "create procedure p_sync(arg_state varchar(20), arg_marker varchar(20)) begin select 1; end",
+        &call_statement,
+    )
+    .expect("call arguments should bind");
+
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0], ("arg_state".to_string(), b"NULL".to_vec()));
+    assert_eq!(bindings[1], ("arg_marker".to_string(), b"?".to_vec()));
+}
+
+#[test]
+fn bind_call_procedure_arguments_accepts_constant_expressions() {
+    let call_statement = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::MySqlDialect {},
+        "call p_sync(1 + 2, abs(-3))"
+    )
+    .expect("call statement should parse")
+    .into_iter()
+    .next()
+    .expect("single call statement should exist");
+
+    let bindings = bind_call_procedure_arguments(
+        "create procedure p_sync(arg_left int, arg_right int) begin select 1; end",
+        &call_statement,
+    )
+    .expect("call arguments should bind");
+
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0], ("arg_left".to_string(), b"1 + 2".to_vec()));
+    assert_eq!(bindings[1], ("arg_right".to_string(), b"3".to_vec()));
+}
+
+#[test]
+fn bind_call_procedure_argument_bindings_applies_parameter_modes() {
+    let call_statement = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::MySqlDialect {},
+        "call p_sync(7, arg_result, arg_state)",
+    )
+    .expect("call statement should parse")
+    .into_iter()
+    .next()
+    .expect("single call statement should exist");
+
+    let bindings = bind_call_procedure_argument_bindings(
+        "create procedure p_sync(in p_in int, out p_out int, inout p_state int) begin select 1; end",
+        &call_statement,
+    )
+    .expect("mode-aware call arguments should bind");
+
+    assert_eq!(bindings.len(), 3);
+    assert_eq!(bindings[0].name, "p_in");
+    assert_eq!(bindings[0].mode, RoutineParameterMode::In);
+    assert_eq!(bindings[0].value, b"7".to_vec());
+    assert!(bindings[0].output_target.is_none());
+
+    assert_eq!(bindings[1].name, "p_out");
+    assert_eq!(bindings[1].mode, RoutineParameterMode::Out);
+    assert_eq!(bindings[1].value, b"NULL".to_vec());
+    assert_eq!(bindings[1].output_target.as_deref(), Some("arg_result"));
+
+    assert_eq!(bindings[2].name, "p_state");
+    assert_eq!(bindings[2].mode, RoutineParameterMode::InOut);
+    assert_eq!(bindings[2].value, b"arg_state".to_vec());
+    assert_eq!(bindings[2].output_target.as_deref(), Some("arg_state"));
+}
+
+#[test]
+fn bind_call_procedure_argument_bindings_rejects_non_identifier_out_target() {
+    let call_statement = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::MySqlDialect {},
+        "call p_sync(1)",
+    )
+    .expect("call statement should parse")
+    .into_iter()
+    .next()
+    .expect("single call statement should exist");
+
+    let err = bind_call_procedure_argument_bindings(
+        "create procedure p_sync(out p_out int) begin select 1; end",
+        &call_statement,
+    )
+    .expect_err("OUT binding should require identifier target");
+
+    assert!(matches!(
+        err,
+        crate::SqlParseError::UnsupportedStatement(message)
+            if message.contains("OUT argument") && message.contains("identifier target")
+    ));
+}
+
+#[test]
+fn parse_create_procedure_action_statements_splits_top_level_statements() {
+    let actions = parse_create_procedure_action_statements(
+        "create procedure p_sync() begin set @x = 1; select (@x + 1); select ';'; end",
+    )
+    .expect("procedure actions should parse");
+
+    assert_eq!(
+        actions,
+        vec![
+            "set @x = 1".to_string(),
+            "select (@x + 1)".to_string(),
+            "select ';'".to_string(),
+        ]
+    );
 }

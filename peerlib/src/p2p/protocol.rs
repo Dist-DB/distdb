@@ -15,18 +15,28 @@ pub enum AffinityReplicationAction {
 impl AffinityReplicationAction {
 
     pub fn as_str(&self) -> &'static str {
+
         match self {
-            Self::JoinRequest => "affinity.join.request",
-            Self::JoinResponse => "affinity.join.response",
-            Self::SchemaCatalogRequest => "affinity.schema.request",
-            Self::SchemaCatalogResponse => "affinity.schema.response",
-            Self::DataSnapshotRequest => "affinity.snapshot.request",
-            Self::DataSnapshotResponse => "affinity.snapshot.response",
-            Self::TransactionsSinceRequest => "affinity.wal.request",
+            Self::JoinRequest               => "affinity.join.request",
+            Self::JoinResponse              => "affinity.join.response",
+            Self::SchemaCatalogRequest      => "affinity.schema.request",
+            Self::SchemaCatalogResponse     => "affinity.schema.response",
+            Self::DataSnapshotRequest       => "affinity.snapshot.request",
+            Self::DataSnapshotResponse      => "affinity.snapshot.response",
+            Self::TransactionsSinceRequest  => "affinity.wal.request",
             Self::TransactionsSinceResponse => "affinity.wal.response",
         }
+
     }
     
+}
+
+impl std::fmt::Display for AffinityReplicationAction {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -194,14 +204,14 @@ impl ServiceMessage {
     pub fn affinity_replication_action(&self) -> Option<AffinityReplicationAction> {
 
         match self {
-            Self::AffinityJoinRequest(_) => Some(AffinityReplicationAction::JoinRequest),
-            Self::AffinityJoinResponse(_) => Some(AffinityReplicationAction::JoinResponse),
-            Self::SchemaCatalogRequest(_) => Some(AffinityReplicationAction::SchemaCatalogRequest),
-            Self::SchemaCatalogResponse(_) => Some(AffinityReplicationAction::SchemaCatalogResponse),
-            Self::DataSnapshotRequest(_) => Some(AffinityReplicationAction::DataSnapshotRequest),
-            Self::DataSnapshotResponse(_) => Some(AffinityReplicationAction::DataSnapshotResponse),
-            Self::TransactionsSinceRequest(_) => Some(AffinityReplicationAction::TransactionsSinceRequest),
-            Self::TransactionsSinceResponse(_) => Some(AffinityReplicationAction::TransactionsSinceResponse),
+            Self::AffinityJoinRequest(_)        => Some(AffinityReplicationAction::JoinRequest),
+            Self::AffinityJoinResponse(_)       => Some(AffinityReplicationAction::JoinResponse),
+            Self::SchemaCatalogRequest(_)       => Some(AffinityReplicationAction::SchemaCatalogRequest),
+            Self::SchemaCatalogResponse(_)      => Some(AffinityReplicationAction::SchemaCatalogResponse),
+            Self::DataSnapshotRequest(_)        => Some(AffinityReplicationAction::DataSnapshotRequest),
+            Self::DataSnapshotResponse(_)       => Some(AffinityReplicationAction::DataSnapshotResponse),
+            Self::TransactionsSinceRequest(_)   => Some(AffinityReplicationAction::TransactionsSinceRequest),
+            Self::TransactionsSinceResponse(_)  => Some(AffinityReplicationAction::TransactionsSinceResponse),
             _ => None,
         }
 

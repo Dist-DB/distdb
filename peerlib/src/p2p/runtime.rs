@@ -64,6 +64,7 @@ pub struct ServerP2pRuntime<T: Transport> {
 }
 
 impl<T: Transport> ServerP2pRuntime<T> {
+    
     pub fn new(network: ServerP2pNetwork<T>) -> Self {
         Self {
             network,
@@ -209,7 +210,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                 if let Some(action) = message.affinity_replication_action() {
                     log::debug!(
                         "server p2p affinity replication action={} from_peer_id={}",
-                        action.as_str(),
+                        action,
                         from_peer_id
                     );
                 }
@@ -228,7 +229,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::AffinityJoinRequest(req) => {
                         log::debug!(
                             "server p2p affinity join request received action={} from_peer_id={} affinity_id={}",
-                            AffinityReplicationAction::JoinRequest.as_str(),
+                            AffinityReplicationAction::JoinRequest,
                             from_peer_id,
                             req.affinity_id
                         );
@@ -239,7 +240,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::AffinityJoinResponse(resp) => {
                         log::debug!(
                             "server p2p affinity join response received action={} from_peer_id={} request_id={} ok={}",
-                            AffinityReplicationAction::JoinResponse.as_str(),
+                            AffinityReplicationAction::JoinResponse,
                             from_peer_id,
                             resp.request_id,
                             resp.ok
@@ -251,7 +252,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::SchemaCatalogRequest(req) => {
                         log::debug!(
                             "server p2p schema catalog request received action={} from_peer_id={} database_id={}",
-                            AffinityReplicationAction::SchemaCatalogRequest.as_str(),
+                            AffinityReplicationAction::SchemaCatalogRequest,
                             from_peer_id,
                             req.database_id
                         );
@@ -262,7 +263,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::SchemaCatalogResponse(resp) => {
                         log::debug!(
                             "server p2p schema catalog response received action={} from_peer_id={} request_id={}",
-                            AffinityReplicationAction::SchemaCatalogResponse.as_str(),
+                            AffinityReplicationAction::SchemaCatalogResponse,
                             from_peer_id,
                             resp.request_id
                         );
@@ -273,7 +274,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::DataSnapshotRequest(req) => {
                         log::debug!(
                             "server p2p data snapshot request received action={} from_peer_id={} database_id={}",
-                            AffinityReplicationAction::DataSnapshotRequest.as_str(),
+                            AffinityReplicationAction::DataSnapshotRequest,
                             from_peer_id,
                             req.database_id
                         );
@@ -284,7 +285,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::DataSnapshotResponse(resp) => {
                         log::debug!(
                             "server p2p data snapshot response received action={} from_peer_id={} request_id={}",
-                            AffinityReplicationAction::DataSnapshotResponse.as_str(),
+                            AffinityReplicationAction::DataSnapshotResponse,
                             from_peer_id,
                             resp.request_id
                         );
@@ -295,7 +296,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::TransactionsSinceRequest(req) => {
                         log::debug!(
                             "server p2p transactions since request received action={} from_peer_id={} database_id={} from_tx={:?}",
-                            AffinityReplicationAction::TransactionsSinceRequest.as_str(),
+                            AffinityReplicationAction::TransactionsSinceRequest,
                             from_peer_id,
                             req.database_id,
                             req.from_transaction_id
@@ -307,7 +308,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
                     ServiceMessage::TransactionsSinceResponse(resp) => {
                         log::debug!(
                             "server p2p transactions since response received action={} from_peer_id={} request_id={} count={}",
-                            AffinityReplicationAction::TransactionsSinceResponse.as_str(),
+                            AffinityReplicationAction::TransactionsSinceResponse,
                             from_peer_id,
                             resp.request_id,
                             resp.transactions.len()

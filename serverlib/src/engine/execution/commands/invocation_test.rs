@@ -49,6 +49,50 @@ fn execute_stored_procedure_invocation_uses_cached_if_else_plan() {
 }
 
 #[test]
+fn execute_stored_procedure_invocation_executes_non_if_top_level_actions_in_order() {
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    catalog
+        .register_stored_procedure(
+            "refresh_accounts",
+            "create procedure refresh_accounts() begin set @phase = 'boot'; select 1; select 2; end",
+            vec!["accounts".to_string()],
+        )
+        .expect("procedure register should succeed");
+
+    let procedure = catalog
+        .stored_procedure("refresh_accounts")
+        .expect("procedure should exist");
+
+    let mut executed = Vec::new();
+
+    let result = execute_stored_procedure_invocation(
+        &HashMap::new(),
+        procedure,
+        EntityInvocationSource::DirectedUser,
+        &mut |sql| {
+            executed.push(sql.to_string());
+            Ok(sql.to_string())
+        },
+    )
+    .expect("stored procedure invocation should succeed");
+
+    assert_eq!(
+        executed,
+        vec![
+            "set @phase = 'boot'".to_string(),
+            "select 1".to_string(),
+            "select 2".to_string(),
+        ]
+    );
+
+    assert_eq!(result, Some("select 2".to_string()));
+
+}
+
+#[test]
 fn execute_automatic_triggers_for_event_runs_only_matching_triggers() {
 
     let mut catalog =
@@ -280,7 +324,7 @@ fn execute_stored_procedure_invocation_with_cleanup_runs_cleanup_even_on_success
     )
     .expect("invocation with cleanup should succeed");
 
-    assert_eq!(result, None);
+    assert_eq!(result, Some("select 1".to_string()));
     assert!(catalog.table("tmp_users").is_none());
 
 }
@@ -377,7 +421,7 @@ fn execute_stored_procedure_invocation_with_scoped_teardown_cleans_up_owned_tabl
     )
     .expect("scoped invocation should succeed");
 
-    assert_eq!(result, None);
+    assert_eq!(result, Some("ok".to_string()));
     assert!(catalog
         .table_ids()
         .into_iter()

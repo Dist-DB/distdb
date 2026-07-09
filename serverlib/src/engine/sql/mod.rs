@@ -40,11 +40,14 @@ pub use select_plan::{
     parse_create_view_dependencies_from_sql,
 };
 pub use routine_plan::{
+    bind_call_procedure_argument_bindings,
     bind_call_procedure_arguments,
     extract_create_function_action_sql,
     extract_create_function_return_expression,
+    parse_create_procedure_parameter_declarations_from_statement,
     parse_create_procedure_parameter_names_from_statement,
     parse_create_function_parameter_names_from_statement,
+    parse_create_procedure_action_statements,
     parse_create_function_return_type_from_statement,
     parse_if_else_end_plan_from_create_procedure_statement,
     parse_if_else_end_plan_from_statement,
@@ -68,6 +71,7 @@ pub use predicates::{
 pub use types::{
     AlterTableChangeOp, AlterTableChangePlan, DeleteRowsPlan, IfElseEndBranchPlan,
     IfElseEndPlan, InsertRowsPlan, InsertRowsSource,
+    RoutineArgumentBinding, RoutineParameterDeclaration, RoutineParameterMode,
     SelectCaseWhen,
     SelectComparisonOp, SelectCondition,
     SelectCtePlan, SelectJoin, SelectJoinKind, SelectOrderByItem, SelectSetBoundaryOp, SelectSetQueryStep, SelectPredicate,

@@ -292,7 +292,7 @@ pub fn explain_joined_select_plan_result(read_plan: &SelectReadPlan) -> SelectEx
 
         rows.push(vec![
             (join_index + 1).to_string().into_bytes(),
-            join_kind_label(&join.kind).as_bytes().to_vec(),
+            join.kind.to_string().into_bytes(),
             relation_label(&join.relation).into_bytes(),
             on_text.into_bytes(),
             pushdown_filter_text(read_plan.pushdown_conditions.get(join_index + 1)).into_bytes(),
@@ -317,18 +317,6 @@ fn relation_label(relation: &SelectRelation) -> String {
         
         _ => relation.table_id.clone(),
 
-    }
-
-}
-
-fn join_kind_label(kind: &SelectJoinKind) -> &'static str {
-
-    match kind {
-        SelectJoinKind::Inner   => "inner",
-        SelectJoinKind::Left    => "left",
-        SelectJoinKind::Right   => "right",
-        SelectJoinKind::Full    => "full",
-        SelectJoinKind::Cross   => "cross",
     }
 
 }

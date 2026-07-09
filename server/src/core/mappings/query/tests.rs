@@ -674,6 +674,110 @@ fn call_procedure_argument_bindings_do_not_bleed_between_calls() {
 }
 
 #[test]
+fn call_procedure_returns_out_parameter_values_when_no_resultset_is_emitted() {
+    
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_out_value",
+            "create procedure p_out_value(in p_in bigint, out p_out bigint) begin set p_out = p_in; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let call_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_out_value(7, out_slot)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-out-value",
+        &call_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let columns = query_result_columns(response.clone());
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].field_name, "out_slot");
+    assert_eq!(columns[0].field_type, FieldType::Text);
+
+    assert_eq!(query_result_rows(response), vec![vec!["7".to_string()]]);
+
+}
+
+#[test]
+fn call_procedure_returns_inout_parameter_values_when_no_resultset_is_emitted() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .register_stored_procedure(
+            "p_inout_value",
+            "create procedure p_inout_value(inout p_state bigint) begin set p_state = 9; end",
+            Vec::new(),
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id, catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let call_query = DataQuery {
+        database_id: "main".to_string(),
+        sql: "call p_inout_value(state_slot)".to_string(),
+    };
+
+    let response = handle_query_command(
+        "req-call-inout-value",
+        &call_query,
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let columns = query_result_columns(response.clone());
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].field_name, "state_slot");
+    assert_eq!(columns[0].field_type, FieldType::Text);
+
+    assert_eq!(query_result_rows(response), vec![vec!["9".to_string()]]);
+}
+
+#[test]
 fn call_procedure_supports_local_declare_and_set_statements() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");

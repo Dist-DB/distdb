@@ -26,7 +26,7 @@ use serverlib::core::cluster::NodeDescriptor;
 use serverlib::{
     AffinityProcessor,
     ConcurrentWalManager, DatabaseCatalog, DatabaseEntity,
-    DatabaseEntityAspect, DatabaseEntityKind, DatabaseId,
+    DatabaseEntityAspect, DatabaseId,
     SqlOperation, encode_wal_frame, import_p2p_ca_pem_if_missing, parse_mysql8_sql_requests,
     sign_tls_enrollment_csr,
 };
@@ -158,24 +158,6 @@ fn table_lock_update_from_request(request: &ConnectorRequest) -> Option<(bool, S
     
 }
 
-fn entity_kind_name(kind: DatabaseEntityKind) -> &'static str {
-
-    match kind {
-        
-        DatabaseEntityKind::Table => "table",
-        
-        DatabaseEntityKind::View => "view",
-        
-        DatabaseEntityKind::Relationship => "relationship",
-        
-        DatabaseEntityKind::Trigger => "trigger",
-
-        DatabaseEntityKind::StoredProcedure => "stored_procedure",
-
-    }
-
-}
-
 fn append_catalog_entity_rows(
     rows: &mut Vec<Vec<Vec<u8>>>,
     resolved_database_id: &str,
@@ -273,7 +255,7 @@ fn append_catalog_entity_rows(
                 rows.push(vec![
                     resolved_database_id.as_bytes().to_vec(),
                     catalog.database_name().as_bytes().to_vec(),
-                    entity_kind_name(entity.kind()).as_bytes().to_vec(),
+                    entity.kind().to_string().into_bytes(),
                     entity.name().as_bytes().to_vec(),
                     entity_status.into_bytes(),
                     if bootstrap_ready {

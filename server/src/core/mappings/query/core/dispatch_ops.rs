@@ -421,12 +421,13 @@ fn execute_call_stored_procedure(
         common::normalize_identifier!(ctx.session_id),
         procedure.procedure_id,
     ));
+    let mut output_mappings: Vec<(String, String)> = Vec::new();
 
     if let Some(parsed_call_statement) = statement.parsed_statement.as_ref() {
 
         let argument_bindings =
 
-            match serverlib::bind_call_procedure_arguments(&procedure.sql, parsed_call_statement) {
+            match serverlib::bind_call_procedure_argument_bindings(&procedure.sql, parsed_call_statement) {
                 
                 Ok(bindings) => bindings,
                 
@@ -439,8 +440,14 @@ fn execute_call_stored_procedure(
 
             };
 
-        for (name, value) in argument_bindings {
-            local_entities.set_argument(name, value);
+        for binding in argument_bindings {
+            let parameter_name = binding.name;
+
+            if let Some(output_target) = binding.output_target {
+                output_mappings.push((output_target, parameter_name.clone()));
+            }
+
+            local_entities.set_argument(parameter_name, binding.value);
         }
 
     }
@@ -485,35 +492,125 @@ fn execute_call_stored_procedure(
         },
     );
 
+    let output_result = match &invocation_result {
+        Ok(_) => collect_call_procedure_output_result(&local_entities, &output_mappings),
+        Err(_) => Ok(None),
+    };
+
     let cleanup_result = match resolve_catalog_mut(ctx.catalogs, &query.database_id) {
         Some(catalog) => local_entities.cleanup(catalog, ctx.wal),
         None => Err(format!("database '{}' not found", query.database_id)),
     };
 
-    match (invocation_result, cleanup_result) {
+    match (invocation_result, output_result, cleanup_result) {
 
-        (Ok(Some(response)), Ok(())) => response,
+        (Ok(Some(response)), Ok(output_query_result), Ok(())) => {
+            apply_call_output_result_if_noop(request_id, response, output_query_result)
+        },
 
-        (Ok(None), Ok(())) => ConnectorResponse::applied(
+        (Ok(None), Ok(Some(output_query_result)), Ok(())) => ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Query(output_query_result),
+        ),
+
+        (Ok(None), Ok(None), Ok(())) => ConnectorResponse::applied(
             request_id.to_string(),
             ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
         ),
 
-        (Err(err), Ok(())) => ConnectorResponse::rejected(
+        (Ok(_), Err(output_err), Ok(())) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("call procedure output propagation failed: {output_err}"),
+        ),
+
+        (Err(err), _, Ok(())) => ConnectorResponse::rejected(
             request_id.to_string(),
             format!("call procedure failed: {err}"),
         ),
 
-        (Ok(_), Err(cleanup_err)) => ConnectorResponse::rejected(
+        (Ok(_), Ok(_), Err(cleanup_err)) => ConnectorResponse::rejected(
             request_id.to_string(),
             format!("call procedure cleanup failed: {cleanup_err}"),
         ),
 
-        (Err(err), Err(cleanup_err)) => ConnectorResponse::rejected(
+        (Ok(_), Err(output_err), Err(cleanup_err)) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "call procedure output propagation failed: {output_err}; cleanup failed: {cleanup_err}",
+            ),
+        ),
+
+        (Err(err), _, Err(cleanup_err)) => ConnectorResponse::rejected(
             request_id.to_string(),
             format!("call procedure failed: {err}; cleanup failed: {cleanup_err}"),
         ),
 
+    }
+
+}
+
+fn collect_call_procedure_output_result(
+    local_entities: &serverlib::ProcedureLocalEntityScope,
+    output_mappings: &[(String, String)],
+) -> Result<Option<QueryResult>, String> {
+
+    if output_mappings.is_empty() {
+        return Ok(None);
+    }
+
+    let mut columns = Vec::with_capacity(output_mappings.len());
+    let mut row = Vec::with_capacity(output_mappings.len());
+
+    for (idx, (output_target, parameter_name)) in output_mappings.iter().enumerate() {
+        let Some(value) = local_entities.resolve_value(parameter_name.as_str()) else {
+            return Err(format!(
+                "routine parameter '{}' has no resolved value",
+                parameter_name,
+            ));
+        };
+
+        columns.push(connector::FieldDef {
+            seqno: (idx + 1) as u32,
+            field_name: output_target.clone(),
+            field_type: connector::FieldType::Text,
+            nullable: true,
+            indexed: connector::FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        });
+        row.push(value.clone());
+    }
+
+    Ok(Some(QueryResult {
+        columns,
+        rows: vec![row],
+        timings: empty_query_timings(),
+    }))
+
+}
+
+fn apply_call_output_result_if_noop(
+    request_id: &str,
+    response: ConnectorResponse,
+    output_query_result: Option<QueryResult>,
+) -> ConnectorResponse {
+
+    let Some(output_query_result) = output_query_result else {
+        return response;
+    };
+
+    let should_replace = matches!(
+        response.result,
+        ConnectorResult::Mutation(MutationResult { affected_rows: 0 })
+    );
+
+    if should_replace {
+        ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Query(output_query_result),
+        )
+    } else {
+        response
     }
 
 }

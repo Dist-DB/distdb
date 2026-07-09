@@ -1,5 +1,7 @@
 use super::{
-    parse_select_read_plan_from_statement, IfElseEndBranchPlan, IfElseEndPlan, SqlParseError,
+    evaluate_expression_sql_to_bytes, evaluate_sql_function, parse_select_read_plan_from_statement,
+    IfElseEndBranchPlan, IfElseEndPlan, RoutineArgumentBinding,
+    RoutineParameterDeclaration, RoutineParameterMode, SqlParseError,
 };
 use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Statement, Value,
@@ -240,7 +242,18 @@ pub fn parse_create_procedure_parameter_names_from_statement(
     statement: &str,
 ) -> Result<Vec<String>, SqlParseError> {
 
-    parse_create_routine_parameter_names_from_statement(statement)
+    Ok(parse_create_procedure_parameter_declarations_from_statement(statement)?
+        .into_iter()
+        .map(|parameter| parameter.name)
+        .collect())
+
+}
+
+pub fn parse_create_procedure_parameter_declarations_from_statement(
+    statement: &str,
+) -> Result<Vec<RoutineParameterDeclaration>, SqlParseError> {
+
+    parse_create_procedure_parameter_declarations(statement)
 
 }
 
@@ -248,7 +261,7 @@ pub fn parse_create_function_parameter_names_from_statement(
     statement: &str,
 ) -> Result<Vec<String>, SqlParseError> {
 
-    parse_create_routine_parameter_names_from_statement(statement)
+    parse_create_function_parameter_names(statement)
 
 }
 
@@ -378,7 +391,33 @@ pub fn parse_create_function_return_type_from_statement(
 
 }
 
-fn parse_create_routine_parameter_names_from_statement(
+fn parse_create_procedure_parameter_declarations(
+    statement: &str,
+) -> Result<Vec<RoutineParameterDeclaration>, SqlParseError> {
+
+    let parameter_segments = parse_create_routine_parameter_segments(statement)?;
+
+    parameter_segments
+        .into_iter()
+        .map(|parameter| parse_procedure_parameter_declaration(&parameter))
+        .collect()
+
+}
+
+fn parse_create_function_parameter_names(
+    statement: &str,
+) -> Result<Vec<String>, SqlParseError> {
+
+    let parameter_segments = parse_create_routine_parameter_segments(statement)?;
+
+    parameter_segments
+        .into_iter()
+        .map(|parameter| parse_routine_parameter_name_without_mode(&parameter))
+        .collect()
+
+}
+
+fn parse_create_routine_parameter_segments(
     statement: &str,
 ) -> Result<Vec<String>, SqlParseError> {
 
@@ -411,10 +450,69 @@ fn parse_create_routine_parameter_names_from_statement(
     })?;
 
     let raw_params = &header[(open_index + 1)..close_index];
-    split_top_level_csv(raw_params)
-        .into_iter()
-        .map(|param| parse_procedure_parameter_name(&param))
-        .collect()
+    Ok(split_top_level_csv(raw_params))
+
+}
+
+pub fn bind_call_procedure_argument_bindings(
+    create_procedure_sql: &str,
+    call_statement: &Statement,
+) -> Result<Vec<RoutineArgumentBinding>, SqlParseError> {
+
+    let parameter_declarations =
+        parse_create_procedure_parameter_declarations_from_statement(create_procedure_sql)?;
+
+    let call_arguments = parse_call_argument_bindings(call_statement).map_err(|message| {
+        SqlParseError::UnsupportedStatement(format!("CALL argument parse failed: {message}"))
+    })?;
+
+    if parameter_declarations.len() != call_arguments.len() {
+        return Err(SqlParseError::UnsupportedStatement(format!(
+            "CALL argument mismatch: expected {} values but received {}",
+            parameter_declarations.len(),
+            call_arguments.len(),
+        )));
+    }
+
+    let mut bindings = Vec::with_capacity(parameter_declarations.len());
+
+    for (parameter, call_argument) in parameter_declarations.into_iter().zip(call_arguments) {
+        
+        let output_target = match parameter.mode {
+
+            RoutineParameterMode::In => None,
+
+            RoutineParameterMode::Out | 
+            RoutineParameterMode::InOut => {
+                let Some(target) = call_argument.output_target.clone() else {
+                    return Err(SqlParseError::UnsupportedStatement(format!(
+                        "CALL {} argument '{}' must be an identifier target",
+                        parameter.mode,
+                        parameter.name,
+                    )));
+                };
+                Some(target)
+            },
+
+        };
+
+        let value = match parameter.mode {
+
+            RoutineParameterMode::Out => b"NULL".to_vec(),
+
+            RoutineParameterMode::In | RoutineParameterMode::InOut => call_argument.value,
+
+        };
+
+        bindings.push(RoutineArgumentBinding {
+            name: parameter.name,
+            mode: parameter.mode,
+            value,
+            output_target,
+        });
+    }
+
+    Ok(bindings)
 
 }
 
@@ -423,21 +521,24 @@ pub fn bind_call_procedure_arguments(
     call_statement: &Statement,
 ) -> Result<Vec<(String, Vec<u8>)>, SqlParseError> {
 
-    let parameter_names = parse_create_procedure_parameter_names_from_statement(create_procedure_sql)?;
+    Ok(bind_call_procedure_argument_bindings(create_procedure_sql, call_statement)?
+        .into_iter()
+        .map(|binding| (binding.name, binding.value))
+        .collect())
 
-    let argument_values = parse_call_argument_values(call_statement).map_err(|message| {
-        SqlParseError::UnsupportedStatement(format!("CALL argument parse failed: {message}"))
-    })?;
+}
 
-    if parameter_names.len() != argument_values.len() {
-        return Err(SqlParseError::UnsupportedStatement(format!(
-            "CALL argument mismatch: expected {} values but received {}",
-            parameter_names.len(),
-            argument_values.len(),
-        )));
-    }
+pub fn parse_create_procedure_action_statements(
+    statement: &str,
+) -> Result<Vec<String>, SqlParseError> {
 
-    Ok(parameter_names.into_iter().zip(argument_values).collect())
+    let body = extract_create_procedure_body(statement)?;
+
+    Ok(split_top_level_statement_sql(body)
+        .into_iter()
+        .map(|statement_sql| statement_sql.trim().trim_end_matches(';').trim().to_string())
+        .filter(|statement_sql| !statement_sql.is_empty())
+        .collect::<Vec<_>>())
 
 }
 
@@ -522,7 +623,7 @@ fn parse_if_branch_condition(condition_sql: &str) -> Result<crate::SelectConditi
 
 }
 
-fn parse_call_argument_values(statement: &Statement) -> Result<Vec<Vec<u8>>, String> {
+fn parse_call_argument_bindings(statement: &Statement) -> Result<Vec<ParsedCallArgument>, String> {
 
     let Statement::Call(function) = statement else {
         return Err("statement is not CALL".to_string());
@@ -540,14 +641,11 @@ fn parse_call_argument_values(statement: &Statement) -> Result<Vec<Vec<u8>>, Str
 
     };
 
-    call_args
-        .iter()
-        .map(call_argument_to_bytes)
-        .collect()
+    call_args.iter().map(call_argument_to_binding).collect()
 
 }
 
-fn call_argument_to_bytes(argument: &FunctionArg) -> Result<Vec<u8>, String> {
+fn call_argument_to_binding(argument: &FunctionArg) -> Result<ParsedCallArgument, String> {
 
     let expression = match argument {
 
@@ -562,7 +660,28 @@ fn call_argument_to_bytes(argument: &FunctionArg) -> Result<Vec<u8>, String> {
 
     };
 
-    expression_to_bytes(expression)
+    Ok(ParsedCallArgument {
+        value: expression_to_bytes(expression)?,
+        output_target: expression_output_target(expression),
+    })
+
+}
+
+fn expression_output_target(expression: &Expr) -> Option<String> {
+
+    match expression {
+        Expr::Identifier(ident) => Some(common::normalize_identifier!(&ident.value)),
+
+        Expr::CompoundIdentifier(identifiers) => Some(identifiers
+            .iter()
+            .map(|ident| common::normalize_identifier!(&ident.value))
+            .collect::<Vec<_>>()
+            .join(".")),
+
+        Expr::Nested(inner) => expression_output_target(inner),
+
+        _ => None,
+    }
 
 }
 
@@ -595,7 +714,16 @@ fn expression_to_bytes(expression: &Expr) -> Result<Vec<u8>, String> {
             .join(".")
             .into_bytes()),
 
-        _ => Err("unsupported CALL argument expression".to_string()),
+        Expr::Nested(inner) => expression_to_bytes(inner),
+
+        _ => {
+            evaluate_expression_sql_to_bytes(
+                &expression.to_string(),
+                &mut |_| None,
+                &mut |nested, _| evaluate_sql_function(nested).map_err(|err| err.to_string()),
+            )
+            .or_else(|_| Ok(expression.to_string().into_bytes()))
+        },
 
     }
 
@@ -628,18 +756,113 @@ fn value_to_bytes(value: &Value) -> Result<Vec<u8>, String> {
 
         Value::DollarQuotedString(v) => Ok(v.value.as_bytes().to_vec()),
 
-        Value::Null => Err("CALL NULL arguments are not supported".to_string()),
+        Value::Null => Ok(b"NULL".to_vec()),
 
-        Value::Placeholder(v) => Err(format!(
-            "CALL placeholder argument '{}' is not supported",
-            v
-        )),
+        Value::Placeholder(v) => Ok(v.as_bytes().to_vec()),
 
     }
 
 }
 
-fn parse_procedure_parameter_name(parameter: &str) -> Result<String, SqlParseError> {
+fn split_top_level_statement_sql(text: &str) -> Vec<String> {
+
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    for ch in text.chars() {
+
+        if in_single_quote {
+            current.push(ch);
+
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+
+            if ch == '\'' {
+                in_single_quote = false;
+            }
+
+            continue;
+        }
+
+        if in_double_quote {
+            current.push(ch);
+
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+
+            if ch == '"' {
+                in_double_quote = false;
+            }
+
+            continue;
+        }
+
+        match ch {
+
+            '\'' => {
+                in_single_quote = true;
+                current.push(ch);
+            },
+
+            '"' => {
+                in_double_quote = true;
+                current.push(ch);
+            },
+
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            },
+
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            },
+
+            ';' if depth == 0 => {
+                let statement = current.trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                current.clear();
+            },
+
+            _ => current.push(ch),
+
+        }
+
+    }
+
+    let statement = current.trim();
+    if !statement.is_empty() {
+        statements.push(statement.to_string());
+    }
+
+    statements
+
+}
+
+fn parse_procedure_parameter_declaration(
+    parameter: &str,
+) -> Result<RoutineParameterDeclaration, SqlParseError> {
 
     let mut tokens = parameter.split_whitespace();
 
@@ -649,22 +872,49 @@ fn parse_procedure_parameter_name(parameter: &str) -> Result<String, SqlParseErr
         ));
     };
 
-    let candidate = if first.eq_ignore_ascii_case("in") ||
-        first.eq_ignore_ascii_case("out") ||
-        first.eq_ignore_ascii_case("inout")
-    {
-        
-        tokens.next().ok_or_else(|| {
+    let (mode, candidate) = if first.eq_ignore_ascii_case("in") {
+        let name = tokens.next().ok_or_else(|| {
             SqlParseError::UnsupportedStatement(
                 "CREATE PROCEDURE parameter name is missing".to_string(),
             )
-        })?
-
+        })?;
+        (RoutineParameterMode::In, name)
+    } else if first.eq_ignore_ascii_case("out") {
+        let name = tokens.next().ok_or_else(|| {
+            SqlParseError::UnsupportedStatement(
+                "CREATE PROCEDURE parameter name is missing".to_string(),
+            )
+        })?;
+        (RoutineParameterMode::Out, name)
+    } else if first.eq_ignore_ascii_case("inout") {
+        let name = tokens.next().ok_or_else(|| {
+            SqlParseError::UnsupportedStatement(
+                "CREATE PROCEDURE parameter name is missing".to_string(),
+            )
+        })?;
+        (RoutineParameterMode::InOut, name)
     } else {
-        first
+        (RoutineParameterMode::In, first)
     };
 
-    Ok(common::normalize_identifier!(candidate.trim_matches('`').trim_matches('"')))
+    Ok(RoutineParameterDeclaration {
+        name: common::normalize_identifier!(candidate.trim_matches('`').trim_matches('"')),
+        mode,
+    })
+
+}
+
+fn parse_routine_parameter_name_without_mode(parameter: &str) -> Result<String, SqlParseError> {
+
+    let mut tokens = parameter.split_whitespace();
+
+    let Some(first) = tokens.next() else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CREATE FUNCTION parameter definition is empty".to_string(),
+        ));
+    };
+
+    Ok(common::normalize_identifier!(first.trim_matches('`').trim_matches('"')))
 
 }
 
@@ -741,6 +991,12 @@ enum NextClause {
     ElseIfSpaced,
     Else,
     EndIf,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedCallArgument {
+    value: Vec<u8>,
+    output_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
