@@ -1,17 +1,20 @@
-mod select_execute;
-mod select_explain;
+mod select;
 mod mutation_select;
 mod control_flow;
 mod invocation;
 mod scoped_table;
 mod procedure_local_entity;
 
-pub use select_execute::{
-	execute_joined_select_plan, execute_projection_only_select_plan,
+pub use select::execute::{
+	execute_projection_only_select_plan,
+};
+
+pub use select::join::{
+	execute_joined_select_plan,
 	execute_relation_select_plan,
 };
 
-pub use select_explain::{
+pub use select::explain::{
 	advise_select_execution, explain_joined_select_plan_result,
 	explain_select_plan_result, SelectExecutionAdvice,
 };

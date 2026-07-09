@@ -4,8 +4,9 @@ use crate::{
     SelectJoinKind, SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation,
 };
 
-use super::super::relation_qualifier;
-use super::super::select::SelectExecutionResult;
+use crate::engine::execution::{
+    relation_qualifier, SelectExecutionResult, join_condition_field_names
+};
 
 pub fn explain_select_plan_result(
     table_id: &str,
@@ -143,12 +144,19 @@ pub fn explain_select_plan_result(
         } else {
 
             let path = match access_plan.map(|plan| &plan.strategy) {
+
                 Some(RelationAccessStrategy::FullScan)                  => "full_scan",
+
                 Some(RelationAccessStrategy::EqualityProbe { .. })      => "equality_probe",
+
                 Some(RelationAccessStrategy::PrefixLikeProbe { .. })    => "prefix_like_probe",
+
                 Some(RelationAccessStrategy::StringLikeProbe { .. })    => "string_like_probe",
+
                 Some(RelationAccessStrategy::RuntimeIndexLookup { .. }) => "index_lookup_then_scan",
+
                 None => "full_scan",
+                
             };
 
             (
@@ -275,7 +283,7 @@ pub fn explain_joined_select_plan_result(read_plan: &SelectReadPlan) -> SelectEx
     for (join_index, join) in read_plan.joins.iter().enumerate() {
         
         let on_text = if let Some((left_field_name, right_field_name)) =
-            super::super::join_condition_field_names(join)
+            join_condition_field_names(join)
         {
             format!("{} = {}", left_field_name, right_field_name)
         } else {
