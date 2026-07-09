@@ -24,11 +24,13 @@ impl CheckpointMetadata {
     }
 
     pub fn mark_step_completed(&mut self, step_index: usize) {
+
         if !self.completed_step_indices.contains(&step_index) {
             self.completed_step_indices.push(step_index);
             self.completed_step_indices.sort();
             self.last_update_epoch_ms = epoch_ms!();
         }
+
     }
 
     pub fn is_step_completed(&self, step_index: usize) -> bool {
@@ -40,10 +42,13 @@ impl CheckpointMetadata {
     }
 
     pub fn progress_percentage(&self, total_steps: usize) -> u64 {
+
         if total_steps == 0 {
             return 100;
         }
+        
         ((self.completed_step_indices.len() as u64 * 100) / total_steps as u64).min(100)
+
     }
 
 }

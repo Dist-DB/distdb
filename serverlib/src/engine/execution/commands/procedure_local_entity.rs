@@ -119,8 +119,11 @@ impl ProcedureLocalEntityScope {
         let normalized = common::normalize_identifier!(argument_name);
 
         match self.entities.get(&normalized) {
+
             Some(ProcedureLocalEntity::Argument { value }) => Some(value),
+
             _ => None,
+            
         }
 
     }

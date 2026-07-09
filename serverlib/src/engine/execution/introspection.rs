@@ -45,12 +45,14 @@ pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {
         .fields
         .iter()
         .map(|field| {
+
             let nullable = if field.nullable { "YES" } else { "NO" };
             let key = match field.indexed {
                 FieldIndex::PrimaryKey => "PRI",
                 FieldIndex::Indexed => "MUL",
                 FieldIndex::None => "",
             };
+
             let default_value = field
                 .default_value
                 .as_ref()
@@ -70,6 +72,7 @@ pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {
                 key.as_bytes().to_vec(),
                 default_value.into_bytes(),
             ]
+            
         })
         .collect();
 

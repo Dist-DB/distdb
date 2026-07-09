@@ -92,19 +92,25 @@ impl ConditionValueProvider for JoinedRowCandidateProvider<'_> {
 }
 
 impl ConditionValueProvider for ChainedConditionValueProvider<'_> {
+
     fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
         self.primary.value(field_name).or_else(|| self.fallback.value(field_name))
     }
+
 }
 
 impl ConditionValueProvider for UnqualifiedFieldFallbackProvider<'_> {
+
     fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
+
         self.provider.value(field_name).or_else(|| {
             field_name
                 .split_once('.')
                 .and_then(|(_, column_name)| self.provider.value(column_name))
         })
+    
     }
+
 }
 
 impl JoinedRowTuple {
@@ -136,31 +142,39 @@ impl JoinedRowTuple {
     }
 
     pub fn append(&self, relation: &SelectRelation, row: &MaterializedRelationRow) -> Self {
+
         let mut members = self.members.clone();
         members.push(JoinedRowMember {
             qualifier: relation_qualifier(relation).to_string(),
             row_id: Some(row.row_id),
             row_map: Some(row.row_map.clone()),
         });
+        
         Self { members }
+
     }
 
     pub fn append_missing_relation(&self, relation: &SelectRelation) -> Self {
+
         let mut members = self.members.clone();
         members.push(JoinedRowMember {
             qualifier: relation_qualifier(relation).to_string(),
             row_id: None,
             row_map: None,
         });
+        
         Self { members }
+
     }
 
     pub fn first_relation_row(&self) -> Option<MaterializedRelationRow> {
+        
         let member = self.members.first()?;
         Some(MaterializedRelationRow {
             row_id: member.row_id?,
             row_map: member.row_map.as_ref()?.clone(),
         })
+
     }
 
     pub fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
@@ -217,6 +231,7 @@ pub fn row_matches_condition_with_result(
     };
 
     match condition {
+
         SelectCondition::And(children) => {
             for child in children {
                 if !row_matches_condition_with_result(
@@ -231,7 +246,7 @@ pub fn row_matches_condition_with_result(
             }
 
             Ok(true)
-        }
+        },
 
         SelectCondition::Or(children) => {
             for child in children {
@@ -247,7 +262,7 @@ pub fn row_matches_condition_with_result(
             }
 
             Ok(false)
-        }
+        },
 
         SelectCondition::Not(child) => row_matches_condition_with_result(
                 provider,

@@ -232,6 +232,7 @@ fn build_rows_by_id_from_snapshot(
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    
     let workers = std::cmp::min(available, equality_warm_max_workers());
 
     if workers <= 1 {

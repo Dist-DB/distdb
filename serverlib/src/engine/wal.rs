@@ -1280,6 +1280,7 @@ fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'
 }
 
 fn wal_sync_on_append() -> bool {
+
     std::env::var("DISTDB_WAL_SYNC_ON_APPEND")
         .ok()
         .map(|value| {
@@ -1289,6 +1290,7 @@ fn wal_sync_on_append() -> bool {
             )
         })
         .unwrap_or(true)
+
 }
 
 fn compact_entries_to_latest_schema_and_metadata(
@@ -1526,6 +1528,7 @@ fn spawn_worker(
                         
                         break;
                     }
+                    
                 },
 
                 WalCommand::AppendBatch { records, ack } => {

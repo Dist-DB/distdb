@@ -111,11 +111,15 @@ pub fn parse_update_rows_from_statement(statement: &str) -> Result<UpdateRowsPla
 fn parse_update_literal(expr: &Expr) -> Result<Option<Vec<u8>>, SqlParseError> {
 
     match expr {
+        
         Expr::Value(value) => parse_update_value(value),
+        
         Expr::Function(function) => evaluate_sql_function(function),
+        
         _ => Err(SqlParseError::UnsupportedStatement(format!(
             "UPDATE assignment value '{expr}' is not supported"
         ))),
+
     }
 
 }

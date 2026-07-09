@@ -19,13 +19,14 @@ pub fn evaluate_case_projection<E>(
 where
     E: SqlFunctionEvaluationStrategy,
 {
-    
+
     let resolved_operand = operand
         .map(|value| resolve_case_value(provider, value, evaluate_function))
         .transpose()?
         .flatten();
 
     for (branch_when, value) in branches {
+        
         let branch_matches = match branch_when {
 
             SelectCaseWhen::Condition(condition) => row_matches_condition_with_result(
@@ -39,7 +40,7 @@ where
             SelectCaseWhen::Equals(expected) => {
                 let resolved_expected = resolve_case_value(provider, expected, evaluate_function)?;
                 matches!((&resolved_operand, resolved_expected), (Some(left), Some(right)) if compare_row_value(left, &right, &SelectComparisonOp::Eq))
-            }
+            },
             
         };
 

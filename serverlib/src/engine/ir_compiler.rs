@@ -1104,6 +1104,7 @@ where
     let mut result_sets = Vec::new();
 
     if let Ok(plan) = parse_if_else_end_plan_from_create_procedure_statement(sql) {
+        
         if let Some(plan) = plan {
 
             for branch in plan.branches {
@@ -1115,6 +1116,7 @@ where
             }
 
         }
+
     }
 
     result_sets

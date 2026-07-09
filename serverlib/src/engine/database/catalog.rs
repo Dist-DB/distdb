@@ -1260,6 +1260,7 @@ impl DatabaseCatalog {
         self.bump_schema_epoch();
 
         Ok(())
+
     }
 
     pub fn trigger(&self, trigger_id: &str) -> Option<&DatabaseTrigger> {
@@ -1512,6 +1513,7 @@ impl DatabaseCatalog {
         &mut self,
         key_ref: impl Into<String>,
     ) -> DatabaseResult<()> {
+
         let normalized = key_ref.into().trim().to_string();
         if normalized.is_empty() {
             return Err(DatabaseError::InvalidEncryptionKeyRef);
@@ -1540,16 +1542,19 @@ impl DatabaseCatalog {
     }
 
     fn save_to_path(&self, path: impl AsRef<Path>) -> DatabaseResult<()> {
+
         let mut snapshot = self.clone();
         snapshot.entities.retain(|_, entity| {
             !matches!(entity, DatabaseEntity::Table(table) if table.is_temporary())
         });
 
         let payload = bincode::serialize(&snapshot).map_err(|_| DatabaseError::CatalogSerialize)?;
+        
         let mut file = Vec::with_capacity(common::helpers::format::HEADER_SIZE + payload.len());
         file.extend_from_slice(&common::helpers::format::make_header(FileKind::Catalog));
         file.extend_from_slice(&payload);
         write_bytes(path, &file).map_err(|_| DatabaseError::CatalogWrite)
+
     }
 
     // Stub for future p2p/quorum integration.

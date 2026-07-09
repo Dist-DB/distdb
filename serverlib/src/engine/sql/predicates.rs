@@ -586,12 +586,19 @@ pub fn compare_row_value(actual: &[u8], expected: &[u8], op: &SelectComparisonOp
     let ordering = compare_stored_field_values(actual, expected);
 
     match op {
+        
         SelectComparisonOp::Eq      => ordering == std::cmp::Ordering::Equal,
+
         SelectComparisonOp::NotEq   => ordering != std::cmp::Ordering::Equal,
+
         SelectComparisonOp::Gt      => ordering == std::cmp::Ordering::Greater,
-        SelectComparisonOp::Gte     => ordering != std::cmp::Ordering::Less,
+
+        SelectComparisonOp::GtEq    => ordering != std::cmp::Ordering::Less,
+
         SelectComparisonOp::Lt      => ordering == std::cmp::Ordering::Less,
-        SelectComparisonOp::Lte     => ordering != std::cmp::Ordering::Greater,
+
+        SelectComparisonOp::LtEq    => ordering != std::cmp::Ordering::Greater,
+
     }
 
 }

@@ -192,7 +192,7 @@ impl DatabaseIndex {
 			
 			DatabaseIndexOrigin::Derived => {
 				IndexId(format!("{}:{}:{}", kind.prefix(), table_id, field_list))
-			}
+			},
 
 			DatabaseIndexOrigin::Relationship => {
 				IndexId(format!(
@@ -202,7 +202,7 @@ impl DatabaseIndex {
 					table_id,
 					field_list
 				))
-			}
+			},
 
 			DatabaseIndexOrigin::Temporary => {
 				let temp_id = temp_id.unwrap_or("temp");
@@ -214,7 +214,7 @@ impl DatabaseIndex {
 					table_id,
 					field_list
 				))
-			}
+			},
 
 		}
 		

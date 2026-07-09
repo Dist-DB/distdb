@@ -1108,7 +1108,7 @@ fn apply_sum_window_projection(
             if let Some(cell) = rows[*row_index].get_mut(column_index) {
                 *cell = render_window_numeric_value(sum_value);
             }
-            
+
         }
 
     }
@@ -1505,14 +1505,16 @@ fn count_star_projection(read_plan: &SelectReadPlan) -> Option<String> {
 }
 
 fn count_star_is_strict_full_table(read_plan: &SelectReadPlan) -> bool {
-    read_plan.where_condition.is_none()
-        && read_plan.joins.is_empty()
-        && read_plan.group_by.is_empty()
-        && read_plan.having_condition.is_none()
-        && !read_plan.distinct
-        && read_plan.order_by.is_empty()
-        && read_plan.limit.is_none()
-        && read_plan.offset.is_none()
+
+    read_plan.where_condition.is_none() &&
+    read_plan.joins.is_empty() &&
+    read_plan.group_by.is_empty() &&
+    read_plan.having_condition.is_none() &&
+    !read_plan.distinct &&
+    read_plan.order_by.is_empty() &&
+    read_plan.limit.is_none() &&
+    read_plan.offset.is_none()
+    
 }
 
 fn count_star_primary_key_cardinality(

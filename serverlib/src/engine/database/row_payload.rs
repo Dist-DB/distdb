@@ -348,10 +348,10 @@ fn looks_like_valid_encrypted_payload_envelope(
     envelope: &EncryptedRowPayloadEnvelope,
 ) -> bool {
 
-    envelope.key_version > 0
-        && envelope.nonce.len() == ENCRYPTED_ROW_PAYLOAD_NONCE_SIZE_BYTES
-        && envelope.auth_tag.len() == ENCRYPTED_ROW_PAYLOAD_AUTH_TAG_SIZE_BYTES
-        && !envelope.ciphertext.is_empty()
+    envelope.key_version > 0 &&
+    envelope.nonce.len() == ENCRYPTED_ROW_PAYLOAD_NONCE_SIZE_BYTES &&
+    envelope.auth_tag.len() == ENCRYPTED_ROW_PAYLOAD_AUTH_TAG_SIZE_BYTES &&
+    !envelope.ciphertext.is_empty()
 
 }
 

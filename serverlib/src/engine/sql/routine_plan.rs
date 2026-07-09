@@ -264,6 +264,7 @@ pub fn extract_create_function_action_sql(statement: &str) -> Result<String, Sql
     }
 
     if let Some(begin_index) = find_keyword_boundary_index(&lowered, "begin") {
+
         let after_begin = begin_index + "begin".len();
         let body_and_end = trimmed[after_begin..].trim_start();
         let lowered_body_and_end = body_and_end.to_ascii_lowercase();
@@ -282,6 +283,7 @@ pub fn extract_create_function_action_sql(statement: &str) -> Result<String, Sql
         })?;
 
         return Ok(body_and_end[..end_index].trim().trim_end_matches(';').trim().to_string());
+
     }
 
     let Some(return_index) = find_keyword_boundary_index(&lowered, "return") else {
@@ -640,15 +642,16 @@ fn value_to_bytes(value: &Value) -> Result<Vec<u8>, String> {
 fn parse_procedure_parameter_name(parameter: &str) -> Result<String, SqlParseError> {
 
     let mut tokens = parameter.split_whitespace();
+
     let Some(first) = tokens.next() else {
         return Err(SqlParseError::UnsupportedStatement(
             "CREATE PROCEDURE parameter definition is empty".to_string(),
         ));
     };
 
-    let candidate = if first.eq_ignore_ascii_case("in")
-        || first.eq_ignore_ascii_case("out")
-        || first.eq_ignore_ascii_case("inout")
+    let candidate = if first.eq_ignore_ascii_case("in") ||
+        first.eq_ignore_ascii_case("out") ||
+        first.eq_ignore_ascii_case("inout")
     {
         
         tokens.next().ok_or_else(|| {

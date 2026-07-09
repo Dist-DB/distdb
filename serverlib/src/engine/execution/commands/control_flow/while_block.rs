@@ -22,7 +22,7 @@ where
 
         match execute_body(context, body_sql.as_str())? {
             
-            LoopControlDirective::None => {}
+            LoopControlDirective::None => {},
             
             LoopControlDirective::Iterate(target) => {
                 if loop_target_matches_label(target.as_deref(), loop_label.as_deref()) {

@@ -296,9 +296,9 @@ fn set_expr_contains_operator(set_expr: &SetExpr, needle: SetOperator) -> bool {
             right,
             ..
         } => {
-            *op == needle
-                || set_expr_contains_operator(left, needle)
-                || set_expr_contains_operator(right, needle)
+            *op == needle ||
+            set_expr_contains_operator(left, needle) ||
+            set_expr_contains_operator(right, needle)
         },
 
         SetExpr::Query(query) => query_contains_operator(query, needle),
@@ -346,9 +346,11 @@ fn first_object_name_in_set_expr(set_expr: &SetExpr) -> Option<String> {
 fn first_object_name_in_delete(delete: &Delete) -> Option<String> {
 
     match &delete.from {
+        
         FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => {
             tables.first().and_then(first_object_name_in_table_with_joins)
         }
+
     }
 
 }

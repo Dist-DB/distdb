@@ -306,10 +306,12 @@ where
 }
 
 fn join_field_column_name(field_name: &str) -> &str {
+
     field_name
         .split_once('.')
         .map(|(_, column_name)| column_name)
         .unwrap_or(field_name)
+        
 }
 
 

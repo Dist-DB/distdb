@@ -8,6 +8,8 @@ pub struct SqlDialectCapabilities {
     pub supports_if_else_end_statements: bool,
     pub supports_stored_procedures: bool,
     pub supports_user_defined_functions: bool,
+    pub supports_triggers: bool,
+    pub supports_events: bool,
 }
 
 pub fn dialect_capabilities_for_target(
@@ -23,6 +25,8 @@ pub fn dialect_capabilities_for_target(
             supports_if_else_end_statements: true,
             supports_stored_procedures: true,
             supports_user_defined_functions: true,
+            supports_triggers: false,
+            supports_events: false,
         },
     
     }

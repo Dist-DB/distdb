@@ -90,10 +90,15 @@ where
     let cleanup_result = cleanup();
 
     match (invocation_result, cleanup_result) {
+
         (Ok(result), Ok(())) => Ok(result),
+
         (Err(err), Ok(())) => Err(err),
+
         (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+
         (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
+        
     }
 
 }
@@ -127,10 +132,15 @@ where
     let cleanup_result = scope.cleanup(catalog, wal);
 
     match (invocation_result, cleanup_result) {
+
         (Ok(result), Ok(())) => Ok(result),
+
         (Err(err), Ok(())) => Err(err),
+
         (Ok(_), Err(cleanup_err)) => Err(format!("temporary table scoped cleanup failed: {cleanup_err}")),
+
         (Err(err), Err(cleanup_err)) => Err(format!("{err}; temporary table scoped cleanup failed: {cleanup_err}")),
+
     }
 
 }
@@ -193,10 +203,15 @@ where
     let cleanup_result = cleanup();
 
     match (result, cleanup_result) {
+
         (Ok(outcomes), Ok(())) => Ok(outcomes),
+
         (Err(err), Ok(())) => Err(err),
+
         (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+
         (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
+
     }
 
 }
@@ -239,10 +254,15 @@ where
     let cleanup_result = scope.cleanup(catalog, wal);
 
     match (result, cleanup_result) {
+        
         (Ok(outcomes), Ok(())) => Ok(outcomes),
+
         (Err(err), Ok(())) => Err(err),
+
         (Ok(_), Err(cleanup_err)) => Err(format!("temporary table scoped cleanup failed: {cleanup_err}")),
+
         (Err(err), Err(cleanup_err)) => Err(format!("{err}; temporary table scoped cleanup failed: {cleanup_err}")),
+
     }
 
 }

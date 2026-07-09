@@ -696,7 +696,7 @@ fn collect_set_query_steps(
             left,
             right,
         } => {
-            
+
             collect_set_query_steps(left, inherited_with, steps)?;
             collect_set_query_steps(right, inherited_with, steps)?;
 
@@ -1099,6 +1099,7 @@ fn passthrough_projection_map(
                 "derived wrapper WHERE requires unique projected column names".to_string(),
             ));
         }
+
     }
 
     Ok(projection_map)
@@ -1543,9 +1544,13 @@ fn parse_window_projection_item(
     }
 
     let has_arguments = match &function.args {
+        
         FunctionArguments::None => false,
+        
         FunctionArguments::List(list) => !list.args.is_empty(),
+        
         FunctionArguments::Subquery(_) => true,
+
     };
 
     if function_name.eq_ignore_ascii_case("row_number") && has_arguments {
@@ -1556,27 +1561,34 @@ fn parse_window_projection_item(
     }
 
     if function_name.eq_ignore_ascii_case("sum") {
+        
         match &function.args {
-            FunctionArguments::List(list) if list.args.len() == 1 => {}
+
+            FunctionArguments::List(list) if list.args.len() == 1 => {},
+
             _ => {
                 return Err(SqlParseError::UnsupportedStatement(
                     "SUM window function currently requires exactly one argument".to_string(),
                 ));
             }
+
         }
+
     }
 
     match function.over.as_ref() {
+        
         Some(WindowType::NamedWindow(_)) | Some(WindowType::WindowSpec(_)) => {
             Ok(SelectProjectionItem::WindowFunction {
                 output_name,
                 function: function.clone(),
             })
-        }
+        },
 
         None => Err(SqlParseError::UnsupportedStatement(
             "window projection requires an OVER clause".to_string(),
         )),
+
     }
 
 }
@@ -1640,7 +1652,7 @@ fn ensure_condition_has_no_subqueries(
                 ensure_condition_has_no_subqueries(child, location)?;
             }
             Ok(())
-        }
+        },
 
         SelectCondition::Not(child) => ensure_condition_has_no_subqueries(child, location),
 
@@ -1665,12 +1677,14 @@ fn is_inbuilt_projection_item(item: &SelectProjectionItem) -> bool {
 }
 
 fn is_projection_only_without_from_item(item: &SelectProjectionItem) -> bool {
+    
     matches!(
         item,
-        SelectProjectionItem::InbuiltFunction { .. }
-            | SelectProjectionItem::Case { .. }
-            | SelectProjectionItem::WindowFunction { .. }
+        SelectProjectionItem::InbuiltFunction { .. } |
+        SelectProjectionItem::Case { .. } |
+        SelectProjectionItem::WindowFunction { .. }
     )
+
 }
 
 pub fn parse_select_condition_from_expr(
@@ -1705,16 +1719,21 @@ pub fn derive_relation_pushdown_conditions(
 
     #[expect(clippy::single_match, reason="the function may be extended in the future to support more condition types that can be pushed down, but currently only one type is supported")]
     for clause in clauses {
+
         match relation_index_for_condition(clause, relation_bindings) {
+            
             Some(index) => {
                 if is_safe_relation_pushdown(index, joins)
                     && let Some(localized) = localize_condition_for_relation(clause)
                 {
                     per_relation[index].push(localized);
                 }
-            }
+            },
+
             None => {}
+
         }
+
     }
 
     per_relation
@@ -1752,17 +1771,21 @@ fn relation_index_for_condition(
 ) -> Option<usize> {
 
     let field_name = match condition {
-        SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::Like { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::Regex { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::InList { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::IsNull { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::InSubquery { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::ScalarSubqueryComparison { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::AnySubqueryComparison { field_name, .. })
-        | SelectCondition::Predicate(SelectPredicate::AllSubqueryComparison { field_name, .. }) => field_name,
+        
+        SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::Like { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::Regex { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::InList { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::IsNull { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::InSubquery { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::ScalarSubqueryComparison { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::AnySubqueryComparison { field_name, .. }) |
+        SelectCondition::Predicate(SelectPredicate::AllSubqueryComparison { field_name, .. }) => field_name,
+
         SelectCondition::Predicate(SelectPredicate::FieldComparison { .. }) => return None,
+
         _ => return None,
+
     };
 
     let (qualifier, _) = field_name.split_once('.')?;
@@ -1954,12 +1977,12 @@ fn parse_select_condition_expression(
                 parse_select_condition_expression(right, relation_bindings)?,
             ])),
 
-            BinaryOperator::Eq
-            | BinaryOperator::NotEq
-            | BinaryOperator::Gt
-            | BinaryOperator::GtEq
-            | BinaryOperator::Lt
-            | BinaryOperator::LtEq => {
+            BinaryOperator::Eq |
+            BinaryOperator::NotEq |
+            BinaryOperator::Gt |
+            BinaryOperator::GtEq |
+            BinaryOperator::Lt |
+            BinaryOperator::LtEq => {
 
                 let op = parse_select_comparison_op(op)?;
 
@@ -1967,13 +1990,14 @@ fn parse_select_condition_expression(
                 let right_field_name = parse_condition_column_name(right, relation_bindings);
 
                 match (left_field_name, right_field_name) {
+
                     (Ok(left_field_name), Ok(right_field_name)) => {
                         Ok(SelectCondition::Predicate(SelectPredicate::FieldComparison {
                             left_field_name,
                             op,
                             right_field_name,
                         }))
-                    }
+                    },
 
                     (Ok(field_name), Err(_)) => {
                         if let Some(subquery_plan) = parse_scalar_subquery_plan(right)? {
@@ -1997,7 +2021,7 @@ fn parse_select_condition_expression(
                                 value,
                             }))
                         }
-                    }
+                    },
 
                     (Err(_), Ok(field_name)) => {
                         if let Some(subquery_plan) = parse_scalar_subquery_plan(left)? {
@@ -2011,13 +2035,15 @@ fn parse_select_condition_expression(
                                 "WHERE currently supports field-to-field comparisons only when the left side is a column reference".to_string(),
                             ))
                         }
-                    }
+                    },
 
                     (Err(_), Err(_)) => Err(SqlParseError::UnsupportedStatement(
                         "WHERE comparison requires a column reference on at least one side".to_string(),
                     )),
+
                 }
-            }
+            
+            },
             
             _ => Err(SqlParseError::UnsupportedStatement(
                 "WHERE operator is not supported yet".to_string(),
@@ -2152,16 +2178,19 @@ fn parse_select_condition_expression(
             let high_value = parse_condition_literal_value(high)?;
 
             let between = SelectCondition::And(vec![
+                
                 SelectCondition::Predicate(SelectPredicate::Comparison {
                     field_name: field_name.clone(),
-                    op: SelectComparisonOp::Gte,
+                    op: SelectComparisonOp::GtEq,
                     value: low_value,
                 }),
+                
                 SelectCondition::Predicate(SelectPredicate::Comparison {
                     field_name,
-                    op: SelectComparisonOp::Lte,
+                    op: SelectComparisonOp::LtEq,
                     value: high_value,
                 }),
+
             ]);
 
             if *negated {
@@ -2210,10 +2239,12 @@ fn parse_condition_column_name(
 }
 
 fn parse_scalar_subquery_plan(expression: &Expr) -> Result<Option<SelectReadPlan>, SqlParseError> {
+    
     parse_single_column_subquery_plan(
         expression,
         "WHERE scalar subquery comparison requires selecting exactly one column",
     )
+
 }
 
 fn parse_single_column_subquery_plan(
@@ -2244,11 +2275,17 @@ fn parse_select_comparison_op(op: &BinaryOperator) -> Result<SelectComparisonOp,
     match op {
 
         BinaryOperator::Eq => Ok(SelectComparisonOp::Eq),
+
         BinaryOperator::NotEq => Ok(SelectComparisonOp::NotEq),
+
         BinaryOperator::Gt => Ok(SelectComparisonOp::Gt),
-        BinaryOperator::GtEq => Ok(SelectComparisonOp::Gte),
+
+        BinaryOperator::GtEq => Ok(SelectComparisonOp::GtEq),
+
         BinaryOperator::Lt => Ok(SelectComparisonOp::Lt),
-        BinaryOperator::LtEq => Ok(SelectComparisonOp::Lte),
+
+        BinaryOperator::LtEq => Ok(SelectComparisonOp::LtEq),
+
         _ => Err(SqlParseError::UnsupportedStatement(
             "WHERE comparison operator is not supported yet".to_string(),
         )),
@@ -2260,12 +2297,19 @@ fn parse_select_comparison_op(op: &BinaryOperator) -> Result<SelectComparisonOp,
 fn reverse_select_comparison_op(op: &SelectComparisonOp) -> SelectComparisonOp {
 
     match op {
+
         SelectComparisonOp::Eq => SelectComparisonOp::Eq,
+
         SelectComparisonOp::NotEq => SelectComparisonOp::NotEq,
+
         SelectComparisonOp::Gt => SelectComparisonOp::Lt,
-        SelectComparisonOp::Gte => SelectComparisonOp::Lte,
+
+        SelectComparisonOp::GtEq => SelectComparisonOp::LtEq,
+
         SelectComparisonOp::Lt => SelectComparisonOp::Gt,
-        SelectComparisonOp::Lte => SelectComparisonOp::Gte,
+
+        SelectComparisonOp::LtEq => SelectComparisonOp::GtEq,
+        
     }
 
 }

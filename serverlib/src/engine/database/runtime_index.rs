@@ -1654,6 +1654,7 @@ fn save_accessor_cache_snapshot(
     }
 
     Ok(())
+    
 }
 
 #[expect(clippy::type_complexity, reason="returning a tuple of (latest_tx_id, live_rows)")]

@@ -124,11 +124,15 @@ pub fn function_argument_values(
 ) -> Result<Vec<Vec<u8>>, String> {
 
     let args = match &function.args {
+
         FunctionArguments::None => return Ok(Vec::new()),
+
         FunctionArguments::List(list) => &list.args,
+
         FunctionArguments::Subquery(_) => {
             return Err("function subquery arguments are not supported".to_string());
         }
+
     };
 
     args.iter()
@@ -175,9 +179,13 @@ fn sql_function_column_references(function: &Function) -> HashSet<String> {
     let mut references = HashSet::new();
 
     let args = match &function.args {
+        
         FunctionArguments::None => return references,
+        
         FunctionArguments::List(list) => &list.args,
+
         FunctionArguments::Subquery(_) => return references,
+
     };
 
     for argument in args {
@@ -194,12 +202,16 @@ fn collect_function_argument_references(
 ) {
 
     let expression = match argument {
+        
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => expression,
+
         FunctionArg::Named {
             arg: FunctionArgExpr::Expr(expression),
             ..
         } => expression,
+
         _ => return,
+
     };
 
     collect_expression_references(expression, references);
@@ -216,12 +228,16 @@ fn function_argument_to_bytes(
 ) -> Result<Vec<u8>, String> {
 
     let expression = match argument {
+        
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => expression,
+
         FunctionArg::Named {
             arg: FunctionArgExpr::Expr(expression),
             ..
         } => expression,
+
         _ => return Err("unsupported function argument".to_string()),
+
     };
 
     expression_to_argument_bytes(expression, lookup, evaluate_nested_function)
@@ -238,6 +254,7 @@ fn expression_to_argument_bytes(
 ) -> Result<Vec<u8>, String> {
 
     match expression {
+
         Expr::Value(value) => value_to_argument_bytes(value),
 
         Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
@@ -263,16 +280,17 @@ fn expression_to_argument_bytes(
             lookup(&qualified)
                 .or_else(|| qualified.split_once('.').and_then(|(_, column)| lookup(column)))
                 .ok_or_else(|| format!("unresolved function argument '{qualified}': missing column binding"))
-        }
+        },
 
         Expr::Function(function) => evaluate_nested_function(function, lookup)
             .map(|value| value.unwrap_or_else(|| b"NULL".to_vec())),
 
         Expr::Nested(inner) => {
             expression_to_argument_bytes(inner, lookup, evaluate_nested_function)
-        }
+        },
 
         _ => Err(format!("unsupported function argument expression '{expression}'")),
+
     }
 
 }
@@ -280,27 +298,34 @@ fn expression_to_argument_bytes(
 fn value_to_argument_bytes(value: &Value) -> Result<Vec<u8>, String> {
 
     match value {
+        
         Value::Null => Ok(b"NULL".to_vec()),
+        
         Value::Boolean(value) => Ok(value.to_string().into_bytes()),
+        
         Value::Number(value, _) => Ok(value.to_string().into_bytes()),
-        Value::SingleQuotedString(value)
-        | Value::DoubleQuotedString(value)
-        | Value::TripleSingleQuotedString(value)
-        | Value::TripleDoubleQuotedString(value)
-        | Value::EscapedStringLiteral(value)
-        | Value::UnicodeStringLiteral(value)
-        | Value::SingleQuotedByteStringLiteral(value)
-        | Value::DoubleQuotedByteStringLiteral(value)
-        | Value::TripleSingleQuotedByteStringLiteral(value)
-        | Value::TripleDoubleQuotedByteStringLiteral(value)
-        | Value::SingleQuotedRawStringLiteral(value)
-        | Value::DoubleQuotedRawStringLiteral(value)
-        | Value::TripleSingleQuotedRawStringLiteral(value)
-        | Value::TripleDoubleQuotedRawStringLiteral(value)
-        | Value::NationalStringLiteral(value)
-        | Value::HexStringLiteral(value) => Ok(value.as_bytes().to_vec()),
+
+        Value::SingleQuotedString(value) |
+        Value::DoubleQuotedString(value) |
+        Value::TripleSingleQuotedString(value) |
+        Value::TripleDoubleQuotedString(value) |
+        Value::EscapedStringLiteral(value) |
+        Value::UnicodeStringLiteral(value) |
+        Value::SingleQuotedByteStringLiteral(value) |
+        Value::DoubleQuotedByteStringLiteral(value) |
+        Value::TripleSingleQuotedByteStringLiteral(value) |
+        Value::TripleDoubleQuotedByteStringLiteral(value) |
+        Value::SingleQuotedRawStringLiteral(value) |
+        Value::DoubleQuotedRawStringLiteral(value) |
+        Value::TripleSingleQuotedRawStringLiteral(value) |
+        Value::TripleDoubleQuotedRawStringLiteral(value) |
+        Value::NationalStringLiteral(value) |
+        Value::HexStringLiteral(value) => Ok(value.as_bytes().to_vec()),
+
         Value::DollarQuotedString(value) => Ok(value.value.as_bytes().to_vec()),
+
         Value::Placeholder(value) => Err(format!("unsupported function argument placeholder '{value}'")),
+        
     }
 
 }

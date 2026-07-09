@@ -344,6 +344,7 @@ where
     let baseline_local_bindings = frame.local_bindings.clone();
 
     source.open()?;
+    
     frame.diagnostics.opened = true;
     frame.diagnostics.closed = false;
     frame.diagnostics.not_found = false;

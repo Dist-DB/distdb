@@ -13,15 +13,15 @@ impl SchemaChangePhase {
 
         matches!(
             (self, next),
-            (Self::Locked, Self::Rewriting)
-                | (Self::Rewriting, Self::Reindexing)
-                | (Self::Reindexing, Self::Syncing)
-                | (Self::Syncing, Self::Cutover)
-                | (Self::Cutover, Self::Cutover)
-                | (Self::Locked, Self::Locked)
-                | (Self::Rewriting, Self::Rewriting)
-                | (Self::Reindexing, Self::Reindexing)
-                | (Self::Syncing, Self::Syncing)
+            (Self::Locked, Self::Rewriting) |
+            (Self::Rewriting, Self::Reindexing) |
+            (Self::Reindexing, Self::Syncing) |
+            (Self::Syncing, Self::Cutover) |
+            (Self::Cutover, Self::Cutover) |
+            (Self::Locked, Self::Locked) |
+            (Self::Rewriting, Self::Rewriting) |
+            (Self::Reindexing, Self::Reindexing) |
+            (Self::Syncing, Self::Syncing)
         )
         
     }

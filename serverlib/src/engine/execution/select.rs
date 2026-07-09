@@ -180,6 +180,7 @@ fn collect_subquery_exists_with_outer(
             index_filter_map,
             like_filter,
         );
+
         let qualifier = subquery
             .relations
             .first()
@@ -420,6 +421,7 @@ fn collect_subquery_scalar_value_with_outer(
         let Some(schema) = catalog.table_schema(&subquery.table_id) else {
             return Ok(None);
         };
+
         let Some(table) = catalog.table(&subquery.table_id) else {
             return Ok(None);
         };
@@ -593,6 +595,7 @@ where
     let schema = catalog
         .table_schema(table_id)
         .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
+
     let table = catalog
         .table(table_id)
         .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
@@ -712,6 +715,7 @@ fn execute_local_sql_function_with_lookup(
         .map_err(|err| format!("function '{}' return type parse failed: {err}", local_function.procedure_id))?;
 
     let services = DefaultSQLProgramaticCompilerServices;
+    
     let context = StoredProcedureCompilerContext::new(&services)
         .with_routine(Some(RoutineDeclaration {
             kind: RoutineKind::Function,

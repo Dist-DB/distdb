@@ -183,9 +183,9 @@ pub enum SelectComparisonOp {
     Eq,
     NotEq,
     Gt,
-    Gte,
+    GtEq,
     Lt,
-    Lte,
+    LtEq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
