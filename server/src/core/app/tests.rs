@@ -3962,6 +3962,84 @@ fn describe_sql_backed_objects_returns_original_sql_and_object_type() {
 }
 
 #[test]
+fn debug_procedure_returns_cached_artifact_details() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-debug-procedure-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let procedure_sql = "create procedure p_sync() begin select 1; end";
+
+    catalog
+        .register_stored_procedure("p_sync", procedure_sql, Vec::new())
+        .expect("procedure should register");
+
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let request = ConnectorRequest::new(
+        "req-debug-procedure-1",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "debug procedure p_sync".to_string(),
+            },
+        },
+    );
+
+    let response = app.handle_connector_request(&request);
+    assert_eq!(response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = response.result else {
+        panic!("expected query result for debug procedure");
+    };
+
+    let attr_value = |attribute: &str| {
+        result.rows.iter().find_map(|row| {
+            if String::from_utf8_lossy(&row[0]) == attribute {
+                Some(String::from_utf8_lossy(&row[1]).to_string())
+            } else {
+                None
+            }
+        })
+    };
+
+    assert_eq!(attr_value("entity_type").as_deref(), Some("stored_procedure"));
+    assert_eq!(attr_value("entity_name").as_deref(), Some("p_sync"));
+    assert_eq!(attr_value("cache_present").as_deref(), Some("true"));
+    assert_eq!(attr_value("sql").as_deref(), Some(procedure_sql));
+
+    assert!(
+        attr_value("resources").is_some(),
+        "debug output should include resources attribute"
+    );
+    assert!(
+        attr_value("result_set_count").is_some(),
+        "debug output should include result_set_count attribute"
+    );
+    assert!(
+        attr_value("procedure_dependencies").is_some(),
+        "debug output should include procedure_dependencies attribute"
+    );
+    assert!(
+        attr_value("procedure_variables").is_some(),
+        "debug output should include procedure_variables attribute"
+    );
+    assert!(
+        attr_value("procedure_outputs").is_some(),
+        "debug output should include procedure_outputs attribute"
+    );
+}
+
+#[test]
 fn drop_if_exists_for_sql_backed_objects_is_idempotent() {
     let unique_suffix = common::epoch_nanos!();
 

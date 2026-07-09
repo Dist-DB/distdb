@@ -9,6 +9,9 @@
 - CALL argument binding:
   - parameter names are parsed from `CREATE PROCEDURE` signature
   - call arguments are bound positionally and injected into the procedure-local value scope
+  - parameter modes (`IN`, `OUT`, `INOUT`) are parsed from routine declarations
+  - `OUT` / `INOUT` arguments require identifier targets and are tracked for output propagation
+  - when CALL emits no explicit result set/mutation result, OUT/INOUT bindings are surfaced as a single-row query result
 - IF/ELSE control-flow planning support from procedure SQL:
   - parse IF/ELSE/ELSEIF blocks into `IfElseEndPlan`
   - cache plan on stored-procedure entity
@@ -55,6 +58,8 @@
 | CALL execution path | Supported | Server query mapping resolves procedure, binds args, invokes routine, returns action result | Cleanup is attempted after invocation and errors are surfaced |
 | CALL argument arity validation | Supported | Mismatch between procedure params and call args is rejected | Error path returns explicit argument mismatch message |
 | CALL argument expression shapes | Partial | Supports literals (boolean/number/string), signed numeric unary, identifier and compound identifier forms | Subquery args, placeholders, NULL, and many general expressions are rejected |
+| CALL OUT/INOUT argument modes | Supported | Routine parameter declarations preserve `IN`/`OUT`/`INOUT`; bind step enforces identifier targets for OUT/INOUT and tracks output mappings | Current model still follows implemented CALL action/result flow, not full MySQL procedure language parity |
+| CALL OUT/INOUT output propagation | Supported | OUT/INOUT values are returned when CALL would otherwise produce the default no-op mutation response | Existing explicit procedure-emitted query/mutation outputs remain authoritative |
 | Procedure body control flow | Partial | IF/ELSEIF/ELSE/END IF, CASE/WHEN/THEN/ELSE/END CASE, LOOP/WHILE/REPEAT, and basic cursor statements (DECLARE/OPEN/FETCH/CLOSE) are supported in the CALL action interpreter | Execution model is intentionally narrow compared with full MySQL routine language |
 | Non-IF top-level procedure body execution | Limited | Invocation currently executes planned IF/ELSE actions; bodies that do not map to that model may produce no branch action result | Not full statement-block interpreter coverage |
 | CASE resolution semantics | Supported | CASE execution reuses the existing condition processor semantics used by query control flow | Supports searched and simple CASE branches in the implemented routine model |
@@ -69,4 +74,4 @@
 ## Gaps
 - Procedure body execution is currently limited to the implemented control-flow/action model (IF/ELSE and CASE branches), not full MySQL stored-procedure language coverage.
 - CALL argument support is intentionally constrained to currently implemented expression/constant forms.
-- Full MySQL routine semantics (for example labeled loop/block semantics, broader handler conditions/actions, and rich OUT/INOUT behavior) are not implemented yet.
+- Full MySQL routine semantics (for example labeled loop/block semantics and broader handler conditions/actions) are not implemented yet.

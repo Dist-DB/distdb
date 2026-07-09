@@ -477,6 +477,74 @@ fn create_select_and_drop_function_work_end_to_end() {
 }
 
 #[test]
+fn drop_inbuilt_function_is_rejected_and_inbuilt_remains_callable() {
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let drop_response = handle_query_command(
+        "req-drop-inbuilt-abs",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "drop function abs".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(drop_response.status, connector::ResponseStatus::Rejected),
+        "unexpected drop response: {:?}",
+        drop_response
+    );
+
+    let ConnectorResult::Error(message) = drop_response.result else {
+        panic!("expected error result");
+    };
+
+    assert!(
+        message.contains("drop function failed: 'abs' not found"),
+        "unexpected drop rejection message: {message}"
+    );
+
+    let select_response = handle_query_command(
+        "req-select-inbuilt-abs",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select abs(-7)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(select_response.status, connector::ResponseStatus::Applied),
+        "unexpected select response after failed drop: {:?}",
+        select_response
+    );
+
+    let rows = query_result_rows(select_response);
+    assert_eq!(rows, vec![vec!["7".to_string()]]);
+    
+}
+
+#[test]
 fn call_procedure_tears_down_scoped_temporary_tables() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");

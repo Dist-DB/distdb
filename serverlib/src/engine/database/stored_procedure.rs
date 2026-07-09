@@ -5,8 +5,8 @@ use crate::engine::database::entity::kind::DatabaseEntityKind;
 use crate::engine::database::entity::metadata::EntityMetadata;
 use crate::engine::database::table::schema::TableSchema;
 use crate::engine::ir_compiler::{
-    compile_sql_programatic_sql_with_services, DefaultSQLProgramaticCompilerServices,
-    SQLProgramaticIr,
+    compile_sql_programatic_artifact_with_services, DefaultSQLProgramaticCompilerServices,
+    SQLProgramaticCompilationArtifact, SQLProgramaticIr,
 };
 use crate::engine::sql::IfElseEndPlan;
 
@@ -19,7 +19,7 @@ pub struct DatabaseStoredProcedure {
     pub dependencies: Vec<String>,
     pub metadata: EntityMetadata,
     #[serde(skip)]
-    pub compiled_ir: Option<SQLProgramaticIr>,
+    pub compiled_artifact: Option<SQLProgramaticCompilationArtifact>,
 }
 
 impl DatabaseStoredProcedure {
@@ -32,10 +32,10 @@ impl DatabaseStoredProcedure {
             sql,
             dependencies,
             metadata: EntityMetadata::default(),
-            compiled_ir: None,
+            compiled_artifact: None,
         };
 
-        procedure.refresh_compiled_ir_cache();
+        procedure.refresh_compilation_cache();
         procedure
 
     }
@@ -43,13 +43,18 @@ impl DatabaseStoredProcedure {
     pub fn set_sql(&mut self, sql: String) {
 
         self.sql = sql;
-        self.refresh_compiled_ir_cache();
+        self.invalidate_compilation_cache();
+        self.refresh_compilation_cache();
         
     }
 
-    pub fn refresh_compiled_ir_cache(&mut self) {
+    pub fn invalidate_compilation_cache(&mut self) {
+        self.compiled_artifact = None;
+    }
 
-        self.compiled_ir = Some(compile_sql_programatic_sql_with_services(
+    pub fn refresh_compilation_cache(&mut self) {
+
+        self.compiled_artifact = Some(compile_sql_programatic_artifact_with_services(
             &self.sql,
             &DefaultSQLProgramaticCompilerServices,
         ));
@@ -57,11 +62,15 @@ impl DatabaseStoredProcedure {
     }
 
     pub fn if_else_end_plan(&self) -> Option<&IfElseEndPlan> {
-        self.compiled_ir.as_ref().and_then(SQLProgramaticIr::if_else_end_plan)
+        self.compiled_ir().and_then(SQLProgramaticIr::if_else_end_plan)
+    }
+
+    pub fn compiled_artifact(&self) -> Option<&SQLProgramaticCompilationArtifact> {
+        self.compiled_artifact.as_ref()
     }
 
     pub fn compiled_ir(&self) -> Option<&SQLProgramaticIr> {
-        self.compiled_ir.as_ref()
+        self.compiled_artifact().map(|artifact| &artifact.ir)
     }
     
 }
@@ -114,7 +123,8 @@ impl DatabaseEntityAspect for DatabaseStoredProcedure {
             .map(|dep| common::normalize_identifier!(dep))
             .collect();
 
-        self.refresh_compiled_ir_cache();
+        self.invalidate_compilation_cache();
+        self.refresh_compilation_cache();
 
     }
     

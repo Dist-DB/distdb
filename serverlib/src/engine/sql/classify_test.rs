@@ -39,3 +39,13 @@ fn fallback_extracts_function_name_for_drop() {
     assert_eq!(classified.1, SqlOperation::DropStoredProcedure);
     assert_eq!(classified.2.as_deref(), Some("f_arg_route"));
 }
+
+#[test]
+fn fallback_extracts_entity_name_for_debug() {
+    let classified = classify_text_fallback("debug procedure p_sync;")
+        .expect("debug should classify");
+
+    assert_eq!(classified.0, SqlDirective::Retrieve);
+    assert_eq!(classified.1, SqlOperation::Select);
+    assert_eq!(classified.2.as_deref(), Some("p_sync"));
+}

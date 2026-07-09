@@ -6,18 +6,18 @@ use crate::engine::sql::{
     evaluate_expression_sql_to_bytes, evaluate_inbuilt_sql_function_with_lookup,
     extract_create_function_action_sql, extract_create_function_return_expression,
     function_argument_values, parse_create_function_parameter_names_from_statement,
-    parse_create_function_return_type_from_statement, parse_select_read_plan_from_statement,
+    parse_select_read_plan_from_statement,
     SqlFunctionEvaluationStrategy, with_lookup_sql_function_evaluator,
 };
+
 use crate::{
-    compile_and_validate_sql_programatic_function_artifact_with_context,
     ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseTable, DatabaseStoredProcedure,
-    DefaultSQLProgramaticCompilerServices,
     FieldDef, FieldIndex, FieldType, RelationAccessPlan, RuntimeIndexStore, SelectCondition,
-    RoutineDeclaration, RoutineKind, SQLProgramaticInboundParameter, SelectJoin,
+    SelectJoin,
     SelectJoinKind, SelectProjectionItem, SelectReadPlan, SelectRelation,
-    StoredProcedureCompilerContext, TableSchema,
+    TableSchema,
 };
+
 use crate::engine::sql::SelectExpression;
 
 use super::{
@@ -303,10 +303,12 @@ fn collect_subquery_projection_values_with_outer(
         }
 
         let mut index_filter_map = HashMap::new();
+
         let like_filter = subquery
             .where_condition
             .as_ref()
             .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+        
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
@@ -708,42 +710,23 @@ fn execute_local_sql_function_with_lookup(
     let inbound_parameters = parameter_names
         .into_iter()
         .zip(argument_values)
-        .map(|(name, value)| SQLProgramaticInboundParameter { name, value })
         .collect::<Vec<_>>();
 
-    let return_type = parse_create_function_return_type_from_statement(&local_function.sql)
-        .map_err(|err| format!("function '{}' return type parse failed: {err}", local_function.procedure_id))?;
+    let inbound_provider = inbound_parameters
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
 
-    let services = DefaultSQLProgramaticCompilerServices;
-    
-    let context = StoredProcedureCompilerContext::new(&services)
-        .with_routine(Some(RoutineDeclaration {
-            kind: RoutineKind::Function,
-            name: Some(local_function.procedure_id.clone()),
-            return_type,
-        }))
-        .with_inbound_parameters(inbound_parameters);
-
-    let artifact = compile_and_validate_sql_programatic_function_artifact_with_context(
-        &local_function.sql,
-        context,
-    )
-    .map_err(|issues| {
-        let details = issues
-            .into_iter()
-            .map(|issue| issue.message)
-            .collect::<Vec<_>>()
-            .join("; ");
-        format!("function '{}' validation failed: {details}", local_function.procedure_id)
+    let artifact = local_function.compiled_artifact().ok_or_else(|| {
+        format!(
+            "function '{}' compiled artifact is not available",
+            local_function.procedure_id,
+        )
     })?;
 
-    let inbound_provider = artifact.resources.inbound_parameters().iter().fold(
-        HashMap::new(),
-        |mut acc, (name, value)| {
-            acc.insert(name.clone(), value.clone());
-            acc
-        },
-    );
+    let inbound_provider = inbound_provider
+        .into_iter()
+        .collect::<HashMap<_, _>>();
 
     if let Some(return_expression) = extract_create_function_return_expression(&local_function.sql)
         .map_err(|err| format!("function '{}' return extraction failed: {err}", local_function.procedure_id))?

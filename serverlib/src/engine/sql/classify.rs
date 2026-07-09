@@ -433,6 +433,17 @@ pub(super) fn classify_text_fallback(
 
         "create" | "drop" => {},
 
+        "debug" => {
+            let object_name = tokens
+                .get(2)
+                .and_then(|name| normalize_fallback_object_name(name));
+            return Some((
+                SqlDirective::Retrieve,
+                SqlOperation::Select,
+                object_name,
+            ));
+        },
+
         "call" => {
             let object_name = tokens
                 .get(1)

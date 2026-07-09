@@ -159,6 +159,24 @@ call p_sync(1);
 - local routine bindings are checked before row/global structures during condition resolution.
 - invocation-scoped temporary resources are cleaned up after each call.
 
+### Routine debug introspection
+
+DistDB now supports a lightweight debug introspection command for database entities:
+
+```sql
+debug <databaseentitytype> <entityname>;
+```
+
+Supported entity types:
+
+- `table`
+- `view`
+- `trigger`
+- `procedure` / `stored_procedure`
+- `function` / `stored_function`
+
+The result is returned as `attribute` / `value` rows. For routines, debug output includes cached artifact/resource context such as dependency list, variable resources, and outbound resource entries.
+
 ## Current Transaction Contract
 
 The current explicit transaction behavior is closest to a staged DML model with snapshot-aware reads.

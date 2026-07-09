@@ -51,4 +51,5 @@ This table describes how the inbuilt function subsystem is integrated into the p
 ## Gaps
 - Only the implemented inbuilt function set is supported; this is not full MySQL built-in parity.
 - Some advanced expression combinations are still limited by current parser/execution constraints.
-- No user-defined SQL function execution model yet (separate from inbuilt functions).
+- User-defined SQL functions are supported through the current scalar lifecycle (`CREATE FUNCTION`, `DROP FUNCTION`, and query-time execution), but full MySQL UDF parity is not implemented.
+- UDF storage currently reuses the shared routine catalog model used by stored procedures instead of a distinct function catalog object type.

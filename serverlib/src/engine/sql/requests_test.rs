@@ -304,6 +304,17 @@ fn describe_table_maps_to_retrieve_operation() {
 }
 
 #[test]
+fn debug_entity_maps_to_retrieve_operation() {
+    let requests =
+        parse_mysql8_sql_requests("debug procedure p_sync", "main").expect("debug should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::Select);
+    assert_eq!(requests[0].object_name.as_deref(), Some("p_sync"));
+}
+
+#[test]
 fn use_database_maps_to_alter_schema_other_operation() {
     let requests =
         parse_mysql8_sql_requests("use analytics", "main").expect("use database should parse");
