@@ -154,7 +154,8 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
     );
 
     let wal_append_start = Instant::now();
-    wal.append(&stream_id, record).map_err(|e| e.to_string())?;
+    wal.append_with_context(&stream_id, record, &payload_context)
+        .map_err(|e| e.to_string())?;
     let wal_append_ms = wal_append_start.elapsed().as_millis() as u64;
     let latest_tx_id = next_id.0;
 
@@ -191,6 +192,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
 }
 
 pub(super) fn append_row_payload_records_batch(
+    catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
     wal_id: &str,
     table: &serverlib::DatabaseTable,
@@ -208,6 +210,7 @@ pub(super) fn append_row_payload_records_batch(
 
     let batch_start = Instant::now();
     let stream_id = wal_id.to_string();
+    let payload_context = payload_context_for_table(catalog, &table.table_id);
     let derived_indexes = derived_indexes_for_table(table).collect::<Vec<_>>();
     let track_runtime_indexes = !derived_indexes.is_empty();
     let payload_count = payloads.len();
@@ -254,7 +257,7 @@ pub(super) fn append_row_payload_records_batch(
     let materialize_us = materialize_start.elapsed().as_micros() as u64;
 
     let wal_append_start = Instant::now();
-    wal.append_batch(&stream_id, records)
+    wal.append_batch_with_context(&stream_id, records, &payload_context)
         .map_err(|err| err.to_string())?;
     let wal_append_us = wal_append_start.elapsed().as_micros() as u64;
     let latest_tx_id = next_id.saturating_sub(1);

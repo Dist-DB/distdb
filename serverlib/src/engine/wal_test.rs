@@ -352,7 +352,7 @@ fn storage_write_and_read_chains_roundtrip_plaintext_payload() {
 }
 
 #[test]
-fn storage_encode_with_encryption_context_reports_unconfigured_provider() {
+fn storage_encode_with_encryption_context_encrypts_payload() {
     let actor = UserId::from_username("tester");
     let context = crate::TransactionPayloadContext::new()
         .with_database_id("main")
@@ -368,14 +368,29 @@ fn storage_encode_with_encryption_context_reports_unconfigured_provider() {
         b"needs-encryption".to_vec(),
     );
 
-    let err = super::encode_record_for_storage_with_context(&record, &context)
-        .expect_err("unconfigured encryption provider should fail with context");
+    let stored = super::encode_record_for_storage_with_context(&record, &context)
+        .expect("encryption should succeed with configured provider");
 
-    assert_eq!(err, "failed to serialize WAL record");
+    let stored_record: TransactionRecord =
+        bincode::deserialize(&stored).expect("stored record should deserialize");
+
+    let stored_payload = stored_record
+        .payload_raw()
+        .expect("stored payload should be present");
+
+    assert!(
+        crate::engine::database::row_payload::looks_like_encrypted_row_payload(stored_payload),
+        "stored payload should be encrypted envelope"
+    );
+
+    let decoded = super::decode_record_from_storage_with_context(&stored, &context)
+        .expect("decode with context should succeed");
+
+    assert_eq!(decoded.payload_logical(), Some(&b"needs-encryption"[..]));
 }
 
 #[test]
-fn storage_decode_with_encryption_context_reports_unconfigured_provider() {
+fn storage_decode_with_encryption_context_rejects_mismatched_key_material() {
     let actor = UserId::from_username("tester");
     let encrypted_payload = crate::engine::database::row_payload::
         encode_encrypted_row_payload_envelope(
@@ -385,10 +400,14 @@ fn storage_decode_with_encryption_context_reports_unconfigured_provider() {
             b"ciphertext".to_vec(),
         )
         .expect("encrypted payload should encode");
-    let context = crate::TransactionPayloadContext::new()
+    let write_context = crate::TransactionPayloadContext::new()
         .with_database_id("main")
         .with_table_id("users")
         .with_at_rest_encryption("enc:node-main:db-main", 1);
+    let read_context = crate::TransactionPayloadContext::new()
+        .with_database_id("main")
+        .with_table_id("users")
+        .with_at_rest_encryption("enc:node-main:db-other", 1);
     let record = TransactionRecord::with_payload(
         TransactionId(12),
         None,
@@ -398,10 +417,12 @@ fn storage_decode_with_encryption_context_reports_unconfigured_provider() {
         TransactionKind::Insert,
         encrypted_payload,
     );
-    let stored = bincode::serialize(&record).expect("record should serialize");
 
-    let err = super::decode_record_from_storage_with_context(&stored, &context)
-        .expect_err("unconfigured decryption provider should fail with context");
+    let encrypted_stored = super::encode_record_for_storage_with_context(&record, &write_context)
+        .expect("encryption should succeed");
+
+    let err = super::decode_record_from_storage_with_context(&encrypted_stored, &read_context)
+        .expect_err("mismatched key material should fail decrypt");
 
     assert_eq!(err, "failed to deserialize WAL record");
 }

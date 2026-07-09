@@ -20,10 +20,9 @@ use common::helpers::{read_bytes, stable_id, write_bytes};
 
 use crate::core::identity::UserId;
 use crate::engine::database::row_payload::{
+    AesGcmRowPayloadCryptoProvider,
     looks_like_encrypted_row_payload, EncryptedRowPayloadTransform,
     RowPayloadDecryptionTransform, RowPayloadEncryptionWriteTransform,
-    UnconfiguredRowPayloadDecryptionProvider,
-    UnconfiguredRowPayloadEncryptionProvider,
 };
 use crate::engine::database::transaction::record::{
     PayloadTransformError, TransactionPayloadContext,
@@ -83,7 +82,7 @@ fn resolve_wal_storage_payload(
     };
 
     let compression = WalCompressionPayloadTransform;
-    let decrypt = RowPayloadDecryptionTransform::new(UnconfiguredRowPayloadDecryptionProvider);
+    let decrypt = RowPayloadDecryptionTransform::new(AesGcmRowPayloadCryptoProvider);
     let preserve_opaque = EncryptedRowPayloadTransform::preserve_opaque();
 
     let mut current = Cow::Borrowed(payload);
@@ -152,7 +151,7 @@ fn write_wal_storage_payload(
         return Ok(None);
     };
 
-    let encrypt = RowPayloadEncryptionWriteTransform::new(UnconfiguredRowPayloadEncryptionProvider);
+    let encrypt = RowPayloadEncryptionWriteTransform::new(AesGcmRowPayloadCryptoProvider);
     let preserve_opaque = EncryptedRowPayloadTransform::preserve_opaque();
     let compression = WalCompressionPayloadWriteTransform;
 
@@ -194,10 +193,12 @@ pub enum WalStreamMode {
 enum WalCommand {
     Append {
         record: TransactionRecord,
+        context: TransactionPayloadContext,
         ack: Sender<Result<(), &'static str>>,
     },
     AppendBatch {
         records: Vec<TransactionRecord>,
+        context: TransactionPayloadContext,
         ack: Sender<Result<(), &'static str>>,
     },
     CompactToLatestSchemaAndMetadata {
@@ -613,6 +614,18 @@ impl ConcurrentWalManager {
         records: Vec<TransactionRecord>,
     ) -> Result<(), &'static str> {
 
+        let context = TransactionPayloadContext::default();
+        self.append_batch_with_context(wal_id, records, &context)
+
+    }
+
+    pub fn append_batch_with_context(
+        &self,
+        wal_id: &str,
+        records: Vec<TransactionRecord>,
+        context: &TransactionPayloadContext,
+    ) -> Result<(), &'static str> {
+
         if records.is_empty() {
             return Ok(());
         }
@@ -628,6 +641,7 @@ impl ConcurrentWalManager {
         sender
             .send(WalCommand::AppendBatch {
                 records,
+                context: context.clone(),
                 ack: ack_tx,
             })
             .map_err(|_| "failed to send WAL append-batch command")?;
@@ -682,36 +696,8 @@ impl TransactionLog for ConcurrentWalManager {
 
     fn append(&self, wal_id: &str, record: TransactionRecord) -> Result<(), &'static str> {
 
-        let write_ts = write_timestamp_if_data_write(&record);
-        
-        let sender = self.get_or_spawn_worker(wal_id)?;
-        let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
-
-        sender
-            .send(WalCommand::Append {
-                record,
-                ack: ack_tx,
-            })
-            .map_err(|_| "failed to send WAL append command")?;
-
-        ack_rx
-            .recv()
-            .map_err(|_| "failed to receive WAL append acknowledgement")??;
-
-        if let Some(write_ts) = write_ts
-            && let Ok(stream_key) = obfuscated_stream_key(wal_id)
-            && let Ok(mut high_water) = self.write_high_water_by_stream.lock() {
-                high_water
-                    .entry(stream_key)
-                    .and_modify(|current| {
-                        if write_ts > *current {
-                            *current = write_ts;
-                        }
-                    })
-                    .or_insert(write_ts);
-            }
-
-        Ok(())
+        let context = TransactionPayloadContext::default();
+        self.append_with_context(wal_id, record, &context)
 
     }
 
@@ -783,12 +769,66 @@ impl TransactionLog for ConcurrentWalManager {
             .unwrap_or_default()
 
     }
-    
+
+}
+
+impl ConcurrentWalManager {
+
+    pub fn append_with_context(
+        &self,
+        wal_id: &str,
+        record: TransactionRecord,
+        context: &TransactionPayloadContext,
+    ) -> Result<(), &'static str> {
+
+        let write_ts = write_timestamp_if_data_write(&record);
+        
+        let sender = self.get_or_spawn_worker(wal_id)?;
+        let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
+
+        sender
+            .send(WalCommand::Append {
+                record,
+                context: context.clone(),
+                ack: ack_tx,
+            })
+            .map_err(|_| "failed to send WAL append command")?;
+
+        ack_rx
+            .recv()
+            .map_err(|_| "failed to receive WAL append acknowledgement")??;
+
+        if let Some(write_ts) = write_ts
+            && let Ok(stream_key) = obfuscated_stream_key(wal_id)
+            && let Ok(mut high_water) = self.write_high_water_by_stream.lock() {
+                high_water
+                    .entry(stream_key)
+                    .and_modify(|current| {
+                        if write_ts > *current {
+                            *current = write_ts;
+                        }
+                    })
+                    .or_insert(write_ts);
+            }
+
+        Ok(())
+
+    }
 }
 
 fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
 
-    let encoded = encode_record_for_storage(record)?;
+    let context = TransactionPayloadContext::default();
+    frame_record_with_context(record, &context)
+
+}
+
+fn frame_record_with_context(
+    record: &TransactionRecord,
+    context: &TransactionPayloadContext,
+) -> Result<Vec<u8>, &'static str> {
+
+    let encoded = encode_record_for_storage_with_context(record, context)?;
     let len = encoded.len() as u64;
     let mut frame = Vec::with_capacity(8 + encoded.len());
 
@@ -1254,12 +1294,21 @@ fn append_wal_bytes(
 }
 
 fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'static str> {
+    let context = TransactionPayloadContext::default();
+    rewrite_wal_file_with_context(path, records, &context)
+}
+
+fn rewrite_wal_file_with_context(
+    path: &Path,
+    records: &[TransactionRecord],
+    context: &TransactionPayloadContext,
+) -> Result<(), &'static str> {
     
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&make_header(FileKind::Data));
     
     for record in records {
-        let frame = frame_record(record)?;
+        let frame = frame_record_with_context(record, context)?;
         bytes.extend_from_slice(&frame);
     }
     
@@ -1423,7 +1472,7 @@ fn spawn_worker(
 
             match command {
 
-                WalCommand::Append { record, ack } => {
+                WalCommand::Append { record, context, ack } => {
 
                     if let Ok(mut state) = storage.lock() {
 
@@ -1443,7 +1492,7 @@ fn spawn_worker(
 
                             if let Some(ref path) = wal_path {
 
-                                match frame_record(&record) {
+                                match frame_record_with_context(&record, &context) {
 
                                     Ok(frame) => {
                                         if let Err(e) = append_wal_bytes(&mut append_file, path, &frame) {
@@ -1494,7 +1543,7 @@ fn spawn_worker(
                             entries.insert(insert_pos, record);
 
                             if let Some(ref path) = wal_path
-                                && let Err(e) = rewrite_wal_file(path, entries) {
+                                && let Err(e) = rewrite_wal_file_with_context(path, entries, &context) {
                                     log::error!(
                                         "failed to rewrite WAL file for out-of-order insert stream={}: {}",
                                         stream_key,
@@ -1531,7 +1580,7 @@ fn spawn_worker(
                     
                 },
 
-                WalCommand::AppendBatch { records, ack } => {
+                WalCommand::AppendBatch { records, context, ack } => {
 
                     if records.is_empty() {
                         let _ = ack.send(Ok(()));
@@ -1570,7 +1619,7 @@ fn spawn_worker(
                                 let mut frame_error: Option<&'static str> = None;
 
                                 for record in &records {
-                                    match frame_record(record) {
+                                    match frame_record_with_context(record, &context) {
                                         Ok(frame) => frames.extend_from_slice(&frame),
                                         Err(e) => {
                                             frame_error = Some(e);
@@ -1618,7 +1667,7 @@ fn spawn_worker(
                             if is_ordered {
 
                                 if let Some(ref path) = wal_path {
-                                    match frame_record(&record) {
+                                    match frame_record_with_context(&record, &context) {
                                         Ok(frame) => {
                                             if let Err(e) = append_wal_bytes(&mut append_file, path, &frame) {
                                                 log::error!(
@@ -1661,7 +1710,7 @@ fn spawn_worker(
                             entries.insert(insert_pos, record);
 
                             if let Some(ref path) = wal_path
-                                && let Err(e) = rewrite_wal_file(path, entries) {
+                                && let Err(e) = rewrite_wal_file_with_context(path, entries, &context) {
                                     log::error!(
                                         "failed to rewrite WAL file for out-of-order insert stream={}: {}",
                                         stream_key,

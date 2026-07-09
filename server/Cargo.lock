@@ -3088,6 +3088,7 @@ dependencies = [
  "common",
  "flate2",
  "log",
+ "openssl",
  "rcgen",
  "regex",
  "serde",

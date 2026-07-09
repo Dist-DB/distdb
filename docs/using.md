@@ -115,6 +115,32 @@ disconnect;
 
 The console also exposes `help` for additional commands and operator guidance.
 
+## AES-Enabled Databases
+
+DistDB supports optional database-scoped at-rest encryption metadata during database creation.
+
+### Example
+
+```sql
+create database secure_main --aes;
+use secure_main;
+```
+
+You can also provide an explicit key reference:
+
+```sql
+create database secure_billing --aes=enc:node1:billing;
+use secure_billing;
+```
+
+### What to expect
+
+- the AES setting is configured per database, not per table,
+- row-mutation WAL payloads for that database are written through the active at-rest encryption path,
+- encrypted payload reads require the same database/table encryption context,
+- current implementation uses OpenSSL-backed AES-256-GCM,
+- replication transport protection remains a separate TLS concern.
+
 ## Multi-Node Local Testing
 
 ### Node 1

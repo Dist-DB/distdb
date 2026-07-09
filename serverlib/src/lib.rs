@@ -57,6 +57,7 @@ pub use engine::database::core::{
 	EntityMetadata,
 	decode_encrypted_row_payload_envelope, decode_row_field_value, decode_row_payload,
 	encode_encrypted_row_payload_envelope, encode_row_payload,
+	AesGcmRowPayloadCryptoProvider,
 	EncryptedRowPayloadEnvelope, EncryptedRowPayloadTransform,
 	RowPayloadDecryptionProvider, RowPayloadDecryptionTransform,
 	RowPayloadEncryptionProvider, RowPayloadEncryptionWriteTransform,

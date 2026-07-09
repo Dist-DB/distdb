@@ -79,6 +79,7 @@ pub(super) fn execute_select_plan_result(
         .and_then(|condition| {
             collect_indexable_like_filter_for_schema(schema, condition)
         });
+        
     let allow_index_short_circuit = read_plan
         .where_condition
         .as_ref()
@@ -463,7 +464,7 @@ fn resolve_catalog_and_read_plan_for_select<'a>(
     };
 
     let mut normalized_read_plan = read_plan;
-    
+
     normalize_select_read_plan_for_active_database(
         &mut normalized_read_plan,
         requested_database_id,

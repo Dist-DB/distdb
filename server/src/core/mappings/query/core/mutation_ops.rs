@@ -380,6 +380,7 @@ fn execute_insert_locked(
             }
 
             if let Err(err) = append_row_payload_records_batch(
+                catalog,
                 wal,
                 &table_stream_id,
                 table,

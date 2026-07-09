@@ -9,9 +9,21 @@ This page describes the current design direction for optional encryption at rest
 - why the design avoids self-describing payloads,
 - what remains scaffolding versus fully wired behavior.
 
+## Current Status
+
+The at-rest encryption path is now partially active, not only scaffolded.
+
+- encryption metadata is configured per database at `CREATE DATABASE` time,
+- row-mutation WAL payloads (`INSERT` / `UPDATE`) now pass through an active encryption transform when an at-rest key reference is present,
+- read/decode paths can resolve encrypted row payload envelopes when the same database/table encryption context is supplied,
+- the current implementation uses OpenSSL-backed AES-256-GCM for row payload encryption.
+
+This is still not full platform-wide encryption parity. The implemented surface is database-scoped row-payload encryption on the WAL/data-write path, not a complete key-management or per-table policy system.
+
 ## Current Scope
 
 - encryption at rest is optional and configured per database,
+- there is no separate per-table encryption toggle today,
 - replication transport is still protected separately by TLS,
 - key material is node-local and not shared automatically across affinity members.
 
@@ -28,7 +40,8 @@ Current design assumptions:
 
 - encryption configuration is immutable after creation,
 - encryption state is inferred from metadata rather than obvious payload markers,
-- decrypt hooks are not yet fully wired through all persistence paths.
+- row-payload encrypt/decrypt hooks are wired through the active WAL write/read path,
+- non-row payloads (for example schema/metadata/control records) are not treated as encrypted row payloads.
 
 ## Why The Design Looks Like This
 
@@ -54,6 +67,13 @@ This design means payload interpretation depends on platform context, not just a
 - table identifier,
 - stable row index context,
 - mutation sequence component when repeated writes could otherwise collide.
+
+### Current implementation notes
+
+- AES key material is currently derived from the configured key reference plus key version,
+- payload encryption uses AES-256-GCM,
+- nonce generation is currently random 12-byte generation per encrypted row payload,
+- authenticated additional data binds the encryption context to database/table/stream identity.
 
 ### Derivation contract
 
@@ -81,16 +101,29 @@ This reduces the value of inspecting raw bytes without also having the surroundi
 - encrypted-at-rest mode applies when data is persisted locally,
 - receiving nodes are expected to encrypt at their own local write boundaries using their local key material.
 
-## Current Scaffolded Behavior
+## Active Behavior
 
-Row payload support already includes an encrypted-envelope scaffold containing:
+Encrypted row payloads are persisted as an envelope containing:
 
 - key version,
 - nonce,
 - auth tag,
 - ciphertext.
 
-Plain decode paths intentionally reject encrypted envelopes until full decrypt wiring is in place.
+Current active behavior:
+
+- `CREATE DATABASE <name> --aes` and `CREATE DATABASE <name> --aes=<key_ref>` enable database-scoped at-rest metadata,
+- row mutation payloads written through the WAL/data path are encrypted when encryption context is present,
+- default non-encrypted databases continue to write plaintext row payloads,
+- encrypted payloads are not recompressed by the WAL compression stage,
+- context-aware decode paths can recover logical plaintext when the same encryption context is available,
+- mismatched encryption context causes payload decode failure.
+
+Current non-goals / limits:
+
+- no distinct table-level encryption policy,
+- no external KMS integration in the current implementation,
+- no claim that every persistence-adjacent path is encrypted equally; the implemented guarantee is centered on row payload WAL/write flow.
 
 ## Testing Expectations
 
@@ -102,6 +135,8 @@ The encryption contract should be backed by:
 
 ## Remaining Work
 
-- complete encrypt/decrypt hook wiring at persistence boundaries,
+- audit and extend encryption coverage across any remaining persistence boundaries that do not yet carry row-payload encryption context,
 - harden logging paths so encrypted payload material is not exposed accidentally,
+- define a stronger key-management story beyond the current node-local key-reference model,
+- decide whether deterministic nonce derivation should replace or complement random nonce generation for future operational requirements,
 - finalize any key-rotation policy only after operational requirements are stable.

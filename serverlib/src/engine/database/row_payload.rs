@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use openssl::rand::rand_bytes;
+use openssl::sha::sha256;
+use openssl::symm::{Cipher, Crypter, Mode};
 
 use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::engine::database::table::schema::TableSchema;
@@ -167,6 +170,129 @@ impl RowPayloadDecryptionProvider for UnconfiguredRowPayloadDecryptionProvider {
         _envelope: &EncryptedRowPayloadEnvelope,
     ) -> Result<Vec<u8>, PayloadTransformError> {
         Err(PayloadTransformError::EncryptionNotConfigured)
+    }
+
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AesGcmRowPayloadCryptoProvider;
+
+impl AesGcmRowPayloadCryptoProvider {
+
+    fn resolve_key_bytes(
+        context: &TransactionPayloadContext,
+    ) -> Result<([u8; 32], u32), PayloadTransformError> {
+
+        let Some(key_ref) = context.at_rest_encryption_key_ref() else {
+            return Err(PayloadTransformError::EncryptionNotConfigured);
+        };
+
+        let key_version = context.at_rest_encryption_key_version().unwrap_or(0);
+        if key_version == 0 {
+            return Err(PayloadTransformError::EncryptionNotConfigured);
+        }
+
+        let key_material = format!("distdb-at-rest|{}|{}", key_ref, key_version);
+        let digest = sha256(key_material.as_bytes());
+
+        Ok((digest, key_version))
+
+    }
+
+    fn associated_data(context: &TransactionPayloadContext) -> Vec<u8> {
+
+        let database_id = context.database_id().unwrap_or_default();
+        let table_id = context.table_id().unwrap_or_default();
+        let stream_id = context.stream_id().unwrap_or_default();
+
+        format!("db={database_id};table={table_id};stream={stream_id}").into_bytes()
+
+    }
+
+}
+
+impl RowPayloadEncryptionProvider for AesGcmRowPayloadCryptoProvider {
+
+    fn encrypt_row_payload(
+        &self,
+        context: &TransactionPayloadContext,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, PayloadTransformError> {
+
+        let (key_bytes, key_version) = Self::resolve_key_bytes(context)?;
+        let aad = Self::associated_data(context);
+
+        let mut nonce = vec![0u8; ENCRYPTED_ROW_PAYLOAD_NONCE_SIZE_BYTES];
+        rand_bytes(&mut nonce)
+            .map_err(|_| PayloadTransformError::InternalTransformError("failed to generate nonce".to_string()))?;
+
+        let cipher = Cipher::aes_256_gcm();
+        let mut crypter = Crypter::new(cipher, Mode::Encrypt, &key_bytes, Some(&nonce))
+            .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
+
+        crypter.pad(false);
+        crypter
+            .aad_update(&aad)
+            .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
+
+        let mut ciphertext = vec![0u8; plaintext.len() + cipher.block_size()];
+        let mut written = crypter
+            .update(plaintext, &mut ciphertext)
+            .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
+        written += crypter
+            .finalize(&mut ciphertext[written..])
+            .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
+        ciphertext.truncate(written);
+
+        let mut auth_tag = vec![0u8; ENCRYPTED_ROW_PAYLOAD_AUTH_TAG_SIZE_BYTES];
+        crypter
+            .get_tag(&mut auth_tag)
+            .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
+
+        encode_encrypted_row_payload_envelope(key_version, nonce, auth_tag, ciphertext)
+            .map_err(PayloadTransformError::InternalTransformError)
+
+    }
+
+}
+
+impl RowPayloadDecryptionProvider for AesGcmRowPayloadCryptoProvider {
+
+    fn decrypt_row_payload(
+        &self,
+        context: &TransactionPayloadContext,
+        envelope: &EncryptedRowPayloadEnvelope,
+    ) -> Result<Vec<u8>, PayloadTransformError> {
+
+        let (key_bytes, key_version) = Self::resolve_key_bytes(context)?;
+        if envelope.key_version != key_version {
+            return Err(PayloadTransformError::DecryptFailed);
+        }
+
+        let aad = Self::associated_data(context);
+        let cipher = Cipher::aes_256_gcm();
+        let mut crypter = Crypter::new(cipher, Mode::Decrypt, &key_bytes, Some(&envelope.nonce))
+            .map_err(|_| PayloadTransformError::DecryptFailed)?;
+
+        crypter.pad(false);
+        crypter
+            .aad_update(&aad)
+            .map_err(|_| PayloadTransformError::DecryptFailed)?;
+        crypter
+            .set_tag(&envelope.auth_tag)
+            .map_err(|_| PayloadTransformError::DecryptFailed)?;
+
+        let mut plaintext = vec![0u8; envelope.ciphertext.len() + cipher.block_size()];
+        let mut written = crypter
+            .update(&envelope.ciphertext, &mut plaintext)
+            .map_err(|_| PayloadTransformError::DecryptFailed)?;
+        written += crypter
+            .finalize(&mut plaintext[written..])
+            .map_err(|_| PayloadTransformError::DecryptFailed)?;
+        plaintext.truncate(written);
+
+        Ok(plaintext)
+
     }
 
 }

@@ -23,6 +23,7 @@ pub use crate::engine::database::row_payload::{
 	RowPayloadDecryptionProvider, RowPayloadDecryptionTransform,
 	RowPayloadEncryptionProvider, RowPayloadEncryptionWriteTransform,
 	EncryptedRowPayloadTransformPolicy, ENCRYPTED_ROW_PAYLOAD_ENVELOPE_VERSION,
+	AesGcmRowPayloadCryptoProvider,
 	UnconfiguredRowPayloadDecryptionProvider, UnconfiguredRowPayloadEncryptionProvider,
 };
 
