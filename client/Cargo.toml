@@ -5,6 +5,7 @@ edition = "2024"
 authors = ["Sam Colak <sam@samcolak.com>"]
 
 [dependencies]
-connector = { path = "../connector" }
-peerlib = { path = "../peerlib" }
-common = { path = "../common" }
+clientlib = { path = "../clientlib" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+log = "0.4"
+env_logger = "0.11"

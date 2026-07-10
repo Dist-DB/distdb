@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
 use serverlib::{
@@ -8,12 +9,14 @@ use serverlib::{
 };
 
 use crate::core::app::helpers::{
-    CommandKind, SessionTxMarkerType, command_info, is_staged_dml_query, is_transactional_read_query,
+    CommandKind, SessionTxMarkerType, command_info, is_staged_dml_query,
+    is_staged_dml_requests, is_transactional_read_query, is_transactional_read_requests,
 };
 use crate::core::app::state::SessionSnapshot;
 use crate::core::app::ServerApp;
 use crate::core::mappings::query::{
     abort_external_write_group, commit_external_write_group, handle_query_command,
+    handle_query_command_with_parsed,
     handle_query_command_in_write_group,
 };
 use crate::core::transaction_coordinator::QueryRoutingDecision;
@@ -556,7 +559,9 @@ impl ServerApp {
             return None;
         }
 
+        let parse_start = Instant::now();
         let parsed = parse_mysql8_sql_requests(&query.sql, &query.database_id).ok()?;
+        let parse_ms = parse_start.elapsed().as_millis() as u64;
         if parsed.is_empty() {
             return None;
         }
@@ -578,13 +583,15 @@ impl ServerApp {
         let session_state = self.get_session(session_id);
         let connection_id = session_state.map(|s| s.connection_id).unwrap_or(0);
 
-        Some(handle_query_command(
+        Some(handle_query_command_with_parsed(
             &request.request_id,
             query,
             &mut catalogs,
             &self.wal,
             &self.node_data_dir,
             &mut runtime_indexes,
+            parsed,
+            parse_ms,
             session_id,
             connection_id,
             Some("root@localhost".to_string()),
@@ -799,13 +806,15 @@ impl ServerApp {
                 {
                     response
                 } else {
-                    
-                    if let Ok(parsed_requests) = parse_mysql8_sql_requests(&query.sql, &query.database_id) {
+                    let parse_start = Instant::now();
+                    let parsed_requests = parse_mysql8_sql_requests(&query.sql, &query.database_id).ok();
+                    let parsed_requests_parse_ms = parse_start.elapsed().as_millis() as u64;
 
+                    if let Some(parsed_requests) = parsed_requests.as_ref() {
                         if let Err(message) = self.authorize_sql_requests_for_session(
                             session_id,
                             &query.database_id,
-                            &parsed_requests,
+                            parsed_requests,
                         ) {
                             return ConnectorResponse::rejected(request.request_id.clone(), message);
                         }
@@ -814,7 +823,7 @@ impl ServerApp {
                             &request.request_id,
                             session_id,
                             &query.database_id,
-                            &parsed_requests,
+                            parsed_requests,
                         ) {
                             return response;
                         }
@@ -823,7 +832,7 @@ impl ServerApp {
                             &request.request_id,
                             session_id,
                             &query.database_id,
-                            &parsed_requests,
+                            parsed_requests,
                         ) {
                             return response;
                         }
@@ -835,7 +844,17 @@ impl ServerApp {
                         .is_active(session_id)
                         .unwrap_or(false);
 
-                    if transaction_active && is_transactional_read_query(query) {
+                    let transactional_read = parsed_requests
+                        .as_ref()
+                        .map(|parsed| is_transactional_read_requests(parsed))
+                        .unwrap_or_else(|| is_transactional_read_query(query));
+
+                    let staged_dml = parsed_requests
+                        .as_ref()
+                        .map(|parsed| is_staged_dml_requests(parsed))
+                        .unwrap_or_else(|| is_staged_dml_query(query));
+
+                    if transaction_active && transactional_read {
                         
                         self.execute_transactional_read(&request.request_id, session_id, query)
 
@@ -844,7 +863,7 @@ impl ServerApp {
                         match self.transaction_coordinator.route_query(
                             session_id,
                             query.clone(),
-                            is_staged_dml_query(query),
+                            staged_dml,
                         ) {
                             
                             Ok(QueryRoutingDecision::ExecuteImmediately) => {
@@ -853,17 +872,33 @@ impl ServerApp {
                                     .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
                                     .unwrap_or((0, None));
 
-                                let response = handle_query_command(
-                                    &request.request_id,
-                                    query,
-                                    &mut self.catalogs,
-                                    &self.wal,
-                                    &self.node_data_dir,
-                                    &mut self.runtime_indexes,
-                                    session_id,
-                                    connection_id,
-                                    session_user,
-                                );
+                                let response = if let Some(parsed_requests) = parsed_requests.clone() {
+                                    handle_query_command_with_parsed(
+                                        &request.request_id,
+                                        query,
+                                        &mut self.catalogs,
+                                        &self.wal,
+                                        &self.node_data_dir,
+                                        &mut self.runtime_indexes,
+                                        parsed_requests,
+                                        parsed_requests_parse_ms as u64,
+                                        session_id,
+                                        connection_id,
+                                        session_user,
+                                    )
+                                } else {
+                                    handle_query_command(
+                                        &request.request_id,
+                                        query,
+                                        &mut self.catalogs,
+                                        &self.wal,
+                                        &self.node_data_dir,
+                                        &mut self.runtime_indexes,
+                                        session_id,
+                                        connection_id,
+                                        session_user,
+                                    )
+                                };
 
                                 // Update session last_insert_id if INSERT just happened
                                 use crate::core::mappings::query::get_and_clear_last_insert_id;

@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVERLIB_DIR="$ROOT_DIR/serverlib"
+CLIENTLIB_DIR="$ROOT_DIR/clientlib"
 SERVER_DIR="$ROOT_DIR/server"
 COMMON_DIR="$ROOT_DIR/common"
 CONNECTOR_DIR="$ROOT_DIR/connector"
@@ -63,6 +64,7 @@ run_cov "$SERVER_DIR" "server"
 run_cov "$CONNECTOR_DIR" "connector"
 run_cov "$COMMON_DIR" "common"
 run_cov "$PEERLIB_DIR" "peerlib"
+run_cov "$CLIENTLIB_DIR" "clientlib"
 
 echo
 echo "Coverage reports generated:"
@@ -71,3 +73,4 @@ echo "  $OUT_DIR/server.lcov"
 echo "  $OUT_DIR/connector.lcov"
 echo "  $OUT_DIR/common.lcov"
 echo "  $OUT_DIR/peerlib.lcov"
+echo "  $OUT_DIR/clientlib.lcov"

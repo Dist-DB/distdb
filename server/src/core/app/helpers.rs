@@ -40,11 +40,36 @@ pub(super) fn is_staged_dml_query(query: &connector::DataQuery) -> bool {
 
 }
 
+pub(super) fn is_staged_dml_requests(parsed: &[serverlib::SqlRequest]) -> bool {
+
+    if parsed.len() != 1 {
+        return false;
+    }
+
+    matches!(
+        parsed[0].operation,
+        serverlib::SqlOperation::Insert |
+        serverlib::SqlOperation::Update |
+        serverlib::SqlOperation::Delete
+    )
+
+}
+
 pub(super) fn is_transactional_read_query(query: &connector::DataQuery) -> bool {
 
     let Ok(parsed) = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) else {
         return false;
     };
+
+    if parsed.len() != 1 {
+        return false;
+    }
+
+    matches!(parsed[0].operation, serverlib::SqlOperation::Select)
+
+}
+
+pub(super) fn is_transactional_read_requests(parsed: &[serverlib::SqlRequest]) -> bool {
 
     if parsed.len() != 1 {
         return false;

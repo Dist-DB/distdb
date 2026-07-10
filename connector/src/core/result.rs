@@ -7,6 +7,17 @@ pub enum ResponseStatus {
     Rejected,
 }
 
+impl std::fmt::Display for ResponseStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Accepted => write!(f, "accepted"),
+            Self::Applied => write!(f, "applied"),
+            Self::Rejected => write!(f, "rejected"),
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConnectorResponse {
     pub request_id: String,

@@ -337,20 +337,31 @@ fn classify_catalog_access_mode(request: &ConnectorRequest) -> CatalogAccessMode
 
             let normalized = query.sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
 
-            if normalized.starts_with("begin")
-                || normalized.starts_with("start transaction")
-                || normalized.starts_with("commit")
-                || normalized.starts_with("rollback")
-                || normalized.starts_with("lock table")
-                || normalized.starts_with("lock tables")
-                || normalized.starts_with("unlock table")
-                || normalized.starts_with("unlock tables")
+            // Fast-path well-known read-only introspection directives so we do not
+            // parse again in access-mode classification when execution will parse.
+            if normalized.starts_with("show ") ||
+                normalized.starts_with("describe ") ||
+                normalized.starts_with("desc ")
+            {
+                return CatalogAccessMode::Read;
+            }
+
+            if normalized.starts_with("begin") ||
+                normalized.starts_with("start transaction") ||
+                normalized.starts_with("commit") ||
+                normalized.starts_with("rollback") ||
+                normalized.starts_with("lock table") ||
+                normalized.starts_with("lock tables") ||
+                normalized.starts_with("unlock table") ||
+                normalized.starts_with("unlock tables")
             {
                 return CatalogAccessMode::Write;
             }
 
             // FOR UPDATE / FOR SHARE imply lock-sensitive semantics.
-            if normalized.contains(" for update") || normalized.contains(" for share") {
+            if normalized.contains(" for update") || 
+                normalized.contains(" for share") 
+            {
                 return CatalogAccessMode::Write;
             }
 
@@ -365,13 +376,18 @@ fn classify_catalog_access_mode(request: &ConnectorRequest) -> CatalogAccessMode
 
             let mut requires_write = false;
             for statement in statements {
+
                 match statement.operation {
+
                     SqlOperation::Select | SqlOperation::UnionQuery => {}
+
                     _ => {
                         requires_write = true;
                         break;
                     }
+
                 }
+                
             }
 
             if requires_write {

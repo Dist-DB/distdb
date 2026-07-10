@@ -69,7 +69,7 @@ fn print_query_table(result: &QueryResult) {
     let headers = result
         .columns
         .iter()
-        .map(|field| field.field_name.clone())
+        .map(|field| format!("{}:{}", field.field_name, field.field_type.sql_variant_display_name()))
         .collect::<Vec<_>>();
 
     let rows = result

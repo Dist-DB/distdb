@@ -130,6 +130,46 @@ pub(crate) fn handle_query_command(
 
 }
 
+pub(crate) fn handle_query_command_with_parsed(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    parsed: Vec<SqlRequest>,
+    parse_ms: u64,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
+) -> ConnectorResponse {
+
+    let runtime_context = inbuilt_runtime_context_for_query(
+        request_id,
+        query,
+        session_id,
+        connection_id,
+        session_user,
+    );
+
+    with_inbuilt_sql_runtime_context(&runtime_context, || {
+        handle_query_command_internal_with_parsed(
+            request_id,
+            query,
+            catalogs,
+            wal,
+            node_data_dir,
+            runtime_indexes,
+            parsed,
+            parse_ms,
+            None,
+            None,
+            session_id,
+        )
+    })
+
+}
+
 pub(crate) fn handle_query_command_in_write_group(
     request_id: &str,
     query: &DataQuery,
@@ -213,26 +253,13 @@ fn handle_query_command_internal(
     session_id: &str,
 ) -> ConnectorResponse {
 
-    let request_start = Instant::now();
     let parse_start = Instant::now();
 
     match serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) {
 
         Ok(parsed) => {
             let parse_ms = parse_start.elapsed().as_millis() as u64;
-
-            if let Some(statement) = parsed.first() {
-                log::debug!(
-                    "query directive parsed request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
-                    request_id,
-                    query.database_id,
-                    statement.directive,
-                    statement.operation,
-                    statement.object_name
-                );
-            }
-
-            let response = execute_parsed_query(
+            handle_query_command_internal_with_parsed(
                 request_id,
                 query,
                 catalogs,
@@ -240,11 +267,11 @@ fn handle_query_command_internal(
                 node_data_dir,
                 runtime_indexes,
                 parsed,
+                parse_ms,
                 external_write_group_id,
                 touched_tables,
                 session_id,
-            );
-            with_query_timings(response, make_query_timings(request_start, parse_ms))
+            )
         },
 
         Err(err) => {
@@ -252,6 +279,50 @@ fn handle_query_command_internal(
         }
 
     }
+
+}
+
+fn handle_query_command_internal_with_parsed(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    parsed: Vec<SqlRequest>,
+    parse_ms: u64,
+    external_write_group_id: Option<TransactionId>,
+    touched_tables: Option<&mut HashSet<String>>,
+    session_id: &str,
+) -> ConnectorResponse {
+
+    let request_start = Instant::now();
+
+    if let Some(statement) = parsed.first() {
+        log::debug!(
+            "query directive parsed request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
+            request_id,
+            query.database_id,
+            statement.directive,
+            statement.operation,
+            statement.object_name
+        );
+    }
+
+    let response = execute_parsed_query(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        parsed,
+        external_write_group_id,
+        touched_tables,
+        session_id,
+    );
+
+    with_query_timings(response, make_query_timings(request_start, parse_ms))
 
 }
 

@@ -33,6 +33,10 @@
       "path": "./connector"
     },
     {
+      "name": "clientlib",
+      "path": "./clientlib"
+    },
+    {
       "name": "client",
       "path": "./client"
     },
