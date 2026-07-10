@@ -9,12 +9,16 @@
       "path": "./common"
     },
     {
-      "name": "serverlib",
-      "path": "./serverlib"
+      "name": "peerlib",
+      "path": "./peerlib"
     },
     {
       "name": "connector",
       "path": "./connector"
+    },
+    {
+      "name": "serverlib",
+      "path": "./serverlib"
     },
     {
       "name": "server",

@@ -8,9 +8,16 @@
       "name": "common",
       "path": "./common"
     },
+    { "name": "peerlib",
+      "path": "./peerlib"
+    },
     {
       "name": "connector",
       "path": "./connector"
+    },
+    {
+      "name": "clientlib",
+      "path": "./clientlib"
     },
     {
       "name": "client",
