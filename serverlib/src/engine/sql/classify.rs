@@ -596,6 +596,13 @@ pub(super) fn classify_text_fallback(
             required_privilege_for_operation(SqlOperation::CreateStoredProcedure),
         )),
 
+        ("create", "user") => Some((
+            SqlDirective::Create,
+            SqlOperation::CreateOther,
+            object_name,
+            Some(AccountPrivilege::CreateUser),
+        )),
+
         ("drop", "function") => Some((
             SqlDirective::AlterSchema,
             SqlOperation::DropStoredProcedure,
@@ -633,7 +640,7 @@ fn normalize_fallback_object_name(token: &str) -> Option<String> {
 
     let trimmed = token.trim_matches(';');
     let head = trimmed.split_once('(').map_or(trimmed, |(name, _)| name);
-    let normalized = head.trim_matches(|c| c == ';' || c == '`' || c == '"');
+    let normalized = head.trim_matches(|c| c == ';' || c == '`' || c == '"' || c == '\'');
 
     if normalized.is_empty() {
         None

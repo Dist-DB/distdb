@@ -1,5 +1,5 @@
 use super::{
-    AccountAclEntry, AccountPrivilege, PrivilegeSelector,
+    AccountAclEntry, AccountPrivilege, PrivilegeSelector, UserCredential,
 };
 use crate::core::identity::UserId;
 
@@ -97,4 +97,57 @@ fn revoke_object_privilege_removes_object_access() {
     acl.revoke_object_privilege("users", AccountPrivilege::Select);
 
     assert!(!acl.has_privilege_for_object(AccountPrivilege::Select, Some("users")));
+}
+
+#[test]
+fn password_nonce_does_not_depend_on_username() {
+    let first = UserCredential::from_database_user_password(
+        UserId("alice".to_string()),
+        "main",
+        "secret",
+        "node-1",
+        Some(100),
+    );
+
+    let second = UserCredential::from_database_user_password(
+        UserId("alice_renamed".to_string()),
+        "main",
+        "secret",
+        "node-1",
+        Some(100),
+    );
+
+    assert_eq!(first.password_nonce, second.password_nonce);
+    assert!(first.verify_password("secret", "node-1"));
+    assert!(second.verify_password("secret", "node-1"));
+}
+
+#[test]
+fn password_nonce_changes_with_database_or_seed() {
+    let base = UserCredential::from_database_user_password(
+        UserId("alice".to_string()),
+        "main",
+        "secret",
+        "node-1",
+        Some(100),
+    );
+
+    let different_database = UserCredential::from_database_user_password(
+        UserId("alice".to_string()),
+        "analytics",
+        "secret",
+        "node-1",
+        Some(100),
+    );
+
+    let different_seed = UserCredential::from_database_user_password(
+        UserId("alice".to_string()),
+        "main",
+        "secret",
+        "node-1",
+        Some(101),
+    );
+
+    assert_ne!(base.password_nonce, different_database.password_nonce);
+    assert_ne!(base.password_nonce, different_seed.password_nonce);
 }

@@ -23,7 +23,7 @@ EXPECTED=40
 trap stop_server EXIT
 
 cat >"$SEED_SQL" <<SQL
-password password;
+password root;
 create database alpha;
 create database beta;
 use alpha;
@@ -39,7 +39,7 @@ done
 printf "quit;\n" >>"$SEED_SQL"
 
 cat >"$CHECK_SQL" <<'SQL'
-password password;
+password root;
 use alpha;
 select count(*) as c_all from events;
 select count(*) as c_like_all from events where payload like '%';

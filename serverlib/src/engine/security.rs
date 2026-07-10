@@ -1,11 +1,10 @@
-use crate::core::identity::{PasswordKey, UserId};
+use crate::core::identity::UserId;
 use common::helpers::{aes_decrypt, aes_encrypt, stable_id};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserCredential {
     pub user_id: UserId,
-    pub password_key: PasswordKey,
     pub encrypted_password: String,
     pub password_nonce: String,
 }
@@ -21,11 +20,9 @@ impl UserCredential {
     ) -> Self {
 
         let normalized_database_name = database_name.trim().to_ascii_lowercase();
-        let normalized_user_name = user_id.0.trim().to_ascii_lowercase();
         
         let password_nonce = build_password_nonce(
             &normalized_database_name,
-            &normalized_user_name,
             server_identifier,
             first_schema_wal_timestamp_ms,
         );
@@ -35,11 +32,6 @@ impl UserCredential {
 
         Self {
             user_id: user_id.clone(),
-            password_key: PasswordKey::from_database_user_password(
-                &normalized_database_name,
-                &normalized_user_name,
-                password,
-            ),
             encrypted_password: aes_encrypt(password, &secret, &salt),
             password_nonce,
         }
@@ -62,7 +54,6 @@ impl UserCredential {
 
 fn build_password_nonce(
     database_name: &str,
-    user_name: &str,
     server_identifier: &str,
     first_schema_wal_timestamp_ms: Option<u64>,
 ) -> String {
@@ -74,7 +65,6 @@ fn build_password_nonce(
     stable_id(&[
         "distdb-password-nonce",
         database_name,
-        user_name,
         server_identifier,
         &wal_seed,
     ])

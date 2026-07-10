@@ -189,6 +189,7 @@ impl ServerApp {
         for wal_id in catalog_wal_ids {
 
             let mut latest_acl_payload_by_user: HashMap<String, (u64, Vec<u8>)> = HashMap::new();
+            let mut latest_credential_payload_by_user: HashMap<String, (u64, Vec<u8>)> = HashMap::new();
 
             for record in self.wal.since_kinds(&wal_id, None, &[TransactionKind::SecurityChange]) {
 
@@ -197,14 +198,37 @@ impl ServerApp {
                 };
 
                 if let Ok(entry) = ServerApp::decode_account_acl_wal_payload(payload) {
+
                     let user_key = entry.user_id.0.trim().to_ascii_lowercase();
 
                     match latest_acl_payload_by_user.get(&user_key) {
-                        Some((existing_id, _)) if *existing_id >= record.id.0 => {}
+                        
+                        Some((existing_id, _)) if *existing_id >= record.id.0 => {},
+
                         _ => {
                             latest_acl_payload_by_user
                                 .insert(user_key, (record.id.0, payload.to_vec()));
                         }
+                        
+                    }
+
+                    applied += 1;
+                    continue;
+                }
+
+                if let Ok(credential) = ServerApp::decode_user_credential_wal_payload(payload) {
+
+                    let user_key = credential.user_id.0.trim().to_ascii_lowercase();
+
+                    match latest_credential_payload_by_user.get(&user_key) {
+                        
+                        Some((existing_id, _)) if *existing_id >= record.id.0 => {},
+
+                        _ => {
+                            latest_credential_payload_by_user
+                                .insert(user_key, (record.id.0, payload.to_vec()));
+                        }
+
                     }
 
                     applied += 1;
@@ -220,7 +244,18 @@ impl ServerApp {
                 .into_values()
                 .collect::<Vec<_>>();
 
+            let mut latest_credential_payloads = latest_credential_payload_by_user
+                .into_values()
+                .collect::<Vec<_>>();
+
             latest_acl_payloads.sort_by_key(|(transaction_id, _)| *transaction_id);
+            latest_credential_payloads.sort_by_key(|(transaction_id, _)| *transaction_id);
+
+            for (_, payload) in latest_credential_payloads {
+                self
+                    .apply_user_credential_wal_payload(&wal_id, &payload)
+                    .map_err(ServerAppError::Runtime)?;
+            }
 
             for (_, payload) in latest_acl_payloads {
                 self

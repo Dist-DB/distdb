@@ -49,6 +49,14 @@ DistDB is split into a few major surfaces:
 - Staged DML is tracked per session.
 - WAL-backed durability and replay are central to recovery behavior.
 - Grouped WAL commit markers are used to keep transaction visibility commit-gated.
+- security mutations (ACL and credentials) are WAL-persisted as full snapshots and replayed with latest-record-wins precedence per user.
+
+### Authorization and ACL
+
+- SQL request authorization is enforced for non-root sessions using required-privilege metadata.
+- Object-level privilege checks apply across all referenced objects for multi-object statements.
+- SQL `GRANT` and `REVOKE` support ACL mutation under current root-only policy.
+- `CREATE USER '<userid>' IDENTIFIED BY '<password>'` persists encrypted credentials and ACL state.
 
 ### Replication and runtime infrastructure
 

@@ -79,6 +79,18 @@ fn revoke_select_on_schema_builds_database_acl_mutation_plan() {
 }
 
 #[test]
+fn create_user_fallback_maps_to_create_other_with_create_user_privilege() {
+    let requests = parse_mysql8_sql_requests("create user 'alice' identified by 'pw'", "main")
+        .expect("create user should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Create);
+    assert_eq!(requests[0].operation, SqlOperation::CreateOther);
+    assert_eq!(requests[0].object_name.as_deref(), Some("alice"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::CreateUser));
+}
+
+#[test]
 fn request_referenced_object_names_include_join_relations() {
     let requests = parse_mysql8_sql_requests(
         "select u.id from users u inner join orders o on u.id = o.user_id",

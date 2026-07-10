@@ -30,7 +30,7 @@ use crate::engine::database::transaction::{
 };
 
 use crate::engine::database::view::DatabaseView;
-use crate::engine::security::{AccountAclEntry, PrivilegeSelector};
+use crate::engine::security::{AccountAclEntry, PrivilegeSelector, UserCredential};
 use crate::engine::sql::{TriggerEventKind, TriggerTiming};
 use crate::core::identity::UserId;
 
@@ -58,6 +58,8 @@ pub struct DatabaseCatalog {
     active_schema_change: Option<ActiveSchemaChange>,
     #[serde(default)]
     account_acl_entries: HashMap<String, AccountAclEntry>,
+    #[serde(default)]
+    user_credentials: HashMap<String, UserCredential>,
     entities: HashMap<String, DatabaseEntity>,
 }
 
@@ -159,6 +161,7 @@ impl DatabaseCatalog {
             schema_epoch: 0,
             active_schema_change: None,
             account_acl_entries: HashMap::new(),
+            user_credentials: HashMap::new(),
             entities: HashMap::new(),
         }
     }
@@ -1537,6 +1540,24 @@ impl DatabaseCatalog {
     pub fn upsert_account_acl_entry(&mut self, entry: AccountAclEntry) {
         let key = normalize_acl_user_key(&entry.user_id.0);
         self.account_acl_entries.insert(key, entry);
+    }
+
+    pub fn user_credential(&self, user_id: &str) -> Option<&UserCredential> {
+        self.effective_user_credential(user_id)
+    }
+
+    pub fn effective_user_credential(&self, user_id: &str) -> Option<&UserCredential> {
+        let key = normalize_acl_user_key(user_id);
+        self.user_credentials.get(&key)
+    }
+
+    pub fn effective_user_credentials(&self) -> impl Iterator<Item = &UserCredential> {
+        self.user_credentials.values()
+    }
+
+    pub fn upsert_user_credential(&mut self, credential: UserCredential) {
+        let key = normalize_acl_user_key(&credential.user_id.0);
+        self.user_credentials.insert(key, credential);
     }
 
     pub fn at_rest_encryption_enabled(&self) -> bool {

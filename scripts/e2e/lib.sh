@@ -63,7 +63,7 @@ wait_for_server() {
 
   for _ in {1..50}; do
     if "$CONSOLE_BIN" "127.0.0.1:$port" tls=off "user=root@$node_id" <<'SQL' >/dev/null 2>&1
-password password;
+password root;
 quit;
 SQL
     then

@@ -172,3 +172,46 @@ Server identity is then validated from the dial target using rustls server-name 
 - `tls=optional` still permits plaintext fallback when negotiation fails.
 - CA scope is storage-root based, so separate storage roots can form separate trust domains.
 - Service announcements are descriptive, not yet policy-authoritative.
+
+## SQL Authorization, Credentials, And WAL Durability
+
+DistDB now enforces SQL authorization using per-request privilege metadata and catalog ACL state.
+
+### Request authorization model
+
+- each parsed SQL request carries a required privilege,
+- non-root sessions are checked before execution,
+- object-level checks use referenced SQL objects, including multi-object statements such as joins,
+- access requires privilege on every referenced object when object scope is involved.
+
+### ACL mutation path
+
+- `GRANT` and `REVOKE` are executed through SQL request handling,
+- current runtime policy restricts ACL mutation statements to `root`,
+- ACL statements cannot be combined with non-ACL statements in one request payload.
+
+### User creation and credential model
+
+- `CREATE USER` is supported with explicit password syntax:
+	- `CREATE USER '<userid>' IDENTIFIED BY '<password>'`
+- user creation persists both:
+	- an ACL entry for the user,
+	- an encrypted user credential snapshot for the user.
+- duplicate user creation is rejected unless `IF NOT EXISTS` is supplied.
+
+### WAL persistence and precedence
+
+- security changes append `SecurityChange` records to the database WAL stream immediately,
+- security WAL payloads are type-framed so ACL and credential payloads are decoded unambiguously,
+- ACL WAL payloads store a complete ACL snapshot for the target user, not a delta patch,
+- credential WAL payloads store a complete credential snapshot for the target user,
+- replay resolves both ACL and credential state with latest-record-wins semantics per user,
+- precedence is determined by transaction id, so older security snapshots are retained historically but do not override newer state.
+
+### Credential nonce design
+
+- password nonce derivation is stable for a database/server context and seed timestamp,
+- username is intentionally not part of nonce derivation,
+- this avoids password verification breakage if a username identifier changes while credential material is preserved.
+
+This keeps security recovery deterministic after restart and aligns authorization and credential state with WAL-backed durability.

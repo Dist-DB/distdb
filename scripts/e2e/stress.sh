@@ -28,7 +28,7 @@ start_server "$NODE_ID" "$RUN_DIR" "$PORT" "$LOG_FILE"
 wait_for_server "$PORT" "$NODE_ID"
 
 cat >"$SEED_SQL" <<'SQL'
-password password;
+password root;
 create database alpha;
 create database beta;
 use alpha;
@@ -52,7 +52,7 @@ worker() {
     out="$RUN_DIR/w${w}_${i}.out"
 
     cat >"$sql" <<SQL
-password password;
+  password root;
 use alpha;
 insert into events (id, payload) values ($aid, 'A:$w:$i');
 use beta;
@@ -86,7 +86,7 @@ if [[ -f "$FAIL_FILE" ]] && [[ -s "$FAIL_FILE" ]]; then
 fi
 
 cat >"$CHECK_SQL" <<'SQL'
-password password;
+password root;
 use alpha;
 select count(*) as c_all from events;
 select count(*) as c_like from events where payload like 'A:%';

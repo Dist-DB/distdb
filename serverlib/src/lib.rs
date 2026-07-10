@@ -44,7 +44,7 @@ pub mod helpers;
 pub mod security;
 
 pub use core::config::NodeConfig;
-pub use core::identity::{NodeId, PasswordKey, UserId};
+pub use core::identity::{NodeId, UserId};
 pub use engine::security::{AccountAclEntry, RoleGrant, UserCredential};
 pub use common::schema::{
 	normalize_field_name, validate_field_kind, FieldIndex, FieldKind, SchemaValidationError,

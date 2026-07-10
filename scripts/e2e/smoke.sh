@@ -22,7 +22,7 @@ start_server "$NODE_ID" "$RUN_DIR" "$PORT" "$LOG_FILE"
 wait_for_server "$PORT" "$NODE_ID"
 
 cat >"$SQL_FILE" <<'SQL'
-password password;
+password root;
 create database alpha;
 use alpha;
 create table users (id uint64 primary key, email text);

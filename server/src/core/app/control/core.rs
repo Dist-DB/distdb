@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
 use serverlib::{
     AclMutationKind, AccountAclEntry, ConcurrentWalManager, DatabaseCatalog, SqlOperation,
-    SqlRequest, TransactionId, UserId,
+    SqlRequest, TransactionId, UserCredential, UserId,
     parse_mysql8_sql_requests,
 };
 
@@ -19,6 +19,213 @@ use crate::core::mappings::query::{
 use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
+
+    fn parse_create_user_spec(sql: &str) -> Option<(String, String, bool)> {
+
+        let mut rest = sql.trim().trim_end_matches(';').trim();
+
+        if !rest.to_ascii_lowercase().starts_with("create user") {
+            return None;
+        }
+
+        rest = rest["create user".len()..].trim_start();
+
+        let mut if_not_exists = false;
+        if rest.to_ascii_lowercase().starts_with("if not exists") {
+            if_not_exists = true;
+            rest = rest["if not exists".len()..].trim_start();
+        }
+
+        if rest.is_empty() {
+            return None;
+        }
+
+        let (raw_user, mut remaining) = if let Some(quote) = rest.chars().next().filter(|ch| matches!(ch, '\'' | '"' | '`')) {
+            let content = &rest[1..];
+            let end = content.find(quote)?;
+            (content[..end].to_string(), content[end + 1..].trim_start())
+        } else {
+            let token_end = rest
+                .find(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+                .unwrap_or(rest.len());
+            (rest[..token_end].to_string(), rest[token_end..].trim_start())
+        };
+
+        if remaining.starts_with(',') {
+            return None;
+        }
+
+        if !remaining.to_ascii_lowercase().starts_with("identified by") {
+            return None;
+        }
+
+        remaining = remaining["identified by".len()..].trim_start();
+
+        let quote = remaining.chars().next().filter(|ch| matches!(ch, '\'' | '"'))?;
+        let password_content = &remaining[1..];
+        let password_end = password_content.find(quote)?;
+
+        let password = password_content[..password_end].to_string();
+        let trailing = password_content[password_end + 1..].trim_start();
+        if !trailing.is_empty() {
+            return None;
+        }
+
+        if password.trim().is_empty() {
+            return None;
+        }
+
+        let user_without_host = raw_user.split('@').next().unwrap_or(raw_user.as_str());
+        let user_id = common::normalize_identifier!(
+            user_without_host
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_matches('\'')
+        );
+
+        if user_id.is_empty() {
+            None
+        } else {
+            Some((user_id, password, if_not_exists))
+        }
+
+    }
+
+    fn apply_create_user_requests(
+        &mut self,
+        request_id: &str,
+        session_id: &str,
+        query_database_id: &str,
+        parsed_requests: &[SqlRequest],
+    ) -> Option<ConnectorResponse> {
+
+        let mut saw_create_user_statement = false;
+        let create_user_targets = parsed_requests
+            .iter()
+            .map(|request| {
+                let is_create_user = request
+                    .sql
+                    .trim()
+                    .to_ascii_lowercase()
+                    .starts_with("create user");
+
+                if is_create_user {
+                    saw_create_user_statement = true;
+                    Self::parse_create_user_spec(&request.sql)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if !saw_create_user_statement {
+            return None;
+        }
+
+        if create_user_targets.iter().any(|item| item.is_none()) || create_user_targets.len() != parsed_requests.len() {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                "CREATE USER requires syntax: CREATE USER '<userid>' IDENTIFIED BY '<password>' and cannot be combined with non-CREATE USER statements in the same request".to_string(),
+            ));
+        }
+
+        let session_user = self.session_user_for_authorization(session_id);
+        if !session_user.eq_ignore_ascii_case("root") {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!(
+                    "permission denied for user '{}': only root can execute CREATE USER",
+                    session_user,
+                ),
+            ));
+        }
+
+        let normalized_database = common::normalize_identifier!(query_database_id);
+        let database_name = if normalized_database.is_empty() {
+            "main".to_string()
+        } else {
+            normalized_database
+        };
+
+        let Some(catalog_key) = self.resolve_catalog_key(&database_name) else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found for CREATE USER", database_name),
+            ));
+        };
+
+        let mut affected_rows = 0_u64;
+
+        let first_schema_wal_ts = self.first_wal_record_timestamp_for_database(&database_name);
+
+        for (target, _) in create_user_targets.iter().zip(parsed_requests.iter()) {
+            let (user_id, password, if_not_exists) = target
+                .as_ref()
+                .expect("create user targets are pre-validated as Some");
+
+            let already_exists = self.catalogs.get(&catalog_key).is_some_and(|catalog| {
+                catalog.effective_account_acl_entry(user_id).is_some()
+                    || catalog.effective_user_credential(user_id).is_some()
+            });
+
+            if already_exists {
+                if *if_not_exists {
+                    continue;
+                }
+
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create user failed: user '{}' already exists", user_id),
+                ));
+            }
+
+            let credential = UserCredential::from_database_user_password(
+                UserId(user_id.clone()),
+                &database_name,
+                password,
+                &self.config.node_id,
+                first_schema_wal_ts,
+            );
+
+            let mut entry = AccountAclEntry::new(UserId(user_id.clone()), database_name.clone());
+            entry.database_id = database_name.clone();
+
+            if let Err(err) = self.append_user_credential_change_record(
+                &database_name,
+                &session_user,
+                &credential,
+            ) {
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("failed to persist CREATE USER credential to WAL: {}", err),
+                ));
+            }
+
+            if let Err(err) = self.append_account_acl_change_record(&database_name, &session_user, &entry) {
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("failed to persist CREATE USER mutation to WAL: {}", err),
+                ));
+            }
+
+            let Some(catalog) = self.catalogs.get_mut(&catalog_key) else {
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("database '{}' catalog is unavailable", database_name),
+                ));
+            };
+
+            catalog.upsert_account_acl_entry(entry);
+            catalog.upsert_user_credential(credential);
+            affected_rows += 1;
+        }
+
+        Some(ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows }),
+        ))
+
+    }
 
     fn session_user_for_authorization(&self, session_id: &str) -> String {
         self
@@ -604,6 +811,15 @@ impl ServerApp {
                         }
 
                         if let Some(response) = self.apply_acl_mutation_requests(
+                            &request.request_id,
+                            session_id,
+                            &query.database_id,
+                            &parsed_requests,
+                        ) {
+                            return response;
+                        }
+
+                        if let Some(response) = self.apply_create_user_requests(
                             &request.request_id,
                             session_id,
                             &query.database_id,

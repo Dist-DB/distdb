@@ -1,21 +1,97 @@
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
     AccountAclEntry, ConcurrentWalManager, TransactionId, TransactionKind,
-    TransactionRecord, UserId,
+    TransactionRecord, UserCredential, UserId,
 };
 
 use crate::core::app::ServerApp;
 use crate::core::app::helpers::SessionTxMarkerType;
 
+const ACCOUNT_ACL_WAL_PREFIX: &[u8] = b"distdb:security:acl:v1:\n";
+const USER_CREDENTIAL_WAL_PREFIX: &[u8] = b"distdb:security:user-credential:v1:\n";
+
 impl ServerApp {
 
+    pub fn encode_user_credential_wal_payload(credential: &UserCredential) -> Result<Vec<u8>, String> {
+        let encoded = bincode::serialize(credential)
+            .map_err(|err| format!("failed to encode user credential WAL payload: {}", err))?;
+
+        let mut payload = Vec::with_capacity(USER_CREDENTIAL_WAL_PREFIX.len() + encoded.len());
+        payload.extend_from_slice(USER_CREDENTIAL_WAL_PREFIX);
+        payload.extend_from_slice(&encoded);
+        Ok(payload)
+    }
+
+    pub fn decode_user_credential_wal_payload(payload: &[u8]) -> Result<UserCredential, String> {
+        let Some(encoded) = payload.strip_prefix(USER_CREDENTIAL_WAL_PREFIX) else {
+            return Err("user credential WAL payload prefix mismatch".to_string());
+        };
+
+        bincode::deserialize(encoded)
+            .map_err(|err| format!("failed to decode user credential WAL payload: {}", err))
+    }
+
+    pub fn append_user_credential_change_record(
+        &self,
+        database_hint: &str,
+        actor: &str,
+        credential: &UserCredential,
+    ) -> Result<(), String> {
+
+        let wal_id = self.resolve_catalog_wal_stream_for_database(database_hint);
+        let payload = Self::encode_user_credential_wal_payload(credential)?;
+
+        self.append_security_change_record(&wal_id, actor, payload)
+
+    }
+
+    pub fn apply_user_credential_wal_payload(
+        &mut self,
+        database_hint: &str,
+        payload: &[u8],
+    ) -> Result<bool, String> {
+
+        let credential = match Self::decode_user_credential_wal_payload(payload) {
+            Ok(credential) => credential,
+            Err(_) => return Ok(false),
+        };
+
+        let Some(catalog_key) = self.resolve_catalog_key(database_hint) else {
+            return Err(format!(
+                "database '{}' not found while applying user credential WAL payload",
+                database_hint,
+            ));
+        };
+
+        let Some(catalog) = self.catalogs.get_mut(&catalog_key) else {
+            return Err(format!(
+                "database '{}' catalog unavailable while applying user credential WAL payload",
+                database_hint,
+            ));
+        };
+
+        catalog.upsert_user_credential(credential);
+
+        Ok(true)
+
+    }
+
     pub fn encode_account_acl_wal_payload(entry: &AccountAclEntry) -> Result<Vec<u8>, String> {
-        bincode::serialize(entry)
-            .map_err(|err| format!("failed to encode ACL WAL payload: {}", err))
+        let encoded = bincode::serialize(entry)
+            .map_err(|err| format!("failed to encode ACL WAL payload: {}", err))?;
+
+        let mut payload = Vec::with_capacity(ACCOUNT_ACL_WAL_PREFIX.len() + encoded.len());
+        payload.extend_from_slice(ACCOUNT_ACL_WAL_PREFIX);
+        payload.extend_from_slice(&encoded);
+        Ok(payload)
     }
 
     pub fn decode_account_acl_wal_payload(payload: &[u8]) -> Result<AccountAclEntry, String> {
-        bincode::deserialize(payload)
+        let Some(encoded) = payload.strip_prefix(ACCOUNT_ACL_WAL_PREFIX) else {
+            return Err("ACL WAL payload prefix mismatch".to_string());
+        };
+
+        bincode::deserialize(encoded)
             .map_err(|err| format!("failed to decode ACL WAL payload: {}", err))
     }
 

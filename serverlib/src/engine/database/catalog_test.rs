@@ -1,7 +1,7 @@
 
 use super::*;
 use crate::engine::database::entity::metadata::EntityMetadata;
-use crate::engine::security::{AccountAclEntry, AccountPrivilege};
+use crate::engine::security::{AccountAclEntry, AccountPrivilege, UserCredential};
 use crate::core::identity::UserId;
 
 use std::path::PathBuf;
@@ -53,6 +53,38 @@ fn effective_account_acl_entry_returns_latest_acl_state_for_user() {
 
     assert!(effective.acl.contains("UPDATE"));
     assert!(!effective.acl.contains("SELECT"));
+}
+
+#[test]
+fn effective_user_credential_returns_latest_credential_state_for_user() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    let first = UserCredential::from_database_user_password(
+        UserId("Alice".to_string()),
+        "MainDb",
+        "first-secret",
+        "node-1",
+        Some(1),
+    );
+
+    let second = UserCredential::from_database_user_password(
+        UserId("alice".to_string()),
+        "MainDb",
+        "second-secret",
+        "node-1",
+        Some(1),
+    );
+
+    catalog.upsert_user_credential(first);
+    catalog.upsert_user_credential(second);
+
+    let effective = catalog
+        .effective_user_credential("ALICE")
+        .expect("latest user credential should be available");
+
+    assert!(effective.verify_password("second-secret", "node-1"));
+    assert!(!effective.verify_password("first-secret", "node-1"));
 }
 
 #[test]

@@ -464,6 +464,225 @@ fn grant_and_revoke_queries_update_object_acl_access() {
 }
 
 #[test]
+fn create_user_creates_acl_entry_and_wal_snapshot() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-create-user-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let create_user = ConnectorRequest {
+        request_id: "create-user-alice".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create user 'alice' identified by 'secret'".to_string(),
+            },
+        },
+    };
+
+    let create_user_response = app.handle_connector_request_for_session(&create_user, "root-session");
+    assert_eq!(create_user_response.status, ResponseStatus::Applied);
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    let catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist");
+
+    let acl_entry = catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL entry should exist");
+
+    assert!(acl_entry.acl.is_empty());
+    assert!(acl_entry.grant_acl.is_empty());
+    assert!(acl_entry.object_acl.is_empty());
+
+    let credential = catalog
+        .effective_user_credential("alice")
+        .expect("alice credential should exist");
+
+    assert!(credential.verify_password("secret", app.node_id()));
+
+    let wal_id = app.resolve_catalog_wal_stream_for_database("main");
+    let security_records = app
+        .wal
+        .since_kinds(&wal_id, None, &[TransactionKind::SecurityChange]);
+
+    let latest_credential_payload = security_records
+        .iter()
+        .rev()
+        .find_map(|record| {
+            record.payload_logical().and_then(|payload| {
+                std::panic::catch_unwind(|| ServerApp::decode_user_credential_wal_payload(payload))
+                    .ok()
+                    .and_then(Result::ok)
+            })
+        })
+        .expect("latest security payload should include user credential snapshot");
+
+    assert_eq!(latest_credential_payload.user_id.0, "alice");
+    assert!(latest_credential_payload.verify_password("secret", app.node_id()));
+
+    let latest_payload = security_records
+        .last()
+        .and_then(|record| record.payload_logical())
+        .expect("latest security payload should exist");
+
+    let latest_acl_entry = ServerApp::decode_account_acl_wal_payload(latest_payload)
+        .expect("latest security payload should decode as ACL snapshot");
+
+    assert_eq!(latest_acl_entry.user_id.0, "alice");
+    assert!(latest_acl_entry.acl.is_empty());
+
+}
+
+#[test]
+fn create_user_duplicate_requires_if_not_exists() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-create-user-duplicate-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let first_create = ConnectorRequest {
+        request_id: "create-user-first".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create user 'alice' identified by 'secret'".to_string(),
+            },
+        },
+    };
+
+    let first_create_response = app.handle_connector_request_for_session(&first_create, "root-session");
+    assert_eq!(first_create_response.status, ResponseStatus::Applied);
+
+    let duplicate_create = ConnectorRequest {
+        request_id: "create-user-duplicate".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create user 'alice' identified by 'secret'".to_string(),
+            },
+        },
+    };
+
+    let duplicate_response = app.handle_connector_request_for_session(&duplicate_create, "root-session");
+    assert_eq!(duplicate_response.status, ResponseStatus::Rejected);
+
+    let if_not_exists_create = ConnectorRequest {
+        request_id: "create-user-if-not-exists".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create user if not exists 'alice' identified by 'secret'".to_string(),
+            },
+        },
+    };
+
+    let if_not_exists_response =
+        app.handle_connector_request_for_session(&if_not_exists_create, "root-session");
+    assert_eq!(if_not_exists_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Mutation(mutation) = if_not_exists_response.result else {
+        panic!("expected mutation result");
+    };
+
+    assert_eq!(mutation.affected_rows, 0);
+
+}
+
+#[test]
+fn create_user_requires_identified_by_password_clause() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-create-user-syntax-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let invalid_create_user = ConnectorRequest {
+        request_id: "create-user-missing-password".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create user 'alice'".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&invalid_create_user, "root-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result");
+    };
+
+    assert!(message.contains("CREATE USER requires syntax"));
+
+}
+
+#[test]
 fn bootstrap_replays_security_change_password_from_wal() {
 
     reset_bootstrap_password_for_tests();

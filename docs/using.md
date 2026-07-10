@@ -95,7 +95,7 @@ If you are starting from a clean environment, a simple first session looks like 
 
 ```sql
 connect root@server-node-01;
-password password;
+password root;
 create database main;
 show databases;
 use main;
@@ -106,7 +106,7 @@ If the database already exists:
 
 ```sql
 connect root@server-node-01;
-password password;
+password root;
 show databases;
 use main;
 show tables;
@@ -114,6 +114,31 @@ disconnect;
 ```
 
 The console also exposes `help` for additional commands and operator guidance.
+
+## ACL And Privileges
+
+DistDB now performs request-time privilege checks for non-root sessions and supports SQL-driven ACL mutation through `GRANT` and `REVOKE`.
+
+### Basic ACL flow
+
+```sql
+connect root@server-node-01;
+password root;
+use main;
+
+create user 'alice' identified by 'alice-secret';
+grant select on users to alice;
+grant update on users to alice;
+revoke update on users from alice;
+```
+
+### Current behavior notes
+
+- `GRANT` and `REVOKE` are currently root-only operations,
+- ACL checks are object-aware and apply to all referenced objects in a statement,
+- `CREATE USER '<userid>' IDENTIFIED BY '<password>'` persists encrypted user credentials and ACL state,
+- security mutations are written immediately to WAL as full snapshots,
+- WAL replay uses latest-record-wins precedence per user when rebuilding ACL and credential state.
 
 ## AES-Enabled Databases
 
