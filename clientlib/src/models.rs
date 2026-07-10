@@ -17,7 +17,7 @@ impl TlsMode {
             "off" => Some(Self::Off),
             "optional" => Some(Self::Optional),
             "required" => Some(Self::Required),
-            _ => Some(Self::Required),
+            _ => None,
         }
     }
 
