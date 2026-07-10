@@ -7,6 +7,10 @@ DistDB is a distributed SQL database project built around a Rust execution core,
 - why the design is shaped that way,
 - what is implemented today versus what remains intentionally incomplete.
 
+## Quick-start
+
+To run the platform view the [running.md](running.md) file for a quick start guide.
+
 ## Start Here
 
 If you are new to the codebase, read these pages in order:
