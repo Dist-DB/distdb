@@ -45,3 +45,7 @@ impl From<WireError> for ClientError {
     }
 
 }
+
+#[cfg(test)]
+#[path = "error_test.rs"]
+mod tests;

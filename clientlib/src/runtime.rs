@@ -72,6 +72,7 @@ impl DistDbClient {
         let inner = Arc::clone(&self.inner);
 
         tokio::task::spawn_blocking(move || {
+            
             let mut guard = inner
                 .lock()
                 .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
@@ -106,6 +107,7 @@ impl DistDbClient {
                 user: guard.options.user.clone(),
                 database: guard.current_database.clone(),
             })
+
         })
         .await
         .map_err(|err| ClientError::Runtime(format!("connect task failed: {err}")))?
@@ -117,13 +119,16 @@ impl DistDbClient {
         let inner = Arc::clone(&self.inner);
 
         tokio::task::spawn_blocking(move || {
+            
             let mut guard = inner
                 .lock()
                 .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
 
             guard.transport.disconnect_active_peer();
             guard.connected = false;
+            
             Ok(())
+
         })
         .await
         .map_err(|err| ClientError::Runtime(format!("disconnect task failed: {err}")))?
@@ -136,13 +141,16 @@ impl DistDbClient {
         let database = database.into();
 
         tokio::task::spawn_blocking(move || {
+            
             let mut guard = inner
                 .lock()
                 .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
 
             ensure_connected(&guard)?;
             guard.current_database = Some(database);
+            
             Ok(())
+
         })
         .await
         .map_err(|err| ClientError::Runtime(format!("set_database task failed: {err}")))?
@@ -155,23 +163,30 @@ impl DistDbClient {
         let sql = sql.into();
 
         tokio::task::spawn_blocking(move || {
+
             let mut guard = inner
                 .lock()
                 .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
 
             ensure_connected(&guard)?;
+
             let database_id = resolve_database_for_sql(guard.current_database.as_deref(), &sql)?;
             let response = send_query_sync(&mut guard, &database_id, &sql)?;
 
             match response.result {
+                
                 ConnectorResult::Query(result) => {
                     Ok(query_response_from_wire(response.request_id, response.status, result))
                 }
+                
                 ConnectorResult::Error(message) => Err(ClientError::Protocol(message)),
+
                 _ => Err(ClientError::Protocol(
                     "query returned non-query payload".to_string(),
                 )),
+            
             }
+
         })
         .await
         .map_err(|err| ClientError::Runtime(format!("query task failed: {err}")))?
@@ -417,4 +432,8 @@ fn query_value_to_json(value: &QueryValue) -> Value {
     }
 
 }
+
+#[cfg(test)]
+#[path = "runtime_test.rs"]
+mod tests;
 

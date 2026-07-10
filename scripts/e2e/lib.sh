@@ -90,14 +90,34 @@ extract_count() {
   local occurrence="${3:-1}"
 
   awk -v col="$column" -v target="$occurrence" '
+    function trim(s) {
+      gsub(/^[[:space:]]+/, "", s)
+      gsub(/[[:space:]]+$/, "", s)
+      return s
+    }
+
+    function first_cell(line, parts, n, cell) {
+      n = split(line, parts, "|")
+      if (n < 3) {
+        return ""
+      }
+      cell = parts[2]
+      return trim(cell)
+    }
+
     BEGIN { seen = 0; want = 0 }
-    $0 ~ "\\| " col " \\|" { seen++; want = (seen == target); next }
-    want == 1 && $0 ~ /^\|/ {
-      line = $0
-      gsub(/\|/, "", line)
-      gsub(/ /, "", line)
-      if (line ~ /^[0-9]+$/) {
-        print line
+
+    /^\|/ {
+      cell = first_cell($0)
+
+      if (cell == col || index(cell, col ":") == 1) {
+        seen++
+        want = (seen == target)
+        next
+      }
+
+      if (want == 1 && cell ~ /^[0-9]+$/) {
+        print cell
         exit
       }
     }

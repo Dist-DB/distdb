@@ -129,3 +129,7 @@ pub enum ExecuteResponse {
     },
     Query(QueryResponse),
 }
+
+#[cfg(test)]
+#[path = "models_test.rs"]
+mod tests;
