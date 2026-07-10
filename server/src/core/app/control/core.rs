@@ -23,6 +23,232 @@ use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
 
+    fn quoted_sql_identifier(name: &str) -> String {
+        format!("`{}`", name.replace('`', "``"))
+    }
+
+    fn quoted_sql_string(value: &str) -> String {
+        format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+    }
+
+    fn sql_literal_for_field_bytes(value: &[u8]) -> String {
+
+        if let Ok(text) = std::str::from_utf8(value) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let is_numeric = trimmed
+                    .chars()
+                    .enumerate()
+                    .all(|(idx, ch)| ch.is_ascii_digit() || ch == '.' || (idx == 0 && ch == '-'));
+
+                if is_numeric {
+                    return trimmed.to_string();
+                }
+            }
+
+            return Self::quoted_sql_string(text);
+        }
+
+        let hex = value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("x'{hex}'")
+        
+    }
+
+    fn sql_column_definition_from_field_spec(field: &connector::FieldSpec) -> String {
+        let mut definition = format!(
+            "{} {}",
+            Self::quoted_sql_identifier(&field.name),
+            field.kind.to_sql_string()
+        );
+
+        if !field.nullable {
+            definition.push_str(" not null");
+        }
+
+        if let Some(default_value) = field.default_value.as_ref() {
+            definition.push_str(" default ");
+            definition.push_str(&Self::sql_literal_for_field_bytes(default_value));
+        }
+
+        if matches!(field.indexed, common::schema::FieldIndex::PrimaryKey) {
+            definition.push_str(" primary key");
+        }
+
+        definition
+    }
+
+    fn query_from_schema_command(
+        database_id: &str,
+        command: &connector::SchemaCommand,
+    ) -> connector::DataQuery {
+
+        let sql = match command {
+            connector::SchemaCommand::CreateTable { table_id, fields } => {
+                let mut table_constraints = Vec::new();
+
+                for field in fields {
+                    if matches!(field.indexed, common::schema::FieldIndex::Indexed) {
+                        table_constraints.push(format!(
+                            "index ({})",
+                            Self::quoted_sql_identifier(&field.name)
+                        ));
+                    }
+                }
+
+                let mut definitions = fields
+                    .iter()
+                    .map(Self::sql_column_definition_from_field_spec)
+                    .collect::<Vec<_>>();
+                definitions.extend(table_constraints);
+
+                format!(
+                    "create table {} ({})",
+                    Self::quoted_sql_identifier(table_id),
+                    definitions.join(", ")
+                )
+            }
+
+            connector::SchemaCommand::AlterTable { change } => {
+                let mut operations = Vec::new();
+
+                for field_name in &change.remove {
+                    operations.push(format!(
+                        "drop column {}",
+                        Self::quoted_sql_identifier(field_name)
+                    ));
+                }
+
+                for field in &change.update {
+                    operations.push(format!(
+                        "modify column {}",
+                        Self::sql_column_definition_from_field_spec(field)
+                    ));
+                }
+
+                for field in &change.add {
+                    operations.push(format!(
+                        "add column {}",
+                        Self::sql_column_definition_from_field_spec(field)
+                    ));
+
+                    if matches!(field.indexed, common::schema::FieldIndex::Indexed) {
+                        operations.push(format!(
+                            "add index ({})",
+                            Self::quoted_sql_identifier(&field.name)
+                        ));
+                    }
+                }
+
+                format!(
+                    "alter table {} {}",
+                    Self::quoted_sql_identifier(&change.table_id),
+                    operations.join(", ")
+                )
+            }
+
+            connector::SchemaCommand::DropTable { table_id } => {
+                format!("drop table {}", Self::quoted_sql_identifier(table_id))
+            }
+        };
+
+        connector::DataQuery {
+            database_id: database_id.to_string(),
+            sql,
+        }
+
+    }
+
+    fn query_from_mutation_command(
+        database_id: &str,
+        mutation: &connector::DataMutation,
+    ) -> connector::DataQuery {
+
+        let sql = match mutation {
+
+            connector::DataMutation::Insert { table_id, values } => {
+                let columns = values
+                    .iter()
+                    .map(|value| Self::quoted_sql_identifier(&value.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let rendered_values = values
+                    .iter()
+                    .map(|value| Self::sql_literal_for_field_bytes(&value.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                format!(
+                    "insert into {} ({}) values ({})",
+                    Self::quoted_sql_identifier(table_id),
+                    columns,
+                    rendered_values
+                )
+            },
+
+            connector::DataMutation::Update {
+                table_id,
+                values,
+                predicate_sql,
+            } => {
+                let assignments = values
+                    .iter()
+                    .map(|value| {
+                        format!(
+                            "{} = {}",
+                            Self::quoted_sql_identifier(&value.name),
+                            Self::sql_literal_for_field_bytes(&value.value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let mut sql = format!(
+                    "update {} set {}",
+                    Self::quoted_sql_identifier(table_id),
+                    assignments
+                );
+
+                if let Some(predicate_sql) = predicate_sql.as_deref() {
+                    let predicate_sql = predicate_sql.trim();
+                    if !predicate_sql.is_empty() {
+                        sql.push_str(" where ");
+                        sql.push_str(predicate_sql);
+                    }
+                }
+
+                sql
+            },
+
+            connector::DataMutation::Delete {
+                table_id,
+                predicate_sql,
+            } => {
+                let mut sql = format!("delete from {}", Self::quoted_sql_identifier(table_id));
+
+                if let Some(predicate_sql) = predicate_sql.as_deref() {
+                    let predicate_sql = predicate_sql.trim();
+                    if !predicate_sql.is_empty() {
+                        sql.push_str(" where ");
+                        sql.push_str(predicate_sql);
+                    }
+                }
+
+                sql
+            },
+
+        };
+
+        connector::DataQuery {
+            database_id: database_id.to_string(),
+            sql,
+        }
+
+    }
+
     fn parse_create_user_spec(sql: &str) -> Option<(String, String, bool)> {
 
         let mut rest = sql.trim().trim_end_matches(';').trim();
@@ -220,7 +446,9 @@ impl ServerApp {
 
             catalog.upsert_account_acl_entry(entry);
             catalog.upsert_user_credential(credential);
+            
             affected_rows += 1;
+
         }
 
         Some(ConnectorResponse::applied(
@@ -929,15 +1157,41 @@ impl ServerApp {
             
             },
 
-            CommandKind::Schema => ConnectorResponse::rejected(
-                request.request_id.clone(),
-                "schema command execution is not wired yet",
-            ),
+            CommandKind::Schema => {
 
-            CommandKind::Mutation => ConnectorResponse::rejected(
-                request.request_id.clone(),
-                "mutation command execution is not wired yet",
-            ),
+                let ConnectorCommand::Schema { database_id, command } = &request.command else {
+                    unreachable!("command info kind must align with command variant")
+                };
+
+                let query = Self::query_from_schema_command(database_id, command);
+                let translated_request = ConnectorRequest::new(
+                    request.request_id.clone(),
+                    ConnectorCommand::Query { query },
+                );
+
+                self.handle_connector_request_for_session(&translated_request, session_id)
+
+            }
+
+            CommandKind::Mutation => {
+
+                let ConnectorCommand::Mutation {
+                    database_id,
+                    mutation,
+                } = &request.command
+                else {
+                    unreachable!("command info kind must align with command variant")
+                };
+
+                let query = Self::query_from_mutation_command(database_id, mutation);
+                let translated_request = ConnectorRequest::new(
+                    request.request_id.clone(),
+                    ConnectorCommand::Query { query },
+                );
+
+                self.handle_connector_request_for_session(&translated_request, session_id)
+
+            }
 
         };
 

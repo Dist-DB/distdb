@@ -3,6 +3,7 @@ use super::*;
 use crate::engine::database::entity::metadata::EntityMetadata;
 use crate::engine::security::{AccountAclEntry, AccountPrivilege, UserCredential};
 use crate::core::identity::UserId;
+use crate::{FieldDef, FieldType};
 
 use std::path::PathBuf;
 
@@ -935,6 +936,168 @@ fn table_lifecycle_replay_honors_create_then_drop() {
 
     assert_eq!(applied, 2);
     assert!(catalog.table("users").is_none());
+}
+
+#[test]
+fn index_lifecycle_replay_recreates_user_defined_index() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    let wal = crate::engine::wal::ConcurrentWalManager::new();
+    let actor = crate::core::identity::UserId::from_username("index-lifecycle");
+
+    let create_table_payload = TableLifecyclePayload {
+        table_id: "users".to_string(),
+        action: TableLifecycleAction::Create,
+        schema_epoch: 1,
+        entity_id: None,
+        schema: Some(TableSchema::new(vec![
+            FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::UInt(64),
+                nullable: false,
+                indexed: FieldIndex::PrimaryKey,
+                default_value: None,
+                metadata: None,
+            },
+            FieldDef {
+                seqno: 2,
+                field_name: "email".to_string(),
+                field_type: FieldType::Text,
+                nullable: false,
+                indexed: FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            },
+        ])),
+    };
+
+    wal.append(
+        "main_db",
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            crate::TransactionKind::TableLifecycle,
+            create_table_payload
+                .encode()
+                .expect("table payload should encode"),
+        ),
+    )
+    .expect("table lifecycle append should succeed");
+
+    let index = DatabaseIndex::from_table_fields_with_origin(
+        "users",
+        crate::engine::database::index::DatabaseIndexKind::Indexed,
+        crate::engine::database::index::DatabaseIndexOrigin::UserDefined,
+        None,
+        vec!["email".to_string()],
+    );
+
+    let index_payload = crate::engine::database::index_lifecycle_payload::IndexLifecyclePayload {
+        table_id: "users".to_string(),
+        index_id: "idx_users_email".to_string(),
+        action: crate::engine::database::index_lifecycle_payload::IndexLifecycleAction::Create,
+        schema_epoch: 2,
+        index: Some(DatabaseIndex {
+            index_id: crate::engine::database::index_id::IndexId("idx_users_email".to_string()),
+            ..index
+        }),
+    };
+
+    let encoded_index_payload = index_payload
+        .encode()
+        .expect("index payload should encode");
+
+    let decoded_index_payload =
+        crate::engine::database::index_lifecycle_payload::IndexLifecyclePayload::decode(
+            &encoded_index_payload,
+        )
+        .expect("index payload should decode");
+
+    assert!(decoded_index_payload.index.is_some());
+
+    wal.append(
+        "main_db",
+        crate::TransactionRecord::with_payload(
+            crate::TransactionId(2),
+            None,
+            Some(crate::TransactionId(1)),
+            2,
+            actor,
+            crate::TransactionKind::IndexLifecycle,
+            encoded_index_payload,
+        ),
+    )
+    .expect("index lifecycle append should succeed");
+
+    let applied = catalog
+        .replay_entity_construction_from_log("main_db", &wal)
+        .expect("replay should succeed");
+
+    assert_eq!(applied, 2);
+    assert!(catalog.index_in_table("users", "idx_users_email").is_some());
+}
+
+#[test]
+fn apply_schema_change_preserves_user_defined_indexes() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::UInt(64),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "email".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .create_table("users", schema.clone())
+        .expect("table should be created");
+
+    catalog
+        .create_index("users", Some("idx_users_email"), vec!["email".to_string()])
+        .expect("index should be created");
+
+    let before = catalog
+        .index_in_table("users", "idx_users_email")
+        .cloned()
+        .expect("user-defined index should exist");
+
+    let payload = SchemaChangePayload {
+        table_id: "users".to_string(),
+        schema_revision: 1,
+        schema_epoch: catalog.schema_epoch().saturating_add(1),
+        entity_id: None,
+        schema,
+    };
+
+    catalog
+        .apply_schema_change(payload)
+        .expect("schema change should apply");
+
+    let after = catalog
+        .index_in_table("users", "idx_users_email")
+        .expect("user-defined index should survive schema change");
+
+    assert_eq!(after.field_names, before.field_names);
 }
 
 #[test]

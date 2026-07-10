@@ -377,6 +377,17 @@ impl RuntimeIndexStore {
 
     }
 
+    pub fn remove_index_for_table(&mut self, table_scope_id: &str, index_id: &str) {
+        let scoped = scoped_index_id(table_scope_id, index_id);
+        self.indexes.remove(&scoped);
+    }
+
+    pub fn remove_table_indexes(&mut self, table_scope_id: &str) {
+        let prefix = format!("{}::", table_scope_id);
+        self.indexes.retain(|index_id, _| !index_id.starts_with(&prefix));
+        self.incremental_persist_last_saved_ms.remove(table_scope_id);
+    }
+
     pub fn cardinality(&self, index_id: &str) -> Option<usize> {
         self.index(index_id).map(|state| state.cardinality())
     }

@@ -258,7 +258,7 @@ fn create_view_persists_dependencies_from_view_body() {
 }
 
 #[test]
-fn begin_transaction_is_explicitly_recognized() {
+fn begin_transaction_is_accepted_as_noop_mutation() {
     let mut catalogs = HashMap::new();
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -279,15 +279,15 @@ fn begin_transaction_is_explicitly_recognized() {
         Some("root@localhost".to_string()),
     );
 
-    let ConnectorResult::Error(message) = response.result else {
-        panic!("expected error result")
+    let ConnectorResult::Mutation(result) = response.result else {
+        panic!("expected mutation result")
     };
 
-    assert!(message.contains("session transactions are not wired yet"));
+    assert_eq!(result.affected_rows, 0);
 }
 
 #[test]
-fn commit_is_explicitly_recognized() {
+fn commit_is_accepted_as_noop_mutation() {
     let mut catalogs = HashMap::new();
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -308,11 +308,11 @@ fn commit_is_explicitly_recognized() {
         Some("root@localhost".to_string()),
     );
 
-    let ConnectorResult::Error(message) = response.result else {
-        panic!("expected error result")
+    let ConnectorResult::Mutation(result) = response.result else {
+        panic!("expected mutation result")
     };
 
-    assert!(message.contains("session transactions are not wired yet"));
+    assert_eq!(result.affected_rows, 0);
 }
 
 #[test]

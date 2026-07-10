@@ -465,6 +465,17 @@ fn show_tables_from_database_maps_to_retrieve_operation() {
 }
 
 #[test]
+fn show_indexes_from_table_maps_to_retrieve_operation() {
+    let requests = parse_mysql8_sql_requests("show indexes from users", "main")
+        .expect("show indexes should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::Select);
+    assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+}
+
+#[test]
 fn show_privileges_maps_to_retrieve_operation() {
     let requests = parse_mysql8_sql_requests("show privileges", "main")
         .expect("show privileges should parse");

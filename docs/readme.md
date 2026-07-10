@@ -7,6 +7,19 @@ DistDB is a distributed SQL database project built around a Rust execution core,
 - why the design is shaped that way,
 - what is implemented today versus what remains intentionally incomplete.
 
+## Release Status
+
+DistDB is currently in **Developer Alpha**.
+
+This means:
+
+- the platform is usable for development and controlled evaluation,
+- core behavior is documented and validated for the supported surface,
+- compatibility and behavior are still evolving,
+- partial/unsupported areas are expected and documented.
+
+For current alpha scope and expectations, see [release.md](release.md).
+
 ## Quick-start
 
 To run the platform view the [running.md](running.md) file for a quick start guide.
@@ -54,6 +67,7 @@ DistDB is split into a few major surfaces:
 - WAL-backed durability and replay are central to recovery behavior.
 - Grouped WAL commit markers are used to keep transaction visibility commit-gated.
 - security mutations (ACL and credentials) are WAL-persisted as full snapshots and replayed with latest-record-wins precedence per user.
+- index lifecycle mutations (`CREATE INDEX` / `DROP INDEX`) are WAL-persisted and replayed during bootstrap.
 
 ### Authorization and ACL
 
@@ -101,6 +115,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 ### Platform operation
 
 - [using.md](using.md): running the server, console, and local multi-node setups.
+- [release.md](release.md): current release posture, alpha scope, and expectations.
 - [security.md](security.md): TLS modes, CA flow, and runtime security tradeoffs.
 - [replication.md](replication.md): affinity model, sync sequence, and failure handling.
 
@@ -120,5 +135,13 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - If you want to run the system, start with [using.md](using.md).
 - If you want to understand security or deployment posture, read [security.md](security.md) and [replication.md](replication.md).
 - If you are changing execution behavior, read [architecture-boundaries.md](architecture-boundaries.md), [select-architecture.md](select-architecture.md), and the relevant compliance page before editing code.
+
+## Liability Disclaimer
+
+DistDB is provided on an "as is" and "as available" basis, without warranties of any kind, express or implied, including but not limited to fitness for a particular purpose, merchantability, non-infringement, security, availability, or correctness.
+
+By using this software, you accept responsibility for validating behavior, securing deployments, and operating within your own risk tolerance and regulatory obligations.
+
+The project contributors and maintainers are not liable for direct, indirect, incidental, special, consequential, or exemplary damages, including but not limited to data loss, service interruption, financial loss, security incidents, or business impact arising from use or inability to use the software.
 
 

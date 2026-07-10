@@ -12,6 +12,7 @@ pub mod index_id;
 pub mod replica_state;
 pub mod entity;
 pub mod index;
+pub mod index_lifecycle_payload;
 pub mod row_payload;
 pub mod runtime_index;
 pub mod relationship;

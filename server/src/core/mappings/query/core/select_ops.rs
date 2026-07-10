@@ -262,8 +262,8 @@ fn handle_select_introspection_request(
 
     }
 
-    if statement_sql_lower.starts_with("show privileges")
-        || statement_sql_lower.starts_with("show priviledges")
+    if statement_sql_lower.starts_with("show privileges") ||
+        statement_sql_lower.starts_with("show priviledges")
     {
 
         let target_db = statement
@@ -322,6 +322,94 @@ fn handle_select_introspection_request(
 
     }
 
+    if statement_sql_lower.starts_with("show index") ||
+        statement_sql_lower.starts_with("show indexes") ||
+        statement_sql_lower.starts_with("show keys")
+    {
+
+        let object_name = statement
+            .object_name
+            .clone()
+            .or_else(|| parse_show_indexes_target_table(&statement.sql));
+
+        let Some(object_name) = object_name else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                "show indexes missing table identifier",
+            ));
+        };
+
+        let (catalog, normalized_table_id) = if query.database_id.trim().is_empty() {
+
+            if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+
+                let Some(catalog) = resolve_catalog(catalogs, database_name) else {
+                    return Some(ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("database '{}' not found", database_name),
+                    ));
+                };
+
+                (catalog, common::normalize_identifier!(object_id))
+
+            } else {
+
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("database '{}' not found", object_name),
+                ));
+
+            }
+
+        } else if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+
+            let Some(catalog) = resolve_catalog(catalogs, database_name) else {
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("database '{}' not found", database_name),
+                ));
+            };
+
+            (catalog, common::normalize_identifier!(object_id))
+
+        } else {
+
+            let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+                return Some(ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("database '{}' not found", query.database_id),
+                ));
+            };
+
+            (catalog, common::normalize_identifier!(object_name))
+
+        };
+
+        let Some(table) = catalog.table(&normalized_table_id) else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!(
+                    "table '{}' not found in database '{}'",
+                    normalized_table_id,
+                    catalog.database_id.0
+                ),
+            ));
+        };
+
+        let result = serverlib::show_indexes_result(table.indexes.values().map(|index| {
+            (
+                normalized_table_id.clone(),
+                index.index_id.0.clone(),
+                format!("{:?}", index.kind).to_ascii_lowercase(),
+                format!("{:?}", index.origin).to_ascii_lowercase(),
+                index.field_names.join(","),
+            )
+        }));
+
+        return Some(applied_query_response(request_id, result));
+
+    }
+
     if statement_sql_lower.starts_with("debug ") {
 
         let (entity_type, entity_name) = match parse_debug_entity_request(&statement.sql) {
@@ -358,9 +446,9 @@ fn handle_select_introspection_request(
 
     }
 
-    if statement_sql_lower.starts_with("describe ")
-        || statement_sql_lower.starts_with("desc ")
-        || statement_sql_lower.starts_with("show columns")
+    if statement_sql_lower.starts_with("describe ") ||
+        statement_sql_lower.starts_with("desc ") ||
+        statement_sql_lower.starts_with("show columns")
     {
 
         let Some(object_name) = statement.object_name.as_deref() else {
@@ -465,6 +553,35 @@ fn handle_select_introspection_request(
     }
 
     None
+
+}
+
+fn parse_show_indexes_target_table(sql: &str) -> Option<String> {
+
+    let tokens = sql
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>();
+
+    let target_idx = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("from") || token.eq_ignore_ascii_case("in"))?
+        + 1;
+
+    let raw = tokens.get(target_idx)?;
+    let normalized = raw
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches(';')
+        .to_string();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 
 }
 
@@ -848,7 +965,9 @@ fn resolve_catalog_and_object_for_lookup<'a>(
 ) -> Result<(&'a DatabaseCatalog, String, String), String> {
 
     if requested_database_id.trim().is_empty() {
+
         if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+
             let Some(catalog) = resolve_catalog(catalogs, database_name) else {
                 return Err(format!("database '{}' not found", database_name));
             };
@@ -859,12 +978,14 @@ fn resolve_catalog_and_object_for_lookup<'a>(
                 common::normalize_identifier!(object_id),
                 resolved_database_id,
             ));
+
         }
 
         return Err(format!("database '{}' not found", object_name));
     }
 
     if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+
         let Some(catalog) = resolve_catalog(catalogs, database_name) else {
             return Err(format!("database '{}' not found", database_name));
         };
@@ -875,6 +996,7 @@ fn resolve_catalog_and_object_for_lookup<'a>(
             common::normalize_identifier!(object_id),
             resolved_database_id,
         ));
+        
     }
 
     let Some(catalog) = resolve_catalog(catalogs, requested_database_id) else {

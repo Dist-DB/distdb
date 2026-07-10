@@ -1,5 +1,6 @@
 use super::*;
 use super::wal_ops::append_payload_record;
+use serverlib::SchemaMigrationExecutor;
 
 pub(super) fn execute_alter_table_impl(
     request_id: &str,
@@ -95,11 +96,27 @@ pub(super) fn execute_alter_table_impl(
                 field_name,
                 new_type,
             } => {
+                
                 type_changes.push(serverlib::FieldTypeChangeRule {
                     field_name: field_name.clone(),
                     target_type: new_type.clone(),
                 });
-                Ok(())
+
+                let existing = tx.pending_schema().field(&field_name).cloned();
+
+                match existing {
+                    
+                    Some(mut field) => {
+                        field.field_type = new_type;
+                        tx.update_field(field)
+                    },
+
+                    None => Err(serverlib::DatabaseError::SchemaChange(
+                        serverlib::SchemaError::FieldNotFound,
+                    )),
+
+                }
+
             },
 
         };
@@ -117,6 +134,65 @@ pub(super) fn execute_alter_table_impl(
     let wal_id = catalog.database_id.0.clone();
     let entity_wal_id = table_id.clone();
     let created_at = common::epoch_nanos!();
+
+    // Type changes require row rewrite while the schema lock is still active.
+    if !type_changes.is_empty() {
+
+        let mutation_rule_set = serverlib::SchemaMutationRuleSet {
+            renames,
+            removals,
+            additions: additions
+                .into_iter()
+                .map(|(name, _)| (name, vec![]))
+                .collect(),
+            type_changes,
+            conversion_policy: serverlib::TypeConversionPolicy::Safe,
+        };
+
+        let executor =
+            serverlib::DiskToMemorySchemaMigrationExecutor::new(node_data_dir.to_path_buf());
+
+        if let Err(err) = executor.set_rules_for_table(&table_id, mutation_rule_set) {
+            let _ = tx.abort(catalog);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table schema migration setup failed: {err}"),
+            );
+        }
+
+        if let Err(err) = executor.rewrite_rows(catalog, &table_id) {
+            let _ = tx.abort(catalog);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table schema migration failed: {err}"),
+            );
+        }
+
+        if let Err(err) = executor.rebuild_indexes(catalog, &table_id) {
+            let _ = tx.abort(catalog);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table schema migration failed: {err}"),
+            );
+        }
+
+        if let Err(err) = executor.flush_temp_image(catalog, &table_id) {
+            let _ = tx.abort(catalog);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table schema migration failed: {err}"),
+            );
+        }
+
+        if let Err(err) = executor.cutover(catalog, &table_id) {
+            let _ = tx.abort(catalog);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table schema migration failed: {err}"),
+            );
+        }
+
+    }
 
     if let Err(err) = tx.commit::<serverlib::DatabaseError, _>(catalog, |payload| {
         
@@ -149,37 +225,6 @@ pub(super) fn execute_alter_table_impl(
             request_id.to_string(),
             format!("alter table failed: {err}"),
         );
-    }
-
-    // If there are type changes or field modifications, run the migration executor
-    if !type_changes.is_empty() {
-
-        let mutation_rule_set = serverlib::SchemaMutationRuleSet {
-            renames,
-            removals,
-            additions: additions
-                .into_iter()
-                .map(|(name, _)| (name, vec![]))
-                .collect(),
-            type_changes,
-            conversion_policy: serverlib::TypeConversionPolicy::Safe,
-        };
-
-        let executor =
-            serverlib::DiskToMemorySchemaMigrationExecutor::new(node_data_dir.to_path_buf());
-        
-        executor
-            .set_rules_for_table(&table_id, mutation_rule_set)
-            .ok();
-
-        if let Err(err) = serverlib::run_schema_migration(catalog, &table_id, &executor) {
-            log::warn!("schema migration failed for table '{}': {err}", table_id);
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("alter table schema migration failed: {err}"),
-            );
-        }
-
     }
 
     ConnectorResponse::applied(
@@ -497,17 +542,30 @@ pub(super) fn execute_drop_directive_impl(
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     match statement.operation {
 
         SqlOperation::DropDatabase => {
-            execute_drop_database(request_id, catalogs, node_data_dir, statement)
+            execute_drop_database(request_id, catalogs, node_data_dir, runtime_indexes, statement)
         },
 
         _ if drop_entity_operation_metadata(statement.operation).is_some() => {
-            execute_drop_entity_object(request_id, query, catalogs, wal, node_data_dir, statement)
+            execute_drop_entity_object(
+                request_id,
+                query,
+                catalogs,
+                wal,
+                node_data_dir,
+                runtime_indexes,
+                statement,
+            )
+        },
+
+        SqlOperation::DropOther => {
+            execute_drop_other_object(request_id, query, catalogs, wal, runtime_indexes, statement)
         },
 
         _ => ConnectorResponse::rejected(
@@ -519,6 +577,294 @@ pub(super) fn execute_drop_directive_impl(
         ),
 
     }
+
+}
+
+pub(super) fn execute_create_other_impl(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let (index_name, table_id, field_names, if_not_exists) = match parse_create_index_spec(statement) {
+        Ok(spec) => spec,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create index parse failed: {err}"),
+            );
+        }
+    };
+
+    let created_index_id = match catalog.create_index(&table_id, index_name.as_deref(), field_names) {
+        Ok(index_id) => index_id,
+
+        Err(serverlib::DatabaseError::DuplicateEntity) if if_not_exists => {
+            return ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            );
+        }
+
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create index failed: {err}"),
+            );
+        }
+    };
+
+    let created_index = catalog
+        .index_in_table(&table_id, &created_index_id)
+        .cloned()
+        .ok_or_else(|| "created index metadata missing".to_string());
+
+    let created_index = match created_index {
+        Ok(index) => index,
+        Err(err) => {
+            let _ = catalog.drop_index(&created_index_id, Some(&table_id));
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create index failed: {err}"),
+            );
+        }
+    };
+
+    let index_payload = serverlib::IndexLifecyclePayload {
+        table_id: table_id.clone(),
+        index_id: created_index_id.clone(),
+        action: serverlib::IndexLifecycleAction::Create,
+        schema_epoch: catalog.schema_epoch(),
+        index: Some(created_index),
+    };
+
+    let encoded_index_payload = match index_payload.encode() {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            let _ = catalog.drop_index(&created_index_id, Some(&table_id));
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create index payload encode failed: {err}"),
+            );
+        }
+    };
+
+    if let Err(err) = append_payload_record(
+        wal,
+        &catalog.database_id.0,
+        TransactionKind::IndexLifecycle,
+        encoded_index_payload,
+        common::epoch_nanos!(),
+    ) {
+        let _ = catalog.drop_index(&created_index_id, Some(&table_id));
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create index WAL append failed: {err}"),
+        );
+    }
+
+    let Some(table) = catalog.table(&table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create index failed: table '{}' not found", table_id),
+        );
+    };
+
+    let stream_id = catalog
+        .entity_wal_stream_id(&table_id)
+        .unwrap_or_else(|| table_id.clone());
+
+    let payload_context = payload_context_for_table(catalog, &table_id);
+    let live_rows = match load_live_rows_with_context(wal, &stream_id, table.schema(), &payload_context) {
+        Ok(rows) => rows,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create index live-row scan failed: {err}"),
+            );
+        }
+    };
+
+    if let Some(index) = table.indexes.get(&created_index_id)
+        && runtime_indexes.should_track_index(index)
+    {
+        let state = runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0);
+        state.rebuild(
+            live_rows
+                .iter()
+                .map(|(_, row_map)| index_value_tuple(index, row_map))
+                .collect(),
+        );
+        state.index = Some(index.clone());
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+    )
+
+}
+
+pub(super) fn execute_alter_view_impl(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let Some(view_id) = statement.object_name.as_deref() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "alter view missing view identifier",
+        );
+    };
+
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    if catalog.view(view_id).is_none() {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("alter view failed: '{}' not found", common::normalize_identifier!(view_id)),
+        );
+    }
+
+    let dependencies = statement
+        .sql
+        .to_ascii_lowercase()
+        .replacen("alter view", "create view", 1);
+
+    let dependencies = serverlib::parse_create_view_dependencies_from_sql(&dependencies)
+        .unwrap_or_default();
+
+    let Some(entity_wal_id) = catalog.entity_wal_stream_id(view_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "alter view WAL stream lookup failed".to_string(),
+        );
+    };
+
+    if let Err(err) = catalog.set_sql_definition(
+        view_id,
+        SqlObjectKind::View,
+        statement.sql.clone(),
+        dependencies.clone(),
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("alter view definition apply failed: {err}"),
+        );
+    }
+
+    let wal_id = catalog.database_id.0.clone();
+    let created_at = common::epoch_nanos!();
+
+    if let Err(err) = append_sql_definition_upsert_with_wal(
+        catalog,
+        wal,
+        &wal_id,
+        &entity_wal_id,
+        view_id,
+        SqlObjectKind::View,
+        &statement.sql,
+        dependencies,
+        created_at,
+        "alter view",
+    ) {
+        return ConnectorResponse::rejected(request_id.to_string(), err);
+    }
+
+    if let Err(err) = persist_entity_snapshot(catalog, view_id, node_data_dir) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("alter view entity snapshot write failed: {err}"),
+        );
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+    )
+
+}
+
+pub(super) fn execute_truncate_table_impl(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let Some(table_id) = statement.object_name.as_deref() else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "truncate table missing table identifier",
+        );
+    };
+
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let normalized_table_id = common::normalize_identifier!(table_id);
+
+    let Some(table) = catalog.table(&normalized_table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("truncate table failed: table '{}' not found", normalized_table_id),
+        );
+    };
+
+    let stream_id = catalog
+        .entity_wal_stream_id(&normalized_table_id)
+        .unwrap_or_else(|| normalized_table_id.clone());
+
+    if let Err(err) = wal.compact_stream_to_latest_schema_and_metadata(
+        &stream_id,
+        UserId::from_username("server"),
+        common::epoch_nanos!(),
+    ) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("truncate table failed: {err}"),
+        );
+    }
+
+    for index in derived_indexes_for_table(table) {
+        if !runtime_indexes.should_track_index(index) {
+            continue;
+        }
+
+        let state = runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0);
+        state.rebuild(Default::default());
+        state.index = Some(index.clone());
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+    )
 
 }
 
@@ -546,6 +892,7 @@ fn execute_drop_database(
     request_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -587,6 +934,13 @@ fn execute_drop_database(
         );
     };
 
+    for table_id in catalog.table_ids() {
+        let table_scope_id = catalog
+            .entity_wal_stream_id(&table_id)
+            .unwrap_or(table_id.clone());
+        runtime_indexes.remove_table_indexes(&table_scope_id);
+    }
+
     let catalog_file = node_data_dir.join(catalog.file_name());
     if let Err(err) = fs::remove_file(&catalog_file)
         && err.kind() != ErrorKind::NotFound {
@@ -609,6 +963,7 @@ fn execute_drop_entity_object(
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -687,8 +1042,8 @@ fn execute_drop_entity_object(
     // Only remove a dedicated entity stream. SQL-backed objects currently
     // share the database stream and must not delete it.
 
-    if let Some(stream_id) = entity_wal_stream_id
-        && stream_id != wal_id
+    if let Some(ref stream_id) = entity_wal_stream_id
+        && stream_id != &wal_id
             && let Err(err) = wal.delete_stream(&stream_id) {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
@@ -700,6 +1055,11 @@ fn execute_drop_entity_object(
 
     if object_type == DatabaseObjectType::Table {
 
+        let table_scope_id = entity_wal_stream_id
+            .clone()
+            .unwrap_or_else(|| normalized_object_id.clone());
+        runtime_indexes.remove_table_indexes(&table_scope_id);
+
         let lifecycle_payload = TableLifecyclePayload {
             table_id: normalized_object_id.clone(),
             action: TableLifecycleAction::Drop,
@@ -709,13 +1069,16 @@ fn execute_drop_entity_object(
         };
 
         let encoded = match lifecycle_payload.encode() {
+            
             Ok(encoded) => encoded,
+            
             Err(err) => {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("drop table lifecycle payload encode failed: {err}"),
                 );
             }
+            
         };
 
         if let Err(err) = append_payload_record(
@@ -779,6 +1142,263 @@ fn execute_drop_entity_object(
         request_id.to_string(),
         ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
     )
+
+}
+
+fn execute_drop_other_object(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let has_if_exists = drop_statement_has_if_exists(&statement.sql);
+
+    let Some((index_name, table_hint)) = parse_drop_index_spec(statement) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop directive is not supported for operation '{:?}'", statement.operation),
+        );
+    };
+
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let normalized_index_name = common::normalize_identifier!(&index_name);
+
+    let table_id_for_drop = table_hint.clone().or_else(|| {
+        catalog
+            .table_ids()
+            .into_iter()
+            .find(|table_id| catalog.index_in_table(table_id, &normalized_index_name).is_some())
+    });
+
+    let existing_index = table_id_for_drop
+        .as_ref()
+        .and_then(|table_id| catalog.index_in_table(table_id, &normalized_index_name).cloned());
+
+    let payload = serverlib::IndexLifecyclePayload {
+        table_id: table_id_for_drop.clone().unwrap_or_default(),
+        index_id: normalized_index_name.clone(),
+        action: serverlib::IndexLifecycleAction::Drop,
+        schema_epoch: catalog.schema_epoch().saturating_add(1),
+        index: existing_index.clone(),
+    };
+
+    match catalog.drop_index(&index_name, table_hint.as_deref()) {
+        Ok(()) => {
+
+            let encoded = match payload.encode() {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    if let Some(index) = existing_index
+                        && let Some(table_id) = table_id_for_drop.as_ref() {
+                            let _ = catalog.create_index(
+                                table_id,
+                                Some(&index.index_id.0),
+                                index.field_names.clone(),
+                            );
+                        }
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("drop index payload encode failed: {err}"),
+                    );
+                }
+            };
+
+            if let Err(err) = append_payload_record(
+                wal,
+                &catalog.database_id.0,
+                TransactionKind::IndexLifecycle,
+                encoded,
+                common::epoch_nanos!(),
+            ) {
+                
+                if let Some(index) = existing_index
+                    && let Some(table_id) = table_id_for_drop.as_ref() {
+                        let _ = catalog.create_index(
+                            table_id,
+                            Some(&index.index_id.0),
+                            index.field_names,
+                        );
+                    }
+                
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("drop index WAL append failed: {err}"),
+                );
+
+            }
+
+            if let Some(table_id) = table_id_for_drop.as_ref() {
+                let table_scope_id = catalog
+                    .entity_wal_stream_id(table_id)
+                    .unwrap_or_else(|| table_id.clone());
+                runtime_indexes.remove_index_for_table(&table_scope_id, &normalized_index_name);
+            }
+
+            ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+            )
+
+        }
+
+        Err(serverlib::DatabaseError::EntityNotFound) if has_if_exists => ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        ),
+
+        Err(err) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("drop index failed: {err}"),
+        ),
+    }
+
+}
+
+fn parse_create_index_spec(
+    statement: &SqlRequest,
+) -> Result<(Option<String>, String, Vec<String>, bool), String> {
+
+    let sql = statement.sql.trim().trim_end_matches(';').trim();
+    let lowered = sql.to_ascii_lowercase();
+
+    if !lowered.starts_with("create") || !lowered.contains(" index ") {
+        return Err("statement is not CREATE INDEX".to_string());
+    }
+
+    let on_pos = lowered
+        .find(" on ")
+        .ok_or_else(|| "CREATE INDEX missing ON clause".to_string())?;
+
+    let prefix = sql[..on_pos].trim();
+    let suffix = sql[on_pos + 4..].trim();
+    let prefix_tokens = prefix.split_whitespace().collect::<Vec<_>>();
+
+    let Some(index_token_pos) = prefix_tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("index"))
+    else {
+        return Err("CREATE INDEX missing INDEX keyword".to_string());
+    };
+
+    let if_not_exists = prefix.to_ascii_lowercase().contains(" if not exists ");
+
+    let index_name_token = if if_not_exists {
+        prefix_tokens.get(index_token_pos + 4)
+    } else {
+        prefix_tokens.get(index_token_pos + 1)
+    }
+    .ok_or_else(|| "CREATE INDEX missing index name".to_string())?;
+
+    let open_paren = suffix
+        .find('(')
+        .ok_or_else(|| "CREATE INDEX missing column list".to_string())?;
+    let close_paren = suffix
+        .rfind(')')
+        .ok_or_else(|| "CREATE INDEX missing closing ')'".to_string())?;
+
+    if close_paren <= open_paren {
+        return Err("CREATE INDEX has invalid column list".to_string());
+    }
+
+    let table_id = normalize_identifier_token(&suffix[..open_paren]);
+
+    let field_names = suffix[open_paren + 1..close_paren]
+        .split(',')
+        .map(|segment| {
+            let first = segment
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| "CREATE INDEX has empty field expression".to_string())?;
+
+            let last_segment = first.rsplit('.').next().unwrap_or(first);
+            Ok(normalize_identifier_token(last_segment))
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+
+    if table_id.is_empty() || field_names.is_empty() {
+        return Err("CREATE INDEX requires table and at least one field".to_string());
+    }
+
+    Ok((
+        Some(normalize_identifier_token(index_name_token)),
+        table_id,
+        field_names,
+        if_not_exists,
+    ))
+
+}
+
+fn parse_drop_index_spec(statement: &SqlRequest) -> Option<(String, Option<String>)> {
+
+    let sql = statement.sql.trim().trim_end_matches(';').trim();
+    let lowered = sql.to_ascii_lowercase();
+
+    if !lowered.starts_with("drop index ") {
+        return None;
+    }
+
+    let tokens = sql.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 3 {
+        return None;
+    }
+
+    let mut idx = 2usize;
+
+    if tokens
+        .get(idx)
+        .is_some_and(|token| token.eq_ignore_ascii_case("if"))
+        && tokens
+            .get(idx + 1)
+            .is_some_and(|token| token.eq_ignore_ascii_case("exists"))
+    {
+        idx += 2;
+    }
+
+    let index_name = normalize_identifier_token(tokens.get(idx)?);
+
+    let table_hint = if tokens
+        .get(idx + 1)
+        .is_some_and(|token| token.eq_ignore_ascii_case("on"))
+    {
+        tokens
+            .get(idx + 2)
+            .map(|token| normalize_identifier_token(token))
+    } else {
+        None
+    };
+
+    if index_name.is_empty() {
+        None
+    } else {
+        Some((index_name, table_hint.filter(|name| !name.is_empty())))
+    }
+
+}
+
+fn normalize_identifier_token(token: &str) -> String {
+
+    token
+        .trim()
+        .trim_matches(',')
+        .trim_matches(';')
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('(')
+        .trim_matches(')')
+        .trim()
+        .to_ascii_lowercase()
 
 }
 

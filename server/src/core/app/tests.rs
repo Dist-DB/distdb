@@ -1263,6 +1263,158 @@ fn show_tables_query_returns_table_name_rows() {
 }
 
 #[test]
+fn schema_command_create_table_executes_via_query_routing() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-schema-command-routing-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let database_name = "schema_route_db";
+    let database_id = serverlib::DatabaseId::from_database_name(database_name)
+        .expect("database id should normalize")
+        .0;
+
+    let create_db = ConnectorRequest::new(
+        "req-create-db",
+        ConnectorCommand::CreateDatabase {
+            database_name: database_name.to_string(),
+        },
+    );
+
+    let create_db_response = app.handle_connector_request(&create_db);
+    assert_eq!(create_db_response.status, ResponseStatus::Applied);
+
+    let create_table = ConnectorRequest::new(
+        "req-schema-create-table",
+        ConnectorCommand::Schema {
+            database_id: database_id.clone(),
+            command: connector::SchemaCommand::CreateTable {
+                table_id: "users".to_string(),
+                fields: vec![
+                    connector::FieldSpec::new("id", common::schema::FieldKind::UInt(64))
+                        .primary_key(),
+                    connector::FieldSpec::new("email", common::schema::FieldKind::Text),
+                ],
+            },
+        },
+    );
+
+    let create_table_response = app.handle_connector_request(&create_table);
+    assert_eq!(create_table_response.status, ResponseStatus::Applied);
+
+    let catalog = app
+        .catalogs()
+        .get(&database_id)
+        .expect("target catalog should exist");
+    assert!(
+        catalog.table_schema("users").is_some(),
+        "expected users table to be registered via schema command"
+    );
+
+}
+
+#[test]
+fn mutation_command_insert_executes_via_query_routing() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-mutation-command-routing-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let database_name = "mutation_route_db";
+    let database_id = serverlib::DatabaseId::from_database_name(database_name)
+        .expect("database id should normalize")
+        .0;
+
+    let create_db = ConnectorRequest::new(
+        "req-create-db",
+        ConnectorCommand::CreateDatabase {
+            database_name: database_name.to_string(),
+        },
+    );
+
+    let create_db_response = app.handle_connector_request(&create_db);
+    assert_eq!(create_db_response.status, ResponseStatus::Applied);
+
+    let create_table = ConnectorRequest::new(
+        "req-query-create-table",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: database_id.clone(),
+                sql: "create table users (id bigint not null primary key, email varchar(255) not null)"
+                    .to_string(),
+            },
+        },
+    );
+
+    let create_table_response = app.handle_connector_request(&create_table);
+    assert_eq!(create_table_response.status, ResponseStatus::Applied);
+
+    let insert = ConnectorRequest::new(
+        "req-mutation-insert",
+        ConnectorCommand::Mutation {
+            database_id: database_id.clone(),
+            mutation: connector::DataMutation::Insert {
+                table_id: "users".to_string(),
+                values: vec![
+                    connector::FieldValue {
+                        name: "id".to_string(),
+                        value: b"1".to_vec(),
+                    },
+                    connector::FieldValue {
+                        name: "email".to_string(),
+                        value: b"sam@example.com".to_vec(),
+                    },
+                ],
+            },
+        },
+    );
+
+    let insert_response = app.handle_connector_request(&insert);
+    assert_eq!(insert_response.status, ResponseStatus::Applied);
+
+    let verify = ConnectorRequest::new(
+        "req-mutation-verify",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: database_id,
+                sql: "select count(*) as c_all from users".to_string(),
+            },
+        },
+    );
+
+    let verify_response = app.handle_connector_request(&verify);
+    assert_eq!(verify_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = verify_response.result else {
+        panic!("expected query result");
+    };
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], b"1".to_vec());
+
+}
+
+#[test]
 fn create_table_query_registers_table_with_schema() {
 
     let unique_suffix = common::epoch_nanos!();
@@ -4991,6 +5143,82 @@ fn alter_table_query_updates_schema() {
 }
 
 #[test]
+fn schema_command_alter_table_update_field_uses_modify_column_path() {
+
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-schema-alter-modify-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let database_name = "alter_modify_db";
+    let database_id = serverlib::DatabaseId::from_database_name(database_name)
+        .expect("database id should normalize")
+        .0;
+
+    let create_db = ConnectorRequest::new(
+        "req-create-db-modify",
+        ConnectorCommand::CreateDatabase {
+            database_name: database_name.to_string(),
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request(&create_db).status,
+        ResponseStatus::Applied
+    );
+
+    let create_table = ConnectorRequest::new(
+        "req-create-table-modify",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: database_id.clone(),
+                sql: "create table users (id bigint not null primary key, email varchar(255) not null)"
+                    .to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        app.handle_connector_request(&create_table).status,
+        ResponseStatus::Applied
+    );
+
+    let alter = ConnectorRequest::new(
+        "req-schema-modify",
+        ConnectorCommand::Schema {
+            database_id: database_id.clone(),
+            command: connector::SchemaCommand::AlterTable {
+                change: connector::SchemaChangeRequest::new("users").update_field(
+                    connector::FieldSpec::new("email", common::schema::FieldKind::StringFixed(512)),
+                ),
+            },
+        },
+    );
+
+    let alter_response = app.handle_connector_request(&alter);
+    assert_eq!(
+        alter_response.status,
+        ResponseStatus::Applied,
+        "alter modify rejected: {:?}",
+        alter_response.result
+    );
+
+    let catalog = app
+        .catalogs()
+        .get(&database_id)
+        .expect("target catalog should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let email = schema.field("email").expect("email field should exist");
+
+    assert_eq!(email.field_type, serverlib::FieldType::StringFixed(512));
+
+}
+
+#[test]
 fn create_database_query_creates_catalog() {
 
     let unique_suffix = common::epoch_nanos!();
@@ -5341,6 +5569,493 @@ fn select_from_view_uses_scoped_materialization_without_catalog_residue() {
             .table_ids()
             .iter()
             .all(|table_id| !table_id.starts_with("__scoped_view_"))
+    );
+}
+
+#[test]
+fn alter_view_updates_stored_definition() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-alter-view-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+    let database_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("database id should normalize")
+        .0;
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-db-alter-view",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-table-alter-view",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email text not null)"
+                        .to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-view-before-alter",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create view users_v as select id from users".to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    let alter_view_response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-alter-view",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "alter view users_v as select email from users".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(alter_view_response.status, ResponseStatus::Applied);
+
+    let catalog = app
+        .catalogs
+        .get(&database_id)
+        .expect("main catalog should exist");
+    let view = catalog.view("users_v").expect("view should exist");
+
+    assert!(view.sql.to_ascii_lowercase().contains("select email from users"));
+}
+
+#[test]
+fn create_and_drop_index_via_query_dispatch() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-index-ops-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+    let database_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("database id should normalize")
+        .0;
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-db-index",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-table-index",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email text not null)"
+                        .to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    let create_index_response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-create-index",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create index idx_users_email on users(email)".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(
+        create_index_response.status,
+        ResponseStatus::Applied,
+        "create index rejected: {:?}",
+        create_index_response.result
+    );
+
+    let catalog = app
+        .catalogs
+        .get(&database_id)
+        .expect("main catalog should exist");
+    let users = catalog.table("users").expect("users table should exist");
+    assert!(users.indexes.contains_key("idx_users_email"));
+
+    let users_stream_id = table_stream_id(&app, &database_id, "users");
+    assert!(app
+        .runtime_indexes
+        .index_for_table(&users_stream_id, "idx_users_email")
+        .is_some());
+
+    let drop_index_response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-drop-index",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "drop index idx_users_email".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(
+        drop_index_response.status,
+        ResponseStatus::Applied,
+        "drop index rejected: {:?}",
+        drop_index_response.result
+    );
+
+    let catalog = app
+        .catalogs
+        .get(&database_id)
+        .expect("main catalog should exist");
+    let users = catalog.table("users").expect("users table should exist");
+    assert!(!users.indexes.contains_key("idx_users_email"));
+    assert!(app
+        .runtime_indexes
+        .index_for_table(&users_stream_id, "idx_users_email")
+        .is_none());
+}
+
+#[test]
+fn drop_table_removes_associated_runtime_indexes() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-drop-table-runtime-indexes-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+    let database_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("database id should normalize")
+        .0;
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-db-drop-table-indexes",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-table-drop-table-indexes",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email text not null)"
+                        .to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-index-drop-table-indexes",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create index idx_users_email on users(email)".to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-insert-drop-table-indexes",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "insert into users (id, email) values (1, 'a@x.com')".to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    let users_stream_id = table_stream_id(&app, &database_id, "users");
+
+    let index_ids = app
+        .catalogs
+        .get(&database_id)
+        .and_then(|catalog| catalog.table("users"))
+        .map(|table| table.indexes.keys().cloned().collect::<Vec<_>>())
+        .expect("users table and indexes should exist");
+
+    let tracked_index_ids = index_ids
+        .into_iter()
+        .filter(|index_id| {
+            app.runtime_indexes
+                .index_for_table(&users_stream_id, index_id)
+                .is_some()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(!tracked_index_ids.is_empty());
+
+    let drop_table_response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-drop-table-indexes",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "drop table users".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(drop_table_response.status, ResponseStatus::Applied);
+
+    for index_id in &tracked_index_ids {
+        assert!(app
+            .runtime_indexes
+            .index_for_table(&users_stream_id, index_id)
+            .is_none());
+    }
+}
+
+#[test]
+fn truncate_table_compacts_wal_and_clears_live_rows() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-truncate-table-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+    let database_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("database id should normalize")
+        .0;
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-db-truncate",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-table-truncate",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email text not null)"
+                        .to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-insert-user-1-truncate",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "insert into users (id, email) values (1, 'a@x.com')".to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-insert-user-2-truncate",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "insert into users (id, email) values (2, 'b@x.com')".to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    let users_stream_id = table_stream_id(&app, &database_id, "users");
+    let before = app.wal.since(&users_stream_id, None);
+    assert!(before.iter().any(|record| record.kind == TransactionKind::Insert));
+
+    let truncate_response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-truncate-users",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "truncate table users".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(truncate_response.status, ResponseStatus::Applied);
+
+    let select_after = app.handle_connector_request(&ConnectorRequest::new(
+        "req-select-after-truncate",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select id, email from users".to_string(),
+            },
+        },
+    ));
+
+    let ConnectorResult::Query(result) = select_after.result else {
+        panic!("expected query result after truncate");
+    };
+
+    assert_eq!(result.rows.len(), 0);
+
+    let after = app.wal.since(&users_stream_id, None);
+    assert!(after.iter().any(|record| record.kind == TransactionKind::Truncate));
+    assert!(after.iter().all(|record| {
+        !matches!(
+            record.kind,
+            TransactionKind::Insert | TransactionKind::Update | TransactionKind::Delete
+        )
+    }));
+}
+
+#[test]
+fn show_indexes_reports_user_defined_index_after_restart() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-show-indexes-restart-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-db-show-indexes",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-table-show-indexes",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key, email text not null)"
+                        .to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-index-show-indexes",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create index idx_users_email on users(email)".to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    drop(app);
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should reinitialize");
+    app.bootstrap().expect("bootstrap should replay index lifecycle");
+
+    let response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-show-indexes-after-restart",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show indexes from users".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = response.result else {
+        panic!("expected query result");
+    };
+
+    let names = result
+        .rows
+        .iter()
+        .map(|row| String::from_utf8(row[1].clone()).expect("index name should be utf8"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        names.iter().any(|name| name == "idx_users_email"),
+        "show indexes should include user-defined index after restart"
     );
 }
 

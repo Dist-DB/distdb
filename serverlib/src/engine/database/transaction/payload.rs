@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::engine::database::entity::payload::EntityMetadataPayload;
+use crate::engine::database::index_lifecycle_payload::IndexLifecyclePayload;
 use crate::engine::database::schema::change_payload::SchemaChangePayload;
 use crate::engine::database::sql_definition_payload::SqlDefinitionPayload;
 use crate::engine::database::table::lifecycle_payload::TableLifecyclePayload;
@@ -51,6 +52,12 @@ impl SerdeTransactionPayload for TableLifecyclePayload {
     const DECODE_ERROR: &'static str = "failed to deserialize table lifecycle payload";
 }
 
+impl SerdeTransactionPayload for IndexLifecyclePayload {
+    const KIND: TransactionKind = TransactionKind::IndexLifecycle;
+    const ENCODE_ERROR: &'static str = "failed to serialize index lifecycle payload";
+    const DECODE_ERROR: &'static str = "failed to deserialize index lifecycle payload";
+}
+
 impl SerdeTransactionPayload for EntityMetadataPayload {
     const KIND: TransactionKind = TransactionKind::MetadataChange;
     const ENCODE_ERROR: &'static str = "failed to serialize entity metadata payload";
@@ -67,6 +74,7 @@ impl SerdeTransactionPayload for SqlDefinitionPayload {
 pub enum DecodedTransactionPayload {
     SchemaChange(SchemaChangePayload),
     TableLifecycle(TableLifecyclePayload),
+    IndexLifecycle(IndexLifecyclePayload),
     EntityMetadata(EntityMetadataPayload),
     SqlDefinition(SqlDefinitionPayload),
 }
@@ -82,6 +90,9 @@ impl DecodedTransactionPayload {
 
             TransactionKind::TableLifecycle => TableLifecyclePayload::decode_payload(payload)
                 .map(Self::TableLifecycle),
+
+            TransactionKind::IndexLifecycle => IndexLifecyclePayload::decode_payload(payload)
+                .map(Self::IndexLifecycle),
 
             TransactionKind::MetadataChange | 
             TransactionKind::SecurityChange => EntityMetadataPayload::decode_payload(payload)

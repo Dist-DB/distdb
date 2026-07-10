@@ -44,6 +44,18 @@ pub(super) fn classify_statement(
         
     }
 
+    if normalized_lower.starts_with("show index") ||
+        normalized_lower.starts_with("show indexes") ||
+        normalized_lower.starts_with("show keys")
+    {
+        return Ok((
+            SqlDirective::Retrieve,
+            SqlOperation::Select,
+            extract_show_indexes_target(normalized),
+            required_privilege_for_operation(SqlOperation::Select),
+        ));
+    }
+
     let (directive, operation, object_name) = match statement {
 
         Statement::Query(query) => {
@@ -303,6 +315,24 @@ pub(super) fn classify_statement(
 
 }
 
+fn extract_show_indexes_target(statement: &str) -> Option<String> {
+
+    let tokens = statement
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>();
+
+    let target_idx = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("from") || token.eq_ignore_ascii_case("in"))?
+        + 1;
+
+    let raw = tokens.get(target_idx)?;
+    normalize_fallback_object_name(raw)
+
+}
+
 // Mapping security model privileges to SQL operations. This is a simplified mapping and may not cover all cases.
 fn required_privilege_for_operation(operation: SqlOperation) -> Option<AccountPrivilege> {
 
@@ -498,6 +528,28 @@ pub(super) fn classify_text_fallback(
                     SqlDirective::Retrieve,
                     SqlOperation::Select,
                     None,
+                    required_privilege_for_operation(SqlOperation::Select),
+                ));
+            }
+
+            if tokens.get(1).is_some_and(|token| {
+                token.eq_ignore_ascii_case("index")
+                    || token.eq_ignore_ascii_case("indexes")
+                    || token.eq_ignore_ascii_case("keys")
+            }) {
+                let object_name = tokens
+                    .iter()
+                    .position(|token| {
+                        token.eq_ignore_ascii_case("from")
+                            || token.eq_ignore_ascii_case("in")
+                    })
+                    .and_then(|idx| tokens.get(idx + 1))
+                    .and_then(|name| normalize_fallback_object_name(name));
+
+                return Some((
+                    SqlDirective::Retrieve,
+                    SqlOperation::Select,
+                    object_name,
                     required_privilege_for_operation(SqlOperation::Select),
                 ));
             }

@@ -44,6 +44,20 @@
   - MySQL-complete modifier/hint surface is not fully implemented
   - execution is still primarily rule/path based (no broad cost-based optimizer)
 
+## Statement Batch Execution
+
+- Connector query payloads that parse into multiple SQL statements are executed sequentially.
+- Execution stops at the first rejected statement; earlier applied statements remain applied.
+- The response returned is the first rejection response, or the final applied response when all statements succeed.
+- Transaction semantics for grouped rollback are still governed by explicit session transaction handling (`BEGIN` / `COMMIT` / `ROLLBACK`) rather than implicit all-or-nothing multi-statement batches.
+
 ## Adjacent Schema Lifecycle (Commonly Used With DML)
 - `ALTER TABLE` change-plan path
+  - supported change operations include `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `MODIFY COLUMN`
+  - connector schema update-field requests are routed through `ALTER TABLE ... MODIFY COLUMN` SQL execution
+- `CREATE INDEX` and `DROP INDEX`
+  - index lifecycle mutations are dispatched through the SQL query execution surface
+  - structured index lifecycle WAL payloads are used for durable replay
+- `SHOW INDEX` / `SHOW INDEXES` / `SHOW KEYS`
+  - table-scoped index introspection is available and returns index metadata (`table_name`, `index_name`, `index_kind`, `index_origin`, `fields`)
 - `DROP TABLE`, `DROP VIEW`, `DROP DATABASE`

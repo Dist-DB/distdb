@@ -117,3 +117,33 @@ fn executor_rejects_schema_phase_without_database() {
     let result = executor.execute_schema_catalog_phase(&processor, &step);
     assert!(result.is_err());
 }
+
+#[test]
+fn executor_rejects_schema_phase_without_document_database_entry() {
+    let executor = ReplicationPhaseExecutor::new();
+    let processor = create_test_processor();
+
+    let step = AffinitySyncStep {
+        phase: AffinitySyncPhase::SchemaCatalog,
+        database_id: Some("missing-db".to_string()),
+        schema_identifier: Some(1),
+    };
+
+    let result = executor.execute_schema_catalog_phase(&processor, &step);
+    assert!(result.is_err());
+}
+
+#[test]
+fn executor_rejects_schema_phase_when_plan_schema_mismatches_document() {
+    let executor = ReplicationPhaseExecutor::new();
+    let processor = create_test_processor();
+
+    let step = AffinitySyncStep {
+        phase: AffinitySyncPhase::SchemaCatalog,
+        database_id: Some("db1".to_string()),
+        schema_identifier: Some(99),
+    };
+
+    let result = executor.execute_schema_catalog_phase(&processor, &step);
+    assert!(result.is_err());
+}

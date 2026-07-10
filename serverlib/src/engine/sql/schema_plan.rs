@@ -131,6 +131,11 @@ pub fn parse_alter_table_change_plan_from_statement(
 
     for operation in operations {
 
+        if let Some(modify_op) = parse_modify_column_change_op(operation)? {
+            plan_ops.push(modify_op);
+            continue;
+        }
+
         match operation {
 
             AlterTableOperation::AddColumn { column_def, .. } => {
@@ -206,6 +211,45 @@ pub fn parse_alter_table_change_plan_from_statement(
         operations: plan_ops,
     })
     
+}
+
+fn parse_modify_column_change_op(
+    operation: &AlterTableOperation,
+) -> Result<Option<AlterTableChangeOp>, SqlParseError> {
+
+    let rendered = operation.to_string();
+    let lowered = rendered.to_ascii_lowercase();
+
+    let specification = if lowered.starts_with("modify column ") {
+        rendered["modify column ".len()..].trim()
+    } else if lowered.starts_with("modify ") {
+        rendered["modify ".len()..].trim()
+    } else {
+        ""
+    };
+
+    if specification.is_empty() {
+        return Ok(None);
+    }
+
+    let synthetic_create = format!("create table __distdb_modify_probe__ ({specification})");
+    let (_, schema) = create_table_schema_from_statement(&synthetic_create).map_err(|err| {
+        SqlParseError::UnsupportedStatement(format!(
+            "unsupported ALTER TABLE operation: {operation} ({err})"
+        ))
+    })?;
+
+    let Some(field) = schema.fields.first() else {
+        return Err(SqlParseError::UnsupportedStatement(format!(
+            "unsupported ALTER TABLE operation: {operation}"
+        )));
+    };
+
+    Ok(Some(AlterTableChangeOp::ModifyField {
+        field_name: common::normalize_identifier!(&field.field_name),
+        new_type: field.field_type.clone(),
+    }))
+
 }
 
 fn derive_indexed_fields_from_constraints(

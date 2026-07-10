@@ -12,7 +12,9 @@ use crate::engine::database::entity::kind::DatabaseEntityKind;
 use crate::engine::database::entity::object_ref::DatabaseObjectRef;
 use crate::engine::database::entity::object_type::DatabaseObjectType;
 use crate::engine::database::id::DatabaseId;
+use crate::engine::database::index_id::IndexId;
 use crate::engine::database::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin};
+use crate::engine::database::index_lifecycle_payload::{IndexLifecycleAction, IndexLifecyclePayload};
 use crate::engine::database::relationship::DatabaseRelationship;
 use crate::engine::database::schema::change_tx::SchemaChangeTx;
 use crate::engine::database::schema::migration::{run_schema_migration, SchemaMigrationExecutor};
@@ -358,6 +360,111 @@ impl DatabaseCatalog {
 
         self.table(table_id)
             .and_then(|table| table.indexes.get(index_id))
+
+    }
+
+    pub fn create_index(
+        &mut self,
+        table_id: &str,
+        index_name: Option<&str>,
+        field_names: Vec<String>,
+    ) -> DatabaseResult<String> {
+
+        let normalized_table_id = common::normalize_identifier!(table_id);
+
+        let table = self
+            .table_mut(&normalized_table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
+
+        let normalized_fields = field_names
+            .into_iter()
+            .map(|field| common::normalize_identifier!(field))
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+
+        if normalized_fields.is_empty() {
+            return Err(DatabaseError::SchemaChange(
+                crate::engine::database::schema::error::SchemaError::FieldNotFound,
+            ));
+        }
+
+        for field_name in &normalized_fields {
+            if table.schema.field(field_name).is_none() {
+                return Err(DatabaseError::SchemaChange(
+                    crate::engine::database::schema::error::SchemaError::FieldNotFound,
+                ));
+            }
+        }
+
+        let mut index = DatabaseIndex::from_table_fields_with_origin(
+            &normalized_table_id,
+            DatabaseIndexKind::Indexed,
+            DatabaseIndexOrigin::UserDefined,
+            None,
+            normalized_fields,
+        );
+
+        if let Some(index_name) = index_name {
+            let normalized_name = common::normalize_identifier!(index_name);
+            if normalized_name.is_empty() {
+                return Err(DatabaseError::DuplicateEntity);
+            }
+            index.index_id = IndexId(normalized_name);
+        }
+
+        let index_id = index.index_id.0.clone();
+
+        if table.indexes.contains_key(&index_id) {
+            return Err(DatabaseError::DuplicateEntity);
+        }
+
+        table.indexes.insert(index_id.clone(), index);
+        self.bump_schema_epoch();
+
+        Ok(index_id)
+
+    }
+
+    pub fn drop_index(
+        &mut self,
+        index_name: &str,
+        table_id: Option<&str>,
+    ) -> DatabaseResult<()> {
+
+        let normalized_index_name = common::normalize_identifier!(index_name);
+
+        if normalized_index_name.is_empty() {
+            return Err(DatabaseError::EntityNotFound);
+        }
+
+        if let Some(table_id) = table_id {
+
+            let normalized_table_id = common::normalize_identifier!(table_id);
+            let table = self
+                .table_mut(&normalized_table_id)
+                .ok_or(DatabaseError::TableNotFound)?;
+
+            if table.indexes.remove(&normalized_index_name).is_none() {
+                return Err(DatabaseError::EntityNotFound);
+            }
+
+            self.bump_schema_epoch();
+            return Ok(());
+
+        }
+
+        for entity in self.entities.values_mut() {
+
+            if let DatabaseEntity::Table(table) = entity
+                && table.indexes.remove(&normalized_index_name).is_some()
+            {
+                self.bump_schema_epoch();
+                return Ok(());
+            }
+            
+        }
+
+        Err(DatabaseError::EntityNotFound)
 
     }
 
@@ -779,7 +886,7 @@ impl DatabaseCatalog {
             return Ok(());
         }
 
-        let indexes = Self::indexes_for_schema(&table_id, &payload.schema);
+        let indexes = Self::merge_indexes_for_schema(&table_id, &payload.schema, &table.indexes);
 
         table.replace_schema(payload.schema_revision, payload.schema, indexes);
         self.accept_schema_epoch(payload.schema_epoch);
@@ -813,6 +920,54 @@ impl DatabaseCatalog {
                     Ok(())
                 }
                 Err(e) => Err(e),
+            },
+
+        }
+
+    }
+
+    pub fn apply_index_lifecycle(&mut self, payload: IndexLifecyclePayload) -> DatabaseResult<()> {
+
+        if !self.should_apply_schema_epoch(payload.schema_epoch) {
+            return Ok(());
+        }
+
+        let table_id = common::normalize_identifier!(payload.table_id);
+        let index_id = common::normalize_identifier!(payload.index_id);
+
+        match payload.action {
+
+            IndexLifecycleAction::Create => {
+
+                let Some(mut index) = payload.index else {
+                    return Err(DatabaseError::IndexPayloadDeserialize);
+                };
+
+                let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+
+                if !index.field_names.iter().all(|field| table.schema.field(field).is_some()) {
+                    return Err(DatabaseError::SchemaChange(
+                        crate::engine::database::schema::error::SchemaError::FieldNotFound,
+                    ));
+                }
+
+                index.table_id = table_id;
+                index.index_id = IndexId(index_id.clone());
+                index.refresh_index_id();
+                index.index_id = IndexId(index_id.clone());
+                table.indexes.insert(index_id, index);
+                self.accept_schema_epoch(payload.schema_epoch);
+                Ok(())
+
+            },
+
+            IndexLifecycleAction::Drop => {
+
+                let table = self.table_mut(&table_id).ok_or(DatabaseError::TableNotFound)?;
+                table.indexes.remove(&index_id);
+                self.accept_schema_epoch(payload.schema_epoch);
+                Ok(())
+
             },
 
         }
@@ -1064,6 +1219,7 @@ impl DatabaseCatalog {
             &[
                 TransactionKind::SchemaChange,
                 TransactionKind::TableLifecycle,
+                TransactionKind::IndexLifecycle,
                 TransactionKind::MetadataChange,
                 TransactionKind::SecurityChange,
                 TransactionKind::SqlDefinitionChange,
@@ -1073,6 +1229,7 @@ impl DatabaseCatalog {
             match record.kind {
                 TransactionKind::SchemaChange |
                 TransactionKind::TableLifecycle |
+                TransactionKind::IndexLifecycle |
                 TransactionKind::MetadataChange |
                 TransactionKind::SecurityChange |
                 TransactionKind::SqlDefinitionChange => {
@@ -1099,6 +1256,10 @@ impl DatabaseCatalog {
                                     DatabaseError::SchemaPayloadDeserialize
                                 },
 
+                                TransactionKind::IndexLifecycle => {
+                                    DatabaseError::IndexPayloadDeserialize
+                                },
+
                                 TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
                                     DatabaseError::MetadataPayloadDeserialize
                                 },
@@ -1116,6 +1277,10 @@ impl DatabaseCatalog {
 
                             TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
                                 DatabaseError::SchemaPayloadDeserialize
+                            },
+
+                            TransactionKind::IndexLifecycle => {
+                                DatabaseError::IndexPayloadDeserialize
                             },
 
                             TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
@@ -1138,6 +1303,10 @@ impl DatabaseCatalog {
 
                         DecodedTransactionPayload::TableLifecycle(payload) => {
                             self.apply_table_lifecycle(payload)?;
+                        },
+
+                        DecodedTransactionPayload::IndexLifecycle(payload) => {
+                            self.apply_index_lifecycle(payload)?;
                         },
 
                         DecodedTransactionPayload::EntityMetadata(payload) => {
@@ -1695,6 +1864,53 @@ impl DatabaseCatalog {
 
     }
 
+    fn merge_indexes_for_schema(
+        table_id: &str,
+        schema: &TableSchema,
+        existing_indexes: &HashMap<String, DatabaseIndex>,
+    ) -> HashMap<String, DatabaseIndex> {
+
+        let derived = Self::indexes_for_schema(table_id, schema);
+        let derived_ids = derived
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut merged = HashMap::new();
+
+        for (index_id, index) in existing_indexes {
+
+            if index.is_temporary() {
+                continue;
+            }
+
+            let is_schema_derived =
+                index.origin == DatabaseIndexOrigin::Derived && derived_ids.contains(index_id);
+
+            if is_schema_derived {
+                continue;
+            }
+
+            let fields_are_valid = index
+                .field_names
+                .iter()
+                .all(|field_name| schema.field(field_name).is_some());
+
+            if !fields_are_valid {
+                continue;
+            }
+
+            let mut preserved = index.clone();
+            preserved.table_id = common::normalize_identifier!(table_id);
+            merged.insert(index_id.clone(), preserved);
+
+        }
+
+        merged.extend(derived);
+        merged
+
+    }
+
     fn bump_schema_epoch(&mut self) {
         self.schema_epoch = self.schema_epoch.saturating_add(1);
     }
@@ -1720,7 +1936,11 @@ impl DatabaseCatalog {
             entity.normalize_in_place();
 
             if let DatabaseEntity::Table(table) = &mut entity {
-                table.indexes = Self::indexes_for_schema(&table.table_id, &table.schema);
+                table.indexes = Self::merge_indexes_for_schema(
+                    &table.table_id,
+                    &table.schema,
+                    &table.indexes,
+                );
             }
 
             let key = entity.storage_key();

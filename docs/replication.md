@@ -158,6 +158,14 @@ Replication must run in this order:
 3. data snapshot sync,
 4. WAL catch-up sync.
 
+Current runtime enforcement in the schema-catalog phase includes:
+
+- the affinity document must be present,
+- the target database must exist in the affinity document,
+- the sync-plan `schema_identifier` must match the affinity document's `schema_identifier` for that database.
+
+If any of these checks fail, the schema-catalog phase is rejected instead of proceeding with a potentially stale or mismatched schema assumption.
+
 ### Why the order matters
 
 This order prevents the runtime from applying data against stale catalog or security assumptions.

@@ -30,14 +30,12 @@ pub(super) fn execute_parsed_query(
     session_id: &str,
 ) -> ConnectorResponse {
 
-    if parsed.len() != 1 {
+    if parsed.is_empty() {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            "multi-statement query execution is not wired yet",
+            "query execution requires at least one statement",
         );
     }
-
-    let statement = &parsed[0];
 
     let mut ctx = QueryExecutionContext {
         catalogs,
@@ -49,16 +47,58 @@ pub(super) fn execute_parsed_query(
         session_id,
     };
 
-    log::debug!(
-        "query directive dispatch request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
-        request_id,
-        query.database_id,
-        statement.directive,
-        statement.operation,
-        statement.object_name
+    let mut last_response = ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
     );
 
-    let handler: Option<QueryOperationHandler> = match statement.operation {
+    for statement in parsed {
+        log::debug!(
+            "query directive dispatch request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
+            request_id,
+            query.database_id,
+            statement.directive,
+            statement.operation,
+            statement.object_name
+        );
+
+        let response = match query_operation_handler(statement.operation) {
+            Some(handler) => handler(&mut ctx, request_id, query, &statement),
+
+            None => {
+                log::debug!(
+                    "query directive missing handler request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
+                    request_id,
+                    query.database_id,
+                    statement.directive,
+                    statement.operation,
+                    statement.object_name
+                );
+
+                ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!(
+                        "query operation '{:?}' execution is not wired yet",
+                        statement.operation
+                    ),
+                )
+            }
+        };
+
+        if matches!(response.status, connector::ResponseStatus::Rejected) {
+            return response;
+        }
+
+        last_response = response;
+    }
+
+    last_response
+
+}
+
+fn query_operation_handler(operation: SqlOperation) -> Option<QueryOperationHandler> {
+
+    match operation {
 
         SqlOperation::Insert => Some(execute_insert),
         
@@ -73,51 +113,31 @@ pub(super) fn execute_parsed_query(
         SqlOperation::CreateDatabase => Some(execute_create_database),
         
         SqlOperation::CreateTable => Some(execute_create_table),
+
+        SqlOperation::CreateOther => Some(execute_create_other),
         
-        SqlOperation::DropDatabase
-        | SqlOperation::DropTable
-        | SqlOperation::DropView
-        | SqlOperation::DropTrigger
-        | SqlOperation::DropStoredProcedure => Some(execute_drop_directive),
+        SqlOperation::DropDatabase |
+        SqlOperation::DropTable |
+        SqlOperation::DropView |
+        SqlOperation::DropTrigger |
+        SqlOperation::DropStoredProcedure |
+        SqlOperation::DropOther => Some(execute_drop_directive),
         
         SqlOperation::CreateView => Some(execute_create_view),
         
         SqlOperation::CreateTrigger => Some(execute_create_trigger),
         
         SqlOperation::CreateStoredProcedure => Some(execute_create_stored_procedure),
-
+        
         SqlOperation::CallStoredProcedure => Some(execute_call_stored_procedure),
         
         SqlOperation::AlterTable => Some(execute_alter_table),
+
+        SqlOperation::AlterView => Some(execute_alter_view),
+
+        SqlOperation::TruncateTable => Some(execute_truncate_table),
         
         SqlOperation::AlterOther => Some(execute_alter_other),
-        
-        _ => None,
-
-    };
-
-    match handler {
-
-        Some(handler) => handler(&mut ctx, request_id, query, statement),
-        
-        None => {
-            log::debug!(
-                "query directive missing handler request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
-                request_id,
-                query.database_id,
-                statement.directive,
-                statement.operation,
-                statement.object_name
-            );
-
-            ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!(
-                    "query operation '{:?}' execution is not wired yet",
-                    statement.operation
-                ),
-            )
-        },
 
     }
 
@@ -133,23 +153,23 @@ fn execute_alter_other(
     let lowered = statement.sql.trim().to_ascii_lowercase();
 
     if lowered.starts_with("begin") || lowered.starts_with("start transaction") {
-        return ConnectorResponse::rejected(
+        return ConnectorResponse::applied(
             request_id.to_string(),
-            "transaction control recognized but session transactions are not wired yet; current mode is autocommit per statement",
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
         );
     }
 
     if lowered.starts_with("commit") {
-        return ConnectorResponse::rejected(
+        return ConnectorResponse::applied(
             request_id.to_string(),
-            "commit recognized but session transactions are not wired yet; current mode is autocommit per statement",
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
         );
     }
 
     if lowered.starts_with("rollback") {
-        return ConnectorResponse::rejected(
+        return ConnectorResponse::applied(
             request_id.to_string(),
-            "rollback recognized but session transactions are not wired yet; current mode is autocommit per statement",
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
         );
     }
 
@@ -176,6 +196,42 @@ fn execute_alter_table(
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
+        statement,
+    )
+
+}
+
+fn execute_alter_view(
+    ctx: &mut QueryExecutionContext<'_>,
+    request_id: &str,
+    query: &DataQuery,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    execute_alter_view_impl(
+        request_id,
+        query,
+        ctx.catalogs,
+        ctx.wal,
+        ctx.node_data_dir,
+        statement,
+    )
+
+}
+
+fn execute_truncate_table(
+    ctx: &mut QueryExecutionContext<'_>,
+    request_id: &str,
+    query: &DataQuery,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    execute_truncate_table_impl(
+        request_id,
+        query,
+        ctx.catalogs,
+        ctx.wal,
+        ctx.runtime_indexes,
         statement,
     )
 
@@ -217,6 +273,24 @@ fn execute_create_table(
 
 }
 
+fn execute_create_other(
+    ctx: &mut QueryExecutionContext<'_>,
+    request_id: &str,
+    query: &DataQuery,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    execute_create_other_impl(
+        request_id,
+        query,
+        ctx.catalogs,
+        ctx.wal,
+        ctx.runtime_indexes,
+        statement,
+    )
+
+}
+
 fn execute_drop_directive(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
@@ -230,6 +304,7 @@ fn execute_drop_directive(
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
+        ctx.runtime_indexes,
         statement,
     )
 

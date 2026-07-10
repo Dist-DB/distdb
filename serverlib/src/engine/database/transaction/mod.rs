@@ -10,6 +10,7 @@ pub use crate::engine::database::schema::change_payload::SchemaChangePayload;
 pub use crate::engine::database::sql_definition_payload::{
 	SqlDefinitionAction, SqlDefinitionPayload, SqlObjectKind,
 };
+pub use crate::engine::database::index_lifecycle_payload::{IndexLifecycleAction, IndexLifecyclePayload};
 pub use crate::engine::database::table::lifecycle_payload::{TableLifecycleAction, TableLifecyclePayload};
 
 pub use payload::{DecodedTransactionPayload, TransactionPayloadCodec};

@@ -42,7 +42,9 @@ Notes:
 
 - `node_id` identifies this server instance.
 - `datadir` is where local state and WAL data are stored.
-- `tls=off` is suitable for local dev smoke testing.
+- server default TLS mode is `required` when `tls=` is omitted.
+- `tls=off` in the example above is an explicit local-dev override for smoke testing.
+- when `tls=required` is used, the server does not fall back to plaintext.
 
 ## 3. Connect With Console
 
@@ -60,6 +62,13 @@ cd console
 cargo run -- 127.0.0.1:9400 tls=off user=root@server-node-01
 ```
 
+For TLS-required runs, configure console with `tls=required` and a trust root:
+
+```bash
+cd console
+cargo run -- 127.0.0.1:9400 tls=required tls_ca=/path/to/ca.pem user=root@server-node-01
+```
+
 ## 4. Authenticate And Run A Quick Check
 
 In the console session:
@@ -69,12 +78,21 @@ password root;
 create database main;
 use main;
 create table users (id uint64 primary key, email text);
+create index idx_users_email on users(email);
+show indexes from users;
 insert into users (id, email) values (1, 'sam@example.com');
 select count(*) as c_all from users;
 quit;
 ```
 
 Expected result: `c_all` should return `1`.
+
+`show indexes from users;` should include at least:
+
+- the primary-key-derived index for `id`,
+- the user-defined `idx_users_email` index.
+
+If you restart the server with the same `datadir`, both indexes should still appear in `SHOW INDEXES` output.
 
 ## 5. Stop The Service
 

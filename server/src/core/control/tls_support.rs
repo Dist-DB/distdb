@@ -14,14 +14,22 @@ use crate::core::config::ServerTlsConfig;
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 pub type BoxedConnectorStream = Box<dyn AsyncReadWrite>;
+
+
 const OPTIONAL_TLS_PROBE_TIMEOUT_MS: u64 = 250;
 
+
 pub fn parse_tls_mode_from_args(args: &[String]) -> Result<common::TlsMode, String> {
+
     match args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
+        
         Some(raw) => common::TlsMode::parse(raw)
             .ok_or_else(|| format!("invalid tls mode '{raw}'; use off|optional|required")),
-        None => Ok(common::TlsMode::Optional),
+        
+        None => Ok(common::TlsMode::Required),
+
     }
+
 }
 
 pub fn parse_tls_config_from_args(args: &[String]) -> ServerTlsConfig {
@@ -131,6 +139,7 @@ pub fn build_tls_client_config(config: &ServerTlsConfig) -> Result<Arc<ClientCon
     let mut roots = RootCertStore::empty();
     let certs = load_tls_certificates(root_path)?;
     let cert_count = certs.len();
+
     for cert in certs {
         roots
             .add(cert)
@@ -170,22 +179,27 @@ pub async fn negotiate_connector_stream(
         common::TlsMode::Off => Ok(Box::new(stream)),
 
         common::TlsMode::Required => {
+            
             let acceptor = tls_acceptor.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "tls mode is required but no tls acceptor is configured",
                 )
             })?;
+            
             let tls_stream = acceptor.accept(stream).await.map_err(|err| {
                 std::io::Error::new(
                     std::io::ErrorKind::ConnectionAborted,
                     format!("tls handshake failed for {peer_addr}: {err}"),
                 )
             })?;
+            
             Ok(Box::new(tls_stream))
+
         },
 
         common::TlsMode::Optional => {
+
             let Some(acceptor) = tls_acceptor else {
                 return Ok(Box::new(stream));
             };
@@ -221,6 +235,7 @@ pub async fn negotiate_connector_stream(
             }
 
             Ok(Box::new(stream))
+            
         }
 
     }

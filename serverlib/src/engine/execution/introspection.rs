@@ -39,6 +39,43 @@ where
     
 }
 
+pub fn show_indexes_result<I>(indexes: I) -> SelectExecutionResult
+where
+    I: IntoIterator<Item = (String, String, String, String, String)>,
+{
+
+    let mut index_rows = indexes.into_iter().collect::<Vec<_>>();
+    index_rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(left.2.cmp(&right.2))
+    });
+
+    SelectExecutionResult {
+        columns: vec![
+            text_column(1, "table_name"),
+            text_column(2, "index_name"),
+            text_column(3, "index_kind"),
+            text_column(4, "index_origin"),
+            text_column(5, "fields"),
+        ],
+        rows: index_rows
+            .into_iter()
+            .map(|(table_id, index_id, kind, origin, fields)| {
+                vec![
+                    table_id.into_bytes(),
+                    index_id.into_bytes(),
+                    kind.into_bytes(),
+                    origin.into_bytes(),
+                    fields.into_bytes(),
+                ]
+            })
+            .collect(),
+    }
+
+}
+
 pub fn show_privileges_result<I>(entries: I) -> SelectExecutionResult
 where
     I: IntoIterator<Item = (String, Vec<String>, Vec<String>)>,

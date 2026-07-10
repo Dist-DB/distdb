@@ -14,6 +14,7 @@ pub enum DatabaseIndexKind {
 pub enum DatabaseIndexOrigin {
 	#[default]
 	Derived,
+	UserDefined,
 	Relationship,
 	Temporary,
 
@@ -24,6 +25,7 @@ impl DatabaseIndexOrigin {
 	pub fn prefix(self) -> &'static str {
 		match self {
 			Self::Derived => "drv",
+			Self::UserDefined => "usr",
 			Self::Relationship => "rel",
 			Self::Temporary => "tmp",
 		}
@@ -50,7 +52,7 @@ pub struct DatabaseIndex {
 	pub kind: DatabaseIndexKind,
 	#[serde(default)]
 	pub origin: DatabaseIndexOrigin,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde(default)]
 	pub temp_id: Option<String>,
 	#[serde(default)]
 	pub field_names: Vec<String>,
@@ -178,6 +180,10 @@ impl DatabaseIndex {
 		matches!(self.origin, DatabaseIndexOrigin::Relationship)
 	}
 
+	pub fn is_user_defined(&self) -> bool {
+		matches!(self.origin, DatabaseIndexOrigin::UserDefined)
+	}
+
 	fn compose_index_id(
 		table_id: &str,
 		kind: DatabaseIndexKind,
@@ -192,6 +198,16 @@ impl DatabaseIndex {
 			
 			DatabaseIndexOrigin::Derived => {
 				IndexId(format!("{}:{}:{}", kind.prefix(), table_id, field_list))
+			},
+
+			DatabaseIndexOrigin::UserDefined => {
+				IndexId(format!(
+					"{}:{}:{}:{}",
+					origin.prefix(),
+					kind.prefix(),
+					table_id,
+					field_list
+				))
 			},
 
 			DatabaseIndexOrigin::Relationship => {

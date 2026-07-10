@@ -200,3 +200,25 @@ fn alter_table_change_plan_parses_add_drop_and_rename() {
         _ => panic!("expected rename field operation"),
     }
 }
+
+#[test]
+fn alter_table_change_plan_parses_modify_column() {
+    let plan = parse_alter_table_change_plan_from_statement(
+        "alter table users modify column email varchar(512) not null",
+    )
+    .expect("alter table modify should parse");
+
+    assert_eq!(plan.table_id, "users");
+    assert_eq!(plan.operations.len(), 1);
+
+    match &plan.operations[0] {
+        AlterTableChangeOp::ModifyField {
+            field_name,
+            new_type,
+        } => {
+            assert_eq!(field_name, "email");
+            assert_eq!(new_type, &FieldType::StringFixed(512));
+        }
+        _ => panic!("expected modify field operation"),
+    }
+}

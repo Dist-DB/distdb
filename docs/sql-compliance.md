@@ -27,6 +27,20 @@ Current SELECT window-function coverage is partial: the runtime includes first e
 for `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `SUM`, `AVG`, `MIN`, and `MAX` with named-window reuse, while broader window function parity and
 non-`ROWS` frame units are still pending.
 
+Current command-surface execution model also includes:
+
+- sequential execution for query payloads that parse into multiple statements,
+- first-error stop behavior for statement batches,
+- routing of connector `Schema` and `Mutation` command variants through the same authorization and execution surfaces used by SQL query paths,
+- connector `SchemaCommand::AlterTable` update-field operations mapping to SQL `ALTER TABLE ... MODIFY COLUMN` and executing through the same parser/planner/runtime path as direct SQL,
+- index introspection via `SHOW INDEX` / `SHOW INDEXES` / `SHOW KEYS` table-scoped forms.
+
+Durability alignment for index lifecycle currently includes:
+
+- `CREATE INDEX` and `DROP INDEX` persistence through structured index lifecycle WAL records,
+- replay/application of index lifecycle payloads during bootstrap,
+- preservation of valid user-defined indexes through schema normalization/reload paths.
+
 ## Why The Coverage Is Split By Area
 
 SQL support in DistDB is not one feature. It spans parser acceptance, planner behavior, execution wiring, and runtime limits. Breaking coverage into focused pages makes it easier to answer practical questions such as:

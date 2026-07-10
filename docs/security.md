@@ -37,7 +37,7 @@ The current design therefore prioritizes getting nodes onto a trusted transport 
 #### TLS mode
 
 - `tls=off|optional|required`
-- default: `optional`
+- default: `required` (server)
 
 Behavior:
 
@@ -105,6 +105,8 @@ Outbound peer transport follows the same mode:
 - `required`: fail if TLS configuration or handshake is unavailable
 - `optional`: try TLS first and fall back to plaintext when allowed
 - `off`: use plaintext only
+
+When `tls=required` is configured, plaintext fallback is not permitted.
 
 ### CA-root gating
 

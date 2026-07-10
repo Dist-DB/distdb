@@ -132,3 +132,58 @@ fn derived_indexes_for_table_and_primary_key_index_prefer_expected_entries() {
     assert_eq!(primary_key_index.index_id, primary_key_like_index.index_id);
 
 }
+
+#[test]
+fn runtime_index_store_can_remove_scoped_index_and_table_indexes() {
+    let mut store = RuntimeIndexStore::new();
+
+    let users_email = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["email".to_string()],
+    );
+
+    let users_tenant = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["tenant_id".to_string()],
+    );
+
+    let orders_ref = DatabaseIndex::from_table_fields(
+        "orders",
+        DatabaseIndexKind::Indexed,
+        vec!["order_ref".to_string()],
+    );
+
+    store.register_index_for_table("users_stream", users_email.clone());
+    store.register_index_for_table("users_stream", users_tenant.clone());
+    store.register_index_for_table("orders_stream", orders_ref.clone());
+
+    assert!(store
+        .index_for_table("users_stream", &users_email.index_id.0)
+        .is_some());
+    assert!(store
+        .index_for_table("users_stream", &users_tenant.index_id.0)
+        .is_some());
+    assert!(store
+        .index_for_table("orders_stream", &orders_ref.index_id.0)
+        .is_some());
+
+    store.remove_index_for_table("users_stream", &users_email.index_id.0);
+
+    assert!(store
+        .index_for_table("users_stream", &users_email.index_id.0)
+        .is_none());
+    assert!(store
+        .index_for_table("users_stream", &users_tenant.index_id.0)
+        .is_some());
+
+    store.remove_table_indexes("users_stream");
+
+    assert!(store
+        .index_for_table("users_stream", &users_tenant.index_id.0)
+        .is_none());
+    assert!(store
+        .index_for_table("orders_stream", &orders_ref.index_id.0)
+        .is_some());
+}

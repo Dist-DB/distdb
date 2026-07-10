@@ -38,6 +38,36 @@ fn show_tables_result_sorts_names() {
 }
 
 #[test]
+fn show_indexes_result_sorts_and_emits_expected_columns() {
+    let result = show_indexes_result(vec![
+        (
+            "users".to_string(),
+            "idx_users_email".to_string(),
+            "indexed".to_string(),
+            "userdefined".to_string(),
+            "email".to_string(),
+        ),
+        (
+            "users".to_string(),
+            "pri:users:id".to_string(),
+            "primarykey".to_string(),
+            "derived".to_string(),
+            "id".to_string(),
+        ),
+    ]);
+
+    assert_eq!(result.columns.len(), 5);
+    assert_eq!(result.columns[0].field_name, "table_name");
+    assert_eq!(result.columns[1].field_name, "index_name");
+    assert_eq!(result.columns[2].field_name, "index_kind");
+    assert_eq!(result.columns[3].field_name, "index_origin");
+    assert_eq!(result.columns[4].field_name, "fields");
+
+    assert_eq!(String::from_utf8(result.rows[0][1].clone()).unwrap(), "idx_users_email");
+    assert_eq!(String::from_utf8(result.rows[1][1].clone()).unwrap(), "pri:users:id");
+}
+
+#[test]
 fn show_privileges_result_sorts_users_and_emits_three_columns() {
     let result = show_privileges_result(vec![
         (

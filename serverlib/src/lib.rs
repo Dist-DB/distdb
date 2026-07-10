@@ -145,14 +145,14 @@ pub use engine::execution::{
 	EqualityProbeSource,
 	JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 		RelationAccessPlan, RelationAccessStrategy, SelectExecutionResult, show_databases_result,
-		show_privileges_result, show_tables_result,
+		show_indexes_result, show_privileges_result, show_tables_result,
 };
 
 pub use engine::database::table::schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
 
 pub use engine::database::transaction::
 	{EntityMetadataPayload, SchemaChangePayload, SqlDefinitionAction, SqlDefinitionPayload,
-	SqlObjectKind, TableLifecycleAction, TableLifecyclePayload,
+	SqlObjectKind, IndexLifecycleAction, IndexLifecyclePayload, TableLifecycleAction, TableLifecyclePayload,
 	ChainedTransactionPayloadResolver, ChainedTransactionPayloadWriter,
 	PlainTransactionPayloadResolver,
 	TransactionId, TransactionKind, TransactionPayloadContext, TransactionPayloadResolver,

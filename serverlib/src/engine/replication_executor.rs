@@ -125,8 +125,30 @@ impl ReplicationPhaseExecutor {
             schema_identifier
         );
 
-        // TODO: Implement actual schema sync from peers
-        // For now, we assume schema was exchanged during join
+        let document = processor.document().ok_or_else(|| {
+            ServerLibError::InvalidState(
+                "schema catalog phase requires valid affinity document".to_string(),
+            )
+        })?;
+
+        let document_schema_identifier = document
+            .database_schema_identifier(database_id)
+            .ok_or_else(|| {
+                ServerLibError::InvalidState(format!(
+                    "schema catalog phase requires database '{}' in affinity document",
+                    database_id
+                ))
+            })?;
+
+        if document_schema_identifier != schema_identifier {
+            return Err(ServerLibError::InvalidState(format!(
+                "schema catalog phase schema mismatch for database '{}': plan={} document={}",
+                database_id,
+                schema_identifier,
+                document_schema_identifier
+            )));
+        }
+
         log::debug!(
             "schema catalog phase completed database={} schema_id={}",
             database_id,

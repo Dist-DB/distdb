@@ -51,6 +51,12 @@ cd ./console
 
 ## Common Startup Options
 
+### TLS mode default and fallback behavior
+
+- server defaults to `tls=required` when no `tls=` argument is provided.
+- `tls=required` enforces TLS-only transport and does not fall back to plaintext.
+- `tls=off` remains available as an explicit local-development override.
+
 ### Bootstrap peers
 
 You can provide bootstrap peers at startup for discovery:
@@ -110,6 +116,7 @@ password root;
 show databases;
 use main;
 show tables;
+show indexes from users;
 disconnect;
 ```
 
@@ -227,6 +234,30 @@ Supported entity types:
 - `function` / `stored_function`
 
 The result is returned as `attribute` / `value` rows. For routines, debug output includes cached artifact/resource context such as dependency list, variable resources, and outbound resource entries.
+
+## Schema And Mutation Command Routing
+
+DistDB routes connector `Schema` and `Mutation` command variants through the same authorization and SQL execution surfaces used by `Query` payloads.
+
+### Practical impact
+
+- schema and mutation requests now follow the same parser/planner/runtime behavior as equivalent SQL,
+- `SchemaCommand::AlterTable` field update operations execute through `ALTER TABLE ... MODIFY COLUMN`,
+- multi-statement query payloads continue to execute sequentially with first-error stop behavior.
+
+## Index Lifecycle Introspection
+
+DistDB supports SQL index introspection through `SHOW INDEX`, `SHOW INDEXES`, and `SHOW KEYS` forms.
+
+Example:
+
+```sql
+show indexes from users;
+```
+
+Current output includes `table_name`, `index_name`, `index_kind`, `index_origin`, and `fields`.
+
+User-defined indexes created via `CREATE INDEX` are persisted through WAL lifecycle records and are expected to remain visible after restart/bootstrap when the same data directory is reused.
 
 ## Current Transaction Contract
 

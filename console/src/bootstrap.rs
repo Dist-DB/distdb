@@ -101,7 +101,7 @@ pub fn connector_tls_config_from_cli_args(
         Some(raw) => common::TlsMode::parse(raw).ok_or_else(|| {
             format!("invalid tls mode '{}'; expected off|optional|required", raw)
         })?,
-        None => common::TlsMode::Optional,
+        None => common::TlsMode::Required,
     };
 
     let ca_path = args

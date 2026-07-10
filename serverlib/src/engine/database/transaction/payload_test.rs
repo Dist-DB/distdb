@@ -42,3 +42,22 @@ fn kind_dispatch_decodes_entity_metadata_payload() {
     assert_eq!(decoded, DecodedTransactionPayload::EntityMetadata(payload));
 
 }
+
+#[test]
+fn kind_dispatch_decodes_index_lifecycle_payload() {
+
+    let payload = crate::engine::database::index_lifecycle_payload::IndexLifecyclePayload {
+        table_id: "users".to_string(),
+        index_id: "idx_users_email".to_string(),
+        action: crate::engine::database::index_lifecycle_payload::IndexLifecycleAction::Drop,
+        schema_epoch: 10,
+        index: None,
+    };
+
+    let encoded = payload.encode_payload().expect("payload should encode");
+    let decoded = DecodedTransactionPayload::decode(TransactionKind::IndexLifecycle, &encoded)
+        .expect("dispatch should decode index lifecycle payload");
+
+    assert_eq!(decoded, DecodedTransactionPayload::IndexLifecycle(payload));
+
+}
