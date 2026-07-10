@@ -2,6 +2,7 @@ use common::helpers::format::FileKind;
 use common::helpers::list_files;
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{DatabaseCatalog, DatabaseId, TransactionKind};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::core::app::ServerApp;
@@ -172,26 +173,59 @@ impl ServerApp {
 
     }
 
-    fn replay_bootstrap_security_from_wal(&self) -> Result<usize, ServerAppError> {
+    fn replay_bootstrap_security_from_wal(&mut self) -> Result<usize, ServerAppError> {
 
         let mut applied = 0usize;
         let first_wal_ts = self.first_wal_record_timestamp_for_database("main");
 
         configure_bootstrap_crypto_context(self.config.node_id.clone(), first_wal_ts);
 
-        for catalog in self.catalogs.values() {
+        let catalog_wal_ids = self
+            .catalogs
+            .values()
+            .map(|catalog| catalog.database_id.0.clone())
+            .collect::<Vec<_>>();
 
-            let wal_id = &catalog.database_id.0;
+        for wal_id in catalog_wal_ids {
 
-            for record in self.wal.since_kinds(wal_id, None, &[TransactionKind::SecurityChange]) {
+            let mut latest_acl_payload_by_user: HashMap<String, (u64, Vec<u8>)> = HashMap::new();
+
+            for record in self.wal.since_kinds(&wal_id, None, &[TransactionKind::SecurityChange]) {
 
                 let Some(payload) = record.payload_logical() else {
                     continue;
                 };
 
+                if let Ok(entry) = ServerApp::decode_account_acl_wal_payload(payload) {
+                    let user_key = entry.user_id.0.trim().to_ascii_lowercase();
+
+                    match latest_acl_payload_by_user.get(&user_key) {
+                        Some((existing_id, _)) if *existing_id >= record.id.0 => {}
+                        _ => {
+                            latest_acl_payload_by_user
+                                .insert(user_key, (record.id.0, payload.to_vec()));
+                        }
+                    }
+
+                    applied += 1;
+                    continue;
+                }
+
                 apply_bootstrap_password_wal_payload(payload).map_err(ServerAppError::Runtime)?;
                 applied += 1;
             
+            }
+
+            let mut latest_acl_payloads = latest_acl_payload_by_user
+                .into_values()
+                .collect::<Vec<_>>();
+
+            latest_acl_payloads.sort_by_key(|(transaction_id, _)| *transaction_id);
+
+            for (_, payload) in latest_acl_payloads {
+                self
+                    .apply_account_acl_wal_payload(&wal_id, &payload)
+                    .map_err(ServerAppError::Runtime)?;
             }
 
         }

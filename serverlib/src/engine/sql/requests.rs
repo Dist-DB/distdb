@@ -29,7 +29,7 @@ pub fn parse_sql_requests(
 
         ParsedOrFallback::Fallback {
             trimmed_sql,
-            metadata: (directive, operation, object_name),
+            metadata: (directive, operation, object_name, required_privilege),
         } => {
             return Ok(vec![SqlRequest {
                 database_id,
@@ -39,6 +39,7 @@ pub fn parse_sql_requests(
                 directive,
                 operation,
                 object_name,
+                required_privilege,
                 compatibility_target,
             }]);
         }
@@ -56,7 +57,7 @@ pub fn parse_sql_requests(
             .next()
             .expect("single statement should exist");
 
-        let (directive, operation, object_name) =
+        let (directive, operation, object_name, required_privilege) =
             classify::classify_statement(&statement, &trimmed_sql)?;
 
         let parsed_insert_plan = if operation == SqlOperation::Insert {
@@ -73,6 +74,7 @@ pub fn parse_sql_requests(
             directive,
             operation,
             object_name,
+            required_privilege,
             compatibility_target,
         }]);
 
@@ -83,7 +85,8 @@ pub fn parse_sql_requests(
         .map(|statement| {
 
             let statement_sql = statement.to_string();
-            let (directive, operation, object_name) =
+
+            let (directive, operation, object_name, required_privilege) =
                 classify::classify_statement(&statement, &statement_sql)?;
 
             let parsed_insert_plan = if operation == SqlOperation::Insert {
@@ -100,6 +103,7 @@ pub fn parse_sql_requests(
                 directive,
                 operation,
                 object_name,
+                required_privilege,
                 compatibility_target,
             })
             
@@ -114,7 +118,10 @@ pub fn sql_statement_metadata(
 
     let parsed = match parse_or_fallback(statement)? {
         ParsedOrFallback::Parsed(parsed) => parsed,
-        ParsedOrFallback::Fallback { metadata, .. } => return Ok(metadata),
+        ParsedOrFallback::Fallback {
+            metadata: (directive, operation, object_name, _),
+            ..
+        } => return Ok((directive, operation, object_name)),
     };
 
     let single = parsed.first().ok_or(SqlParseError::EmptyStatement)?;
@@ -126,18 +133,24 @@ pub fn sql_statement_metadata(
     }
 
     let statement_sql = single.to_string();
-    
-    classify::classify_statement(single, &statement_sql)
+    let (directive, operation, object_name, _) = classify::classify_statement(single, &statement_sql)?;
+
+    Ok((directive, operation, object_name))
 
 }
 
 pub fn sql_directive_for_statement(statement: &str) -> Result<SqlDirective, SqlParseError> {
+
     let (directive, _, _) = sql_statement_metadata(statement)?;
+    
     Ok(directive)
+
 }
 
 fn parse_or_fallback(sql: &str) -> Result<ParsedOrFallback, SqlParseError> {
+
     parser::parse_or_fallback(sql)
+    
 }
 
 

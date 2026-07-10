@@ -1,6 +1,6 @@
 use crate::core::identity::{PasswordKey, UserId};
 use common::helpers::{aes_decrypt, aes_encrypt, stable_id};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserCredential {
@@ -51,8 +51,11 @@ impl UserCredential {
         candidate_password: &str,
         server_identifier: &str,
     ) -> bool {
+
         let secret = build_password_secret(&self.password_nonce, server_identifier);
+        
         aes_decrypt(&self.encrypted_password, &secret) == candidate_password
+
     }
 
 }
@@ -513,6 +516,8 @@ pub struct AccountAclEntry {
     pub acl: HashSet<String>,
     #[serde(default)]
     pub grant_acl: HashSet<String>,
+    #[serde(default)]
+    pub object_acl: HashMap<String, HashSet<String>>,
 }
 
 impl AccountAclEntry {
@@ -523,6 +528,7 @@ impl AccountAclEntry {
             database_id: database_id.into().trim().to_ascii_lowercase(),
             acl: HashSet::new(),
             grant_acl: HashSet::new(),
+            object_acl: HashMap::new(),
         }
     }
 
@@ -554,6 +560,75 @@ impl AccountAclEntry {
         self.grant_acl.remove(privilege.as_str());
     }
 
+    pub fn append_object_privilege(
+        &mut self,
+        object_name: &str,
+        privilege: AccountPrivilege,
+    ) {
+
+        let normalized_object = normalize_acl_object_name(object_name);
+        if normalized_object.is_empty() {
+            return;
+        }
+
+        self.object_acl
+            .entry(normalized_object)
+            .or_default()
+            .insert(privilege.as_str().to_string());
+
+    }
+
+    pub fn revoke_object_privilege(
+        &mut self,
+        object_name: &str,
+        privilege: AccountPrivilege,
+    ) {
+
+        let normalized_object = normalize_acl_object_name(object_name);
+        if normalized_object.is_empty() {
+            return;
+        }
+
+        if let Some(privileges) = self.object_acl.get_mut(&normalized_object) {
+            privileges.remove(privilege.as_str());
+
+            if privileges.is_empty() {
+                self.object_acl.remove(&normalized_object);
+            }
+        }
+
+    }
+
+    pub fn has_privilege_for_object(
+        &self,
+        privilege: AccountPrivilege,
+        object_name: Option<&str>,
+    ) -> bool {
+
+        if self.acl.contains(privilege.as_str()) {
+            return true;
+        }
+
+        let Some(object_name) = object_name else {
+            return false;
+        };
+
+        let normalized_object = normalize_acl_object_name(object_name);
+        if normalized_object.is_empty() {
+            return false;
+        }
+
+        self.object_acl
+            .get(&normalized_object)
+            .map(|privileges| privileges.contains(privilege.as_str()))
+            .unwrap_or(false)
+
+    }
+
+}
+
+fn normalize_acl_object_name(value: &str) -> String {
+    value.trim().trim_matches('`').trim_matches('"').to_ascii_lowercase()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

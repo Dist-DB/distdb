@@ -44,6 +44,426 @@ fn table_stream_id(app: &ServerApp, database_id: &str, table_id: &str) -> String
 }
 
 #[test]
+fn query_requires_select_privilege_for_non_root_user() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-select-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let query = ConnectorRequest {
+        request_id: "select-main".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show databases".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&query, "alice-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected permission error result");
+    };
+
+    assert!(message.contains("permission denied"));
+
+}
+
+#[test]
+fn query_allows_user_with_select_privilege() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-select-allowed-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    let catalog = app
+        .catalogs
+        .get_mut(&main_id)
+        .expect("main catalog should exist");
+
+    let mut alice_acl = serverlib::AccountAclEntry::new(serverlib::UserId("alice".to_string()), "main");
+    alice_acl.append_privilege(serverlib::engine::security::AccountPrivilege::Select);
+    catalog.upsert_account_acl_entry(alice_acl);
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let query = ConnectorRequest {
+        request_id: "select-main".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show databases".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&query, "alice-session");
+    assert_eq!(response.status, ResponseStatus::Applied);
+
+}
+
+#[test]
+fn query_object_acl_allows_only_granted_objects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-object-acl-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let create_users_table = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+
+    let create_users_table_response =
+        app.handle_connector_request_for_session(&create_users_table, "root-session");
+    assert_eq!(create_users_table_response.status, ResponseStatus::Applied);
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    let catalog = app
+        .catalogs
+        .get_mut(&main_id)
+        .expect("main catalog should exist");
+
+    let mut alice_acl = serverlib::AccountAclEntry::new(serverlib::UserId("alice".to_string()), "main");
+    alice_acl.append_object_privilege("users", serverlib::engine::security::AccountPrivilege::Select);
+    catalog.upsert_account_acl_entry(alice_acl);
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let users_query = ConnectorRequest {
+        request_id: "show-users-columns".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let users_query_response = app.handle_connector_request_for_session(&users_query, "alice-session");
+    assert_eq!(users_query_response.status, ResponseStatus::Applied);
+
+    let orders_query = ConnectorRequest {
+        request_id: "show-orders-columns".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    let orders_query_response = app.handle_connector_request_for_session(&orders_query, "alice-session");
+    assert_eq!(orders_query_response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = orders_query_response.result else {
+        panic!("expected permission error result");
+    };
+
+    assert!(message.contains("missing 'SELECT' on object 'main.orders'"));
+
+}
+
+#[test]
+fn query_join_requires_privileges_for_all_referenced_objects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-object-join-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let create_users_table = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+
+    let create_users_table_response =
+        app.handle_connector_request_for_session(&create_users_table, "root-session");
+    assert_eq!(create_users_table_response.status, ResponseStatus::Applied);
+
+    let create_orders_table = ConnectorRequest {
+        request_id: "create-orders".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table orders (id bigint not null primary key, user_id bigint not null)"
+                    .to_string(),
+            },
+        },
+    };
+
+    let create_orders_table_response =
+        app.handle_connector_request_for_session(&create_orders_table, "root-session");
+    assert_eq!(create_orders_table_response.status, ResponseStatus::Applied);
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    let catalog = app
+        .catalogs
+        .get_mut(&main_id)
+        .expect("main catalog should exist");
+
+    let mut alice_acl = serverlib::AccountAclEntry::new(serverlib::UserId("alice".to_string()), "main");
+    alice_acl.append_object_privilege("users", serverlib::engine::security::AccountPrivilege::Select);
+    catalog.upsert_account_acl_entry(alice_acl);
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let join_query = ConnectorRequest {
+        request_id: "join-query".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "select u.id from users u inner join orders o on u.id = o.user_id".to_string(),
+            },
+        },
+    };
+
+    let join_query_response = app.handle_connector_request_for_session(&join_query, "alice-session");
+    assert_eq!(join_query_response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = join_query_response.result else {
+        panic!("expected permission error result");
+    };
+
+    assert!(message.contains("missing 'SELECT' on object 'main.orders'"));
+
+}
+
+#[test]
+fn grant_and_revoke_queries_update_object_acl_access() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-grant-revoke-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let create_users_table = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+
+    let create_users_table_response =
+        app.handle_connector_request_for_session(&create_users_table, "root-session");
+    assert_eq!(create_users_table_response.status, ResponseStatus::Applied);
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let show_users_columns = ConnectorRequest {
+        request_id: "show-users-columns-initial".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let before_grant = app.handle_connector_request_for_session(&show_users_columns, "alice-session");
+    assert_eq!(before_grant.status, ResponseStatus::Rejected);
+
+    let grant = ConnectorRequest {
+        request_id: "grant-users-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_response = app.handle_connector_request_for_session(&grant, "root-session");
+    assert_eq!(grant_response.status, ResponseStatus::Applied);
+
+    let main_wal_id = app.resolve_catalog_wal_stream_for_database("main");
+    let security_records_after_grant = app
+        .wal
+        .since_kinds(&main_wal_id, None, &[TransactionKind::SecurityChange]);
+
+    assert!(!security_records_after_grant.is_empty());
+
+    let grant_acl_payload = security_records_after_grant
+        .last()
+        .and_then(|record| record.payload_logical())
+        .expect("grant security WAL payload should exist");
+
+    let grant_acl_entry = ServerApp::decode_account_acl_wal_payload(grant_acl_payload)
+        .expect("grant security WAL payload should decode as ACL payload");
+
+    assert_eq!(grant_acl_entry.user_id.0, "alice");
+    assert!(grant_acl_entry.has_privilege_for_object(
+        serverlib::engine::security::AccountPrivilege::Select,
+        Some("users"),
+    ));
+
+    let after_grant = app.handle_connector_request_for_session(&show_users_columns, "alice-session");
+    assert_eq!(after_grant.status, ResponseStatus::Applied);
+
+    let revoke = ConnectorRequest {
+        request_id: "revoke-users-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on users from alice".to_string(),
+            },
+        },
+    };
+
+    let revoke_response = app.handle_connector_request_for_session(&revoke, "root-session");
+    assert_eq!(revoke_response.status, ResponseStatus::Applied);
+
+    let security_records_after_revoke = app
+        .wal
+        .since_kinds(&main_wal_id, None, &[TransactionKind::SecurityChange]);
+
+    assert!(security_records_after_revoke.len() > security_records_after_grant.len());
+
+    let revoke_acl_payload = security_records_after_revoke
+        .last()
+        .and_then(|record| record.payload_logical())
+        .expect("revoke security WAL payload should exist");
+
+    let revoke_acl_entry = ServerApp::decode_account_acl_wal_payload(revoke_acl_payload)
+        .expect("revoke security WAL payload should decode as ACL payload");
+
+    assert_eq!(revoke_acl_entry.user_id.0, "alice");
+    assert!(!revoke_acl_entry.has_privilege_for_object(
+        serverlib::engine::security::AccountPrivilege::Select,
+        Some("users"),
+    ));
+
+    let after_revoke = app.handle_connector_request_for_session(&show_users_columns, "alice-session");
+    assert_eq!(after_revoke.status, ResponseStatus::Rejected);
+
+}
+
+#[test]
 fn bootstrap_replays_security_change_password_from_wal() {
 
     reset_bootstrap_password_for_tests();
@@ -97,6 +517,91 @@ fn bootstrap_replays_security_change_password_from_wal() {
     assert!(!old_password_session.authenticate_if_valid_token(&md5_hash("root")));
 
     reset_bootstrap_password_for_tests();
+}
+
+#[test]
+fn bootstrap_acl_replay_prefers_latest_wal_snapshot_for_user() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-bootstrap-acl-latest-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut old_acl = serverlib::AccountAclEntry::new(serverlib::UserId("alice".to_string()), "main");
+    old_acl.append_object_privilege("users", serverlib::engine::security::AccountPrivilege::Select);
+
+    let mut latest_acl = serverlib::AccountAclEntry::new(serverlib::UserId("alice".to_string()), "main");
+    latest_acl.append_privilege(serverlib::engine::security::AccountPrivilege::Select);
+    latest_acl.append_grant_option_for_privilege(serverlib::engine::security::AccountPrivilege::Select);
+
+    let old_payload = ServerApp::encode_account_acl_wal_payload(&old_acl)
+        .expect("old ACL payload should encode");
+    let latest_payload = ServerApp::encode_account_acl_wal_payload(&latest_acl)
+        .expect("latest ACL payload should encode");
+
+    let wal_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    app.wal
+        .append(
+            &wal_id,
+            TransactionRecord::with_payload(
+                TransactionId(1),
+                None,
+                None,
+                1,
+                UserId::from_username("acl-tester"),
+                TransactionKind::SecurityChange,
+                old_payload,
+            ),
+        )
+        .expect("older ACL WAL record should append");
+
+    app.wal
+        .append(
+            &wal_id,
+            TransactionRecord::with_payload(
+                TransactionId(2),
+                None,
+                Some(TransactionId(1)),
+                2,
+                UserId::from_username("acl-tester"),
+                TransactionKind::SecurityChange,
+                latest_payload,
+            ),
+        )
+        .expect("latest ACL WAL record should append");
+
+    app.bootstrap()
+        .expect("bootstrap should replay latest ACL snapshot");
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    let catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist");
+
+    let effective_acl = catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist after replay");
+
+    assert!(effective_acl.acl.contains("SELECT"));
+    assert!(effective_acl.grant_acl.contains("SELECT"));
+    assert!(effective_acl.object_acl.is_empty());
+
 }
 
 #[test]

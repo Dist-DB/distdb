@@ -69,6 +69,7 @@ pub use predicates::{
 };
 
 pub use types::{
+    AclMutationKind, AclMutationPlan,
     AlterTableChangeOp, AlterTableChangePlan, DeleteRowsPlan, IfElseEndBranchPlan,
     IfElseEndPlan, InsertRowsPlan, InsertRowsSource,
     RoutineArgumentBinding, RoutineParameterDeclaration, RoutineParameterMode,

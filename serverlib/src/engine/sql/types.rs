@@ -1,7 +1,12 @@
-use sqlparser::ast::{Function, NamedWindowDefinition, Statement};
+use sqlparser::ast::{
+    Action, Delete, FromTable, Function, GrantObjects, NamedWindowDefinition, ObjectName,
+    Privileges, Query, SetExpr, Statement, TableFactor, TableWithJoins,
+};
 
+use crate::engine::security::AccountPrivilege;
 use crate::{FieldDef, FieldType};
 use super::SelectExpression;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlCompatibilityTarget {
@@ -55,7 +60,478 @@ pub struct SqlRequest {
     pub directive: SqlDirective,
     pub operation: SqlOperation,
     pub object_name: Option<String>,
+    pub required_privilege: Option<AccountPrivilege>,
     pub compatibility_target: SqlCompatibilityTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AclMutationKind {
+    Grant,
+    Revoke,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AclMutationPlan {
+    pub kind: AclMutationKind,
+    pub grantee: String,
+    pub privilege: AccountPrivilege,
+    pub database_name: Option<String>,
+    pub object_name: Option<String>,
+    pub with_grant_option: bool,
+}
+
+impl SqlRequest {
+
+    pub fn referenced_object_names(&self) -> Vec<String> {
+
+        let mut collected = Vec::<String>::new();
+        let mut seen = HashSet::<String>::new();
+
+        let mut push_object = |name: String| {
+            if !name.is_empty() && seen.insert(name.clone()) {
+                collected.push(name);
+            }
+        };
+
+        if let Some(statement) = &self.parsed_statement {
+
+            match statement {
+
+                Statement::Query(query) => {
+                    collect_set_expr_objects(&query.body, &mut push_object);
+                },
+
+                Statement::Insert(insert) => {
+                    push_object(insert.table_name.to_string());
+                },
+
+                Statement::Update { table, .. } => {
+                    collect_table_with_joins_objects(table, &mut push_object);
+                },
+
+                Statement::Delete(delete) => {
+                    collect_delete_objects(delete, &mut push_object);
+                },
+
+                Statement::CreateTable(create_table) => {
+                    push_object(create_table.name.to_string());
+                },
+
+                Statement::CreateView { name, .. } => {
+                    push_object(name.to_string());
+                },
+
+                Statement::Drop {
+                    names, ..
+                } => {
+                    for name in names {
+                        push_object(name.to_string());
+                    }
+                },
+
+                Statement::AlterTable { name, .. } => {
+                    push_object(name.to_string());
+                },
+
+                Statement::AlterView { name, .. } => {
+                    push_object(name.to_string());
+                },
+
+                Statement::Truncate { table_names, .. } => {
+                    for target in table_names {
+                        push_object(target.name.to_string());
+                    }
+                },
+
+                Statement::ShowCreate { obj_name, .. } => {
+                    push_object(obj_name.to_string());
+                },
+
+                Statement::ShowColumns { table_name, .. } => {
+                    push_object(table_name.to_string());
+                },
+
+                Statement::ExplainTable { table_name, .. } => {
+                    push_object(table_name.to_string());
+                },
+
+                _ => {
+                    if let Some(name) = self.object_name.as_ref() {
+                        push_object(name.clone());
+                    }
+                }
+
+            }
+
+        } else if let Some(name) = self.object_name.as_ref() {
+            push_object(name.clone());
+        }
+
+        collected
+
+    }
+
+    pub fn acl_mutation_plans(&self) -> Vec<AclMutationPlan> {
+
+        let Some(statement) = &self.parsed_statement else {
+            return Vec::new();
+        };
+
+        match statement {
+
+            Statement::Grant {
+                privileges,
+                objects,
+                grantees,
+                with_grant_option,
+                ..
+            } => build_acl_mutation_plans(
+                AclMutationKind::Grant,
+                privileges,
+                objects,
+                grantees,
+                *with_grant_option,
+            ),
+
+            Statement::Revoke {
+                privileges,
+                objects,
+                grantees,
+                ..
+            } => build_acl_mutation_plans(
+                AclMutationKind::Revoke,
+                privileges,
+                objects,
+                grantees,
+                false,
+            ),
+
+            _ => Vec::new(),
+
+        }
+
+    }
+
+}
+
+fn build_acl_mutation_plans(
+    kind: AclMutationKind,
+    privileges: &Privileges,
+    objects: &GrantObjects,
+    grantees: &[sqlparser::ast::Ident],
+    with_grant_option: bool,
+) -> Vec<AclMutationPlan> {
+
+    let resolved_privileges = privileges_from_ast(privileges);
+    if resolved_privileges.is_empty() {
+        return Vec::new();
+    }
+
+    let resolved_grantees = grantees
+        .iter()
+        .map(|ident| ident.value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    if resolved_grantees.is_empty() {
+        return Vec::new();
+    }
+
+    let resolved_targets = mutation_targets_from_grant_objects(objects);
+
+    let mut plans = Vec::new();
+
+    if resolved_targets.is_empty() {
+        
+        for grantee in &resolved_grantees {
+
+            for privilege in &resolved_privileges {
+
+                plans.push(AclMutationPlan {
+                    kind: kind.clone(),
+                    grantee: grantee.clone(),
+                    privilege: *privilege,
+                    database_name: None,
+                    object_name: None,
+                    with_grant_option,
+                });
+
+            }
+
+        }
+        
+        return plans;
+
+    }
+
+    for grantee in &resolved_grantees {
+
+        for privilege in &resolved_privileges {
+
+            for (database_name, object_name) in &resolved_targets {
+
+                plans.push(AclMutationPlan {
+                    kind: kind.clone(),
+                    grantee: grantee.clone(),
+                    privilege: *privilege,
+                    database_name: database_name.clone(),
+                    object_name: object_name.clone(),
+                    with_grant_option,
+                });
+
+            }
+
+        }
+
+    }
+
+    plans
+
+}
+
+fn privileges_from_ast(privileges: &Privileges) -> Vec<AccountPrivilege> {
+
+    match privileges {
+
+        Privileges::All {
+            ..
+        } => AccountPrivilege::all().to_vec(),
+
+        Privileges::Actions(actions) => actions
+            .iter()
+            .filter_map(account_privilege_from_action)
+            .collect(),
+
+    }
+
+}
+
+fn account_privilege_from_action(action: &Action) -> Option<AccountPrivilege> {
+
+    match action {
+
+        Action::Connect         => None,
+        
+        Action::Create          => Some(AccountPrivilege::Create),
+        
+        Action::Delete          => Some(AccountPrivilege::Delete),
+        
+        Action::Execute         => Some(AccountPrivilege::Execute),
+        
+        Action::Insert {
+            ..
+        }                       => Some(AccountPrivilege::Insert),
+        
+        Action::References {
+            ..
+        }                       => Some(AccountPrivilege::References),
+        
+        Action::Select {
+            ..
+        }                       => Some(AccountPrivilege::Select),
+        
+        Action::Temporary       => Some(AccountPrivilege::CreateTemporaryTables),
+        
+        Action::Trigger         => Some(AccountPrivilege::Trigger),
+        
+        Action::Truncate        => Some(AccountPrivilege::Delete),
+        
+        Action::Update {
+            ..
+        }                       => Some(AccountPrivilege::Update),
+        
+        Action::Usage           => None,
+
+    }
+
+}
+
+fn mutation_targets_from_grant_objects(
+    objects: &GrantObjects,
+) -> Vec<(Option<String>, Option<String>)> {
+
+    match objects {
+
+        GrantObjects::Schemas(schemas) |
+        GrantObjects::AllSequencesInSchema { schemas, } |
+        GrantObjects::AllTablesInSchema { schemas, } => schemas
+            .iter()
+            .filter_map(|name| {
+                let database_name = object_name_leaf(name)?;
+                Some((Some(database_name), None))
+            })
+            .collect(),
+
+        GrantObjects::Tables(names) |
+        GrantObjects::Sequences(names) => names
+            .iter()
+            .filter_map(|name| {
+                let (database_name, object_name) = split_database_and_object_name(name);
+                object_name.map(|value| (database_name, Some(value)))
+            })
+            .collect(),
+
+    }
+
+}
+
+fn split_database_and_object_name(name: &ObjectName) -> (Option<String>, Option<String>) {
+
+    let normalized_parts = name
+        .0
+        .iter()
+        .filter_map(normalize_ident)
+        .collect::<Vec<_>>();
+
+    if normalized_parts.is_empty() {
+        return (None, None);
+    }
+
+    if normalized_parts.len() == 1 {
+        return (None, normalized_parts.first().cloned());
+    }
+
+    let object_name = normalized_parts.last().cloned();
+    let database_name = normalized_parts
+        .get(normalized_parts.len().saturating_sub(2))
+        .cloned();
+
+    (database_name, object_name)
+
+}
+
+fn object_name_leaf(name: &ObjectName) -> Option<String> {
+    name.0.last().and_then(normalize_ident)
+}
+
+fn normalize_ident(ident: &sqlparser::ast::Ident) -> Option<String> {
+    
+    let normalized = ident
+        .value
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .to_ascii_lowercase();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+
+}
+
+fn collect_set_expr_objects(
+    set_expr: &SetExpr,
+    push_object: &mut impl FnMut(String),
+) {
+
+    match set_expr {
+
+        SetExpr::Select(select) => {
+            for table_with_joins in &select.from {
+                collect_table_with_joins_objects(table_with_joins, push_object);
+            }
+        },
+
+        SetExpr::Query(query) => collect_query_objects(query, push_object),
+
+        SetExpr::SetOperation {
+            left,
+            right,
+            ..
+        } => {
+            collect_set_expr_objects(left, push_object);
+            collect_set_expr_objects(right, push_object);
+        },
+
+        _ => {}
+
+    }
+
+}
+
+fn collect_query_objects(
+    query: &Query,
+    push_object: &mut impl FnMut(String),
+) {
+
+    collect_set_expr_objects(&query.body, push_object);
+
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            collect_query_objects(&cte.query, push_object);
+        }
+    }
+
+}
+
+fn collect_table_with_joins_objects(
+    table: &TableWithJoins,
+    push_object: &mut impl FnMut(String),
+) {
+
+    collect_table_factor_objects(&table.relation, push_object);
+
+    for join in &table.joins {
+        collect_table_factor_objects(&join.relation, push_object);
+    }
+
+}
+
+fn collect_table_factor_objects(
+    factor: &TableFactor,
+    push_object: &mut impl FnMut(String),
+) {
+
+    match factor {
+
+        TableFactor::Table { name, .. } => {
+            collect_object_name(name, push_object);
+        },
+
+        TableFactor::Derived { subquery, .. } => {
+            collect_query_objects(subquery, push_object);
+        },
+
+        TableFactor::NestedJoin {
+            table_with_joins,
+            ..
+        } => {
+            collect_table_with_joins_objects(table_with_joins, push_object);
+        },
+
+        _ => {}
+
+    }
+
+}
+
+fn collect_delete_objects(
+    delete: &Delete,
+    push_object: &mut impl FnMut(String),
+) {
+
+    match &delete.from {
+        FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => {
+            for table in tables {
+                collect_table_with_joins_objects(table, push_object);
+            }
+        }
+    }
+
+}
+
+fn collect_object_name(
+    name: &ObjectName,
+    push_object: &mut impl FnMut(String),
+) {
+
+    let raw = name.to_string();
+    if !raw.is_empty() {
+        push_object(raw);
+    }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,6 +891,6 @@ pub(super) enum ParsedOrFallback {
     Parsed(Vec<Statement>),
     Fallback {
         trimmed_sql: String,
-        metadata: (SqlDirective, SqlOperation, Option<String>),
+        metadata: (SqlDirective, SqlOperation, Option<String>, Option<AccountPrivilege>),
     },
 }

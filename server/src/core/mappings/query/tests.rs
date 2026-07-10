@@ -230,6 +230,7 @@ fn create_view_persists_dependencies_from_view_body() {
         directive: serverlib::SqlDirective::Create,
         operation: serverlib::SqlOperation::CreateView,
         object_name: Some("users_v".to_string()),
+        required_privilege: Some(serverlib::engine::security::AccountPrivilege::Create),
         compatibility_target: serverlib::engine::sql::DEFAULT_SQL_COMPATIBILITY_TARGET,
     };
 

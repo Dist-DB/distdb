@@ -1,8 +1,11 @@
-use std::time::Instant;
 use std::collections::HashSet;
 
 use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
-use serverlib::{ConcurrentWalManager, DatabaseCatalog, SqlOperation, TransactionId, parse_mysql8_sql_requests};
+use serverlib::{
+    AclMutationKind, AccountAclEntry, ConcurrentWalManager, DatabaseCatalog, SqlOperation,
+    SqlRequest, TransactionId, UserId,
+    parse_mysql8_sql_requests,
+};
 
 use crate::core::app::helpers::{
     CommandKind, SessionTxMarkerType, command_info, is_staged_dml_query, is_transactional_read_query,
@@ -16,6 +19,317 @@ use crate::core::mappings::query::{
 use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
+
+    fn session_user_for_authorization(&self, session_id: &str) -> String {
+        self
+            .get_session(session_id)
+            .map(|state| state.user_id)
+            .unwrap_or_else(|| "root".to_string())
+    }
+
+    fn parse_database_and_object_from_acl_target(
+        database_hint: &str,
+        target_database_name: Option<&str>,
+        target_object_name: Option<&str>,
+    ) -> (String, Option<String>) {
+
+        let normalize_database = |value: &str| {
+            let normalized = common::normalize_identifier!(value);
+            if normalized.is_empty() {
+                "main".to_string()
+            } else {
+                normalized
+            }
+        };
+
+        let mut database_name = target_database_name
+            .map(normalize_database)
+            .unwrap_or_else(|| normalize_database(database_hint));
+
+        let mut object_name = target_object_name
+            .map(|value| common::normalize_identifier!(value))
+            .filter(|value| !value.is_empty());
+
+        if let Some(qualified) = object_name.as_ref()
+            && let Some((database_part, object_part)) = qualified.split_once('.')
+        {
+            let normalized_database = normalize_database(database_part);
+            let normalized_object = common::normalize_identifier!(object_part);
+
+            if !normalized_object.is_empty() {
+                database_name = normalized_database;
+                object_name = Some(normalized_object);
+            }
+        }
+
+        (database_name, object_name)
+
+    }
+
+    fn apply_acl_mutation_requests(
+        &mut self,
+        request_id: &str,
+        session_id: &str,
+        query_database_id: &str,
+        parsed_requests: &[SqlRequest],
+    ) -> Option<ConnectorResponse> {
+
+        let contains_acl_mutation = parsed_requests
+            .iter()
+            .any(|request| !request.acl_mutation_plans().is_empty());
+
+        if !contains_acl_mutation {
+            return None;
+        }
+
+        if parsed_requests
+            .iter()
+            .any(|request| request.acl_mutation_plans().is_empty())
+        {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                "GRANT/REVOKE cannot be combined with non-ACL statements in the same request"
+                    .to_string(),
+            ));
+        }
+
+        let session_user = self.session_user_for_authorization(session_id);
+
+        if !session_user.eq_ignore_ascii_case("root") {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!(
+                    "permission denied for user '{}': only root can execute GRANT/REVOKE",
+                    session_user,
+                ),
+            ));
+        }
+
+        let mut applied_mutations = 0_u64;
+
+        for request in parsed_requests {
+
+            for plan in request.acl_mutation_plans() {
+
+                let (database_name, object_name) = Self::parse_database_and_object_from_acl_target(
+                    query_database_id,
+                    plan.database_name.as_deref(),
+                    plan.object_name.as_deref(),
+                );
+
+                let Some(catalog_key) = self.resolve_catalog_key(&database_name) else {
+                    return Some(ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("database '{}' not found for ACL mutation", database_name),
+                    ));
+                };
+
+                let mut entry = self
+                    .catalogs
+                    .get(&catalog_key)
+                    .and_then(|catalog| catalog.effective_account_acl_entry(&plan.grantee).cloned())
+                    .unwrap_or_else(|| {
+                        AccountAclEntry::new(UserId(plan.grantee.clone()), database_name.clone())
+                    });
+
+                entry.database_id = database_name.clone();
+
+                match plan.kind {
+
+                    AclMutationKind::Grant => {
+                        if let Some(object_name) = object_name.as_deref() {
+                            entry.append_object_privilege(object_name, plan.privilege);
+                        } else {
+                            entry.append_privilege(plan.privilege);
+
+                            if plan.with_grant_option {
+                                entry.append_grant_option_for_privilege(plan.privilege);
+                            }
+                        }
+                    },
+
+                    AclMutationKind::Revoke => {
+                        if let Some(object_name) = object_name.as_deref() {
+                            entry.revoke_object_privilege(object_name, plan.privilege);
+                        } else {
+                            entry.revoke_privilege(plan.privilege);
+                        }
+                    },
+
+                }
+
+                if let Err(err) = self.append_account_acl_change_record(
+                    &database_name,
+                    &session_user,
+                    &entry,
+                ) {
+                    return Some(ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("failed to persist ACL mutation to WAL: {}", err),
+                    ));
+                }
+
+                let Some(catalog) = self.catalogs.get_mut(&catalog_key) else {
+                    return Some(ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("database '{}' catalog is unavailable", database_name),
+                    ));
+                };
+
+                catalog.upsert_account_acl_entry(entry);
+                applied_mutations += 1;
+
+            }
+
+        }
+
+        Some(ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult {
+                affected_rows: applied_mutations,
+            }),
+        ))
+
+    }
+
+    fn authorization_objects_for_request(request: &SqlRequest) -> Vec<String> {
+
+        if matches!(request.operation, SqlOperation::CreateDatabase | SqlOperation::DropDatabase) {
+            return Vec::new();
+        }
+
+        request
+            .referenced_object_names()
+            .into_iter()
+            .filter_map(|object_name| {
+                let leaf = object_name
+                    .rsplit('.')
+                    .next()
+                    .map(str::trim)
+                    .unwrap_or(object_name.as_str());
+
+                let normalized = common::normalize_identifier!(leaf);
+                if normalized.is_empty() {
+                    None
+                } else {
+                    Some(normalized)
+                }
+            })
+            .collect()
+
+    }
+
+    fn authorization_database_for_request(
+        query_database_id: &str,
+        request: &SqlRequest,
+    ) -> String {
+
+        if matches!(request.operation, SqlOperation::CreateDatabase) {
+            return "main".to_string();
+        }
+
+        if let Some(object_name) = request.object_name.as_deref()
+            && let Some((database_id, _)) = object_name.split_once('.')
+        {
+            let normalized = common::normalize_identifier!(database_id);
+            if !normalized.is_empty() {
+                return normalized;
+            }
+        }
+
+        let normalized_query_database = common::normalize_identifier!(query_database_id);
+        if !normalized_query_database.is_empty() {
+            return normalized_query_database;
+        }
+
+        "main".to_string()
+
+    }
+
+    fn authorize_sql_requests_for_session(
+        &self,
+        session_id: &str,
+        query_database_id: &str,
+        parsed_requests: &[SqlRequest],
+    ) -> Result<(), String> {
+
+        let session_user = self.session_user_for_authorization(session_id);
+
+        if session_user.eq_ignore_ascii_case("root") {
+            return Ok(());
+        }
+
+        for request in parsed_requests {
+
+            let Some(required_privilege) = request.required_privilege else {
+                continue;
+            };
+
+            let authorization_database =
+                Self::authorization_database_for_request(query_database_id, request);
+
+            let Some(catalog_key) = self.resolve_catalog_key(&authorization_database) else {
+                return Err(format!(
+                    "permission denied for user '{}' on database '{}'",
+                    session_user, authorization_database,
+                ));
+            };
+
+            let Some(catalog) = self.catalogs.get(&catalog_key) else {
+                return Err(format!(
+                    "permission denied for user '{}' on database '{}'",
+                    session_user, authorization_database,
+                ));
+            };
+
+            let authorization_objects = Self::authorization_objects_for_request(request);
+
+            let Some(acl_entry) = catalog.effective_account_acl_entry(&session_user) else {
+                return Err(format!(
+                    "permission denied for user '{}' on database '{}'",
+                    session_user, authorization_database,
+                ));
+            };
+
+            if authorization_objects.is_empty() {
+
+                let has_required_privilege = acl_entry
+                    .has_privilege_for_object(required_privilege, None);
+
+                if !has_required_privilege {
+                    return Err(format!(
+                        "permission denied for user '{}': missing '{}' on database '{}'",
+                        session_user,
+                        required_privilege.as_str(),
+                        authorization_database,
+                    ));
+                }
+
+            } else {
+
+                for object_name in authorization_objects {
+
+                    let has_required_privilege = acl_entry
+                        .has_privilege_for_object(required_privilege, Some(&object_name));
+
+                    if !has_required_privilege {
+                        return Err(format!(
+                            "permission denied for user '{}': missing '{}' on object '{}.{}'",
+                            session_user,
+                            required_privilege.as_str(),
+                            authorization_database,
+                            object_name,
+                        ));
+                    }
+
+                }
+            }
+
+        }
+
+        Ok(())
+
+    }
 
     pub fn handle_read_only_connector_request_for_session(
         &self,
@@ -38,6 +352,10 @@ impl ServerApp {
         let parsed = parse_mysql8_sql_requests(&query.sql, &query.database_id).ok()?;
         if parsed.is_empty() {
             return None;
+        }
+
+        if let Err(message) = self.authorize_sql_requests_for_session(session_id, &query.database_id, &parsed) {
+            return Some(ConnectorResponse::rejected(request.request_id.clone(), message));
         }
 
         let read_only = parsed.iter().all(|statement| {
@@ -244,6 +562,7 @@ impl ServerApp {
                 };
 
                 match DatabaseCatalog::create_new_database(database_name, &self.node_data_dir) {
+
                     Ok(catalog) => {
                         self.catalogs.insert(catalog.database_id.0.clone(), catalog);
 
@@ -251,12 +570,13 @@ impl ServerApp {
                             request.request_id.clone(),
                             ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
                         )
-                    }
+                    },
 
                     Err(err) => ConnectorResponse::rejected(
                         request.request_id.clone(),
                         format!("create database failed: {err}"),
                     ),
+
                 }
 
             },
@@ -272,14 +592,39 @@ impl ServerApp {
                 {
                     response
                 } else {
+                    
+                    if let Ok(parsed_requests) = parse_mysql8_sql_requests(&query.sql, &query.database_id) {
+
+                        if let Err(message) = self.authorize_sql_requests_for_session(
+                            session_id,
+                            &query.database_id,
+                            &parsed_requests,
+                        ) {
+                            return ConnectorResponse::rejected(request.request_id.clone(), message);
+                        }
+
+                        if let Some(response) = self.apply_acl_mutation_requests(
+                            &request.request_id,
+                            session_id,
+                            &query.database_id,
+                            &parsed_requests,
+                        ) {
+                            return response;
+                        }
+
+                    }
+
                     let transaction_active = self
                         .transaction_coordinator
                         .is_active(session_id)
                         .unwrap_or(false);
 
                     if transaction_active && is_transactional_read_query(query) {
+                        
                         self.execute_transactional_read(&request.request_id, session_id, query)
+
                     } else {
+
                         match self.transaction_coordinator.route_query(
                             session_id,
                             query.clone(),
@@ -320,9 +665,10 @@ impl ServerApp {
                             
                             Ok(QueryRoutingDecision::Rejected(message)) => {
                                 ConnectorResponse::rejected(request.request_id.clone(), message)
-                            }
+                            },
                             
                             Err(err) => ConnectorResponse::rejected(request.request_id.clone(), err),
+                            
                         }
 
 
@@ -357,17 +703,18 @@ impl ServerApp {
             },
 
             _ => {
-                // log::info!(
-                //     "connector request completed request_id={} path={} status={:?}",
-                //     request.request_id,
-                //     command_path,
-                //     response.status
-                // );
+                log::debug!(
+                    "connector request completed request_id={} path={} status={:?}",
+                    request.request_id,
+                    command_path,
+                    response.status
+                );
             }
 
         }
 
         response
+
     }
 
     fn handle_transaction_control_query(
@@ -569,6 +916,7 @@ impl ServerApp {
                 ));
             }
 
+            // cleanup transaction state for this session
             self.tx_begin_epoch_ms_by_session.remove(session_id);
             self.tx_snapshot_by_session.remove(session_id);
             self.tx_read_observations_by_session.remove(session_id);
@@ -600,8 +948,6 @@ impl ServerApp {
         staged_queries: &[connector::DataQuery],
         snapshot_epoch_ms: u64,
     ) -> Result<u64, String> {
-        let commit_start = Instant::now();
-        let validation_start = Instant::now();
 
         if snapshot_epoch_ms > 0 {
 
@@ -616,8 +962,6 @@ impl ServerApp {
         }
 
         self.validate_staged_queries(request_id, session_id, staged_queries)?;
-        let validation_ms = validation_start.elapsed().as_millis() as u64;
-        let apply_start = Instant::now();
 
         let session_state = self.get_session(session_id);
         let (connection_id, session_user) = session_state
@@ -679,10 +1023,6 @@ impl ServerApp {
 
         }
 
-        let apply_ms = apply_start.elapsed().as_millis() as u64;
-
-        let commit_marker_start = Instant::now();
-
         if let Err(err) = commit_external_write_group(
             &self.wal,
             Some(&self.catalogs),
@@ -700,19 +1040,6 @@ impl ServerApp {
             );
 
             self.abort_group_table_writes(&touched_tables);
-            let total_ms = commit_start.elapsed().as_millis() as u64;
-
-            log::debug!(
-                "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=failed",
-                request_id,
-                session_id,
-                staged_queries.len(),
-                total_affected_rows,
-                validation_ms,
-                apply_ms,
-                commit_marker_start.elapsed().as_millis() as u64,
-                total_ms,
-            );
             
             return Err(format!("transaction commit marker append failed: {err}"));
 
@@ -722,19 +1049,6 @@ impl ServerApp {
             self.abort_group_table_writes(&touched_tables);
             return Err(err);
         }
-
-        let total_ms = commit_start.elapsed().as_millis() as u64;
-        log::debug!(
-            "transaction commit timing request_id={} session_id={} staged_queries={} affected_rows={} validation_ms={} apply_ms={} commit_marker_ms={} total_ms={} status=ok",
-            request_id,
-            session_id,
-            staged_queries.len(),
-            total_affected_rows,
-            validation_ms,
-            apply_ms,
-            commit_marker_start.elapsed().as_millis() as u64,
-            total_ms,
-        );
 
         Ok(total_affected_rows)
 
@@ -747,16 +1061,7 @@ impl ServerApp {
         staged_queries: &[connector::DataQuery],
     ) -> Result<(), String> {
 
-        let validation_start = Instant::now();
-
         let validation_plan = Self::staged_query_validation_plan(staged_queries);
-
-        let snapshot_start = Instant::now();
-
-        let mut setup_mode = "fallback_full";
-        let mut setup_table_count = 0usize;
-        let index_clone_ms;
-        let wal_seed_ms;
 
         let (mut sandbox_catalogs, snapshot_runtime_indexes, snapshot_wal) =        
             if let Some(snapshot) = self.tx_snapshot_by_session.get(session_id) {
@@ -767,14 +1072,11 @@ impl ServerApp {
                     Some(&snapshot.wal),
                 )
 
-            } else if let Some((table_ids, insert_only)) = &validation_plan {
+            } else if let Some((_table_ids, insert_only)) = &validation_plan {
 
                 if !insert_only {
                     return Err("missing transaction snapshot for validation".to_string());
                 }
-
-                setup_mode = "current_state_insert_only";
-                setup_table_count = table_ids.len();
                 
                 (
                     self.catalogs.clone(),
@@ -791,42 +1093,22 @@ impl ServerApp {
         let sandbox_wal = ConcurrentWalManager::new();
 
         let mut sandbox_indexes = if let Some((table_ids, skip_wal_seed)) = validation_plan {
-
-            setup_table_count = table_ids.len();
-
-            let index_clone_start = Instant::now();
             let scoped_indexes = snapshot_runtime_indexes.clone_for_tables(&sandbox_catalogs, &table_ids);
-            index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
 
             if skip_wal_seed {
-                
-                if setup_mode != "current_state_insert_only" {
-                    setup_mode = "table_scoped_insert_only";
-                }
-
-                wal_seed_ms = 0;
 
             } else {
-
-                setup_mode = "table_scoped";
-                
-                let wal_seed_start = Instant::now();
                 let Some(source_wal) = snapshot_wal else {
                     return Err("missing transaction snapshot for validation".to_string());
                 };
 
                 self.seed_sandbox_wal_from_source_for_tables(&sandbox_catalogs, source_wal, &sandbox_wal, &table_ids)
                     .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
-                
-                wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
-                
             }
 
             scoped_indexes
 
         } else {
-
-            let wal_seed_start = Instant::now();
             
             let Some(source_wal) = snapshot_wal else {
                 return Err("missing transaction snapshot for validation".to_string());
@@ -834,36 +1116,17 @@ impl ServerApp {
 
             self.seed_sandbox_wal_from_source(&sandbox_catalogs, source_wal, &sandbox_wal)
                 .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
-            
-            wal_seed_ms = wal_seed_start.elapsed().as_millis() as u64;
-
-            let index_clone_start = Instant::now();
             let cloned = snapshot_runtime_indexes.clone();
-            index_clone_ms = index_clone_start.elapsed().as_millis() as u64;
 
             cloned
 
         };
-
-        let snapshot_setup_ms = snapshot_start.elapsed().as_millis() as u64;
-
-        log::info!(
-            "transaction validation setup request_id={} session_id={} mode={} tables={} index_clone_ms={} wal_seed_ms={} snapshot_setup_ms={}",
-            request_id,
-            session_id,
-            setup_mode,
-            setup_table_count,
-            index_clone_ms,
-            wal_seed_ms,
-            snapshot_setup_ms,
-        );
 
         let session_state = self.get_session(session_id);
         let (connection_id, session_user) = session_state
             .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
             .unwrap_or((0, None));
 
-        let mut dry_run_total_ms = 0u64;
         let validation_write_group_id = TransactionId(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -875,8 +1138,8 @@ impl ServerApp {
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
 
-            let staged_query_start = Instant::now();
             let dry_run_request_id = format!("{}::dryrun{}", request_id, idx + 1);
+            
             let response = handle_query_command_in_write_group(
                 &dry_run_request_id,
                 staged_query,
@@ -906,21 +1169,7 @@ impl ServerApp {
 
             }
 
-            dry_run_total_ms = dry_run_total_ms.saturating_add(staged_query_start.elapsed().as_millis() as u64);
-
         }
-
-        let total_ms = validation_start.elapsed().as_millis() as u64;
-
-        log::info!(
-            "transaction validation timing request_id={} session_id={} staged_queries={} snapshot_setup_ms={} dry_run_ms={} total_ms={}",
-            request_id,
-            session_id,
-            staged_queries.len(),
-            snapshot_setup_ms,
-            dry_run_total_ms,
-            total_ms,
-        );
 
         Ok(())
 

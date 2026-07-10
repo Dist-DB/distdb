@@ -1,13 +1,75 @@
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
-    ConcurrentWalManager, TransactionId, TransactionKind, TransactionRecord,
-    UserId,
+    AccountAclEntry, ConcurrentWalManager, TransactionId, TransactionKind,
+    TransactionRecord, UserId,
 };
 
 use crate::core::app::ServerApp;
 use crate::core::app::helpers::SessionTxMarkerType;
 
 impl ServerApp {
+
+    pub fn encode_account_acl_wal_payload(entry: &AccountAclEntry) -> Result<Vec<u8>, String> {
+        bincode::serialize(entry)
+            .map_err(|err| format!("failed to encode ACL WAL payload: {}", err))
+    }
+
+    pub fn decode_account_acl_wal_payload(payload: &[u8]) -> Result<AccountAclEntry, String> {
+        bincode::deserialize(payload)
+            .map_err(|err| format!("failed to decode ACL WAL payload: {}", err))
+    }
+
+    pub fn append_account_acl_change_record(
+        &self,
+        database_hint: &str,
+        actor: &str,
+        entry: &AccountAclEntry,
+    ) -> Result<(), String> {
+
+        let wal_id = self.resolve_catalog_wal_stream_for_database(database_hint);
+        let payload = Self::encode_account_acl_wal_payload(entry)?;
+        
+        self.append_security_change_record(&wal_id, actor, payload)
+
+    }
+
+    pub fn apply_account_acl_wal_payload(
+        &mut self,
+        database_hint: &str,
+        payload: &[u8],
+    ) -> Result<bool, String> {
+
+        let mut entry = match Self::decode_account_acl_wal_payload(payload) {
+            Ok(entry) => entry,
+            Err(_) => return Ok(false),
+        };
+
+        let target_database = if entry.database_id.trim().is_empty() {
+            database_hint.to_string()
+        } else {
+            entry.database_id.clone()
+        };
+
+        let Some(catalog_key) = self.resolve_catalog_key(&target_database) else {
+            return Err(format!(
+                "database '{}' not found while applying ACL WAL payload",
+                target_database,
+            ));
+        };
+
+        let Some(catalog) = self.catalogs.get_mut(&catalog_key) else {
+            return Err(format!(
+                "database '{}' catalog unavailable while applying ACL WAL payload",
+                target_database,
+            ));
+        };
+
+        entry.database_id = catalog.database_id.0.clone();
+        catalog.upsert_account_acl_entry(entry);
+
+        Ok(true)
+
+    }
 
     pub fn append_security_change_record(
         &self,

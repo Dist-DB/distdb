@@ -1,5 +1,7 @@
 
 use super::*;
+use crate::engine::sql::AclMutationKind;
+use crate::engine::security::AccountPrivilege;
 
 #[test]
 fn parser_returns_directives_for_multiple_statements() {
@@ -16,10 +18,80 @@ fn parser_returns_directives_for_multiple_statements() {
     assert_eq!(requests[1].directive, SqlDirective::Update);
     assert_eq!(requests[1].operation, SqlOperation::Update);
     assert_eq!(requests[1].object_name.as_deref(), Some("users"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::Select));
+    assert_eq!(requests[1].required_privilege, Some(AccountPrivilege::Update));
     assert_eq!(
         requests[0].compatibility_target,
         SqlCompatibilityTarget::Mysql80
     );
+}
+
+#[test]
+fn create_database_requires_create_privilege() {
+    let requests = parse_mysql8_sql_requests("create database analytics", "main")
+        .expect("create database should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::Create));
+}
+
+#[test]
+fn call_requires_execute_privilege() {
+    let requests = parse_mysql8_sql_requests("call p_sync()", "main")
+        .expect("call should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::Execute));
+}
+
+#[test]
+fn grant_select_on_table_builds_object_acl_mutation_plan() {
+    let requests = parse_mysql8_sql_requests("grant select on users to alice", "main")
+        .expect("grant should parse");
+
+    assert_eq!(requests.len(), 1);
+
+    let plans = requests[0].acl_mutation_plans();
+    assert_eq!(plans.len(), 1);
+
+    assert_eq!(plans[0].kind, AclMutationKind::Grant);
+    assert_eq!(plans[0].grantee, "alice");
+    assert_eq!(plans[0].privilege, AccountPrivilege::Select);
+    assert_eq!(plans[0].database_name, None);
+    assert_eq!(plans[0].object_name.as_deref(), Some("users"));
+}
+
+#[test]
+fn revoke_select_on_schema_builds_database_acl_mutation_plan() {
+    let requests = parse_mysql8_sql_requests("revoke select on schema analytics from alice", "main")
+        .expect("revoke should parse");
+
+    assert_eq!(requests.len(), 1);
+
+    let plans = requests[0].acl_mutation_plans();
+    assert_eq!(plans.len(), 1);
+
+    assert_eq!(plans[0].kind, AclMutationKind::Revoke);
+    assert_eq!(plans[0].grantee, "alice");
+    assert_eq!(plans[0].privilege, AccountPrivilege::Select);
+    assert_eq!(plans[0].database_name.as_deref(), Some("analytics"));
+    assert_eq!(plans[0].object_name, None);
+}
+
+#[test]
+fn request_referenced_object_names_include_join_relations() {
+    let requests = parse_mysql8_sql_requests(
+        "select u.id from users u inner join orders o on u.id = o.user_id",
+        "main",
+    )
+    .expect("join query should parse");
+
+    assert_eq!(requests.len(), 1);
+
+    let mut referenced = requests[0].referenced_object_names();
+    referenced.sort();
+
+    assert_eq!(referenced, vec!["orders".to_string(), "users".to_string()]);
 }
 
 #[test]

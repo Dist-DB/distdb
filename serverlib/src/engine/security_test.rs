@@ -68,3 +68,33 @@ fn usage_token_is_treated_as_no_privileges() {
         .expect("USAGE should resolve as none selector");
     assert!(selector.to_acl_string_set().is_empty());
 }
+
+#[test]
+fn object_privilege_allows_access_without_global_privilege() {
+    let mut acl = AccountAclEntry::new(UserId("sam".to_string()), "analytics");
+    acl.append_object_privilege("users", AccountPrivilege::Select);
+
+    assert!(acl.has_privilege_for_object(AccountPrivilege::Select, Some("users")));
+    assert!(!acl.has_privilege_for_object(AccountPrivilege::Select, Some("orders")));
+}
+
+#[test]
+fn global_privilege_allows_any_object() {
+    let mut acl = AccountAclEntry::new(UserId("sam".to_string()), "analytics");
+    acl.append_privilege(AccountPrivilege::Select);
+
+    assert!(acl.has_privilege_for_object(AccountPrivilege::Select, Some("users")));
+    assert!(acl.has_privilege_for_object(AccountPrivilege::Select, Some("orders")));
+}
+
+#[test]
+fn revoke_object_privilege_removes_object_access() {
+    let mut acl = AccountAclEntry::new(UserId("sam".to_string()), "analytics");
+    acl.append_object_privilege("users", AccountPrivilege::Select);
+
+    assert!(acl.has_privilege_for_object(AccountPrivilege::Select, Some("users")));
+
+    acl.revoke_object_privilege("users", AccountPrivilege::Select);
+
+    assert!(!acl.has_privilege_for_object(AccountPrivilege::Select, Some("users")));
+}

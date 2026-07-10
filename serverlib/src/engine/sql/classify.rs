@@ -3,12 +3,13 @@ use sqlparser::ast::{
     SetOperator, Statement, TableFactor, TableWithJoins, Use,
 };
 
+use crate::engine::security::AccountPrivilege;
 use super::{parse_mysql_statements, SqlDirective, SqlOperation, SqlParseError};
 
 pub(super) fn classify_statement(
     statement: &Statement,
     statement_sql: &str,
-) -> Result<(SqlDirective, SqlOperation, Option<String>), SqlParseError> {
+) -> Result<(SqlDirective, SqlOperation, Option<String>, Option<AccountPrivilege>), SqlParseError> {
 
     let normalized = statement_sql.trim();
     let normalized_lower = normalized.to_ascii_lowercase();
@@ -23,7 +24,8 @@ pub(super) fn classify_statement(
         };
 
         let inner_sql = single_inner.to_string();
-        let (_, inner_operation, inner_object_name) =
+        
+        let (_, inner_operation, inner_object_name, _) =
             classify_statement(single_inner, &inner_sql)?;
 
         if !matches!(
@@ -33,7 +35,12 @@ pub(super) fn classify_statement(
             return Err(SqlParseError::UnsupportedStatement(normalized.to_string()));
         }
 
-        return Ok((SqlDirective::Retrieve, inner_operation, inner_object_name));
+        return Ok((
+            SqlDirective::Retrieve,
+            inner_operation,
+            inner_object_name,
+            required_privilege_for_operation(inner_operation),
+        ));
         
     }
 
@@ -287,7 +294,51 @@ pub(super) fn classify_statement(
         });
     }
 
-    Ok((directive, operation, object_name))
+    Ok((
+        directive,
+        operation,
+        object_name,
+        required_privilege_for_operation(operation),
+    ))
+
+}
+
+// Mapping security model privileges to SQL operations. This is a simplified mapping and may not cover all cases.
+fn required_privilege_for_operation(operation: SqlOperation) -> Option<AccountPrivilege> {
+
+    match operation {
+
+        SqlOperation::Select | 
+        SqlOperation::UnionQuery            => Some(AccountPrivilege::Select),
+
+        SqlOperation::Insert                => Some(AccountPrivilege::Insert),
+
+        SqlOperation::Update                => Some(AccountPrivilege::Update),
+
+        SqlOperation::Delete | 
+        SqlOperation::TruncateTable         => Some(AccountPrivilege::Delete),
+
+        SqlOperation::CreateDatabase |
+        SqlOperation::CreateTable |
+        SqlOperation::CreateView |
+        SqlOperation::CreateTrigger |
+        SqlOperation::CreateStoredProcedure |
+        SqlOperation::CreateOther           => Some(AccountPrivilege::Create),
+        
+        SqlOperation::CallStoredProcedure   => Some(AccountPrivilege::Execute),
+
+        SqlOperation::DropDatabase |
+        SqlOperation::DropTable |
+        SqlOperation::DropView |
+        SqlOperation::DropTrigger |
+        SqlOperation::DropStoredProcedure |
+        SqlOperation::DropOther             => Some(AccountPrivilege::Drop),
+
+        SqlOperation::AlterTable | 
+        SqlOperation::AlterView | 
+        SqlOperation::AlterOther            => Some(AccountPrivilege::Alter),
+        
+    }
 
 }
 
@@ -424,7 +475,7 @@ fn first_object_name_in_grant_objects(objects: &GrantObjects) -> Option<String> 
 
 pub(super) fn classify_text_fallback(
     statement: &str,
-) -> Option<(SqlDirective, SqlOperation, Option<String>)> {
+) -> Option<(SqlDirective, SqlOperation, Option<String>, Option<AccountPrivilege>)> {
     
     let tokens = statement
         .split_whitespace()
@@ -443,7 +494,12 @@ pub(super) fn classify_text_fallback(
                 token.eq_ignore_ascii_case("privileges")
                     || token.eq_ignore_ascii_case("priviledges")
             }) {
-                return Some((SqlDirective::Retrieve, SqlOperation::Select, None));
+                return Some((
+                    SqlDirective::Retrieve,
+                    SqlOperation::Select,
+                    None,
+                    required_privilege_for_operation(SqlOperation::Select),
+                ));
             }
         },
 
@@ -455,6 +511,7 @@ pub(super) fn classify_text_fallback(
                 SqlDirective::Retrieve,
                 SqlOperation::Select,
                 object_name,
+                required_privilege_for_operation(SqlOperation::Select),
             ));
         },
 
@@ -466,6 +523,7 @@ pub(super) fn classify_text_fallback(
                 SqlDirective::Retrieve,
                 SqlOperation::CallStoredProcedure,
                 object_name,
+                required_privilege_for_operation(SqlOperation::CallStoredProcedure),
             ));
         },
 
@@ -488,24 +546,64 @@ pub(super) fn classify_text_fallback(
 
     match (verb.as_str(), object_kind.as_str()) {
 
-        ("create", "trigger")   => Some((SqlDirective::Create, SqlOperation::CreateTrigger, object_name)),
+        ("create", "trigger") => Some((
+            SqlDirective::Create,
+            SqlOperation::CreateTrigger,
+            object_name,
+            required_privilege_for_operation(SqlOperation::CreateTrigger),
+        )),
 
-        ("drop", "trigger")     => Some((SqlDirective::AlterSchema, SqlOperation::DropTrigger, object_name)),
+        ("drop", "trigger") => Some((
+            SqlDirective::AlterSchema,
+            SqlOperation::DropTrigger,
+            object_name,
+            required_privilege_for_operation(SqlOperation::DropTrigger),
+        )),
 
-        ("create", "procedure") => Some((SqlDirective::Create, SqlOperation::CreateStoredProcedure, object_name)),
+        ("create", "procedure") => Some((
+            SqlDirective::Create,
+            SqlOperation::CreateStoredProcedure,
+            object_name,
+            required_privilege_for_operation(SqlOperation::CreateStoredProcedure),
+        )),
 
-        ("drop", "procedure")   => Some((SqlDirective::AlterSchema, SqlOperation::DropStoredProcedure, object_name)),
+        ("drop", "procedure") => Some((
+            SqlDirective::AlterSchema,
+            SqlOperation::DropStoredProcedure,
+            object_name,
+            required_privilege_for_operation(SqlOperation::DropStoredProcedure),
+        )),
 
-        ("drop", "database")    => Some((SqlDirective::AlterSchema, SqlOperation::DropDatabase, object_name)),
+        ("drop", "database") => Some((
+            SqlDirective::AlterSchema,
+            SqlOperation::DropDatabase,
+            object_name,
+            required_privilege_for_operation(SqlOperation::DropDatabase),
+        )),
 
         ("create", "database") | 
-        ("create", "schema")    => Some((SqlDirective::Create, SqlOperation::CreateDatabase, object_name)),
+        ("create", "schema") => Some((
+            SqlDirective::Create,
+            SqlOperation::CreateDatabase,
+            object_name,
+            required_privilege_for_operation(SqlOperation::CreateDatabase),
+        )),
 
-        ("create", "function")  => Some((SqlDirective::Create, SqlOperation::CreateStoredProcedure, object_name)),
+        ("create", "function") => Some((
+            SqlDirective::Create,
+            SqlOperation::CreateStoredProcedure,
+            object_name,
+            required_privilege_for_operation(SqlOperation::CreateStoredProcedure),
+        )),
 
-        ("drop", "function")    => Some((SqlDirective::AlterSchema, SqlOperation::DropStoredProcedure, object_name)),
+        ("drop", "function") => Some((
+            SqlDirective::AlterSchema,
+            SqlOperation::DropStoredProcedure,
+            object_name,
+            required_privilege_for_operation(SqlOperation::DropStoredProcedure),
+        )),
         
-        _                       => None,
+        _ => None,
 
     }
     

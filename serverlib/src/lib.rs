@@ -215,6 +215,7 @@ pub use engine::sql::{
 	TriggerEventKind, TriggerInvocationBinding, TriggerTiming,
 	UpdateAssignment, UpdateRowsPlan,
 	AlterTableChangeOp, AlterTableChangePlan,
+	AclMutationKind, AclMutationPlan,
 	SqlCompatibilityTarget, SqlDirective, SqlOperation, SqlParseError, SqlRequest,
 };
 
