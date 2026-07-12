@@ -97,6 +97,7 @@ extract_count() {
     }
 
     function first_cell(line, parts, n, cell) {
+      gsub(/│/, "|", line)
       n = split(line, parts, "|")
       if (n < 3) {
         return ""
@@ -107,7 +108,7 @@ extract_count() {
 
     BEGIN { seen = 0; want = 0 }
 
-    /^\|/ {
+    /^[\|│]/ {
       cell = first_cell($0)
 
       if (cell == col || index(cell, col ":") == 1) {
