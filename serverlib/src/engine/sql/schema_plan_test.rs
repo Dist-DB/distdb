@@ -170,6 +170,30 @@ fn create_table_schema_tracks_table_level_keys_defaults_and_enum() {
 }
 
 #[test]
+fn create_table_schema_marks_unique_columns_in_metadata() {
+    let (_, schema) = create_table_schema_from_statement(
+        "create table users (id bigint primary key, email varchar(255) unique, login varchar(255), unique key uq_login (login))",
+    )
+    .expect("schema should parse");
+
+    let email = schema.field("email").expect("email field should exist");
+    assert_eq!(email.indexed, FieldIndex::Indexed);
+    assert!(email
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.unique)
+        .unwrap_or(false));
+
+    let login = schema.field("login").expect("login field should exist");
+    assert_eq!(login.indexed, FieldIndex::Indexed);
+    assert!(login
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.unique)
+        .unwrap_or(false));
+}
+
+#[test]
 fn alter_table_change_plan_parses_add_drop_and_rename() {
     let plan = parse_alter_table_change_plan_from_statement(
             "alter table users add column status varchar(20) not null default 'active', drop column legacy, rename column email to login_email",

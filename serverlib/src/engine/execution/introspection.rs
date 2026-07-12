@@ -104,6 +104,24 @@ where
 
 }
 
+pub fn show_variables_result<I>(variables: I) -> SelectExecutionResult
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+
+    let mut rows = variables.into_iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+
+    SelectExecutionResult {
+        columns: vec![text_column(1, "variable_name"), text_column(2, "value")],
+        rows: rows
+            .into_iter()
+            .map(|(name, value)| vec![name.into_bytes(), value.into_bytes()])
+            .collect(),
+    }
+
+}
+
 fn privilege_display_token(privileges: &[String]) -> String {
     
     if privileges.is_empty() {
@@ -124,7 +142,18 @@ pub fn describe_table_result(schema: &TableSchema) -> SelectExecutionResult {
             let nullable = if field.nullable { "YES" } else { "NO" };
             let key = match field.indexed {
                 FieldIndex::PrimaryKey => "PRI",
-                FieldIndex::Indexed => "MUL",
+                FieldIndex::Indexed => {
+                    if field
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.unique)
+                        .unwrap_or(false)
+                    {
+                        "UNI"
+                    } else {
+                        "MUL"
+                    }
+                }
                 FieldIndex::None => "",
             };
 

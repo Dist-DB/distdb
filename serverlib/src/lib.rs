@@ -52,6 +52,7 @@ pub use common::schema::{
 
 pub use engine::database::core::{
 	DatabaseCatalog, DatabaseEntity, DatabaseError, DatabaseId, DatabaseIndex,
+	RecursiveCteExecutionSettings,
 	DatabaseIndexKind, DatabaseIndexOrigin,
 	DatabaseEntityAspect, DatabaseEntityKind, DatabaseRelationship, DatabaseReplicaState,
 	DatabaseResult, DatabaseStoredProcedure, DatabaseTable, DatabaseTrigger,
@@ -145,7 +146,7 @@ pub use engine::execution::{
 	EqualityProbeSource,
 	JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 		RelationAccessPlan, RelationAccessStrategy, SelectExecutionResult, show_databases_result,
-		show_indexes_result, show_privileges_result, show_tables_result,
+		show_indexes_result, show_privileges_result, show_tables_result, show_variables_result,
 };
 
 pub use engine::database::table::schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};
@@ -207,13 +208,18 @@ pub use engine::sql::{
 	parse_alter_table_change_plan_from_statement,
 	sql_directive_for_statement,
 	IfElseEndBranchPlan, IfElseEndPlan,
+	InsertOnDuplicateAssignment, InsertOnDuplicateAssignmentValue,
+	InsertOnDuplicateAssignmentOperand, InsertOnDuplicateArithmeticOp,
 	InsertRowsPlan, InsertRowsSource,
+	MutationReturningItem, MutationReturningPlan,
 	DeleteRowsPlan,
 	SelectComparisonOp, SelectCondition, SelectCtePlan, SelectJoin, SelectJoinKind,
 	SelectOrderByItem, SelectSetBoundaryOp, SelectSetQueryStep, SelectPredicate, SelectProjectionItem,
-	SelectReadPlan, SelectRelation,
+	SelectLimitByPlan, SelectLockMode, SelectReadPlan, SelectRelation,
 	TriggerEventKind, TriggerInvocationBinding, TriggerTiming,
 	UpdateAssignment, UpdateRowsPlan,
+	UpdateAssignmentValue,
+	UpdateAssignmentOperand, UpdateArithmeticOp, UnaryArithmeticOp,
 	AlterTableChangeOp, AlterTableChangePlan,
 	AclMutationKind, AclMutationPlan,
 	SqlCompatibilityTarget, SqlDirective, SqlOperation, SqlParseError, SqlRequest,

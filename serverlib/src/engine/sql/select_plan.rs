@@ -11,8 +11,8 @@ use super::{
     dialect_capabilities_for_target, evaluate_sql_function, is_supported_sql_function,
     parse_mysql_statements,
     validate_regex_pattern, SelectCaseWhen, SelectComparisonOp, SelectCondition, SelectCtePlan,
-    SelectJoin, SelectJoinKind, SelectOrderByItem, SelectSetBoundaryOp, SelectSetQueryStep, SelectExpression, SelectPredicate,
-    SelectProjectionItem, SelectReadPlan, SelectRelation,
+    SelectJoin, SelectJoinKind, SelectLimitByPlan, SelectOrderByItem, SelectSetBoundaryOp, SelectSetQueryStep, SelectExpression, SelectPredicate,
+    SelectLockMode, SelectProjectionItem, SelectReadPlan, SelectRelation,
     SqlParseError, DEFAULT_SQL_COMPATIBILITY_TARGET,
 };
 
@@ -20,6 +20,10 @@ type SelectRelationBinding = SelectRelation;
 type SetQueryParseResult = (
     Vec<SelectSetQueryStep>,
     Vec<SelectOrderByItem>,
+    Option<SelectLimitByPlan>,
+    Option<usize>,
+    Option<usize>,
+    Option<usize>,
     Option<usize>,
     Option<usize>,
 );
@@ -100,18 +104,6 @@ pub(super) fn parse_select_read_plan_from_query(
 
     let ctes = parse_cte_plans_from_query(query, &query_sql)?;
 
-    if !query.limit_by.is_empty() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "SELECT LIMIT BY is not supported yet".to_string(),
-        ));
-    }
-
-    if query.fetch.is_some() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "SELECT FETCH is not supported yet".to_string(),
-        ));
-    }
-
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Err(SqlParseError::UnsupportedStatement(
             "only simple SELECT queries are currently supported for projection parsing".to_string(),
@@ -120,11 +112,7 @@ pub(super) fn parse_select_read_plan_from_query(
 
     let mut distinct = select.distinct.is_some();
 
-    if select.top.is_some() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "SELECT TOP is not supported yet".to_string(),
-        ));
-    }
+    let top_limit = parse_select_top_limit(select.top.as_ref())?;
 
     if !select.lateral_views.is_empty() {
         return Err(SqlParseError::UnsupportedStatement(
@@ -132,21 +120,10 @@ pub(super) fn parse_select_read_plan_from_query(
         ));
     }
 
-    if select.prewhere.is_some() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "SELECT PREWHERE is not supported yet".to_string(),
-        ));
-    }
 
     let named_windows = select.named_window.clone();
 
     let has_window_clause = !named_windows.is_empty();
-
-    if !select.cluster_by.is_empty() || !select.distribute_by.is_empty() || !select.sort_by.is_empty() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "SELECT CLUSTER/DISTRIBUTE/SORT BY is not supported yet".to_string(),
-        ));
-    }
 
     if let Some(plan) = parse_passthrough_derived_select_plan(query, select, is_explain)? {
         return Ok(plan);
@@ -242,6 +219,13 @@ pub(super) fn parse_select_read_plan_from_query(
         &relation_bindings,
     )?;
 
+    let prewhere_condition = parse_select_condition_from_expr(
+        select.prewhere.as_ref(),
+        &relation_bindings,
+    )?;
+
+    let where_condition = combine_where_having_conditions(prewhere_condition, where_condition);
+
     let qualify_condition = parse_select_condition_from_expr(
         select.qualify.as_ref(),
         &relation_bindings,
@@ -262,13 +246,24 @@ pub(super) fn parse_select_read_plan_from_query(
     }
 
     let where_condition = combine_where_having_conditions(where_condition, having_condition.clone());
-    let where_condition = combine_where_having_conditions(where_condition, qualify_condition);
 
-    let order_by = parse_order_by_items(
+    let query_order_by = parse_order_by_items(
         query.order_by.as_ref(),
         &relation_bindings,
         &projection_items,
     )?;
+
+    let compat_order_by = parse_select_compat_order_by_items(select, &relation_bindings)?;
+    let order_by = if !query_order_by.is_empty() && !compat_order_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT ORDER BY cannot be combined with CLUSTER/DISTRIBUTE/SORT BY in current execution model"
+                .to_string(),
+        ));
+    } else if !query_order_by.is_empty() {
+        query_order_by
+    } else {
+        compat_order_by
+    };
 
     let pushdown_conditions = derive_relation_pushdown_conditions(
         where_condition.as_ref(),
@@ -276,8 +271,86 @@ pub(super) fn parse_select_read_plan_from_query(
         &joins,
     );
 
-    let limit = parse_query_limit(query.limit.as_ref())?;
+    let query_limit_plan = parse_query_limit_or_fetch_plan(
+        query.limit.as_ref(),
+        query.fetch.as_ref(),
+        "SELECT",
+    )?;
+    let query_limit = query_limit_plan.limit;
+    if (top_limit.limit.is_some() || top_limit.percent.is_some())
+        && (query_limit_plan.limit.is_some() || query_limit_plan.percent.is_some())
+    {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT currently supports TOP or LIMIT/FETCH, but not both".to_string(),
+        ));
+    }
+
+    if query_limit_plan.with_ties && order_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT FETCH WITH TIES requires ORDER BY in current execution model".to_string(),
+        ));
+    }
+
+    if top_limit.with_ties && order_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT TOP WITH TIES requires ORDER BY in current execution model".to_string(),
+        ));
+    }
+
+    let limit = query_limit.or(top_limit.limit);
+    let top_with_ties_limit = if top_limit.with_ties {
+        top_limit.limit
+    } else {
+        None
+    };
+    let top_percent_with_ties = if top_limit.with_ties {
+        top_limit.percent
+    } else {
+        None
+    };
+    let top_percent = if top_limit.with_ties {
+        None
+    } else {
+        top_limit.percent
+    };
+    let fetch_with_ties_limit = if query_limit_plan.with_ties {
+        query_limit_plan.limit
+    } else {
+        None
+    };
+    let fetch_percent_with_ties = if query_limit_plan.with_ties {
+        query_limit_plan.percent
+    } else {
+        None
+    };
+    let fetch_percent = if query_limit_plan.with_ties {
+        None
+    } else {
+        query_limit_plan.percent
+    };
+
+    let limit_by = parse_select_limit_by_plan(
+        &query.limit_by,
+        limit,
+        query.offset.as_ref(),
+        query.fetch.as_ref(),
+        &relation_bindings,
+        "SELECT",
+    )?;
+
+    let limit = if limit_by.is_some()
+        || top_with_ties_limit.is_some()
+        || top_percent_with_ties.is_some()
+        || fetch_with_ties_limit.is_some()
+        || fetch_percent_with_ties.is_some()
+        || fetch_percent.is_some()
+    {
+        None
+    } else {
+        limit
+    };
     let offset = parse_query_offset(query.offset.as_ref())?;
+    let lock_mode = parse_select_lock_mode(query, &query_sql)?;
 
     Ok(SelectReadPlan {
         table_id,
@@ -294,9 +367,18 @@ pub(super) fn parse_select_read_plan_from_query(
         group_by,
         having_condition,
         has_window_clause,
+        limit_by,
+        top_percent,
+        top_percent_with_ties,
+        top_with_ties_limit,
+        fetch_percent,
+        fetch_percent_with_ties,
+        fetch_with_ties_limit,
         limit,
         offset,
         where_condition,
+        qualify_condition,
+        lock_mode,
         is_explain,
     })
 
@@ -310,12 +392,6 @@ fn parse_cte_plans_from_query(
     let Some(with) = query.with.as_ref() else {
         return Ok(Vec::new());
     };
-
-    if with.recursive {
-        return Err(SqlParseError::UnsupportedStatement(
-            "recursive CTE is not supported yet".to_string(),
-        ));
-    }
 
     let mut ctes = Vec::with_capacity(with.cte_tables.len());
 
@@ -335,15 +411,177 @@ fn parse_cte_plans_from_query(
             });
         }
 
+        if with.recursive
+            && let Some(recursive_plan) = parse_recursive_cte_plan(cte, &cte_table_id)?
+        {
+            ctes.push(recursive_plan);
+            continue;
+        }
+
         let cte_plan = parse_select_read_plan_from_query(cte.query.as_ref(), false)?;
 
         ctes.push(SelectCtePlan {
             table_id: cte_table_id,
             read_plan: Box::new(cte_plan),
+            recursive_read_plan: None,
+            recursive_union_all: false,
         });
     }
 
     Ok(ctes)
+
+}
+
+fn parse_recursive_cte_plan(
+    cte: &sqlparser::ast::Cte,
+    cte_table_id: &str,
+) -> Result<Option<SelectCtePlan>, SqlParseError> {
+
+    if cte.query.order_by.is_some()
+        || cte.query.limit.is_some()
+        || !cte.query.limit_by.is_empty()
+        || cte.query.offset.is_some()
+        || cte.query.fetch.is_some()
+    {
+        return Err(SqlParseError::UnsupportedStatement(
+            "recursive CTE branch-level ORDER BY/LIMIT/OFFSET/FETCH is not supported yet"
+                .to_string(),
+        ));
+    }
+
+    let SetExpr::SetOperation {
+        op,
+        set_quantifier,
+        left,
+        right,
+    } = cte.query.body.as_ref()
+    else {
+        return Ok(None);
+    };
+
+    if *op != SetOperator::Union {
+        return Err(SqlParseError::UnsupportedStatement(
+            "recursive CTE currently supports only UNION between seed and recursive terms"
+                .to_string(),
+        ));
+    }
+
+    let recursive_union_all = matches!(set_quantifier, SetQuantifier::All);
+
+    let seed_plan = parse_union_branch_set_expr(left, None)?;
+    let recursive_plan = parse_union_branch_set_expr(right, None)?;
+
+    let seed_references_self = select_plan_references_table(&seed_plan, cte_table_id);
+    let recursive_references_self = select_plan_references_table(&recursive_plan, cte_table_id);
+
+    if seed_references_self {
+        return Err(SqlParseError::UnsupportedStatement(
+            "recursive CTE seed term must not reference the recursive table".to_string(),
+        ));
+    }
+
+    if !recursive_references_self {
+        return Ok(None);
+    }
+
+    Ok(Some(SelectCtePlan {
+        table_id: cte_table_id.to_string(),
+        read_plan: Box::new(seed_plan),
+        recursive_read_plan: Some(Box::new(recursive_plan)),
+        recursive_union_all,
+    }))
+
+}
+
+fn select_plan_references_table(plan: &SelectReadPlan, table_id: &str) -> bool {
+
+    let normalized_target = common::normalize_identifier!(table_id);
+
+    if !plan.table_id.is_empty() && common::normalize_identifier!(&plan.table_id) == normalized_target {
+        return true;
+    }
+
+    if plan
+        .relations
+        .iter()
+        .any(|relation| common::normalize_identifier!(&relation.table_id) == normalized_target)
+    {
+        return true;
+    }
+
+    if plan
+        .joins
+        .iter()
+        .any(|join| common::normalize_identifier!(&join.relation.table_id) == normalized_target)
+    {
+        return true;
+    }
+
+    if plan
+        .where_condition
+        .as_ref()
+        .is_some_and(|condition| select_condition_references_table(condition, &normalized_target))
+    {
+        return true;
+    }
+
+    for cte in &plan.ctes {
+        if select_plan_references_table(&cte.read_plan, &normalized_target)
+            || cte
+                .recursive_read_plan
+                .as_ref()
+                .is_some_and(|recursive| select_plan_references_table(recursive, &normalized_target))
+        {
+            return true;
+        }
+    }
+
+    false
+
+}
+
+fn select_condition_references_table(
+    condition: &SelectCondition,
+    normalized_table_id: &str,
+) -> bool {
+
+    match condition {
+
+        SelectCondition::And(children) | 
+        SelectCondition::Or(children) => children
+            .iter()
+            .any(|child| select_condition_references_table(child, normalized_table_id)),
+
+        SelectCondition::Not(child) => {
+            select_condition_references_table(child, normalized_table_id)
+        },
+
+        SelectCondition::Predicate(predicate) => {
+            select_predicate_references_table(predicate, normalized_table_id)
+        },
+
+    }
+
+}
+
+fn select_predicate_references_table(
+    predicate: &SelectPredicate,
+    normalized_table_id: &str,
+) -> bool {
+
+    match predicate {
+
+        SelectPredicate::InSubquery { subquery, .. } |
+        SelectPredicate::ScalarSubqueryComparison { subquery, .. } |
+        SelectPredicate::AnySubqueryComparison { subquery, .. } |
+        SelectPredicate::AllSubqueryComparison { subquery, .. } |
+        SelectPredicate::Exists { subquery, .. } => {
+            select_plan_references_table(subquery, normalized_table_id)
+        }
+
+        _ => false,
+
+    }
 
 }
 
@@ -410,6 +648,9 @@ fn collect_select_plan_dependencies_into(
 
     for cte in &plan.ctes {
         collect_select_plan_dependencies_into(&cte.read_plan, seen, dependencies);
+        if let Some(recursive_plan) = cte.recursive_read_plan.as_ref() {
+            collect_select_plan_dependencies_into(recursive_plan, seen, dependencies);
+        }
     }
 
 }
@@ -509,9 +750,9 @@ fn parse_order_by_items(
                     Some(names)
                 },
 
-                SelectProjectionItem::Case { output_name, .. }
-                | SelectProjectionItem::InbuiltFunction { output_name, .. }
-                | SelectProjectionItem::WindowFunction { output_name, .. } => {
+                SelectProjectionItem::Case { output_name, .. } |
+                SelectProjectionItem::InbuiltFunction { output_name, .. } |
+                SelectProjectionItem::WindowFunction { output_name, .. } => {
                     Some(vec![output_name.clone()])
                 },
 
@@ -648,18 +889,6 @@ pub fn parse_union_select_read_plans_from_statement(
         ));
     };
 
-    if !query.limit_by.is_empty() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "set query LIMIT BY is not supported yet".to_string(),
-        ));
-    }
-
-    if query.fetch.is_some() {
-        return Err(SqlParseError::UnsupportedStatement(
-            "set query FETCH is not supported yet".to_string(),
-        ));
-    }
-
     let mut steps = Vec::new();
     collect_set_query_steps(&query.body, query.with.as_ref(), &mut steps)?;
 
@@ -675,10 +904,64 @@ pub fn parse_union_select_read_plans_from_statement(
     }
 
     let order_by = parse_union_order_by_items(query.order_by.as_ref())?;
-    let limit = parse_query_limit(query.limit.as_ref())?;
+    let query_limit_plan = parse_query_limit_or_fetch_plan(
+        query.limit.as_ref(),
+        query.fetch.as_ref(),
+        "set query",
+    )?;
+    let parsed_limit = query_limit_plan.limit;
+
+    if query_limit_plan.with_ties && order_by.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "set query FETCH WITH TIES requires ORDER BY in current execution model".to_string(),
+        ));
+    }
+
+    let limit_by = parse_set_query_limit_by_plan(
+        &query.limit_by,
+        parsed_limit,
+        query.offset.as_ref(),
+        query.fetch.as_ref(),
+    )?;
+
+    let fetch_with_ties_limit = if query_limit_plan.with_ties {
+        query_limit_plan.limit
+    } else {
+        None
+    };
+    let fetch_percent_with_ties = if query_limit_plan.with_ties {
+        query_limit_plan.percent
+    } else {
+        None
+    };
+    let fetch_percent = if query_limit_plan.with_ties {
+        None
+    } else {
+        query_limit_plan.percent
+    };
+
+    let limit = if limit_by.is_some()
+        || fetch_with_ties_limit.is_some()
+        || fetch_percent_with_ties.is_some()
+        || fetch_percent.is_some()
+    {
+        None
+    } else {
+        parsed_limit
+    };
+
     let offset = parse_query_offset(query.offset.as_ref())?;
 
-    Ok((steps, order_by, limit, offset))
+    Ok((
+        steps,
+        order_by,
+        limit_by,
+        fetch_with_ties_limit,
+        fetch_percent,
+        fetch_percent_with_ties,
+        limit,
+        offset,
+    ))
 
 }
 
@@ -897,6 +1180,28 @@ fn parse_union_order_by_items(
 
 }
 
+fn parse_select_lock_mode(query: &Query, query_sql: &str) -> Result<SelectLockMode, SqlParseError> {
+
+    if query.for_clause.is_none() && query.locks.is_empty() {
+        return Ok(SelectLockMode::None);
+    }
+
+    let lowered = query_sql.to_ascii_lowercase();
+
+    if lowered.contains(" for update") {
+        return Ok(SelectLockMode::ForUpdate);
+    }
+
+    if lowered.contains(" for share") {
+        return Ok(SelectLockMode::ForShare);
+    }
+
+    Err(SqlParseError::UnsupportedStatement(
+        "SELECT lock clause is not supported in current execution model".to_string(),
+    ))
+
+}
+
 fn parse_passthrough_derived_select_plan(
     query: &Query,
     select: &sqlparser::ast::Select,
@@ -1017,7 +1322,11 @@ fn parse_passthrough_derived_select_plan(
 
     }
 
-    let outer_limit = parse_query_limit(query.limit.as_ref())?;
+    let outer_limit = parse_query_limit_or_fetch(
+        query.limit.as_ref(),
+        query.fetch.as_ref(),
+        "SELECT",
+    )?;
     let outer_offset = parse_query_offset(query.offset.as_ref())?;
     
     let (limit, offset) = compose_row_windows(
@@ -1540,10 +1849,19 @@ fn parse_window_projection_item(
     if !function_name.eq_ignore_ascii_case("row_number") &&
         !function_name.eq_ignore_ascii_case("rank") &&
         !function_name.eq_ignore_ascii_case("dense_rank") &&
+        !function_name.eq_ignore_ascii_case("percent_rank") &&
+        !function_name.eq_ignore_ascii_case("cume_dist") &&
+        !function_name.eq_ignore_ascii_case("ntile") &&
+        !function_name.eq_ignore_ascii_case("lag") &&
+        !function_name.eq_ignore_ascii_case("lead") &&
         !function_name.eq_ignore_ascii_case("sum") &&
+        !function_name.eq_ignore_ascii_case("count") &&
         !function_name.eq_ignore_ascii_case("avg") &&
         !function_name.eq_ignore_ascii_case("min") &&
-        !function_name.eq_ignore_ascii_case("max")
+        !function_name.eq_ignore_ascii_case("max") &&
+        !function_name.eq_ignore_ascii_case("first_value") &&
+        !function_name.eq_ignore_ascii_case("last_value") &&
+        !function_name.eq_ignore_ascii_case("nth_value")
     {
         return Err(SqlParseError::UnsupportedStatement(format!(
             "SELECT window function '{}' is not supported yet",
@@ -1563,7 +1881,9 @@ fn parse_window_projection_item(
 
     if (function_name.eq_ignore_ascii_case("row_number") ||
         function_name.eq_ignore_ascii_case("rank") ||
-        function_name.eq_ignore_ascii_case("dense_rank")) &&
+        function_name.eq_ignore_ascii_case("dense_rank") ||
+        function_name.eq_ignore_ascii_case("percent_rank") ||
+        function_name.eq_ignore_ascii_case("cume_dist")) &&
         has_arguments
     {
         return Err(SqlParseError::UnsupportedStatement(
@@ -1575,9 +1895,13 @@ fn parse_window_projection_item(
     }
 
     if function_name.eq_ignore_ascii_case("sum") ||
+        function_name.eq_ignore_ascii_case("count") ||
         function_name.eq_ignore_ascii_case("avg") ||
         function_name.eq_ignore_ascii_case("min") ||
-        function_name.eq_ignore_ascii_case("max")
+        function_name.eq_ignore_ascii_case("max") ||
+        function_name.eq_ignore_ascii_case("first_value") ||
+        function_name.eq_ignore_ascii_case("last_value") ||
+        function_name.eq_ignore_ascii_case("ntile")
     {
         
         match &function.args {
@@ -1595,6 +1919,40 @@ fn parse_window_projection_item(
 
         }
 
+    }
+
+    if function_name.eq_ignore_ascii_case("nth_value") {
+        match &function.args {
+
+            FunctionArguments::List(list) if list.args.len() == 2 => {},
+            
+            _ => {
+                return Err(SqlParseError::UnsupportedStatement(
+                    format!(
+                        "{} window function currently requires exactly two arguments",
+                        function.name.to_string().to_ascii_uppercase()
+                    ),
+                ));
+            }
+            
+        }
+    }
+
+    if function_name.eq_ignore_ascii_case("lag") || function_name.eq_ignore_ascii_case("lead") {
+        match &function.args {
+
+            FunctionArguments::List(list) if (1..=3).contains(&list.args.len()) => {},
+
+            _ => {
+                return Err(SqlParseError::UnsupportedStatement(
+                    format!(
+                        "{} window function currently requires between 1 and 3 arguments",
+                        function.name.to_string().to_ascii_uppercase()
+                    ),
+                ));
+            }
+            
+        }
     }
 
     match function.over.as_ref() {
@@ -2428,6 +2786,287 @@ fn parse_query_limit(limit: Option<&Expr>) -> Result<Option<usize>, SqlParseErro
     Ok(Some(parse_unsigned_numeric_expression(limit, "LIMIT")?))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct SelectTopLimit {
+    limit: Option<usize>,
+    percent: Option<usize>,
+    with_ties: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct QueryFetchLimit {
+    limit: Option<usize>,
+    percent: Option<usize>,
+    with_ties: bool,
+}
+
+fn parse_select_top_limit(
+    top: Option<&sqlparser::ast::Top>,
+) -> Result<SelectTopLimit, SqlParseError> {
+
+    let Some(top) = top else {
+        return Ok(SelectTopLimit::default());
+    };
+
+    let rendered = top.to_string();
+    let lowered = rendered.to_ascii_lowercase();
+
+    let with_ties = lowered.contains("with ties");
+
+    let mut parsed_limit = None;
+
+    for token in lowered.split_whitespace() {
+        if let Ok(value) = token.parse::<usize>() {
+            parsed_limit = Some(value);
+            break;
+        }
+    }
+
+    let Some(parsed_limit) = parsed_limit else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "SELECT TOP currently supports only unsigned numeric literals".to_string(),
+        ));
+    };
+
+    if lowered.contains("percent") {
+        return Ok(SelectTopLimit {
+            limit: None,
+            percent: Some(parsed_limit),
+            with_ties,
+        });
+    }
+
+    Ok(SelectTopLimit {
+        limit: Some(parsed_limit),
+        percent: None,
+        with_ties,
+    })
+
+}
+
+fn parse_query_limit_or_fetch(
+    limit: Option<&Expr>,
+    fetch: Option<&sqlparser::ast::Fetch>,
+    clause_name: &str,
+) -> Result<Option<usize>, SqlParseError> {
+
+    Ok(parse_query_limit_or_fetch_plan(limit, fetch, clause_name)?.limit)
+
+}
+
+fn parse_query_limit_or_fetch_plan(
+    limit: Option<&Expr>,
+    fetch: Option<&sqlparser::ast::Fetch>,
+    clause_name: &str,
+) -> Result<QueryFetchLimit, SqlParseError> {
+
+    let parsed_limit = parse_query_limit(limit)?;
+    let parsed_fetch = parse_query_fetch_limit(fetch)?;
+
+    if parsed_limit.is_some() && parsed_fetch.limit.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(format!(
+            "{clause_name} currently supports LIMIT or FETCH, but not both"
+        )));
+    }
+
+    if parsed_limit.is_some() {
+        return Ok(QueryFetchLimit {
+            limit: parsed_limit,
+            percent: None,
+            with_ties: false,
+        });
+    }
+
+    Ok(parsed_fetch)
+
+}
+
+fn parse_query_fetch_limit(
+    fetch: Option<&sqlparser::ast::Fetch>,
+) -> Result<QueryFetchLimit, SqlParseError> {
+
+    let Some(fetch) = fetch else {
+        return Ok(QueryFetchLimit::default());
+    };
+
+    let rendered = fetch.to_string();
+    let lowered = rendered.to_ascii_lowercase();
+
+    if lowered.contains("percent") {
+        let with_ties = lowered.contains("with ties");
+
+        for token in lowered.split_whitespace() {
+            if let Ok(value) = token.parse::<usize>() {
+                return Ok(QueryFetchLimit {
+                    limit: None,
+                    percent: Some(value),
+                    with_ties,
+                });
+            }
+        }
+
+        return Err(SqlParseError::UnsupportedStatement(
+            "FETCH PERCENT currently supports only unsigned numeric literals".to_string(),
+        ));
+    }
+
+    let with_ties = lowered.contains("with ties");
+
+    for token in lowered.split_whitespace() {
+        if let Ok(value) = token.parse::<usize>() {
+            return Ok(QueryFetchLimit {
+                limit: Some(value),
+                percent: None,
+                with_ties,
+            });
+        }
+    }
+
+    if lowered.contains(" first row") || lowered.contains(" next row") {
+        return Ok(QueryFetchLimit {
+            limit: Some(1),
+            percent: None,
+            with_ties,
+        });
+    }
+
+    Err(SqlParseError::UnsupportedStatement(
+        "FETCH currently supports only unsigned numeric literals".to_string(),
+    ))
+
+}
+
+fn parse_select_limit_by_plan(
+    limit_by_exprs: &[Expr],
+    limit: Option<usize>,
+    _offset: Option<&sqlparser::ast::Offset>,
+    _fetch: Option<&sqlparser::ast::Fetch>,
+    relation_bindings: &[SelectRelationBinding],
+    clause_name: &str,
+) -> Result<Option<SelectLimitByPlan>, SqlParseError> {
+
+    if limit_by_exprs.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(per_key_limit) = limit else {
+        return Err(SqlParseError::UnsupportedStatement(format!(
+            "{clause_name} LIMIT BY requires LIMIT"
+        )));
+    };
+
+    let mut fields = Vec::with_capacity(limit_by_exprs.len());
+    for expr in limit_by_exprs {
+        let field_name = parse_condition_column_name(expr, relation_bindings).map_err(|_| {
+            SqlParseError::UnsupportedStatement(
+                "SELECT LIMIT BY currently supports only direct column references".to_string(),
+            )
+        })?;
+        fields.push(field_name);
+    }
+
+    Ok(Some(SelectLimitByPlan {
+        per_key_limit,
+        fields,
+    }))
+
+}
+
+fn parse_set_query_limit_by_plan(
+    limit_by_exprs: &[Expr],
+    limit: Option<usize>,
+    _offset: Option<&sqlparser::ast::Offset>,
+    _fetch: Option<&sqlparser::ast::Fetch>,
+) -> Result<Option<SelectLimitByPlan>, SqlParseError> {
+
+    if limit_by_exprs.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(per_key_limit) = limit else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "set query LIMIT BY requires LIMIT".to_string(),
+        ));
+    };
+
+    let mut fields = Vec::with_capacity(limit_by_exprs.len());
+
+    for expr in limit_by_exprs {
+        let field_name = match expr {
+            Expr::Identifier(identifier) => common::normalize_identifier!(&identifier.value),
+            Expr::CompoundIdentifier(parts) if !parts.is_empty() => {
+                common::normalize_identifier!(&parts[parts.len() - 1].value)
+            }
+            _ => {
+                return Err(SqlParseError::UnsupportedStatement(
+                    "set query LIMIT BY currently supports only direct column references"
+                        .to_string(),
+                ));
+            }
+        };
+
+        fields.push(field_name);
+    }
+
+    Ok(Some(SelectLimitByPlan {
+        per_key_limit,
+        fields,
+    }))
+
+}
+
+fn parse_select_compat_order_by_items(
+    select: &sqlparser::ast::Select,
+    relation_bindings: &[SelectRelationBinding],
+) -> Result<Vec<SelectOrderByItem>, SqlParseError> {
+
+    let mut items = Vec::new();
+    append_compat_order_by_items(
+        &mut items,
+        &select.cluster_by,
+        relation_bindings,
+        "SELECT CLUSTER BY",
+    )?;
+    append_compat_order_by_items(
+        &mut items,
+        &select.distribute_by,
+        relation_bindings,
+        "SELECT DISTRIBUTE BY",
+    )?;
+    append_compat_order_by_items(
+        &mut items,
+        &select.sort_by,
+        relation_bindings,
+        "SELECT SORT BY",
+    )?;
+    Ok(items)
+
+}
+
+fn append_compat_order_by_items(
+    items: &mut Vec<SelectOrderByItem>,
+    exprs: &[Expr],
+    relation_bindings: &[SelectRelationBinding],
+    clause_name: &str,
+) -> Result<(), SqlParseError> {
+
+    for expr in exprs {
+        let field_name = parse_condition_column_name(expr, relation_bindings).map_err(|_| {
+            SqlParseError::UnsupportedStatement(format!(
+                "{clause_name} currently supports only direct column references"
+            ))
+        })?;
+
+        items.push(SelectOrderByItem {
+            field_name,
+            descending: false,
+        });
+    }
+
+    Ok(())
+
+}
+
 fn parse_query_offset(offset: Option<&sqlparser::ast::Offset>) -> Result<Option<usize>, SqlParseError> {
     let Some(offset) = offset else {
         return Ok(None);
@@ -2508,6 +3147,8 @@ fn parse_relation_binding_from_factor(
     statement: &str,
 ) -> Result<SelectRelationBinding, SqlParseError> {
 
+    validate_supported_table_factor_features(relation)?;
+
     let TableFactor::Table { name, alias, .. } = relation else {
         return Err(SqlParseError::UnsupportedStatement(
             "only direct table SELECT is currently supported".to_string(),
@@ -2529,6 +3170,49 @@ fn parse_relation_binding_from_factor(
             .as_ref()
             .map(|table_alias| common::normalize_identifier!(&table_alias.name.value)),
     })
+
+}
+
+fn validate_supported_table_factor_features(relation: &TableFactor) -> Result<(), SqlParseError> {
+
+    let TableFactor::Table {
+        args,
+        with_hints,
+        version,
+        with_ordinality,
+        partitions,
+        ..
+    } = relation else {
+        return Ok(());
+    };
+
+    if args.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "table-valued FROM arguments are not supported yet".to_string(),
+        ));
+    }
+
+    let _ = with_hints;
+
+    if version.is_some() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "table version qualifiers are not supported yet".to_string(),
+        ));
+    }
+
+    if *with_ordinality {
+        return Err(SqlParseError::UnsupportedStatement(
+            "WITH ORDINALITY table factors are not supported yet".to_string(),
+        ));
+    }
+
+    if !partitions.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "table PARTITION selection is not supported yet".to_string(),
+        ));
+    }
+
+    Ok(())
 
 }
 

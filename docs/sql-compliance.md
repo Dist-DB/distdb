@@ -21,11 +21,13 @@ That does not mean full MySQL conformance. It means:
 
 Current parser and runtime alignment includes support for stored procedures and user-defined
 functions in the MySQL80 compatibility target, along with accepted SELECT qualifier syntax such
-as `QUALIFY` and `FOR UPDATE`/`FOR SHARE` where documented below.
+as `QUALIFY` where documented below.
 
 Current SELECT window-function coverage is partial: the runtime includes first execution slices
 for `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `SUM`, `AVG`, `MIN`, and `MAX` with named-window reuse, while broader window function parity and
 non-`ROWS` frame units are still pending.
+
+Current CTE coverage includes first-pass recursive execution for `WITH RECURSIVE` seed + recursive term forms under UNION and UNION ALL semantics with bounded iteration safety.
 
 Current command-surface execution model also includes:
 
@@ -34,6 +36,10 @@ Current command-surface execution model also includes:
 - routing of connector `Schema` and `Mutation` command variants through the same authorization and execution surfaces used by SQL query paths,
 - connector `SchemaCommand::AlterTable` update-field operations mapping to SQL `ALTER TABLE ... MODIFY COLUMN` and executing through the same parser/planner/runtime path as direct SQL,
 - index introspection via `SHOW INDEX` / `SHOW INDEXES` / `SHOW KEYS` table-scoped forms.
+
+Current OLAP command status note:
+
+- `SHOW SLICES FROM <olapview>` is classified, routed, and currently returns first-pass slice rows (dimension coordinates, `row_count`, and numeric per-slice aggregates over projected numeric fields) from committed source rows, with first-pass `WHERE`, `ORDER BY`, and `LIMIT` post-processing over emitted slice columns.
 
 Durability alignment for index lifecycle currently includes:
 

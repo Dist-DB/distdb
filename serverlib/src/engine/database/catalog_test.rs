@@ -132,6 +132,79 @@ fn at_rest_encryption_key_reference_is_immutable_after_set() {
 }
 
 #[test]
+fn recursive_cte_execution_settings_default_values_are_available() {
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    let settings = catalog.recursive_cte_execution_settings();
+
+    assert_eq!(settings.max_iterations, 128);
+    assert_eq!(settings.max_rows, 50_000);
+    assert_eq!(settings.timeout_ms, 0);
+    assert!(settings.detect_repeating_union_all_frontier);
+}
+
+#[test]
+fn recursive_cte_execution_settings_are_sanitized_on_configure() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    catalog.configure_recursive_cte_execution_settings(
+        RecursiveCteExecutionSettings {
+            max_iterations: 0,
+            max_rows: 0,
+            timeout_ms: 25,
+            detect_repeating_union_all_frontier: false,
+        },
+    );
+
+    let settings = catalog.recursive_cte_execution_settings();
+
+    assert_eq!(settings.max_iterations, 1);
+    assert_eq!(settings.max_rows, 1);
+    assert_eq!(settings.timeout_ms, 25);
+    assert!(!settings.detect_repeating_union_all_frontier);
+}
+
+#[test]
+fn recursive_cte_execution_settings_persist_in_catalog_file() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    catalog.configure_recursive_cte_execution_settings(
+        RecursiveCteExecutionSettings {
+            max_iterations: 9,
+            max_rows: 321,
+            timeout_ms: 777,
+            detect_repeating_union_all_frontier: false,
+        },
+    );
+
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "distdb-catalog-recursive-cte-settings-test-{}",
+        common::helpers::utils::unique_id()
+    ));
+
+    std::fs::create_dir_all(&dir).expect("temp dir should be created");
+
+    catalog
+        .save_in_directory(&dir)
+        .expect("catalog save should succeed");
+
+    let loaded = DatabaseCatalog::load_from_path(catalog_path_for_test(&catalog, &dir))
+        .expect("catalog load should succeed");
+
+    let settings = loaded.recursive_cte_execution_settings();
+    assert_eq!(settings.max_iterations, 9);
+    assert_eq!(settings.max_rows, 321);
+    assert_eq!(settings.timeout_ms, 777);
+    assert!(!settings.detect_repeating_union_all_frontier);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn duplicate_table_registration_is_rejected() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");

@@ -552,14 +552,117 @@ pub enum InsertRowsSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertRowsPlan {
     pub table_id: String,
+    pub ignore: bool,
+    pub replace_into: bool,
     pub columns: Vec<String>,
     pub source: InsertRowsSource,
+    pub on_duplicate_update: Vec<InsertOnDuplicateAssignment>,
+    pub returning: Option<MutationReturningPlan>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertOnDuplicateAssignment {
+    pub field_name: String,
+    pub value: InsertOnDuplicateAssignmentValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertOnDuplicateAssignmentValue {
+    Literal(Option<Vec<u8>>),
+    FunctionExpression(String),
+    IncomingColumn(String),
+    ExistingColumn(String),
+    Arithmetic {
+        left: InsertOnDuplicateAssignmentOperand,
+        op: InsertOnDuplicateArithmeticOp,
+        right: InsertOnDuplicateAssignmentOperand,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertOnDuplicateAssignmentOperand {
+    Literal(Option<Vec<u8>>),
+    FunctionExpression(String),
+    IncomingColumn(String),
+    ExistingColumn(String),
+    Unary {
+        op: UnaryArithmeticOp,
+        operand: Box<InsertOnDuplicateAssignmentOperand>,
+    },
+    Arithmetic {
+        left: Box<InsertOnDuplicateAssignmentOperand>,
+        op: InsertOnDuplicateArithmeticOp,
+        right: Box<InsertOnDuplicateAssignmentOperand>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryArithmeticOp {
+    Plus,
+    Minus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOnDuplicateArithmeticOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationReturningItem {
+    Wildcard,
+    Column {
+        field_name: String,
+        output_name: String,
+    },
+}
+
+pub type MutationReturningPlan = Vec<MutationReturningItem>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAssignment {
     pub field_name: String,
-    pub value: Option<Vec<u8>>,
+    pub value: UpdateAssignmentValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateAssignmentValue {
+    Literal(Option<Vec<u8>>),
+    FunctionExpression(String),
+    ExistingColumn(String),
+    Arithmetic {
+        left: UpdateAssignmentOperand,
+        op: UpdateArithmeticOp,
+        right: UpdateAssignmentOperand,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateAssignmentOperand {
+    Literal(Option<Vec<u8>>),
+    FunctionExpression(String),
+    ExistingColumn(String),
+    Unary {
+        op: UnaryArithmeticOp,
+        operand: Box<UpdateAssignmentOperand>,
+    },
+    Arithmetic {
+        left: Box<UpdateAssignmentOperand>,
+        op: UpdateArithmeticOp,
+        right: Box<UpdateAssignmentOperand>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateArithmeticOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -568,8 +671,11 @@ pub struct UpdateRowsPlan {
     pub relations: Vec<SelectRelation>,
     pub joins: Vec<SelectJoin>,
     pub pushdown_conditions: Vec<Option<SelectCondition>>,
+    pub order_by: Vec<SelectOrderByItem>,
+    pub limit: Option<usize>,
     pub assignments: Vec<UpdateAssignment>,
     pub where_condition: Option<SelectCondition>,
+    pub returning: Option<MutationReturningPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -578,7 +684,10 @@ pub struct DeleteRowsPlan {
     pub relations: Vec<SelectRelation>,
     pub joins: Vec<SelectJoin>,
     pub pushdown_conditions: Vec<Option<SelectCondition>>,
+    pub order_by: Vec<SelectOrderByItem>,
+    pub limit: Option<usize>,
     pub where_condition: Option<SelectCondition>,
+    pub returning: Option<MutationReturningPlan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -832,16 +941,40 @@ pub struct SelectReadPlan {
     pub group_by: Vec<String>,
     pub having_condition: Option<SelectCondition>,
     pub has_window_clause: bool,
+    pub limit_by: Option<SelectLimitByPlan>,
+    pub top_percent: Option<usize>,
+    pub top_percent_with_ties: Option<usize>,
+    pub top_with_ties_limit: Option<usize>,
+    pub fetch_percent: Option<usize>,
+    pub fetch_percent_with_ties: Option<usize>,
+    pub fetch_with_ties_limit: Option<usize>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub where_condition: Option<SelectCondition>,
+    pub qualify_condition: Option<SelectCondition>,
+    pub lock_mode: SelectLockMode,
     pub is_explain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectLimitByPlan {
+    pub per_key_limit: usize,
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectLockMode {
+    None,
+    ForUpdate,
+    ForShare,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectCtePlan {
     pub table_id: String,
     pub read_plan: Box<SelectReadPlan>,
+    pub recursive_read_plan: Option<Box<SelectReadPlan>>,
+    pub recursive_union_all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

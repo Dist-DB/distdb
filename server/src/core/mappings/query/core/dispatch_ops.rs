@@ -148,9 +148,9 @@ fn query_operation_handler(operation: SqlOperation) -> Option<QueryOperationHand
 }
 
 fn execute_alter_other(
-    _ctx: &mut QueryExecutionContext<'_>,
+    ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    _query: &DataQuery,
+    query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -177,6 +177,38 @@ fn execute_alter_other(
         );
     }
 
+    if lowered.starts_with("set ") {
+        let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", query.database_id),
+            );
+        };
+
+        return match apply_set_variables(catalog, &statement.sql) {
+            Ok(_) => ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            ),
+            Err(message) => ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("set variable failed: {message}"),
+            ),
+        };
+    }
+
+    if lowered.starts_with("set names")
+        || lowered == "set names default"
+        || lowered.starts_with("set role")
+        || lowered.starts_with("set time zone")
+        || lowered.starts_with("set transaction")
+    {
+        return ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+        );
+    }
+
     ConnectorResponse::rejected(
         request_id.to_string(),
         format!(
@@ -185,6 +217,120 @@ fn execute_alter_other(
         ),
     )
 
+}
+
+fn apply_set_variables(catalog: &mut DatabaseCatalog, sql: &str) -> Result<(), String> {
+    let normalized_sql = sql.trim().trim_end_matches(';').trim();
+
+    if normalized_sql.len() < 3 || !normalized_sql[..3].eq_ignore_ascii_case("set") {
+        return Err("statement is not a SET directive".to_string());
+    }
+
+    let mut assignments_sql = normalized_sql[3..].trim();
+
+    for scope_prefix in ["global", "session", "local"] {
+        if assignments_sql
+            .get(..scope_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scope_prefix))
+            && assignments_sql
+                .chars()
+                .nth(scope_prefix.len())
+                .is_some_and(char::is_whitespace)
+        {
+            assignments_sql = assignments_sql[scope_prefix.len()..].trim_start();
+            break;
+        }
+    }
+
+    if assignments_sql.is_empty() {
+        return Err("missing variable assignment".to_string());
+    }
+
+    let mut next_settings = catalog.recursive_cte_execution_settings().clone();
+
+    for assignment in assignments_sql
+        .split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+    {
+        let Some((raw_name, raw_value)) = assignment.split_once('=') else {
+            return Err(format!("invalid assignment '{assignment}'"));
+        };
+
+        let variable_name = normalize_set_variable_name(raw_name);
+        let variable_value = raw_value.trim();
+
+        match variable_name.as_str() {
+            "cte.max_iterations" => {
+                let parsed = variable_value.parse::<usize>().map_err(|_| {
+                    format!(
+                        "cte.max_iterations expects a positive integer, received '{variable_value}'"
+                    )
+                })?;
+
+                if parsed == 0 {
+                    return Err("cte.max_iterations must be greater than 0".to_string());
+                }
+
+                next_settings.max_iterations = parsed;
+            }
+
+            "cte.max_rows" => {
+                let parsed = variable_value.parse::<usize>().map_err(|_| {
+                    format!("cte.max_rows expects a positive integer, received '{variable_value}'")
+                })?;
+
+                if parsed == 0 {
+                    return Err("cte.max_rows must be greater than 0".to_string());
+                }
+
+                next_settings.max_rows = parsed;
+            }
+
+            "cte.timeout_ms" => {
+                let parsed = variable_value.parse::<u64>().map_err(|_| {
+                    format!("cte.timeout_ms expects a non-negative integer, received '{variable_value}'")
+                })?;
+
+                next_settings.timeout_ms = parsed;
+            }
+
+            "cte.union_all_repeat_detection" => {
+                next_settings.detect_repeating_union_all_frontier =
+                    parse_boolean_set_value(variable_value)?;
+            }
+
+            _ => {
+                return Err(format!("unsupported variable '{raw_name}'"));
+            }
+        }
+    }
+
+    catalog.configure_recursive_cte_execution_settings(next_settings);
+    Ok(())
+}
+
+fn normalize_set_variable_name(input: &str) -> String {
+    let mut normalized = input.trim().to_ascii_lowercase();
+
+    for prefix in ["@@global.", "@@session.", "@@local.", "@@"] {
+        if let Some(stripped) = normalized.strip_prefix(prefix) {
+            normalized = stripped.to_string();
+            break;
+        }
+    }
+
+    normalized
+}
+
+fn parse_boolean_set_value(input: &str) -> Result<bool, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" => Ok(true),
+        "0" | "false" | "off" => Ok(false),
+        other => Err(format!(
+            "cte.union_all_repeat_detection expects true/false (or 1/0), received '{other}'"
+        )),
+    }
 }
 
 fn execute_alter_table(

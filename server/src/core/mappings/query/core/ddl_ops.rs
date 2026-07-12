@@ -1274,6 +1274,30 @@ fn parse_create_index_spec(
         return Err("statement is not CREATE INDEX".to_string());
     }
 
+    if lowered.starts_with("create unique index") {
+        return Err("CREATE UNIQUE INDEX is not supported yet".to_string());
+    }
+
+    if lowered.starts_with("create fulltext") || lowered.starts_with("create spatial") {
+        return Err("CREATE FULLTEXT/SPATIAL INDEX is not supported yet".to_string());
+    }
+
+    if lowered.contains(" using ") {
+        return Err("CREATE INDEX USING is not supported yet".to_string());
+    }
+
+    if lowered.contains(" where ") {
+        return Err("CREATE INDEX WHERE is not supported yet".to_string());
+    }
+
+    if lowered.contains(" algorithm ") || lowered.contains(" lock ") {
+        return Err("CREATE INDEX ALGORITHM/LOCK options are not supported yet".to_string());
+    }
+
+    if lowered.contains(" comment ") {
+        return Err("CREATE INDEX COMMENT is not supported yet".to_string());
+    }
+
     let on_pos = lowered
         .find(" on ")
         .ok_or_else(|| "CREATE INDEX missing ON clause".to_string())?;

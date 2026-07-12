@@ -96,6 +96,22 @@ fn show_privileges_result_sorts_users_and_emits_three_columns() {
 }
 
 #[test]
+fn show_variables_result_sorts_names_and_emits_expected_columns() {
+    let result = show_variables_result(vec![
+        ("cte.timeout_ms".to_string(), "0".to_string()),
+        ("cte.max_iterations".to_string(), "128".to_string()),
+    ]);
+
+    assert_eq!(result.columns.len(), 2);
+    assert_eq!(result.columns[0].field_name, "variable_name");
+    assert_eq!(result.columns[1].field_name, "value");
+    assert_eq!(String::from_utf8(result.rows[0][0].clone()).unwrap(), "cte.max_iterations");
+    assert_eq!(String::from_utf8(result.rows[0][1].clone()).unwrap(), "128");
+    assert_eq!(String::from_utf8(result.rows[1][0].clone()).unwrap(), "cte.timeout_ms");
+    assert_eq!(String::from_utf8(result.rows[1][1].clone()).unwrap(), "0");
+}
+
+#[test]
 fn describe_table_result_uses_schema_metadata() {
     let schema = TableSchema::new(vec![
         FieldDef {

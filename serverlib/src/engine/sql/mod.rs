@@ -16,6 +16,7 @@ mod trigger_plan;
 mod insert_plan;
 mod update_plan;
 mod delete_plan;
+mod mutation_returning;
 
 pub use insert_plan::{parse_insert_rows_from_parsed_statement, parse_insert_rows_from_statement};
 pub use update_plan::parse_update_rows_from_statement;
@@ -71,16 +72,21 @@ pub use predicates::{
 pub use types::{
     AclMutationKind, AclMutationPlan,
     AlterTableChangeOp, AlterTableChangePlan, DeleteRowsPlan, IfElseEndBranchPlan,
-    IfElseEndPlan, InsertRowsPlan, InsertRowsSource,
+    IfElseEndPlan, InsertOnDuplicateArithmeticOp, InsertOnDuplicateAssignment,
+    InsertOnDuplicateAssignmentOperand, InsertOnDuplicateAssignmentValue,
+    InsertRowsPlan, InsertRowsSource,
+    MutationReturningItem, MutationReturningPlan,
     RoutineArgumentBinding, RoutineParameterDeclaration, RoutineParameterMode,
     SelectCaseWhen,
     SelectComparisonOp, SelectCondition,
     SelectCtePlan, SelectJoin, SelectJoinKind, SelectOrderByItem, SelectSetBoundaryOp, SelectSetQueryStep, SelectPredicate,
-    SelectProjectionItem, SelectReadPlan, SelectRelation,
+    SelectLimitByPlan, SelectLockMode, SelectProjectionItem, SelectReadPlan, SelectRelation,
     TriggerEventKind, TriggerInvocationBinding, TriggerTiming,
     SqlCompatibilityTarget, SqlDirective, SqlOperation,
     SqlParseError, SqlRequest, DEFAULT_SQL_COMPATIBILITY_TARGET,
-    UpdateAssignment, UpdateRowsPlan,
+    UnaryArithmeticOp,
+    UpdateArithmeticOp, UpdateAssignment, UpdateAssignmentOperand,
+    UpdateAssignmentValue, UpdateRowsPlan,
 };
 
 pub(super) fn parse_mysql_statements(sql: &str) -> Result<Vec<Statement>, SqlParseError> {

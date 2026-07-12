@@ -431,12 +431,14 @@ fn query_contains_operator(query: &Query, needle: SetOperator) -> bool {
         || query
             .with
             .as_ref()
+            .filter(|with| !with.recursive)
             .map(|with| {
                 with.cte_tables
                     .iter()
                     .any(|cte| query_contains_operator(&cte.query, needle))
             })
             .unwrap_or(false)
+
 }
 
 fn first_object_name_in_set_expr(set_expr: &SetExpr) -> Option<String> {
@@ -583,6 +585,25 @@ pub(super) fn classify_text_fallback(
                     required_privilege_for_operation(SqlOperation::Select),
                 ));
             }
+
+            if tokens
+                .get(1)
+                .is_some_and(|token| token.eq_ignore_ascii_case("slices"))
+            {
+                let object_name = tokens
+                    .iter()
+                    .position(|token| token.eq_ignore_ascii_case("from"))
+                    .and_then(|idx| tokens.get(idx + 1))
+                    .and_then(|name| normalize_fallback_object_name(name));
+
+                return Some((
+                    SqlDirective::Retrieve,
+                    SqlOperation::ShowSlices,
+                    object_name,
+                    required_privilege_for_operation(SqlOperation::ShowSlices),
+                ));
+            }
+            
         },
 
         "debug" => {
@@ -606,6 +627,18 @@ pub(super) fn classify_text_fallback(
                 SqlOperation::CallStoredProcedure,
                 object_name,
                 required_privilege_for_operation(SqlOperation::CallStoredProcedure),
+            ));
+        },
+
+        "update" => {
+            let object_name = tokens
+                .get(1)
+                .and_then(|name| normalize_fallback_object_name(name));
+            return Some((
+                SqlDirective::Update,
+                SqlOperation::Update,
+                object_name,
+                required_privilege_for_operation(SqlOperation::Update),
             ));
         },
 

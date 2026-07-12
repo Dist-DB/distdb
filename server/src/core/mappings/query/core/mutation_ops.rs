@@ -1,6 +1,19 @@
 use super::*;
 use crate::core::mappings::query::core::wal_ops::table_stream_id;
 
+const ORDER_EXPR_LOWER_PREFIX: &str = "__order_expr_lower__:";
+const ORDER_EXPR_UPPER_PREFIX: &str = "__order_expr_upper__:";
+const ORDER_EXPR_ABS_PREFIX: &str = "__order_expr_abs__:";
+const ORDER_EXPR_LENGTH_PREFIX: &str = "__order_expr_length__:";
+const ORDER_EXPR_REVERSE_PREFIX: &str = "__order_expr_reverse__:";
+const ORDER_EXPR_TRIM_PREFIX: &str = "__order_expr_trim__:";
+const ORDER_EXPR_LTRIM_PREFIX: &str = "__order_expr_ltrim__:";
+const ORDER_EXPR_RTRIM_PREFIX: &str = "__order_expr_rtrim__:";
+const ORDER_EXPR_CEIL_PREFIX: &str = "__order_expr_ceil__:";
+const ORDER_EXPR_FLOOR_PREFIX: &str = "__order_expr_floor__:";
+const ORDER_EXPR_ROUND_PREFIX: &str = "__order_expr_round__:";
+const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = "__order_expr_round_scale__:";
+
 pub(super) fn execute_insert_impl(
     request_id: &str,
     query: &DataQuery,
@@ -62,7 +75,20 @@ pub(super) fn execute_insert_impl(
         let mut rows = vec![
             vec!["operation".to_string(), "insert".to_string()],
             vec!["table".to_string(), plan.table_id.clone()],
+            vec!["ignore".to_string(), plan.ignore.to_string()],
+            vec!["replace_into".to_string(), plan.replace_into.to_string()],
+            vec![
+                "on_duplicate_update_count".to_string(),
+                plan.on_duplicate_update.len().to_string(),
+            ],
             vec!["column_count".to_string(), plan.columns.len().to_string()],
+            vec![
+                "returning_count".to_string(),
+                plan.returning
+                    .as_ref()
+                    .map(|items| items.len().to_string())
+                    .unwrap_or_else(|| "0".to_string()),
+            ],
         ];
 
         match &plan.source {
@@ -145,7 +171,14 @@ fn execute_insert_locked(
 
     let table_stream_id = table_stream_id(catalog, &plan.table_id);
 
-    let columns = if plan.columns.is_empty() {
+    let is_default_values_insert = plan.columns.is_empty()
+        && matches!(
+            &plan.source,
+            serverlib::InsertRowsSource::Values(rows)
+                if !rows.is_empty() && rows.iter().all(|row| row.is_empty())
+        );
+
+    let columns = if plan.columns.is_empty() && !is_default_values_insert {
         schema
             .fields
             .iter()
@@ -222,8 +255,14 @@ fn execute_insert_locked(
         |group_id, runtime_indexes| {
 
             let mut affected_rows = 0u64;
+            let mut returning_rows = if plan.returning.is_some() {
+                Vec::with_capacity(insert_rows.len())
+            } else {
+                Vec::new()
+            };
             let mut pk_checks = 0u64;
             let mut staged_payloads = Vec::with_capacity(insert_rows.len());
+            let mut staged_rows = Vec::<HashMap<String, Vec<u8>>>::with_capacity(insert_rows.len());
             let track_runtime_indexes_for_insert = derived_indexes_for_table(table).next().is_some();
             let mut staged_row_maps = if track_runtime_indexes_for_insert {
                 Vec::with_capacity(insert_rows.len())
@@ -231,7 +270,21 @@ fn execute_insert_locked(
                 Vec::new()
             };
             let mut staged_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
+            let mut staged_pk_positions = HashMap::<Vec<Vec<u8>>, usize>::new();
             let mut existing_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
+            let mut existing_pk_rows = HashMap::<Vec<Vec<u8>>, (u64, HashMap<String, Vec<u8>>)>::new();
+            let payload_context = payload_context_for_table(catalog, &plan.table_id);
+            let current_live_rows = load_live_rows_with_context(
+                wal,
+                &table_stream_id,
+                schema,
+                &payload_context,
+            )
+            .unwrap_or_default();
+            let current_live_row_ids = current_live_rows
+                .iter()
+                .map(|(row_id, _)| *row_id)
+                .collect::<HashSet<_>>();
             let primary_key_details = primary_key_index(table).map(|pk_index| {
                 let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
                     vec![pk_index.field_name.as_str()]
@@ -239,20 +292,71 @@ fn execute_insert_locked(
                     pk_index.field_names.iter().map(|name| name.as_str()).collect()
                 };
 
-                let payload_context = payload_context_for_table(catalog, &plan.table_id);
-                existing_pk_keys = load_live_rows_with_context(
-                    wal,
-                    &table_stream_id,
-                    schema,
-                    &payload_context,
-                )
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(_, row_map)| index_value_tuple(pk_index, &row_map))
-                .collect();
+                for (row_id, row_map) in current_live_rows.iter().cloned() {
+                    let key = index_value_tuple(pk_index, &row_map);
+                    existing_pk_keys.insert(key.clone());
+                    existing_pk_rows.insert(key, (row_id, row_map));
+                }
 
                 (pk_index.index_id.0.as_str(), pk_fields)
             });
+
+            let unique_indexes = table
+                .indexes
+                .values()
+                .filter(|index| !index.is_temporary() && index.is_unique_key())
+                .collect::<Vec<_>>();
+
+            let non_primary_unique_indexes = unique_indexes
+                .iter()
+                .copied()
+                .filter(|index| !index.is_primary_key())
+                .collect::<Vec<_>>();
+
+            let mut existing_unique_rows = HashMap::<
+                String,
+                HashMap<Vec<Vec<u8>>, (u64, HashMap<String, Vec<u8>>)>,
+            >::new();
+
+            for index in &unique_indexes {
+                let mut index_rows = HashMap::new();
+                for (row_id, row_map) in current_live_rows.iter().cloned() {
+                    index_rows.insert(index_value_tuple(index, &row_map), (row_id, row_map));
+                }
+                existing_unique_rows.insert(index.index_id.0.clone(), index_rows);
+            }
+
+            let mut staged_unique_positions =
+                HashMap::<String, HashMap<Vec<Vec<u8>>, usize>>::new();
+
+            if !plan.on_duplicate_update.is_empty()
+                && unique_indexes.is_empty()
+            {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    "insert failed: ON DUPLICATE KEY UPDATE requires a primary or unique key"
+                        .to_string(),
+                );
+            }
+
+            if plan.replace_into && unique_indexes.is_empty() {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    "insert failed: REPLACE INTO requires a primary or unique key in current implementation".to_string(),
+                );
+            }
+
+            if let Some((_, pk_fields)) = primary_key_details.as_ref()
+                && plan
+                    .on_duplicate_update
+                    .iter()
+                    .any(|assignment| pk_fields.iter().any(|pk| *pk == assignment.field_name))
+            {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    "insert failed: ON DUPLICATE KEY UPDATE cannot modify primary key fields in current implementation".to_string(),
+                );
+            }
 
             for row in insert_rows.iter() {
 
@@ -336,6 +440,426 @@ fn execute_insert_locked(
                     }
                 };
 
+                if plan.replace_into {
+                    let mut persisted_conflict = None;
+                    let mut staged_conflict_position = None;
+
+                    for index in &unique_indexes {
+                        let index_id = index.index_id.0.as_str();
+                        let key = index_value_tuple(index, &canonical_row);
+
+                        if let Some(position) = staged_unique_positions
+                            .get(index_id)
+                            .and_then(|positions| positions.get(&key))
+                            .copied()
+                        {
+                            staged_conflict_position = Some(position);
+                            break;
+                        }
+
+                        if let Some((row_id, row)) = existing_unique_rows
+                            .get(index_id)
+                            .and_then(|rows| rows.get(&key))
+                            .cloned()
+                        {
+                            persisted_conflict = Some((row_id, row));
+                            break;
+                        }
+                    }
+
+                    if let Some((row_id, existing_row)) = persisted_conflict {
+                        let delete_payload = match encode_row_payload(schema, &existing_row) {
+                            Ok(encoded) => encoded,
+                            Err(err) => {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!("insert replace payload encode failed: {err}"),
+                                );
+                            }
+                        };
+
+                        if let Err(err) = append_row_payload_record_with_live_row_ids(
+                            catalog,
+                            wal,
+                            &table_stream_id,
+                            table,
+                            runtime_indexes,
+                            TransactionKind::Delete,
+                            delete_payload,
+                            common::epoch_nanos!(),
+                            Some(TransactionId(row_id)),
+                            Some(&current_live_row_ids),
+                            Some(group_id),
+                        ) {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert replace delete WAL append failed: {err}"),
+                            );
+                        }
+
+                        if let Err(err) = append_row_payload_record(
+                            catalog,
+                            wal,
+                            &table_stream_id,
+                            table,
+                            runtime_indexes,
+                            TransactionKind::Insert,
+                            encoded.clone(),
+                            common::epoch_nanos!(),
+                            None,
+                            Some(group_id),
+                        ) {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert replace insert WAL append failed: {err}"),
+                            );
+                        }
+
+                        for index in &unique_indexes {
+                            let index_id = index.index_id.0.clone();
+                            let old_key = index_value_tuple(index, &existing_row);
+                            let new_key = index_value_tuple(index, &canonical_row);
+                            if let Some(rows) = existing_unique_rows.get_mut(&index_id) {
+                                rows.remove(&old_key);
+                                rows.insert(new_key, (row_id, canonical_row.clone()));
+                            }
+                        }
+
+                        if plan.returning.is_some() {
+                            returning_rows.push(canonical_row.clone());
+                        }
+
+                        affected_rows = affected_rows.saturating_add(1);
+                        continue;
+                    }
+
+                    if let Some(position) = staged_conflict_position {
+                        let previous_row = staged_rows[position].clone();
+
+                        staged_payloads[position] = encoded.clone();
+                        staged_rows[position] = canonical_row.clone();
+
+                        if track_runtime_indexes_for_insert {
+                            staged_row_maps[position] = canonical_row.clone();
+                        }
+
+                        for index in &unique_indexes {
+                            let index_id = index.index_id.0.clone();
+                            let old_key = index_value_tuple(index, &previous_row);
+                            let new_key = index_value_tuple(index, &canonical_row);
+                            let positions = staged_unique_positions.entry(index_id).or_default();
+                            positions.remove(&old_key);
+                            positions.insert(new_key, position);
+                        }
+
+                        if plan.returning.is_some() {
+                            returning_rows.push(canonical_row.clone());
+                        }
+
+                        affected_rows = affected_rows.saturating_add(1);
+                        continue;
+                    }
+                }
+
+                if !plan.on_duplicate_update.is_empty() {
+                    let mut persisted_conflict = None;
+                    let mut staged_conflict_position = None;
+
+                    for index in &unique_indexes {
+                        let index_id = index.index_id.0.as_str();
+                        let key = index_value_tuple(index, &canonical_row);
+
+                        if let Some(position) = staged_unique_positions
+                            .get(index_id)
+                            .and_then(|positions| positions.get(&key))
+                            .copied()
+                        {
+                            staged_conflict_position = Some(position);
+                            break;
+                        }
+
+                        if let Some((row_id, row)) = existing_unique_rows
+                            .get(index_id)
+                            .and_then(|rows| rows.get(&key))
+                            .cloned()
+                        {
+                            persisted_conflict = Some((row_id, row));
+                            break;
+                        }
+                    }
+
+                    if let Some((row_id, existing_row)) = persisted_conflict {
+                        let delete_payload = match encode_row_payload(schema, &existing_row) {
+                            Ok(encoded) => encoded,
+                            Err(err) => {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!("insert duplicate update payload encode failed: {err}"),
+                                );
+                            }
+                        };
+
+                        let mut updated_row = existing_row.clone();
+
+                        if let Err(message) = apply_insert_on_duplicate_assignments(
+                            &mut updated_row,
+                            &plan.on_duplicate_update,
+                            &canonical_row,
+                        ) {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert duplicate update failed: {message}"),
+                            );
+                        }
+
+                        for field in &schema.fields {
+                            if !updated_row.contains_key(&field.field_name) && !field.nullable {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!(
+                                        "insert duplicate update failed: column '{}' cannot be null",
+                                        field.field_name
+                                    ),
+                                );
+                            }
+                        }
+
+                        let insert_payload = match encode_row_payload(schema, &updated_row) {
+                            Ok(encoded) => encoded,
+                            Err(err) => {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!("insert duplicate update payload encode failed: {err}"),
+                                );
+                            }
+                        };
+
+                        let updated_row = match decode_row_payload(schema, &insert_payload) {
+                            Ok(row) => row,
+                            Err(err) => {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!("insert duplicate update payload decode failed: {err}"),
+                                );
+                            }
+                        };
+
+                        if let Err(err) = append_row_payload_record_with_live_row_ids(
+                            catalog,
+                            wal,
+                            &table_stream_id,
+                            table,
+                            runtime_indexes,
+                            TransactionKind::Delete,
+                            delete_payload,
+                            common::epoch_nanos!(),
+                            Some(TransactionId(row_id)),
+                            Some(&current_live_row_ids),
+                            Some(group_id),
+                        ) {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert duplicate update delete WAL append failed: {err}"),
+                            );
+                        }
+
+                        if let Err(err) = append_row_payload_record(
+                            catalog,
+                            wal,
+                            &table_stream_id,
+                            table,
+                            runtime_indexes,
+                            TransactionKind::Insert,
+                            insert_payload,
+                            common::epoch_nanos!(),
+                            None,
+                            Some(group_id),
+                        ) {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert duplicate update insert WAL append failed: {err}"),
+                            );
+                        }
+
+                        for index in &unique_indexes {
+                            let index_id = index.index_id.0.clone();
+                            let old_key = index_value_tuple(index, &existing_row);
+                            let new_key = index_value_tuple(index, &updated_row);
+                            if let Some(rows) = existing_unique_rows.get_mut(&index_id) {
+                                rows.remove(&old_key);
+                                rows.insert(new_key, (row_id, updated_row.clone()));
+                            }
+                        }
+
+                        if let Some((_, pk_fields)) = primary_key_details.as_ref() {
+                            let old_pk = pk_fields
+                                .iter()
+                                .map(|pk| existing_row.get(*pk).cloned().unwrap_or_default())
+                                .collect::<Vec<_>>();
+                            let new_pk = pk_fields
+                                .iter()
+                                .map(|pk| updated_row.get(*pk).cloned().unwrap_or_default())
+                                .collect::<Vec<_>>();
+
+                            existing_pk_keys.remove(&old_pk);
+                            existing_pk_keys.insert(new_pk.clone());
+                            existing_pk_rows.remove(&old_pk);
+                            existing_pk_rows.insert(new_pk, (row_id, updated_row.clone()));
+                        }
+
+                        if plan.returning.is_some() {
+                            returning_rows.push(updated_row.clone());
+                        }
+
+                        affected_rows = affected_rows.saturating_add(1);
+                        continue;
+                    }
+
+                    if let Some(position) = staged_conflict_position {
+                        let previous_row = staged_rows[position].clone();
+                        let mut updated_row = previous_row.clone();
+
+                        if let Err(message) = apply_insert_on_duplicate_assignments(
+                            &mut updated_row,
+                            &plan.on_duplicate_update,
+                            &canonical_row,
+                        ) {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert duplicate update failed: {message}"),
+                            );
+                        }
+
+                        for field in &schema.fields {
+                            if !updated_row.contains_key(&field.field_name) && !field.nullable {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!(
+                                        "insert duplicate update failed: column '{}' cannot be null",
+                                        field.field_name
+                                    ),
+                                );
+                            }
+                        }
+
+                        let insert_payload = match encode_row_payload(schema, &updated_row) {
+                            Ok(encoded) => encoded,
+                            Err(err) => {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!("insert duplicate update payload encode failed: {err}"),
+                                );
+                            }
+                        };
+
+                        let updated_row = match decode_row_payload(schema, &insert_payload) {
+                            Ok(row) => row,
+                            Err(err) => {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    format!("insert duplicate update payload decode failed: {err}"),
+                                );
+                            }
+                        };
+
+                        staged_payloads[position] = insert_payload;
+                        staged_rows[position] = updated_row.clone();
+
+                        if track_runtime_indexes_for_insert {
+                            staged_row_maps[position] = updated_row.clone();
+                        }
+
+                        for index in &unique_indexes {
+                            let index_id = index.index_id.0.clone();
+                            let old_key = index_value_tuple(index, &previous_row);
+                            let new_key = index_value_tuple(index, &updated_row);
+                            let positions = staged_unique_positions.entry(index_id).or_default();
+                            positions.remove(&old_key);
+                            positions.insert(new_key, position);
+                        }
+
+                        if let Some((_, pk_fields)) = primary_key_details.as_ref() {
+                            let old_pk = pk_fields
+                                .iter()
+                                .map(|pk| previous_row.get(*pk).cloned().unwrap_or_default())
+                                .collect::<Vec<_>>();
+                            let new_pk = pk_fields
+                                .iter()
+                                .map(|pk| updated_row.get(*pk).cloned().unwrap_or_default())
+                                .collect::<Vec<_>>();
+
+                            staged_pk_keys.remove(&old_pk);
+                            staged_pk_keys.insert(new_pk.clone());
+                            staged_pk_positions.remove(&old_pk);
+                            staged_pk_positions.insert(new_pk, position);
+                        }
+
+                        if plan.returning.is_some() {
+                            returning_rows.push(updated_row);
+                        }
+
+                        affected_rows = affected_rows.saturating_add(1);
+                        continue;
+                    }
+                }
+
+                if !plan.replace_into && plan.on_duplicate_update.is_empty() {
+
+                    let mut non_primary_unique_conflict: Option<String> = None;
+
+                    for index in &non_primary_unique_indexes {
+
+                        let index_id = index.index_id.0.as_str();
+                        let key = index_value_tuple(index, &canonical_row);
+
+                        let has_staged_conflict = staged_unique_positions
+                            .get(index_id)
+                            .and_then(|positions| positions.get(&key))
+                            .is_some();
+
+                        let has_persisted_conflict = existing_unique_rows
+                            .get(index_id)
+                            .and_then(|rows| rows.get(&key))
+                            .is_some();
+
+                        if !has_staged_conflict && !has_persisted_conflict {
+                            continue;
+                        }
+
+                        let unique_display = index
+                            .field_names
+                            .iter()
+                            .zip(key.iter())
+                            .map(|(name, val)| {
+                                format!(
+                                    "{}={}",
+                                    name,
+                                    serverlib::display_stored_field_value(val)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        non_primary_unique_conflict = Some(unique_display);
+                        break;
+
+                    }
+
+                    if let Some(unique_display) = non_primary_unique_conflict {
+
+                        if plan.ignore {
+                            continue;
+                        }
+
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("insert failed: duplicate unique key ({})", unique_display),
+                        );
+
+                    }
+                    
+                }
+
                 if let Some((pk_index_id, pk_fields)) = primary_key_details.as_ref() {
                     pk_checks = pk_checks.saturating_add(1);
 
@@ -352,6 +876,184 @@ fn execute_insert_locked(
                         || existing_pk_keys.contains(&incoming_pk)
                         || staged_pk_keys.contains(&incoming_pk)
                     {
+                        if !plan.on_duplicate_update.is_empty() {
+
+                            if let Some((row_id, existing_row)) = existing_pk_rows.get(&incoming_pk).cloned() {
+
+                                let delete_payload = match encode_row_payload(schema, &existing_row) {
+                                    Ok(encoded) => encoded,
+                                    Err(err) => {
+                                        return ConnectorResponse::rejected(
+                                            request_id.to_string(),
+                                            format!("insert duplicate update payload encode failed: {err}"),
+                                        );
+                                    }
+                                };
+
+                                let mut updated_row = existing_row;
+                                
+                                if let Err(message) = apply_insert_on_duplicate_assignments(
+                                    &mut updated_row,
+                                    &plan.on_duplicate_update,
+                                    &canonical_row,
+                                ) {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("insert duplicate update failed: {message}"),
+                                    );
+                                }
+
+                                for field in &schema.fields {
+                                    if !updated_row.contains_key(&field.field_name) && !field.nullable {
+                                        return ConnectorResponse::rejected(
+                                            request_id.to_string(),
+                                            format!(
+                                                "insert duplicate update failed: column '{}' cannot be null",
+                                                field.field_name
+                                            ),
+                                        );
+                                    }
+                                }
+
+                                let insert_payload = match encode_row_payload(schema, &updated_row) {
+                                    Ok(encoded) => encoded,
+                                    Err(err) => {
+                                        return ConnectorResponse::rejected(
+                                            request_id.to_string(),
+                                            format!("insert duplicate update payload encode failed: {err}"),
+                                        );
+                                    }
+                                };
+
+                                let updated_row = match decode_row_payload(schema, &insert_payload) {
+                                    Ok(row) => row,
+                                    Err(err) => {
+                                        return ConnectorResponse::rejected(
+                                            request_id.to_string(),
+                                            format!("insert duplicate update payload decode failed: {err}"),
+                                        );
+                                    }
+                                };
+
+                                if let Err(err) = append_row_payload_record_with_live_row_ids(
+                                    catalog,
+                                    wal,
+                                    &table_stream_id,
+                                    table,
+                                    runtime_indexes,
+                                    TransactionKind::Delete,
+                                    delete_payload,
+                                    common::epoch_nanos!(),
+                                    Some(TransactionId(row_id)),
+                                    Some(&current_live_row_ids),
+                                    Some(group_id),
+                                ) {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("insert duplicate update delete WAL append failed: {err}"),
+                                    );
+                                }
+
+                                if let Err(err) = append_row_payload_record(
+                                    catalog,
+                                    wal,
+                                    &table_stream_id,
+                                    table,
+                                    runtime_indexes,
+                                    TransactionKind::Insert,
+                                    insert_payload,
+                                    common::epoch_nanos!(),
+                                    None,
+                                    Some(group_id),
+                                ) {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("insert duplicate update insert WAL append failed: {err}"),
+                                    );
+                                }
+
+                                if plan.returning.is_some() {
+                                    returning_rows.push(updated_row.clone());
+                                }
+
+                                existing_pk_rows.insert(incoming_pk.clone(), (row_id, updated_row));
+                                affected_rows = affected_rows.saturating_add(1);
+                                continue;
+                            }
+
+                            if let Some(position) = staged_pk_positions.get(&incoming_pk).copied() {
+
+                                let mut updated_row = staged_rows[position].clone();
+                                if let Err(message) = apply_insert_on_duplicate_assignments(
+                                    &mut updated_row,
+                                    &plan.on_duplicate_update,
+                                    &canonical_row,
+                                ) {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("insert duplicate update failed: {message}"),
+                                    );
+                                }
+
+                                for field in &schema.fields {
+                                    if !updated_row.contains_key(&field.field_name) && !field.nullable {
+                                        return ConnectorResponse::rejected(
+                                            request_id.to_string(),
+                                            format!(
+                                                "insert duplicate update failed: column '{}' cannot be null",
+                                                field.field_name
+                                            ),
+                                        );
+                                    }
+                                }
+
+                                let insert_payload = match encode_row_payload(schema, &updated_row) {
+                                    Ok(encoded) => encoded,
+                                    Err(err) => {
+                                        return ConnectorResponse::rejected(
+                                            request_id.to_string(),
+                                            format!("insert duplicate update payload encode failed: {err}"),
+                                        );
+                                    }
+                                };
+
+                                let updated_row = match decode_row_payload(schema, &insert_payload) {
+                                    Ok(row) => row,
+                                    Err(err) => {
+                                        return ConnectorResponse::rejected(
+                                            request_id.to_string(),
+                                            format!("insert duplicate update payload decode failed: {err}"),
+                                        );
+                                    }
+                                };
+
+                                staged_payloads[position] = insert_payload;
+                                staged_rows[position] = updated_row.clone();
+
+                                if track_runtime_indexes_for_insert {
+                                    staged_row_maps[position] = updated_row.clone();
+                                }
+
+                                if plan.returning.is_some() {
+                                    returning_rows.push(updated_row);
+                                }
+
+                                affected_rows = affected_rows.saturating_add(1);
+                                continue;
+                            }
+
+                            {
+                                return ConnectorResponse::rejected(
+                                    request_id.to_string(),
+                                    "insert failed: ON DUPLICATE KEY UPDATE could not resolve duplicate key source".to_string(),
+                                );
+                            }
+                        }
+
+                        if plan.ignore {
+                            continue;
+                        }
+
                         let pk_display = pk_fields
                             .iter()
                             .zip(incoming_pk.iter())
@@ -370,6 +1072,30 @@ fn execute_insert_locked(
                 }
 
                 staged_payloads.push(encoded);
+                staged_rows.push(canonical_row.clone());
+
+                if plan.returning.is_some() {
+                    returning_rows.push(canonical_row.clone());
+                }
+
+                if let Some((_, pk_fields)) = primary_key_details.as_ref() {
+                    let incoming_pk = pk_fields
+                        .iter()
+                        .map(|pk| canonical_row.get(*pk).cloned().unwrap_or_default())
+                        .collect::<Vec<_>>();
+                    let position = staged_payloads.len().saturating_sub(1);
+                    staged_pk_positions.insert(incoming_pk, position);
+                }
+
+                let position = staged_payloads.len().saturating_sub(1);
+                for index in &unique_indexes {
+                    let index_id = index.index_id.0.clone();
+                    let key = index_value_tuple(index, &canonical_row);
+                    staged_unique_positions
+                        .entry(index_id)
+                        .or_default()
+                        .insert(key, position);
+                }
 
                 if track_runtime_indexes_for_insert {
                     staged_row_maps.push(canonical_row);
@@ -412,9 +1138,13 @@ fn execute_insert_locked(
                 });
             }
 
-            ConnectorResponse::applied(
-                request_id.to_string(),
-                ConnectorResult::Mutation(MutationResult { affected_rows }),
+            mutation_response_for_result(
+                request_id,
+                "insert",
+                schema,
+                affected_rows,
+                plan.returning.as_ref(),
+                &returning_rows,
             )
             
         },
@@ -690,7 +1420,7 @@ fn execute_update_locked(
 
     let mutation_uses_joins = !plan.joins.is_empty();
 
-    let current_live_rows = match load_mutation_rows(
+    let mut current_live_rows = match load_mutation_rows(
         catalog,
         wal,
         runtime_indexes,
@@ -707,6 +1437,14 @@ fn execute_update_locked(
             return ConnectorResponse::rejected(request_id.to_string(), message);
         }
     };
+
+    if !plan.order_by.is_empty() {
+        apply_delete_order_by_items(&mut current_live_rows, &plan.order_by);
+    }
+
+    if let Some(limit) = plan.limit {
+        current_live_rows.truncate(limit);
+    }
 
     let primary_key = primary_key_index(table);
     let primary_key_fields = primary_key.map(|pk_index| {
@@ -746,6 +1484,11 @@ fn execute_update_locked(
         |group_id, runtime_indexes| {
 
             let mut affected_rows = 0u64;
+            let mut returning_rows = if plan.returning.is_some() {
+                Vec::with_capacity(current_live_rows.len())
+            } else {
+                Vec::new()
+            };
 
             for (row_id, row_map) in current_live_rows {
 
@@ -776,7 +1519,54 @@ fn execute_update_locked(
                 let mut updated_row = row_map;
 
                 for assignment in &plan.assignments {
-                    match &assignment.value {
+                    let resolved_value = match &assignment.value {
+                        serverlib::UpdateAssignmentValue::Literal(value) => value.clone(),
+
+                        serverlib::UpdateAssignmentValue::FunctionExpression(expression_sql) => {
+                            match evaluate_mutation_function_expression(
+                                expression_sql,
+                                &updated_row,
+                                None,
+                            ) {
+                                Ok(value) => value,
+                                Err(message) => {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("update failed: {message}"),
+                                    );
+                                }
+                            }
+                        }
+
+                        serverlib::UpdateAssignmentValue::ExistingColumn(column_name) => {
+                            match updated_row.get(column_name).cloned() {
+                                Some(value) => Some(value),
+                                None => {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!(
+                                            "update failed: assignment column '{}' was not found in current row",
+                                            column_name
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+
+                        serverlib::UpdateAssignmentValue::Arithmetic { left, op, right } => {
+                            match evaluate_update_assignment_arithmetic(&updated_row, left, *op, right) {
+                                Ok(value) => Some(value),
+                                Err(message) => {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("update failed: {message}"),
+                                    );
+                                }
+                            }
+                        }
+                    };
+
+                    match resolved_value {
                         Some(value) => {
                             if let Some(slot) = updated_row.get_mut(&assignment.field_name) {
                                 *slot = value.clone();
@@ -885,13 +1675,21 @@ fn execute_update_locked(
                     );
                 }
 
+                if plan.returning.is_some() {
+                    returning_rows.push(updated_row.clone());
+                }
+
                 affected_rows = affected_rows.saturating_add(1);
 
             }
 
-            ConnectorResponse::applied(
-                request_id.to_string(),
-                ConnectorResult::Mutation(MutationResult { affected_rows }),
+            mutation_response_for_result(
+                request_id,
+                "update",
+                schema,
+                affected_rows,
+                plan.returning.as_ref(),
+                &returning_rows,
             )
 
         },
@@ -993,7 +1791,7 @@ fn execute_delete_locked(
 
     let mutation_uses_joins = !plan.joins.is_empty();
 
-    let current_live_rows = match load_mutation_rows(
+    let mut current_live_rows = match load_mutation_rows(
         catalog,
         wal,
         runtime_indexes,
@@ -1011,6 +1809,14 @@ fn execute_delete_locked(
         }
     };
 
+    if !plan.order_by.is_empty() {
+        apply_delete_order_by_items(&mut current_live_rows, &plan.order_by);
+    }
+
+    if let Some(limit) = plan.limit {
+        current_live_rows.truncate(limit);
+    }
+
     let current_live_row_ids = current_live_rows
         .iter()
         .map(|(row_id, _)| *row_id)
@@ -1027,6 +1833,11 @@ fn execute_delete_locked(
         |group_id, runtime_indexes| {
 
             let mut affected_rows = 0u64;
+            let mut returning_rows = if plan.returning.is_some() {
+                Vec::with_capacity(current_live_rows.len())
+            } else {
+                Vec::new()
+            };
 
             for (row_id, row_map) in current_live_rows {
 
@@ -1071,17 +1882,342 @@ fn execute_delete_locked(
                     );
                 }
 
+                if plan.returning.is_some() {
+                    returning_rows.push(row_map);
+                }
+
                 affected_rows = affected_rows.saturating_add(1);
             
             }
 
-            ConnectorResponse::applied(
-                request_id.to_string(),
-                ConnectorResult::Mutation(MutationResult { affected_rows }),
+            mutation_response_for_result(
+                request_id,
+                "delete",
+                schema,
+                affected_rows,
+                plan.returning.as_ref(),
+                &returning_rows,
             )
 
         },
     )
+
+}
+
+fn evaluate_update_assignment_arithmetic(
+    row: &HashMap<String, Vec<u8>>,
+    left: &serverlib::UpdateAssignmentOperand,
+    op: serverlib::UpdateArithmeticOp,
+    right: &serverlib::UpdateAssignmentOperand,
+) -> Result<Vec<u8>, String> {
+    let left_value = resolve_update_assignment_operand(row, left)?;
+    let right_value = resolve_update_assignment_operand(row, right)?;
+
+    let result = match op {
+        serverlib::UpdateArithmeticOp::Add => left_value + right_value,
+        serverlib::UpdateArithmeticOp::Subtract => left_value - right_value,
+        serverlib::UpdateArithmeticOp::Multiply => left_value * right_value,
+        serverlib::UpdateArithmeticOp::Divide => {
+            if right_value == 0.0 {
+                return Err("arithmetic division by zero is not supported".to_string());
+            }
+            left_value / right_value
+        }
+        serverlib::UpdateArithmeticOp::Modulo => {
+            if right_value == 0.0 {
+                return Err("arithmetic modulo by zero is not supported".to_string());
+            }
+            left_value % right_value
+        }
+    };
+
+    Ok(format_update_arithmetic_result(result).into_bytes())
+}
+
+fn resolve_update_assignment_operand(
+    row: &HashMap<String, Vec<u8>>,
+    operand: &serverlib::UpdateAssignmentOperand,
+) -> Result<f64, String> {
+    match operand {
+        serverlib::UpdateAssignmentOperand::Unary { op, operand } => {
+            let value = resolve_update_assignment_operand(row, operand)?;
+            match op {
+                serverlib::UnaryArithmeticOp::Plus => Ok(value),
+                serverlib::UnaryArithmeticOp::Minus => Ok(-value),
+            }
+        }
+
+        serverlib::UpdateAssignmentOperand::Arithmetic { left, op, right } => {
+            let left_value = resolve_update_assignment_operand(row, left)?;
+            let right_value = resolve_update_assignment_operand(row, right)?;
+
+            match op {
+                serverlib::UpdateArithmeticOp::Add => Ok(left_value + right_value),
+                serverlib::UpdateArithmeticOp::Subtract => Ok(left_value - right_value),
+                serverlib::UpdateArithmeticOp::Multiply => Ok(left_value * right_value),
+                serverlib::UpdateArithmeticOp::Divide => {
+                    if right_value == 0.0 {
+                        return Err("arithmetic division by zero is not supported".to_string());
+                    }
+                    Ok(left_value / right_value)
+                }
+                serverlib::UpdateArithmeticOp::Modulo => {
+                    if right_value == 0.0 {
+                        return Err("arithmetic modulo by zero is not supported".to_string());
+                    }
+                    Ok(left_value % right_value)
+                }
+            }
+        }
+
+        serverlib::UpdateAssignmentOperand::Literal(value) => {
+            let Some(value) = value.as_ref() else {
+                return Err("arithmetic operand cannot be NULL".to_string());
+            };
+            parse_update_numeric_value(value)
+        }
+
+        serverlib::UpdateAssignmentOperand::FunctionExpression(expression_sql) => {
+            let Some(value) = evaluate_mutation_function_expression(expression_sql, row, None)? else {
+                return Err("arithmetic operand cannot be NULL".to_string());
+            };
+            parse_update_numeric_value(&value)
+        }
+
+        serverlib::UpdateAssignmentOperand::ExistingColumn(column_name) => {
+            let Some(value) = row.get(column_name) else {
+                return Err(format!(
+                    "arithmetic assignment column '{}' was not found in current row",
+                    column_name
+                ));
+            };
+            parse_update_numeric_value(value)
+        }
+    }
+}
+
+fn parse_update_numeric_value(value: &[u8]) -> Result<f64, String> {
+    let text = serverlib::display_stored_field_value(value);
+    let text = text.trim().to_string();
+    text.parse::<f64>()
+        .map_err(|_| format!("arithmetic operand '{}' is not numeric", text))
+}
+
+fn format_update_arithmetic_result(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+fn apply_delete_order_by_items(
+    rows: &mut Vec<(u64, HashMap<String, Vec<u8>>)>,
+    order_by_items: &[serverlib::SelectOrderByItem],
+) {
+
+    rows.sort_by(|left, right| {
+        for item in order_by_items {
+            let left_value = resolve_mutation_order_value(&left.1, &item.field_name);
+            let right_value = resolve_mutation_order_value(&right.1, &item.field_name);
+
+            let ordering = compare_delete_order_values(&left_value, &right_value);
+
+            if ordering != std::cmp::Ordering::Equal {
+                return if item.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                };
+            }
+        }
+
+        std::cmp::Ordering::Equal
+    });
+
+}
+
+fn resolve_mutation_order_value(row: &HashMap<String, Vec<u8>>, field_name: &str) -> String {
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_LOWER_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value).to_ascii_lowercase())
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_UPPER_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value).to_ascii_uppercase())
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_ABS_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value))
+            .and_then(|value| value.trim().parse::<f64>().ok().map(|parsed| parsed.abs().to_string()))
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_LENGTH_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value).chars().count().to_string())
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_REVERSE_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value).chars().rev().collect::<String>())
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_TRIM_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value).trim().to_string())
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_LTRIM_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value).trim_start().to_string())
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_RTRIM_PREFIX) {
+        return row
+            .get(column)
+            .map(|value| serverlib::display_stored_field_value(value).trim_end().to_string())
+            .unwrap_or_else(|| "NULL".to_string());
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_CEIL_PREFIX) {
+        return resolve_mutation_inbuilt_order_expression(
+            row,
+            &format!("ceil({column})"),
+        );
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_FLOOR_PREFIX) {
+        return resolve_mutation_inbuilt_order_expression(
+            row,
+            &format!("floor({column})"),
+        );
+    }
+
+    if let Some(column) = field_name.strip_prefix(ORDER_EXPR_ROUND_PREFIX) {
+        return resolve_mutation_inbuilt_order_expression(
+            row,
+            &format!("round({column})"),
+        );
+    }
+
+    if let Some(encoded) = field_name.strip_prefix(ORDER_EXPR_ROUND_SCALE_PREFIX) {
+        let Some((scale_text, column)) = encoded.split_once(':') else {
+            return "NULL".to_string();
+        };
+
+        let Ok(scale) = scale_text.parse::<i32>() else {
+            return "NULL".to_string();
+        };
+
+        return resolve_mutation_inbuilt_order_expression(
+            row,
+            &format!("round({column},{scale})"),
+        );
+    }
+
+    row.get(field_name)
+        .map(|value| serverlib::display_stored_field_value(value))
+        .unwrap_or_else(|| "NULL".to_string())
+}
+
+fn resolve_mutation_inbuilt_order_expression(
+    row: &HashMap<String, Vec<u8>>,
+    expression_sql: &str,
+) -> String {
+    evaluate_mutation_function_expression(expression_sql, row, None)
+        .ok()
+        .flatten()
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_else(|| "NULL".to_string())
+}
+
+fn evaluate_mutation_function_expression(
+    expression_sql: &str,
+    primary_row: &HashMap<String, Vec<u8>>,
+    secondary_row: Option<&HashMap<String, Vec<u8>>>,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut lookup = |field_name: &str| -> Option<Vec<u8>> {
+        let normalized = common::normalize_identifier!(field_name);
+
+        primary_row
+            .get(&normalized)
+            .cloned()
+            .or_else(|| primary_row.get(field_name).cloned())
+            .or_else(|| {
+                field_name.split_once('.').and_then(|(_, column)| {
+                    let normalized_column = common::normalize_identifier!(column);
+                    primary_row
+                        .get(&normalized_column)
+                        .cloned()
+                        .or_else(|| primary_row.get(column).cloned())
+                })
+            })
+            .or_else(|| {
+                secondary_row.and_then(|row| {
+                    row.get(&normalized)
+                        .cloned()
+                        .or_else(|| row.get(field_name).cloned())
+                        .or_else(|| {
+                            field_name.split_once('.').and_then(|(_, column)| {
+                                let normalized_column = common::normalize_identifier!(column);
+                                row.get(&normalized_column)
+                                    .cloned()
+                                    .or_else(|| row.get(column).cloned())
+                            })
+                        })
+                })
+            })
+    };
+
+    let mut nested = serverlib::engine::sql::evaluate_inbuilt_sql_function_with_lookup;
+
+    serverlib::engine::sql::evaluate_expression_sql_to_bytes(
+        expression_sql,
+        &mut lookup,
+        &mut nested,
+    )
+    .map(Some)
+}
+
+fn compare_delete_order_values(left: &str, right: &str) -> std::cmp::Ordering {
+
+    let left_is_null = left.eq_ignore_ascii_case("NULL");
+    let right_is_null = right.eq_ignore_ascii_case("NULL");
+
+    if left_is_null && right_is_null {
+        return std::cmp::Ordering::Equal;
+    }
+
+    if left_is_null {
+        return std::cmp::Ordering::Less;
+    }
+
+    if right_is_null {
+        return std::cmp::Ordering::Greater;
+    }
+
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(left_num), Ok(right_num)) => left_num
+            .partial_cmp(&right_num)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        _ => left.cmp(right),
+    }
 
 }
 
@@ -1203,6 +2339,286 @@ fn load_mutation_rows(
         rows.into_iter()
             .map(|row| (row.row_id, row.row_map))
             .collect()
+    })
+
+}
+
+fn apply_insert_on_duplicate_assignments(
+    target_row: &mut HashMap<String, Vec<u8>>,
+    assignments: &[serverlib::InsertOnDuplicateAssignment],
+    incoming_row: &HashMap<String, Vec<u8>>,
+) -> Result<(), String> {
+
+    for assignment in assignments {
+
+        let resolved_value = match &assignment.value {
+            serverlib::InsertOnDuplicateAssignmentValue::Literal(value) => value.clone(),
+
+            serverlib::InsertOnDuplicateAssignmentValue::FunctionExpression(expression_sql) => {
+                evaluate_mutation_function_expression(
+                    expression_sql,
+                    target_row,
+                    Some(incoming_row),
+                )?
+            }
+
+            serverlib::InsertOnDuplicateAssignmentValue::IncomingColumn(column_name) => {
+                Some(incoming_row.get(column_name).cloned().ok_or_else(|| {
+                    format!(
+                        "ON DUPLICATE KEY UPDATE VALUES({}) references unknown incoming column",
+                        column_name
+                    )
+                })?)
+            }
+
+            serverlib::InsertOnDuplicateAssignmentValue::ExistingColumn(column_name) => {
+                Some(target_row.get(column_name).cloned().ok_or_else(|| {
+                    format!(
+                        "ON DUPLICATE KEY UPDATE column '{}' references unknown existing column",
+                        column_name
+                    )
+                })?)
+            }
+
+            serverlib::InsertOnDuplicateAssignmentValue::Arithmetic { left, op, right } => {
+                Some(evaluate_insert_on_duplicate_arithmetic(
+                    target_row,
+                    incoming_row,
+                    left,
+                    *op,
+                    right,
+                )?)
+            }
+        };
+
+        match resolved_value {
+            Some(value) => {
+                if let Some(slot) = target_row.get_mut(&assignment.field_name) {
+                    *slot = value;
+                } else {
+                    target_row.insert(assignment.field_name.clone(), value);
+                }
+            }
+            None => {
+                target_row.remove(&assignment.field_name);
+            }
+        }
+    }
+
+    Ok(())
+
+}
+
+fn evaluate_insert_on_duplicate_arithmetic(
+    target_row: &HashMap<String, Vec<u8>>,
+    incoming_row: &HashMap<String, Vec<u8>>,
+    left: &serverlib::InsertOnDuplicateAssignmentOperand,
+    op: serverlib::InsertOnDuplicateArithmeticOp,
+    right: &serverlib::InsertOnDuplicateAssignmentOperand,
+) -> Result<Vec<u8>, String> {
+    let left_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, left)?;
+    let right_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, right)?;
+
+    let result = match op {
+        serverlib::InsertOnDuplicateArithmeticOp::Add => left_value + right_value,
+        serverlib::InsertOnDuplicateArithmeticOp::Subtract => left_value - right_value,
+        serverlib::InsertOnDuplicateArithmeticOp::Multiply => left_value * right_value,
+        serverlib::InsertOnDuplicateArithmeticOp::Divide => {
+            if right_value == 0.0 {
+                return Err("ON DUPLICATE KEY UPDATE arithmetic division by zero is not supported".to_string());
+            }
+            left_value / right_value
+        }
+        serverlib::InsertOnDuplicateArithmeticOp::Modulo => {
+            if right_value == 0.0 {
+                return Err("ON DUPLICATE KEY UPDATE arithmetic modulo by zero is not supported".to_string());
+            }
+            left_value % right_value
+        }
+    };
+
+    Ok(format_update_arithmetic_result(result).into_bytes())
+}
+
+fn resolve_insert_on_duplicate_operand(
+    target_row: &HashMap<String, Vec<u8>>,
+    incoming_row: &HashMap<String, Vec<u8>>,
+    operand: &serverlib::InsertOnDuplicateAssignmentOperand,
+) -> Result<f64, String> {
+    match operand {
+        serverlib::InsertOnDuplicateAssignmentOperand::Unary { op, operand } => {
+            let value = resolve_insert_on_duplicate_operand(target_row, incoming_row, operand)?;
+            match op {
+                serverlib::UnaryArithmeticOp::Plus => Ok(value),
+                serverlib::UnaryArithmeticOp::Minus => Ok(-value),
+            }
+        }
+
+        serverlib::InsertOnDuplicateAssignmentOperand::Arithmetic { left, op, right } => {
+            let left_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, left)?;
+            let right_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, right)?;
+
+            match op {
+                serverlib::InsertOnDuplicateArithmeticOp::Add => Ok(left_value + right_value),
+                serverlib::InsertOnDuplicateArithmeticOp::Subtract => Ok(left_value - right_value),
+                serverlib::InsertOnDuplicateArithmeticOp::Multiply => Ok(left_value * right_value),
+                serverlib::InsertOnDuplicateArithmeticOp::Divide => {
+                    if right_value == 0.0 {
+                        return Err(
+                            "ON DUPLICATE KEY UPDATE arithmetic division by zero is not supported"
+                                .to_string(),
+                        );
+                    }
+                    Ok(left_value / right_value)
+                }
+                serverlib::InsertOnDuplicateArithmeticOp::Modulo => {
+                    if right_value == 0.0 {
+                        return Err(
+                            "ON DUPLICATE KEY UPDATE arithmetic modulo by zero is not supported"
+                                .to_string(),
+                        );
+                    }
+                    Ok(left_value % right_value)
+                }
+            }
+        }
+
+        serverlib::InsertOnDuplicateAssignmentOperand::Literal(value) => {
+            let Some(value) = value.as_ref() else {
+                return Err("ON DUPLICATE KEY UPDATE arithmetic operand cannot be NULL".to_string());
+            };
+            parse_update_numeric_value(value)
+        }
+
+        serverlib::InsertOnDuplicateAssignmentOperand::FunctionExpression(expression_sql) => {
+            let Some(value) = evaluate_mutation_function_expression(
+                expression_sql,
+                target_row,
+                Some(incoming_row),
+            )? else {
+                return Err("ON DUPLICATE KEY UPDATE arithmetic operand cannot be NULL".to_string());
+            };
+            parse_update_numeric_value(&value)
+        }
+
+        serverlib::InsertOnDuplicateAssignmentOperand::IncomingColumn(column_name) => {
+            let Some(value) = incoming_row.get(column_name) else {
+                return Err(format!(
+                    "ON DUPLICATE KEY UPDATE VALUES({}) references unknown incoming column",
+                    column_name
+                ));
+            };
+            parse_update_numeric_value(value)
+        }
+
+        serverlib::InsertOnDuplicateAssignmentOperand::ExistingColumn(column_name) => {
+            let Some(value) = target_row.get(column_name) else {
+                return Err(format!(
+                    "ON DUPLICATE KEY UPDATE column '{}' references unknown existing column",
+                    column_name
+                ));
+            };
+            parse_update_numeric_value(value)
+        }
+    }
+}
+
+fn mutation_response_for_result(
+    request_id: &str,
+    operation: &str,
+    schema: &TableSchema,
+    affected_rows: u64,
+    returning: Option<&serverlib::MutationReturningPlan>,
+    rows: &[HashMap<String, Vec<u8>>],
+) -> ConnectorResponse {
+
+    let Some(returning) = returning else {
+        return ConnectorResponse::applied(
+            request_id.to_string(),
+            ConnectorResult::Mutation(MutationResult { affected_rows }),
+        );
+    };
+
+    let query_result = match query_result_from_returning(schema, returning, rows) {
+        Ok(result) => result,
+        Err(message) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("{operation} returning failed: {message}"),
+            );
+        }
+    };
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Query(query_result),
+    )
+
+}
+
+fn query_result_from_returning(
+    schema: &TableSchema,
+    returning: &serverlib::MutationReturningPlan,
+    rows: &[HashMap<String, Vec<u8>>],
+) -> Result<QueryResult, String> {
+
+    let mut projected = Vec::<(String, String)>::new();
+
+    for item in returning {
+        match item {
+            serverlib::MutationReturningItem::Wildcard => {
+                projected.extend(
+                    schema
+                        .fields
+                        .iter()
+                        .map(|field| (field.field_name.clone(), field.field_name.clone())),
+                );
+            }
+
+            serverlib::MutationReturningItem::Column {
+                field_name,
+                output_name,
+            } => projected.push((field_name.clone(), output_name.clone())),
+        }
+    }
+
+    let mut columns = Vec::with_capacity(projected.len());
+
+    for (idx, (field_name, output_name)) in projected.iter().enumerate() {
+        let Some(field) = schema.field(field_name) else {
+            return Err(format!("unknown column '{field_name}'"));
+        };
+
+        columns.push(connector::FieldDef {
+            seqno: (idx + 1) as u32,
+            field_name: output_name.clone(),
+            field_type: field.field_type.clone(),
+            nullable: field.nullable,
+            indexed: connector::FieldIndex::None,
+            default_value: None,
+            metadata: field.metadata.clone(),
+        });
+    }
+
+    let rows = rows
+        .iter()
+        .map(|row_map| {
+            projected
+                .iter()
+                .map(|(field_name, _)| {
+                    row_map
+                        .get(field_name)
+                        .map(|value| serverlib::display_stored_field_value(value).into_bytes())
+                        .unwrap_or_else(|| b"NULL".to_vec())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    Ok(QueryResult {
+        columns,
+        rows,
+        timings: empty_query_timings(),
     })
 
 }

@@ -476,6 +476,31 @@ fn show_indexes_from_table_maps_to_retrieve_operation() {
 }
 
 #[test]
+fn show_slices_from_view_maps_to_show_slices_operation() {
+    let requests = parse_mysql8_sql_requests("show slices from sales_cube", "main")
+        .expect("show slices should parse");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ShowSlices);
+    assert_eq!(requests[0].object_name.as_deref(), Some("sales_cube"));
+}
+
+#[test]
+fn show_slices_with_where_order_and_limit_maps_to_show_slices_operation() {
+    let requests = parse_mysql8_sql_requests(
+        "show slices from sales_cube where region = 'eu' order by sum_qty desc limit 1",
+        "main",
+    )
+    .expect("show slices with clauses should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ShowSlices);
+    assert_eq!(requests[0].object_name.as_deref(), Some("sales_cube"));
+}
+
+#[test]
 fn show_privileges_maps_to_retrieve_operation() {
     let requests = parse_mysql8_sql_requests("show privileges", "main")
         .expect("show privileges should parse");

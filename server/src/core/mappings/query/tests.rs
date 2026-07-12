@@ -287,6 +287,3359 @@ fn begin_transaction_is_accepted_as_noop_mutation() {
 }
 
 #[test]
+fn insert_returning_returns_inserted_rows() {
+    let mut catalogs = HashMap::new();
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(32),
+                    nullable: false,
+                    indexed: FieldIndex::PrimaryKey,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "email".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("users table should register");
+    catalogs.insert("main".to_string(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let response = handle_query_command(
+        "req-insert-returning",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'sam@example.com') returning id, email".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string(), "sam@example.com".to_string()]]);
+}
+
+#[test]
+fn replace_into_replaces_existing_primary_key_row() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-replace",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64), active varchar(8))"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-replace-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email, active) values (1, 'seed@example.com', 'false')"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let replace = handle_query_command(
+        "req-replace-users",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "replace into users (id, email, active) values (1, 'incoming@example.com', 'true') returning id, email, active".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(replace),
+        vec![vec![
+            "1".to_string(),
+            "incoming@example.com".to_string(),
+            "true".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn replace_into_replaces_existing_unique_key_row() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-replace-unique",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64) unique, active varchar(8))"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-replace-unique-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email, active) values (1, 'seed@example.com', 'false')"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let replace = handle_query_command(
+        "req-replace-users-unique",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "replace into users (id, email, active) values (2, 'seed@example.com', 'true') returning id, email, active".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(replace),
+        vec![vec![
+            "2".to_string(),
+            "seed@example.com".to_string(),
+            "true".to_string(),
+        ]]
+    );
+
+    let rows = query_result_rows(handle_query_command(
+        "req-select-users-replace-unique",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, email, active from users".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    ));
+
+    assert_eq!(
+        rows,
+        vec![vec![
+            "2".to_string(),
+            "seed@example.com".to_string(),
+            "true".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn replace_into_with_duplicate_values_keeps_last_payload() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-replace-duplicate-values",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let replace = handle_query_command(
+        "req-replace-duplicate-values",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "replace into users (id, email) values (1, 'first@example.com'), (1, 'second@example.com')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(replace.status, connector::ResponseStatus::Applied));
+
+    let read = handle_query_command(
+        "req-select-replace-duplicate-values",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, email from users".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(read),
+        vec![vec!["1".to_string(), "second@example.com".to_string()]]
+    );
+}
+
+#[test]
+fn insert_accepts_placeholder_literals_as_raw_values() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-placeholder-insert",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let insert = handle_query_command(
+        "req-insert-placeholder-literal",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, :incoming_email) returning id, email".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(insert),
+        vec![vec!["1".to_string(), ":incoming_email".to_string()]]
+    );
+}
+
+#[test]
+fn insert_default_values_uses_schema_defaults() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-default-values",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key default 1, email varchar(64) default 'seed@example.com')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let insert = handle_query_command(
+        "req-insert-default-values",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users default values returning id, email".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(insert),
+        vec![vec!["1".to_string(), "seed@example.com".to_string()]]
+    );
+}
+
+#[test]
+fn insert_default_values_with_column_list_uses_defaults() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-default-values-column-list",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key default 9, email varchar(64) default 'seed@example.com', nickname varchar(64) default 'seed')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let insert = handle_query_command(
+        "req-insert-default-values-column-list",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) default values returning id, email, nickname".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(insert),
+        vec![vec![
+            "9".to_string(),
+            "seed@example.com".to_string(),
+            "seed".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn insert_set_syntax_inserts_row() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-insert-set",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64), active bool default false)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let insert = handle_query_command(
+        "req-insert-users-set",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users set id = 1, email = 'set@example.com' returning id, email, active"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(insert),
+        vec![vec![
+            "1".to_string(),
+            "set@example.com".to_string(),
+            "false".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn insert_set_syntax_with_qualified_targets_inserts_row() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-insert-set-qualified",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let insert = handle_query_command(
+        "req-insert-users-set-qualified",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users set app.users.id = 1, users.email = 'qualified@example.com' returning id, email"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(insert),
+        vec![vec!["1".to_string(), "qualified@example.com".to_string(),]]
+    );
+}
+
+#[test]
+fn insert_default_values_rejects_when_required_column_has_no_default() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-default-values-reject",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key default 1, email varchar(64) not null)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let insert = handle_query_command(
+        "req-insert-default-values-reject",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users default values".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(insert.status, connector::ResponseStatus::Rejected));
+    let connector::ConnectorResult::Error(message) = insert.result else {
+        panic!("expected error result")
+    };
+    assert!(message.contains("missing required column 'email'"));
+}
+
+#[test]
+fn insert_ignore_skips_duplicate_primary_keys() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-insert-ignore",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-insert-ignore-users",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert ignore into users (id, email) values (1, 'a@example.com'), (1, 'dup@example.com'), (2, 'b@example.com') returning id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+}
+
+#[test]
+fn insert_rejects_duplicate_non_primary_unique_key() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-unique-reject",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64) unique)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-users-unique-reject-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'dup@example.com')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let duplicate = handle_query_command(
+        "req-insert-users-unique-reject-duplicate",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (2, 'dup@example.com')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(duplicate.status, connector::ResponseStatus::Rejected));
+    let connector::ConnectorResult::Error(message) = duplicate.result else {
+        panic!("expected error result")
+    };
+    assert!(message.contains("duplicate unique key"));
+}
+
+#[test]
+fn insert_ignore_skips_duplicate_non_primary_unique_key() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = handle_query_command(
+        "req-create-users-unique-ignore",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64) unique)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-insert-ignore-users-unique",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert ignore into users (id, email) values (1, 'a@example.com'), (2, 'a@example.com'), (3, 'c@example.com') returning id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string()], vec!["3".to_string()]]);
+}
+
+#[test]
+fn insert_on_duplicate_key_update_updates_existing_rows() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64), active varchar(8))"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email, active) values (1, 'a@example.com', 'false')"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email, active) values (1, 'dup@example.com', 'true') on duplicate key update email = 'updated@example.com', active = 'true' returning id, email, active".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(upsert);
+    assert_eq!(
+        rows,
+        vec![vec![
+            "1".to_string(),
+            "updated@example.com".to_string(),
+            "true".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_values_column_reference() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-values",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64), active varchar(8))"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-values-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email, active) values (1, 'seed@example.com', 'false')"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-values",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email, active) values (1, 'incoming@example.com', 'true') on duplicate key update email = values(email), active = values(active) returning id, email, active".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(upsert);
+    assert_eq!(
+        rows,
+        vec![vec![
+            "1".to_string(),
+            "incoming@example.com".to_string(),
+            "true".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_unique_key_conflicts_without_primary_key() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-unique-no-pk",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (email varchar(64) unique, active varchar(8))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-unique-no-pk-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (email, active) values ('seed@example.com', 'false')"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-unique-no-pk",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (email, active) values ('seed@example.com', 'true') on duplicate key update active = values(active) returning email, active".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(upsert),
+        vec![vec!["seed@example.com".to_string(), "true".to_string()]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_existing_column_reference() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-existing-col-ref",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-existing-col-ref-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'seed@example.com')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-existing-col-ref",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'incoming@example.com') on duplicate key update email = email returning id, email".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(upsert);
+    assert_eq!(
+        rows,
+        vec![vec!["1".to_string(), "seed@example.com".to_string()]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_arithmetic_assignment_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-arithmetic-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 2) on duplicate key update login_count = login_count + values(login_count) returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(upsert),
+        vec![vec!["1".to_string(), "12".to_string()]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_nested_arithmetic_assignment_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-nested-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-nested-arithmetic-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-nested-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 2) on duplicate key update login_count = (login_count + values(login_count)) * 2 returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(upsert),
+        vec![vec!["1".to_string(), "24".to_string()]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_arithmetic_function_operand_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-fn-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-fn-arithmetic-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-fn-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 2) on duplicate key update login_count = login_count + abs(1) returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(upsert),
+        vec![vec!["1".to_string(), "11".to_string()]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_unary_arithmetic_operand_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-unary-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-unary-arithmetic-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-unary-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 2) on duplicate key update login_count = -login_count + values(login_count) returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(upsert),
+        vec![vec!["1".to_string(), "-8".to_string()]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_supports_top_level_unary_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-top-unary",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-top-unary-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-top-unary",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 2) on duplicate key update login_count = -values(login_count) returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(upsert),
+        vec![vec!["1".to_string(), "-2".to_string()]]
+    );
+}
+
+#[test]
+fn update_rows_supports_nested_arithmetic_assignment_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-nested-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-update-nested-arithmetic-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let update = handle_query_command(
+        "req-update-nested-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set login_count = (login_count + 1) * 2 where id = 1 returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(update),
+        vec![vec!["1".to_string(), "22".to_string()]]
+    );
+}
+
+#[test]
+fn update_rows_supports_arithmetic_function_operand_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-fn-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-update-fn-arithmetic-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let update = handle_query_command(
+        "req-update-fn-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set login_count = login_count + abs(1) where id = 1 returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(update),
+        vec![vec!["1".to_string(), "11".to_string()]]
+    );
+}
+
+#[test]
+fn update_rows_supports_top_level_unary_assignment_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-top-unary",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-update-top-unary-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 5)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let update = handle_query_command(
+        "req-update-top-unary",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set login_count = -login_count where id = 1 returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(update),
+        vec![vec!["1".to_string(), "-5".to_string()]]
+    );
+}
+
+#[test]
+fn update_rows_supports_unary_arithmetic_operand_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-unary-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-update-unary-arithmetic-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let update = handle_query_command(
+        "req-update-unary-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set login_count = -login_count + 5 where id = 1 returning id, login_count".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(update),
+        vec![vec!["1".to_string(), "-5".to_string()]]
+    );
+}
+
+#[test]
+fn update_order_by_lower_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-order-lower",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, name varchar(32), active bool)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, name, active) values (1, 'B', false)",
+        "insert into users (id, name, active) values (2, 'a', false)",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-update-order-lower",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let update = handle_query_command(
+        "req-update-users-order-lower",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = true order by lower(name) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(update.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-order-lower",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, active from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(selected),
+        vec![
+            vec!["1".to_string(), "false".to_string()],
+            vec!["2".to_string(), "true".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn update_order_by_abs_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-order-abs",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, score int, active bool)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, score, active) values (1, -1, false)",
+        "insert into users (id, score, active) values (2, -5, false)",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-update-order-abs",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let update = handle_query_command(
+        "req-update-users-order-abs",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = true order by abs(score) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(update.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-order-abs",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, active from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(selected),
+        vec![
+            vec!["1".to_string(), "true".to_string()],
+            vec!["2".to_string(), "false".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn update_order_by_trim_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-order-trim",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, name varchar(32), active bool)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, name, active) values (1, '  a', false)",
+        "insert into users (id, name, active) values (2, ' b', false)",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-update-order-trim",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let update = handle_query_command(
+        "req-update-users-order-trim",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = true order by trim(name) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(update.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-order-trim",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, active from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(selected),
+        vec![
+            vec!["1".to_string(), "true".to_string()],
+            vec!["2".to_string(), "false".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn update_order_by_round_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-order-round",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, score double, active bool)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, score, active) values (1, 1.2, false)",
+        "insert into users (id, score, active) values (2, 1.8, false)",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-update-order-round",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let update = handle_query_command(
+        "req-update-users-order-round",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = true order by round(score) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(update.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-order-round",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, active from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(selected),
+        vec![
+            vec!["1".to_string(), "true".to_string()],
+            vec!["2".to_string(), "false".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn update_order_by_round_with_scale_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-update-order-round-scale",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, score double, active bool)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, score, active) values (1, 1.24, false)",
+        "insert into users (id, score, active) values (2, 1.26, false)",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-update-order-round-scale",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let update = handle_query_command(
+        "req-update-users-order-round-scale",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = true order by round(score,1) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(update.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-order-round-scale",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, active from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(selected),
+        vec![
+            vec!["1".to_string(), "true".to_string()],
+            vec!["2".to_string(), "false".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn delete_order_by_lower_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-delete-order-lower",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, name varchar(32))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, name) values (1, 'B')",
+        "insert into users (id, name) values (2, 'a')",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-delete-order-lower",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let deleted = handle_query_command(
+        "req-delete-users-order-lower",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users order by lower(name) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-delete-order-lower",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(query_result_rows(selected), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn delete_order_by_length_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-delete-order-length",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, name varchar(32))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, name) values (1, 'aa')",
+        "insert into users (id, name) values (2, 'bbbb')",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-delete-order-length",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let deleted = handle_query_command(
+        "req-delete-users-order-length",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users order by length(name) desc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-delete-order-length",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(query_result_rows(selected), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn delete_order_by_ltrim_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-delete-order-ltrim",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, name varchar(32))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, name) values (1, '  b')",
+        "insert into users (id, name) values (2, ' a')",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-delete-order-ltrim",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let deleted = handle_query_command(
+        "req-delete-users-order-ltrim",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users order by ltrim(name) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-delete-order-ltrim",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(query_result_rows(selected), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn delete_order_by_floor_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-delete-order-floor",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, score double)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, score) values (1, 1.9)",
+        "insert into users (id, score) values (2, 1.1)",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-delete-order-floor",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let deleted = handle_query_command(
+        "req-delete-users-order-floor",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users order by floor(score) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-delete-order-floor",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(query_result_rows(selected), vec![vec!["2".to_string()]]);
+}
+
+#[test]
+fn delete_order_by_round_with_scale_expression_is_applied_before_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-delete-order-round-scale",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, score double)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for sql in [
+        "insert into users (id, score) values (1, 1.24)",
+        "insert into users (id, score) values (2, 1.26)",
+    ] {
+        let inserted = handle_query_command(
+            "req-insert-users-delete-order-round-scale",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
+    }
+
+    let deleted = handle_query_command(
+        "req-delete-users-order-round-scale",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users order by round(score,1) asc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
+
+    let selected = handle_query_command(
+        "req-select-users-delete-order-round-scale",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(query_result_rows(selected), vec![vec!["2".to_string()]]);
+}
+
+#[test]
+fn insert_ignore_with_on_duplicate_key_update_is_supported() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-ignore",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-ignore-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'seed@example.com')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-ignore",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert ignore into users (id, email) values (1, 'incoming@example.com') on duplicate key update email = values(email) returning id, email".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(upsert);
+    assert_eq!(
+        rows,
+        vec![vec!["1".to_string(), "incoming@example.com".to_string()]]
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_rejects_primary_key_assignment() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-pk",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-upsert-pk-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'a@example.com')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-pk",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'dup@example.com') on duplicate key update id = 2"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(upsert.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = upsert.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("cannot modify primary key fields"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn insert_on_duplicate_key_update_handles_intra_statement_duplicate_keys() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-upsert-staged",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let upsert = handle_query_command(
+        "req-insert-upsert-staged",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email) values (1, 'first@example.com'), (1, 'dup@example.com'), (2, 'two@example.com') on duplicate key update email = 'staged-updated@example.com'".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(upsert.status, connector::ResponseStatus::Applied));
+
+    let rows = query_result_rows(handle_query_command(
+        "req-select-upsert-staged",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, email from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    ));
+
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "staged-updated@example.com".to_string()],
+            vec!["2".to_string(), "two@example.com".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn update_returning_returns_updated_rows() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(32),
+                    nullable: false,
+                    indexed: FieldIndex::PrimaryKey,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "active".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("users table should register");
+
+    let users = catalog.table("users").expect("users table should exist");
+    let mut row = HashMap::new();
+    row.insert("id".to_string(), b"1".to_vec());
+    row.insert("active".to_string(), b"false".to_vec());
+    let payload = serverlib::encode_row_payload(users.schema(), &row).expect("payload should encode");
+    super::core::append_row_payload_record(
+        &catalog,
+        &wal,
+        "users",
+        users,
+        &mut runtime_indexes,
+        TransactionKind::Insert,
+        payload,
+        common::epoch_nanos!(),
+        None,
+        None,
+    )
+    .expect("row append should succeed");
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-update-returning",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = true where id = 1 returning id, active".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string(), "true".to_string()]]);
+}
+
+#[test]
+fn update_supports_existing_column_assignment_reference() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-update-col-ref",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64), nickname varchar(64))"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-users-update-col-ref",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, email, nickname) values (1, 'seed@example.com', 'alias@example.com')"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let update = handle_query_command(
+        "req-update-users-col-ref",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set email = nickname where id = 1 returning id, email".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(update),
+        vec![vec!["1".to_string(), "alias@example.com".to_string()]]
+    );
+}
+
+#[test]
+fn update_supports_arithmetic_assignment_expression() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-update-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, login_count int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let seed = handle_query_command(
+        "req-insert-users-update-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id, login_count) values (1, 10)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(seed.status, connector::ResponseStatus::Applied));
+
+    let update = handle_query_command(
+        "req-update-users-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set login_count = login_count + 2 where id = 1 returning id, login_count"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(update.status, connector::ResponseStatus::Applied),
+        "unexpected update response: {:?}",
+        update
+    );
+
+    let verify = handle_query_command(
+        "req-select-users-arithmetic",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, login_count from users where id = 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(verify),
+        vec![vec!["1".to_string(), "12".to_string()]]
+    );
+}
+
+#[test]
+fn update_order_by_limit_updates_only_ranked_subset() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-update-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, active varchar(8))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-users-update-order-limit-1",
+            "insert into users (id, active) values (1, 'false')",
+        ),
+        (
+            "req-insert-users-update-order-limit-2",
+            "insert into users (id, active) values (2, 'false')",
+        ),
+        (
+            "req-insert-users-update-order-limit-3",
+            "insert into users (id, active) values (3, 'false')",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(response.status, connector::ResponseStatus::Applied));
+    }
+
+    let update_response = handle_query_command(
+        "req-update-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = 'true' order by id desc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(
+        matches!(update_response.status, connector::ResponseStatus::Applied),
+        "unexpected update response: {:?}",
+        update_response
+    );
+
+    let rows = query_result_rows(handle_query_command(
+        "req-select-users-update-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, active from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    ));
+
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "false".to_string()],
+            vec!["2".to_string(), "false".to_string()],
+            vec!["3".to_string(), "true".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn delete_returning_returns_deleted_rows() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "id".to_string(),
+                    field_type: FieldType::Int(32),
+                    nullable: false,
+                    indexed: FieldIndex::PrimaryKey,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "email".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("users table should register");
+
+    let users = catalog.table("users").expect("users table should exist");
+    let mut row = HashMap::new();
+    row.insert("id".to_string(), b"1".to_vec());
+    row.insert("email".to_string(), b"sam@example.com".to_vec());
+    let payload = serverlib::encode_row_payload(users.schema(), &row).expect("payload should encode");
+    super::core::append_row_payload_record(
+        &catalog,
+        &wal,
+        "users",
+        users,
+        &mut runtime_indexes,
+        TransactionKind::Insert,
+        payload,
+        common::epoch_nanos!(),
+        None,
+        None,
+    )
+    .expect("row append should succeed");
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-delete-returning",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users where id = 1 returning id, email".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string(), "sam@example.com".to_string()]]);
+}
+
+#[test]
+fn delete_order_by_limit_deletes_only_ranked_subset() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-delete-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-users-delete-order-limit-1",
+            "insert into users (id, email) values (1, 'a@example.com')",
+        ),
+        (
+            "req-insert-users-delete-order-limit-2",
+            "insert into users (id, email) values (2, 'b@example.com')",
+        ),
+        (
+            "req-insert-users-delete-order-limit-3",
+            "insert into users (id, email) values (3, 'c@example.com')",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(matches!(response.status, connector::ResponseStatus::Applied));
+    }
+
+    let delete_response = handle_query_command(
+        "req-delete-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users order by id desc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let ConnectorResult::Mutation(delete_mutation) = delete_response.result else {
+        panic!("expected mutation response");
+    };
+    assert_eq!(delete_mutation.affected_rows, 1);
+
+    let remaining = handle_query_command(
+        "req-select-users-delete-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert_eq!(
+        query_result_rows(remaining),
+        vec![vec!["1".to_string()], vec!["2".to_string()]]
+    );
+}
+
+#[test]
+fn update_from_applies_changes_for_matching_rows() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-update-from",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, active varchar(8))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let create_audit = handle_query_command(
+        "req-create-audit-update-from",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table audit (id int primary key, user_id int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_audit.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        ("req-insert-users-update-from-1", "insert into users (id, active) values (1, 'false')"),
+        ("req-insert-users-update-from-2", "insert into users (id, active) values (2, 'false')"),
+        ("req-insert-audit-update-from-1", "insert into audit (id, user_id) values (10, 1)"),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let update_response = handle_query_command(
+        "req-update-from",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "update users set active = 'true' from audit where users.id = audit.user_id returning id, active".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(update_response);
+    assert_eq!(rows, vec![vec!["1".to_string(), "true".to_string()]]);
+}
+
+#[test]
+fn delete_using_removes_matching_rows() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-delete-using",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key, email varchar(64))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let create_profiles = handle_query_command(
+        "req-create-profiles-delete-using",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table profiles (id int primary key, user_id int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_profiles.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-users-delete-using-1",
+            "insert into users (id, email) values (1, 'sam@example.com')",
+        ),
+        (
+            "req-insert-users-delete-using-2",
+            "insert into users (id, email) values (2, 'jane@example.com')",
+        ),
+        (
+            "req-insert-profiles-delete-using-1",
+            "insert into profiles (id, user_id) values (10, 1)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let delete_response = handle_query_command(
+        "req-delete-using",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "delete from users using profiles where users.id = profiles.user_id returning id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(delete_response);
+    assert_eq!(rows, vec![vec!["1".to_string()]]);
+}
+
+#[test]
 fn commit_is_accepted_as_noop_mutation() {
     let mut catalogs = HashMap::new();
     let wal = ConcurrentWalManager::in_memory();
@@ -313,6 +3666,1903 @@ fn commit_is_accepted_as_noop_mutation() {
     };
 
     assert_eq!(result.affected_rows, 0);
+}
+
+#[test]
+fn show_slices_without_view_identifier_is_rejected() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let response = handle_query_command(
+        "req-show-slices",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Rejected),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("show slices missing olap view identifier"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn show_slices_returns_dimension_coordinates_row_counts_and_numeric_aggregates() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-orders",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table orders (id bigint not null primary key, region varchar(32), product varchar(32), qty int, revenue int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        ("req-insert-orders-1", "insert into orders (id, region, product, qty, revenue) values (1, 'EU', 'A', 10, 100)"),
+        ("req-insert-orders-2", "insert into orders (id, region, product, qty, revenue) values (2, 'EU', 'A', 20, 200)"),
+        ("req-insert-orders-3", "insert into orders (id, region, product, qty, revenue) values (3, 'US', 'B', 7, 70)"),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let create_olap = handle_query_command(
+        "req-create-olap",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create olapview sales_cube using region, product as select id, region, product, qty from orders".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_olap.status, connector::ResponseStatus::Applied));
+
+    let slices = handle_query_command(
+        "req-show-slices-live",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices from sales_cube".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(slices.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        slices
+    );
+
+    let ConnectorResult::Query(result) = slices.result else {
+        panic!("expected query result")
+    };
+
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8(cell).expect("cell should be utf8"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                "EU".to_string(),
+                "A".to_string(),
+                "2".to_string(),
+                "30".to_string(),
+                "10".to_string(),
+                "20".to_string(),
+                "15".to_string(),
+            ],
+            vec![
+                "US".to_string(),
+                "B".to_string(),
+                "1".to_string(),
+                "7".to_string(),
+                "7".to_string(),
+                "7".to_string(),
+                "7".to_string(),
+            ],
+        ]
+    );
+
+    let columns = result
+        .columns
+        .into_iter()
+        .map(|field| field.field_name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        columns,
+        vec![
+            "region".to_string(),
+            "product".to_string(),
+            "row_count".to_string(),
+            "sum_qty".to_string(),
+            "min_qty".to_string(),
+            "max_qty".to_string(),
+            "avg_qty".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn show_slices_numeric_aggregates_ignore_null_values() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-orders-null-agg",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table orders (id bigint not null primary key, region varchar(32), product varchar(32), qty int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-orders-null-1",
+            "insert into orders (id, region, product, qty) values (1, 'EU', 'A', 10)",
+        ),
+        (
+            "req-insert-orders-null-2",
+            "insert into orders (id, region, product, qty) values (2, 'EU', 'A', null)",
+        ),
+        (
+            "req-insert-orders-null-3",
+            "insert into orders (id, region, product, qty) values (3, 'US', 'B', null)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let create_olap = handle_query_command(
+        "req-create-olap-null-agg",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create olapview sales_cube using region, product as select id, region, product, qty from orders".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_olap.status, connector::ResponseStatus::Applied));
+
+    let slices = handle_query_command(
+        "req-show-slices-null-agg",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices from sales_cube".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(slices.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        slices
+    );
+
+    let ConnectorResult::Query(result) = slices.result else {
+        panic!("expected query result")
+    };
+
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8(cell).expect("cell should be utf8"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                "EU".to_string(),
+                "A".to_string(),
+                "2".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+            ],
+            vec![
+                "US".to_string(),
+                "B".to_string(),
+                "1".to_string(),
+                "NULL".to_string(),
+                "NULL".to_string(),
+                "NULL".to_string(),
+                "NULL".to_string(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn show_slices_orders_rows_deterministically_with_null_coordinates() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-orders-null-order",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table orders (id bigint not null primary key, region varchar(32), product varchar(32), qty int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-orders-null-order-1",
+            "insert into orders (id, region, product, qty) values (1, null, 'A', 10)",
+        ),
+        (
+            "req-insert-orders-null-order-2",
+            "insert into orders (id, region, product, qty) values (2, 'EU', null, 20)",
+        ),
+        (
+            "req-insert-orders-null-order-3",
+            "insert into orders (id, region, product, qty) values (3, 'EU', 'A', 30)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let create_olap = handle_query_command(
+        "req-create-olap-null-order",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create olapview sales_cube using region, product as select id, region, product, qty from orders".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_olap.status, connector::ResponseStatus::Applied));
+
+    let slices = handle_query_command(
+        "req-show-slices-null-order",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices from sales_cube".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(slices.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        slices
+    );
+
+    let ConnectorResult::Query(result) = slices.result else {
+        panic!("expected query result")
+    };
+
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8(cell).expect("cell should be utf8"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                "NULL".to_string(),
+                "A".to_string(),
+                "1".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+                "10".to_string(),
+            ],
+            vec![
+                "EU".to_string(),
+                "NULL".to_string(),
+                "1".to_string(),
+                "20".to_string(),
+                "20".to_string(),
+                "20".to_string(),
+                "20".to_string(),
+            ],
+            vec![
+                "EU".to_string(),
+                "A".to_string(),
+                "1".to_string(),
+                "30".to_string(),
+                "30".to_string(),
+                "30".to_string(),
+                "30".to_string(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn show_slices_supports_order_by_desc_and_limit() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-orders-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table orders (id bigint not null primary key, region varchar(32), product varchar(32), qty int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-orders-order-limit-1",
+            "insert into orders (id, region, product, qty) values (1, 'EU', 'A', 10)",
+        ),
+        (
+            "req-insert-orders-order-limit-2",
+            "insert into orders (id, region, product, qty) values (2, 'EU', 'A', 20)",
+        ),
+        (
+            "req-insert-orders-order-limit-3",
+            "insert into orders (id, region, product, qty) values (3, 'US', 'B', 7)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let create_olap = handle_query_command(
+        "req-create-olap-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create olapview sales_cube using region, product as select id, region, product, qty from orders".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_olap.status, connector::ResponseStatus::Applied));
+
+    let slices = handle_query_command(
+        "req-show-slices-order-limit",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices from sales_cube order by sum_qty desc limit 1".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(slices.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        slices
+    );
+
+    let ConnectorResult::Query(result) = slices.result else {
+        panic!("expected query result")
+    };
+
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8(cell).expect("cell should be utf8"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![vec![
+            "EU".to_string(),
+            "A".to_string(),
+            "2".to_string(),
+            "30".to_string(),
+            "10".to_string(),
+            "20".to_string(),
+            "15".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn show_slices_rejects_malformed_order_by_clause() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let response = handle_query_command(
+        "req-show-slices-bad-order-by",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices from sales_cube order".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Rejected),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("ORDER BY clause is malformed"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn show_slices_supports_where_filtering_on_slice_columns() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-orders-where",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table orders (id bigint not null primary key, region varchar(32), product varchar(32), qty int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-orders-where-1",
+            "insert into orders (id, region, product, qty) values (1, 'EU', 'A', 10)",
+        ),
+        (
+            "req-insert-orders-where-2",
+            "insert into orders (id, region, product, qty) values (2, 'EU', 'A', 20)",
+        ),
+        (
+            "req-insert-orders-where-3",
+            "insert into orders (id, region, product, qty) values (3, 'US', 'B', 7)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let create_olap = handle_query_command(
+        "req-create-olap-where",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create olapview sales_cube using region, product as select id, region, product, qty from orders".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_olap.status, connector::ResponseStatus::Applied));
+
+    let slices = handle_query_command(
+        "req-show-slices-where",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices from sales_cube where region = 'eu' and sum_qty >= 30".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(slices.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        slices
+    );
+
+    let ConnectorResult::Query(result) = slices.result else {
+        panic!("expected query result")
+    };
+
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8(cell).expect("cell should be utf8"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![vec![
+            "EU".to_string(),
+            "A".to_string(),
+            "2".to_string(),
+            "30".to_string(),
+            "10".to_string(),
+            "20".to_string(),
+            "15".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn show_slices_rejects_malformed_where_clause() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let response = handle_query_command(
+        "req-show-slices-bad-where",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show slices from sales_cube where region".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Rejected),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("WHERE clause is malformed"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn select_for_update_is_supported_via_query_execution_path() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-select-for-update",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let insert_user = handle_query_command(
+        "req-insert-users-select-for-update",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id) values (1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-select-for-update",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users for update".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Applied));
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn select_for_share_is_supported_via_query_execution_path() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-select-for-share",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let insert_user = handle_query_command(
+        "req-insert-users-select-for-share",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id) values (1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-select-for-share",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users for share".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Applied));
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn select_for_update_join_is_supported_in_first_pass_lock_mode() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-select-for-update-join",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let create_profiles = handle_query_command(
+        "req-create-profiles-select-for-update-join",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table profiles (id int primary key, user_id int)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_profiles.status, connector::ResponseStatus::Applied));
+
+    let insert_user = handle_query_command(
+        "req-insert-users-select-for-update-join",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id) values (1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
+
+    let insert_profile = handle_query_command(
+        "req-insert-profiles-select-for-update-join",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into profiles (id, user_id) values (1, 1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_profile.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-select-for-update-join",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select u.id from users u join profiles p on u.id = p.user_id for update"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Applied));
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn select_for_update_cte_is_supported_in_first_pass_lock_mode() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-select-for-update-cte",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let insert_user = handle_query_command(
+        "req-insert-users-select-for-update-cte",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id) values (1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-select-for-update-cte",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "with active_users as (select id from users) select id from active_users for update"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Applied));
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn recursive_cte_union_all_repeating_frontier_is_rejected_early() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-recursive-cte-repeating-frontier",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let insert_user = handle_query_command(
+        "req-insert-users-recursive-cte-repeating-frontier",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id) values (1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-recursive-cte-repeating-frontier",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "with recursive t(id) as (select id from users where id = 1 union all select id from t) select id from t"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+    assert!(
+        message.contains("repeating UNION ALL frontier")
+            || message.contains("exceeded max iterations"),
+        "unexpected recursive rejection message: {message}"
+    );
+}
+
+#[test]
+fn set_variable_cte_max_iterations_limits_recursive_cte_execution() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-edges-set-max-iterations",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table edges (id bigint not null primary key, parent_id int, child_id int)"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-edges-set-max-iterations-1",
+            "insert into edges (id, parent_id, child_id) values (1, 1, 2)",
+        ),
+        (
+            "req-insert-edges-set-max-iterations-2",
+            "insert into edges (id, parent_id, child_id) values (2, 2, 3)",
+        ),
+        (
+            "req-insert-edges-set-max-iterations-3",
+            "insert into edges (id, parent_id, child_id) values (3, 3, 4)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let set_response = handle_query_command(
+        "req-set-max-iterations",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.max_iterations = 2".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
+
+    let recursive_query = handle_query_command(
+        "req-recursive-cte-set-max-iterations",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "with recursive chain as (select parent_id, child_id from edges where parent_id = 1 union select e.parent_id, e.child_id from edges e join chain c on e.parent_id = c.child_id) select child_id from chain order by child_id"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(
+        recursive_query.status,
+        connector::ResponseStatus::Rejected
+    ));
+    let ConnectorResult::Error(message) = recursive_query.result else {
+        panic!("expected error result")
+    };
+    assert!(
+        message.contains("exceeded max iterations (2)"),
+        "unexpected recursive rejection message: {message}"
+    );
+}
+
+#[test]
+fn set_variable_cte_union_all_repeat_detection_can_be_disabled() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-recursive-cte-repeat-toggle",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let insert_user = handle_query_command(
+        "req-insert-users-recursive-cte-repeat-toggle",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id) values (1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
+
+    let set_response = handle_query_command(
+        "req-set-recursive-cte-repeat-toggle",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.union_all_repeat_detection = false, cte.max_iterations = 3"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-recursive-cte-repeat-toggle",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "with recursive t(id) as (select id from users where id = 1 union all select id from t) select id from t"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+    assert!(
+        message.contains("exceeded max iterations (3)"),
+        "unexpected recursive rejection message: {message}"
+    );
+    assert!(
+        !message.contains("repeating UNION ALL frontier"),
+        "repeat-frontier detection should be disabled: {message}"
+    );
+}
+
+#[test]
+fn show_variables_includes_recursive_cte_runtime_controls() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let response = handle_query_command(
+        "req-show-variables-cte",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variables".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Applied));
+
+    let rows = query_result_rows(response);
+    assert!(rows.iter().any(|row| {
+        row.len() == 2 && row[0] == "cte.max_iterations" && row[1] == "128"
+    }));
+    assert!(rows.iter().any(|row| {
+        row.len() == 2 && row[0] == "cte.max_rows" && row[1] == "50000"
+    }));
+    assert!(rows.iter().any(|row| {
+        row.len() == 2 && row[0] == "cte.timeout_ms" && row[1] == "0"
+    }));
+    assert!(rows.iter().any(|row| {
+        row.len() == 2 && row[0] == "cte.union_all_repeat_detection" && row[1] == "true"
+    }));
+}
+
+#[test]
+fn show_variable_reflects_set_variable_updates() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let set_response = handle_query_command(
+        "req-set-variables-show-variable",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.timeout_ms = 42, cte.max_rows = 321".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
+
+    let show_timeout = handle_query_command(
+        "req-show-variable-timeout",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variable cte.timeout_ms".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(show_timeout.status, connector::ResponseStatus::Applied));
+    assert_eq!(
+        query_result_rows(show_timeout),
+        vec![vec!["cte.timeout_ms".to_string(), "42".to_string()]]
+    );
+
+    let show_max_rows = handle_query_command(
+        "req-show-variable-max-rows",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variable @@session.cte.max_rows".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(show_max_rows.status, connector::ResponseStatus::Applied));
+    assert_eq!(
+        query_result_rows(show_max_rows),
+        vec![vec!["cte.max_rows".to_string(), "321".to_string()]]
+    );
+}
+
+#[test]
+fn show_variables_like_filters_recursive_cte_controls() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let response = handle_query_command(
+        "req-show-variables-like-cte-max",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variables like 'cte.max_%'".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Applied));
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["cte.max_iterations".to_string(), "128".to_string()],
+            vec!["cte.max_rows".to_string(), "50000".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn select_sql_no_cache_modifier_is_accepted_in_compat_mode() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_users = handle_query_command(
+        "req-create-users-select-sql-no-cache",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id int primary key)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
+
+    let insert_user = handle_query_command(
+        "req-insert-users-select-sql-no-cache",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into users (id) values (1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-select-sql-no-cache",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select sql_no_cache id from users".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Applied));
+    assert_eq!(query_result_rows(response), vec![vec!["1".to_string()]]);
+}
+
+#[test]
+fn create_unique_index_is_rejected_until_unique_semantics_are_supported() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-unique-index",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id bigint not null primary key, email varchar(64))"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-create-unique-index",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create unique index idx_users_email on users(email)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Rejected),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("CREATE UNIQUE INDEX is not supported yet"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn create_index_with_using_clause_is_rejected_until_supported() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-users-index-using",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table users (id bigint not null primary key, email varchar(64))"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let response = handle_query_command(
+        "req-create-index-using",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create index idx_users_email on users(email) using btree".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Rejected),
+        "unexpected response: {:?}",
+        response
+    );
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.to_ascii_lowercase().contains("using")
+            && (
+                message.contains("CREATE INDEX USING is not supported yet")
+                || message.contains("sql parse failed")
+            ),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn recursive_cte_executes_hierarchy_expansion() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-edges",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table edges (id bigint not null primary key, parent_id int, child_id int)"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-edges-1",
+            "insert into edges (id, parent_id, child_id) values (1, 1, 2)",
+        ),
+        (
+            "req-insert-edges-2",
+            "insert into edges (id, parent_id, child_id) values (2, 2, 3)",
+        ),
+        (
+            "req-insert-edges-3",
+            "insert into edges (id, parent_id, child_id) values (3, 3, 4)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let recursive_query = handle_query_command(
+        "req-recursive-cte",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "with recursive chain as (select parent_id, child_id from edges where parent_id = 1 union select e.parent_id, e.child_id from edges e join chain c on e.parent_id = c.child_id) select child_id from chain order by child_id"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(recursive_query.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        recursive_query
+    );
+
+    let rows = query_result_rows(recursive_query);
+
+    assert_eq!(
+        rows,
+        vec![
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+            vec!["4".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn recursive_cte_union_all_executes_hierarchy_expansion() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let create_table = handle_query_command(
+        "req-create-edges-union-all",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table edges (id bigint not null primary key, parent_id int, child_id int)"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    for (request_id, sql) in [
+        (
+            "req-insert-edges-union-all-1",
+            "insert into edges (id, parent_id, child_id) values (1, 1, 2)",
+        ),
+        (
+            "req-insert-edges-union-all-2",
+            "insert into edges (id, parent_id, child_id) values (2, 2, 3)",
+        ),
+        (
+            "req-insert-edges-union-all-3",
+            "insert into edges (id, parent_id, child_id) values (3, 3, 4)",
+        ),
+    ] {
+        let response = handle_query_command(
+            request_id,
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "unexpected response for {request_id}: {:?}",
+            response
+        );
+    }
+
+    let recursive_query = handle_query_command(
+        "req-recursive-cte-union-all",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "with recursive chain as (select parent_id, child_id from edges where parent_id = 1 union all select e.parent_id, e.child_id from edges e join chain c on e.parent_id = c.child_id) select child_id from chain order by child_id"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(recursive_query.status, connector::ResponseStatus::Applied),
+        "unexpected response: {:?}",
+        recursive_query
+    );
+
+    let rows = query_result_rows(recursive_query);
+
+    assert_eq!(
+        rows,
+        vec![
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+            vec!["4".to_string()],
+        ]
+    );
 }
 
 #[test]
@@ -2126,6 +7376,1395 @@ fn union_query_applies_query_level_order_by_limit_and_offset() {
 }
 
 #[test]
+fn select_fetch_first_rows_only_limits_single_relation_query() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for id in ["1", "2", "3"] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-fetch-single-relation",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id desc fetch first 2 rows only".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["3".to_string()], vec!["2".to_string()]]);
+}
+
+#[test]
+fn select_fetch_first_rows_with_ties_keeps_boundary_ties() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "score".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for (id, score) in [("1", "99"), ("2", "90"), ("3", "90"), ("4", "80")] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("score".to_string(), score.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-fetch-with-ties-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, score from users order by score desc fetch first 2 rows with ties"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "99".to_string()],
+            vec!["2".to_string(), "90".to_string()],
+            vec!["3".to_string(), "90".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn select_fetch_first_percent_caps_rows() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for id in ["1", "2", "3", "4"] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-fetch-percent-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users order by id fetch first 50 percent rows only".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+}
+
+#[test]
+fn select_fetch_first_percent_with_ties_keeps_boundary_ties() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "score".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for (id, score) in [("1", "99"), ("2", "90"), ("3", "90"), ("4", "80")] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("score".to_string(), score.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-fetch-percent-with-ties-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, score from users order by score desc fetch first 50 percent rows with ties"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "99".to_string()],
+            vec!["2".to_string(), "90".to_string()],
+            vec!["3".to_string(), "90".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn union_query_fetch_with_ties_keeps_boundary_ties() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "score".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table should register");
+    catalog
+        .register_table("archived_users", schema)
+        .expect("archived users table should register");
+
+    for (table_id, id, score) in [
+        ("users", "1", "95"),
+        ("users", "2", "90"),
+        ("archived_users", "3", "90"),
+        ("archived_users", "4", "85"),
+    ] {
+        let table = catalog.table(table_id).expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("score".to_string(), score.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            table_id,
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-union-fetch-with-ties-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, score from users union all select id, score from archived_users order by score desc fetch first 2 rows with ties".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "95".to_string()],
+            vec!["2".to_string(), "90".to_string()],
+            vec!["3".to_string(), "90".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn union_query_fetch_percent_caps_rows() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table should register");
+    catalog
+        .register_table("archived_users", schema)
+        .expect("archived users table should register");
+
+    for (table_id, id) in [
+        ("users", "1"),
+        ("users", "2"),
+        ("archived_users", "3"),
+        ("archived_users", "4"),
+    ] {
+        let table = catalog.table(table_id).expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            table_id,
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-union-fetch-percent-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users union all select id from archived_users order by id fetch first 50 percent rows only".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+}
+
+#[test]
+fn union_query_fetch_percent_with_ties_keeps_boundary_ties() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "score".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table should register");
+    catalog
+        .register_table("archived_users", schema)
+        .expect("archived users table should register");
+
+    for (table_id, id, score) in [
+        ("users", "1", "95"),
+        ("users", "2", "90"),
+        ("archived_users", "3", "90"),
+        ("archived_users", "4", "85"),
+    ] {
+        let table = catalog.table(table_id).expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("score".to_string(), score.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            table_id,
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-union-fetch-percent-with-ties-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, score from users union all select id, score from archived_users order by score desc fetch first 50 percent rows with ties".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "95".to_string()],
+            vec!["2".to_string(), "90".to_string()],
+            vec!["3".to_string(), "90".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn select_top_limits_rows() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for id in ["1", "2", "3"] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-top-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select top 2 id from users order by id desc".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["3".to_string()], vec!["2".to_string()]]);
+}
+
+#[test]
+fn select_top_percent_caps_rows() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for id in ["1", "2", "3", "4"] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-top-percent-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select top 50 percent id from users order by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+}
+
+#[test]
+fn select_top_percent_with_ties_keeps_boundary_ties() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "score".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for (id, score) in [("1", "99"), ("2", "90"), ("3", "90"), ("4", "80")] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("score".to_string(), score.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-top-percent-with-ties-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select top 50 percent with ties id, score from users order by score desc"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "99".to_string()],
+            vec!["2".to_string(), "90".to_string()],
+            vec!["3".to_string(), "90".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn select_top_with_ties_keeps_boundary_ties() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "score".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for (id, score) in [("1", "99"), ("2", "90"), ("3", "90"), ("4", "80")] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("score".to_string(), score.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-top-with-ties-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select top 2 with ties id, score from users order by score desc".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "99".to_string()],
+            vec!["2".to_string(), "90".to_string()],
+            vec!["3".to_string(), "90".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn select_prewhere_and_where_combines_filters() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "role".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for (id, role) in [("1", "admin"), ("1", "user"), ("2", "admin")] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("role".to_string(), role.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-prewhere-where-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, role from users prewhere id = 1 where role = 'admin'".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string(), "admin".to_string()]]);
+}
+
+#[test]
+fn select_limit_by_caps_each_group() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "team".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for (id, team) in [("1", "a"), ("2", "a"), ("3", "b"), ("4", "b")] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("team".to_string(), team.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-limit-by-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, team from users order by id limit 1 by team".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "a".to_string()],
+            vec!["3".to_string(), "b".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn select_limit_by_with_offset_applies_global_offset_after_group_caps() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::Int(32),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "team".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for (id, team) in [("1", "a"), ("2", "a"), ("3", "b"), ("4", "b")] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+        row.insert("team".to_string(), team.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-select-limit-by-offset-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id, team from users order by id limit 1 offset 1 by team".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["3".to_string(), "b".to_string()]]);
+}
+
+#[test]
+fn select_sort_cluster_distribute_by_apply_ordering_compatibility() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema)
+        .expect("users table should register");
+
+    for id in ["3", "1", "2"] {
+        let table = catalog.table("users").expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            "users",
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let sort_rows = query_result_rows(handle_query_command(
+        "req-select-sort-by-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users sort by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    ));
+    assert_eq!(
+        sort_rows,
+        vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+        ]
+    );
+
+    let cluster_rows = query_result_rows(handle_query_command(
+        "req-select-cluster-by-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users cluster by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    ));
+    assert_eq!(
+        cluster_rows,
+        vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+        ]
+    );
+
+    let distribute_rows = query_result_rows(handle_query_command(
+        "req-select-distribute-by-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users distribute by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    ));
+    assert_eq!(
+        distribute_rows,
+        vec![
+            vec!["1".to_string()],
+            vec!["2".to_string()],
+            vec!["3".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn union_query_applies_query_level_fetch_first_rows_only() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table should register");
+    catalog
+        .register_table("archived_users", schema)
+        .expect("archived_users table should register");
+
+    for (table_id, id) in [
+        ("users", "1"),
+        ("users", "3"),
+        ("archived_users", "2"),
+        ("archived_users", "4"),
+    ] {
+        let table = catalog.table(table_id).expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            table_id,
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-union-order-fetch-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users union all select id from archived_users order by id desc fetch first 2 rows only".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["4".to_string()], vec!["3".to_string()]]);
+}
+
+#[test]
+fn union_query_applies_query_level_limit_by() {
+    let mut catalogs = HashMap::new();
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = TableSchema::new(vec![FieldDef {
+        seqno: 1,
+        field_name: "id".to_string(),
+        field_type: FieldType::Int(32),
+        nullable: false,
+        indexed: FieldIndex::PrimaryKey,
+        default_value: None,
+        metadata: None,
+    }]);
+
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table should register");
+    catalog
+        .register_table("archived_users", schema)
+        .expect("archived_users table should register");
+
+    for (table_id, id) in [
+        ("users", "1"),
+        ("users", "2"),
+        ("archived_users", "1"),
+        ("archived_users", "2"),
+    ] {
+        let table = catalog.table(table_id).expect("table should exist");
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.as_bytes().to_vec());
+
+        let payload = serverlib::encode_row_payload(table.schema(), &row)
+            .expect("row payload should encode");
+
+        super::core::append_row_payload_record(
+            &catalog,
+            &wal,
+            table_id,
+            table,
+            &mut runtime_indexes,
+            TransactionKind::Insert,
+            payload,
+            common::epoch_nanos!(),
+            None,
+            None,
+        )
+        .expect("row append should succeed");
+    }
+
+    catalogs.insert("main".to_string(), catalog);
+
+    let response = handle_query_command(
+        "req-union-limit-by-1",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select id from users union all select id from archived_users order by id limit 1 by id".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+}
+
+#[test]
 fn union_query_applies_order_by_ordinal_position() {
     let mut catalogs = HashMap::new();
     let wal = ConcurrentWalManager::in_memory();
@@ -2632,6 +9271,7 @@ fn union_query_deduplicates_case_insensitively_under_ci_collation() {
     let metadata = common::schema::FieldMetadata {
         comment: None,
         auto_increment: false,
+        unique: false,
         original_sql_type: None,
         character_set: Some("utf8mb4".to_string()),
         collation: Some("utf8mb4_general_ci".to_string()),
@@ -2939,6 +9579,7 @@ fn union_query_rejects_conflicting_collations() {
                 metadata: Some(common::schema::FieldMetadata {
                     comment: None,
                     auto_increment: false,
+                    unique: false,
                     original_sql_type: None,
                     character_set: Some("utf8mb4".to_string()),
                     collation: Some("utf8mb4_general_ci".to_string()),
@@ -2961,6 +9602,7 @@ fn union_query_rejects_conflicting_collations() {
                 metadata: Some(common::schema::FieldMetadata {
                     comment: None,
                     auto_increment: false,
+                    unique: false,
                     original_sql_type: None,
                     character_set: Some("utf8mb4".to_string()),
                     collation: Some("utf8mb4_bin".to_string()),

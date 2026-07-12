@@ -11,7 +11,16 @@ pub(super) fn execute_union_query_impl(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    let (steps, order_by, limit, offset) =
+    let (
+        steps,
+        order_by,
+        limit_by,
+        fetch_with_ties_limit,
+        fetch_percent,
+        fetch_percent_with_ties,
+        limit,
+        offset,
+    ) =
         match serverlib::parse_union_select_read_plans_from_statement(&statement.sql) {
             Ok(parsed) => parsed,
             Err(err) => {
@@ -197,6 +206,40 @@ pub(super) fn execute_union_query_impl(
         });
     }
 
+    rows = match apply_union_limit_by(rows, &columns, limit_by.as_ref()) {
+        Ok(rows) => rows,
+        Err(message) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("union query execution failed: {message}"),
+            );
+        }
+    };
+
+    if let Some(percent) = fetch_percent_with_ties {
+        rows = match apply_union_percent_with_ties(rows, &columns, &order_by, percent) {
+            Ok(rows) => rows,
+            Err(message) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("union query execution failed: {message}"),
+                );
+            }
+        };
+    } else {
+        rows = apply_union_percent(rows, fetch_percent);
+
+        rows = match apply_union_with_ties(rows, &columns, &order_by, fetch_with_ties_limit) {
+            Ok(rows) => rows,
+            Err(message) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("union query execution failed: {message}"),
+                );
+            }
+        };
+    }
+
     rows = apply_union_row_window(rows, limit, offset);
 
     ConnectorResponse::applied(
@@ -207,6 +250,164 @@ pub(super) fn execute_union_query_impl(
             timings: empty_query_timings(),
         }),
     )
+}
+
+fn apply_union_percent(
+    rows: Vec<Vec<Vec<u8>>>,
+    fetch_percent: Option<usize>,
+) -> Vec<Vec<Vec<u8>>> {
+
+    let Some(percent) = fetch_percent else {
+        return rows;
+    };
+
+    if rows.is_empty() || percent == 0 {
+        return Vec::new();
+    }
+
+    let capped_percent = percent.min(100);
+    let total_rows = rows.len();
+    let bounded_rows = total_rows
+        .saturating_mul(capped_percent)
+        .saturating_add(99)
+        / 100;
+
+    rows.into_iter().take(bounded_rows).collect()
+
+}
+
+fn apply_union_percent_with_ties(
+    rows: Vec<Vec<Vec<u8>>>,
+    columns: &[serverlib::FieldDef],
+    order_by: &[serverlib::SelectOrderByItem],
+    percent: usize,
+) -> Result<Vec<Vec<Vec<u8>>>, String> {
+
+    if rows.is_empty() || percent == 0 {
+        return Ok(Vec::new());
+    }
+
+    let capped_percent = percent.min(100);
+    let total_rows = rows.len();
+    let bounded_rows = total_rows
+        .saturating_mul(capped_percent)
+        .saturating_add(99)
+        / 100;
+
+    apply_union_with_ties(rows, columns, order_by, Some(bounded_rows))
+
+}
+
+fn apply_union_limit_by(
+    rows: Vec<Vec<Vec<u8>>>,
+    columns: &[serverlib::FieldDef],
+    limit_by: Option<&serverlib::SelectLimitByPlan>,
+) -> Result<Vec<Vec<Vec<u8>>>, String> {
+
+    let Some(limit_by) = limit_by else {
+        return Ok(rows);
+    };
+
+    let mut key_indexes = Vec::with_capacity(limit_by.fields.len());
+    for field_name in &limit_by.fields {
+        let Some(index) = columns.iter().position(|column| column.field_name == *field_name) else {
+            return Err(format!(
+                "LIMIT BY column '{}' is not present in UNION output",
+                field_name
+            ));
+        };
+        key_indexes.push(index);
+    }
+
+    let mut per_key_counts = std::collections::HashMap::<Vec<Vec<u8>>, usize>::new();
+    let mut limited_rows = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let key = key_indexes
+            .iter()
+            .map(|index| row.get(*index).cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        let count = per_key_counts.entry(key).or_insert(0);
+        if *count < limit_by.per_key_limit {
+            *count += 1;
+            limited_rows.push(row);
+        }
+    }
+
+    Ok(limited_rows)
+
+}
+
+fn apply_union_with_ties(
+    rows: Vec<Vec<Vec<u8>>>,
+    columns: &[serverlib::FieldDef],
+    order_by: &[serverlib::SelectOrderByItem],
+    with_ties_limit: Option<usize>,
+) -> Result<Vec<Vec<Vec<u8>>>, String> {
+
+    let Some(limit) = with_ties_limit else {
+        return Ok(rows);
+    };
+
+    if limit == 0 || rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if limit >= rows.len() {
+        return Ok(rows);
+    }
+
+    let mut order_indexes = Vec::with_capacity(order_by.len());
+    const UNION_ORDER_BY_ORDINAL_PREFIX: &str = "__union_order_by_ordinal__";
+
+    for item in order_by {
+        let index = if let Some(raw_ordinal) = item.field_name.strip_prefix(UNION_ORDER_BY_ORDINAL_PREFIX) {
+            let ordinal = raw_ordinal
+                .parse::<usize>()
+                .map_err(|_| format!("invalid ORDER BY ordinal '{}'", raw_ordinal))?;
+
+            if ordinal == 0 || ordinal > columns.len() {
+                return Err(format!(
+                    "ORDER BY ordinal {} is out of range for {} output columns",
+                    ordinal,
+                    columns.len()
+                ));
+            }
+
+            ordinal - 1
+        } else {
+            columns
+                .iter()
+                .position(|column| column.field_name == item.field_name)
+                .ok_or_else(|| {
+                    format!(
+                        "ORDER BY column '{}' is not present in UNION output",
+                        item.field_name
+                    )
+                })?
+        };
+
+        order_indexes.push(index);
+    }
+
+    if order_indexes.is_empty() {
+        return Ok(rows.into_iter().take(limit).collect());
+    }
+
+    let boundary_index = limit - 1;
+    let mut end = limit;
+
+    while end < rows.len()
+        && order_indexes
+            .iter()
+            .all(|index| rows[end].get(*index) == rows[boundary_index].get(*index))
+    {
+        end += 1;
+    }
+
+    Ok(rows.into_iter().take(end).collect())
+
 }
 
 pub(super) fn apply_set_boundary_operation(
@@ -495,6 +696,7 @@ fn reconcile_union_column_metadata(
     let resolved_metadata = common::schema::FieldMetadata {
         comment: base_metadata.comment.or(branch_metadata.comment),
         auto_increment: base_metadata.auto_increment || branch_metadata.auto_increment,
+        unique: base_metadata.unique || branch_metadata.unique,
         original_sql_type: base_metadata.original_sql_type.or(branch_metadata.original_sql_type),
         character_set: resolved_character_set,
         collation: resolved_collation,

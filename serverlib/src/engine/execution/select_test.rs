@@ -8,7 +8,7 @@ use crate::engine::database::transaction::TransactionLog;
 use crate::{
     encode_row_payload, parse_select_read_plan_from_statement, ConcurrentWalManager,
     DatabaseCatalog, FieldDef, FieldIndex, FieldType, RuntimeIndexStore, SelectComparisonOp,
-    SelectCondition, SelectPredicate, SelectProjectionItem, SelectRelation, TableSchema,
+    SelectCondition, SelectLockMode, SelectPredicate, SelectProjectionItem, SelectRelation, TableSchema,
     TransactionId, TransactionKind, TransactionRecord, UserId,
 };
 
@@ -891,6 +891,105 @@ fn execute_relation_select_plan_supports_sum_over_named_window_with_frame_projec
 }
 
 #[test]
+fn execute_relation_select_plan_supports_named_window_partition_order_and_frame_overrides() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+    let mut extra_profile_row = std::collections::HashMap::new();
+    extra_profile_row.insert("id".to_string(), b"11".to_vec());
+    extra_profile_row.insert("user_id".to_string(), b"1".to_vec());
+    extra_profile_row.insert("name".to_string(), b"Sam Two".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &extra_profile_row)
+                .expect("extra profile row should encode"),
+        ),
+    )
+    .expect("extra profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, user_id, row_number() over (w order by id) as rn_order_override, row_number() over (w partition by id order by id) as rn_partition_override, sum(id) over (w rows between unbounded preceding and current row) as running_sum_frame_override from profiles window w as (partition by user_id order by id desc rows between current row and current row) order by id",
+    )
+    .expect("named window override select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("named window override projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("user_id utf8"),
+                String::from_utf8(row[2].clone()).expect("order override utf8"),
+                String::from_utf8(row[3].clone()).expect("partition override utf8"),
+                String::from_utf8(row[4].clone()).expect("frame override utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "10".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+                "21".to_string(),
+            ),
+            (
+                "11".to_string(),
+                "1".to_string(),
+                "2".to_string(),
+                "1".to_string(),
+                "11".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn execute_relation_select_plan_supports_rank_and_dense_rank_window_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
@@ -1011,6 +1110,124 @@ fn execute_relation_select_plan_supports_rank_and_dense_rank_window_projection()
 }
 
 #[test]
+fn execute_relation_select_plan_supports_lag_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, lag(id, 1, 0) over (order by id) as prev_id from users order by id",
+    )
+    .expect("lag window select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("lag window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("lag utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("1".to_string(), "0".to_string()),
+            ("2".to_string(), "1".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_lead_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, lead(id, 1, 99) over (order by id) as next_id from users order by id",
+    )
+    .expect("lead window select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("lead window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("lead utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("1".to_string(), "2".to_string()),
+            ("2".to_string(), "99".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn execute_relation_select_plan_supports_avg_min_max_window_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
@@ -1043,9 +1260,9 @@ fn execute_relation_select_plan_supports_avg_min_max_window_projection() {
     .expect("second profile row should append");
 
     let read_plan = parse_select_read_plan_from_statement(
-        "select id, avg(id) over (order by id rows between unbounded preceding and current row) as running_avg, min(id) over (order by id rows between unbounded preceding and current row) as running_min, max(id) over (order by id rows between unbounded preceding and current row) as running_max from profiles order by id",
+        "select id, count(id) over (order by id rows between unbounded preceding and current row) as running_count, avg(id) over (order by id rows between unbounded preceding and current row) as running_avg, min(id) over (order by id rows between unbounded preceding and current row) as running_min, max(id) over (order by id rows between unbounded preceding and current row) as running_max from profiles order by id",
     )
-    .expect("avg/min/max window select should parse");
+    .expect("count/avg/min/max window select should parse");
 
     let relation = catalog.table("profiles").expect("profiles table should exist");
     let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
@@ -1071,7 +1288,7 @@ fn execute_relation_select_plan_supports_avg_min_max_window_projection() {
             )
         },
     )
-    .expect("avg/min/max window projection should succeed");
+    .expect("count/avg/min/max window projection should succeed");
 
     let rows = result
         .rows
@@ -1079,9 +1296,10 @@ fn execute_relation_select_plan_supports_avg_min_max_window_projection() {
         .map(|row| {
             (
                 String::from_utf8(row[0].clone()).expect("id utf8"),
-                String::from_utf8(row[1].clone()).expect("avg utf8"),
-                String::from_utf8(row[2].clone()).expect("min utf8"),
-                String::from_utf8(row[3].clone()).expect("max utf8"),
+                String::from_utf8(row[1].clone()).expect("count utf8"),
+                String::from_utf8(row[2].clone()).expect("avg utf8"),
+                String::from_utf8(row[3].clone()).expect("min utf8"),
+                String::from_utf8(row[4].clone()).expect("max utf8"),
             )
         })
         .collect::<Vec<_>>();
@@ -1091,18 +1309,654 @@ fn execute_relation_select_plan_supports_avg_min_max_window_projection() {
         vec![
             (
                 "10".to_string(),
+                "1".to_string(),
                 "10".to_string(),
                 "10".to_string(),
                 "10".to_string(),
             ),
             (
                 "11".to_string(),
+                "2".to_string(),
                 "10.5".to_string(),
                 "10".to_string(),
                 "11".to_string(),
             ),
         ]
     );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_first_last_value_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"1".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam Two".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, first_value(id) over (order by id rows between unbounded preceding and current row) as first_id, last_value(id) over (order by id rows between unbounded preceding and current row) as last_id from profiles order by id",
+    )
+    .expect("first/last value window select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("first/last value window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("first value utf8"),
+                String::from_utf8(row[2].clone()).expect("last value utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("10".to_string(), "10".to_string(), "10".to_string()),
+            ("11".to_string(), "10".to_string(), "11".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_nth_value_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"1".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam Two".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, nth_value(id, 2) over (order by id rows between unbounded preceding and current row) as second_id from profiles order by id",
+    )
+    .expect("nth_value window select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("nth_value window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("nth value utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("10".to_string(), "NULL".to_string()),
+            ("11".to_string(), "11".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_percent_rank_and_cume_dist_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let mut third_profile_row = std::collections::HashMap::new();
+    third_profile_row.insert("id".to_string(), b"12".to_vec());
+    third_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    third_profile_row.insert("name".to_string(), b"Zed".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(12),
+            None,
+            None,
+            12,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &third_profile_row)
+                .expect("third profile row should encode"),
+        ),
+    )
+    .expect("third profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, name, percent_rank() over (order by name), cume_dist() over (order by name) from profiles order by id",
+    )
+    .expect("percent_rank/cume_dist window select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("percent_rank/cume_dist window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("name utf8"),
+                String::from_utf8(row[2].clone()).expect("percent_rank utf8"),
+                String::from_utf8(row[3].clone()).expect("cume_dist utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "10".to_string(),
+                "Sam".to_string(),
+                "0".to_string(),
+                "0.6666666666666666".to_string(),
+            ),
+            (
+                "11".to_string(),
+                "Sam".to_string(),
+                "0".to_string(),
+                "0.6666666666666666".to_string(),
+            ),
+            (
+                "12".to_string(),
+                "Zed".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_ntile_window_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let mut third_profile_row = std::collections::HashMap::new();
+    third_profile_row.insert("id".to_string(), b"12".to_vec());
+    third_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    third_profile_row.insert("name".to_string(), b"Zed".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(12),
+            None,
+            None,
+            12,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &third_profile_row)
+                .expect("third profile row should encode"),
+        ),
+    )
+    .expect("third profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, name, ntile(2) over (order by name) as tile from profiles order by id",
+    )
+    .expect("ntile window select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("ntile window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("name utf8"),
+                String::from_utf8(row[2].clone()).expect("tile utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("10".to_string(), "Sam".to_string(), "1".to_string()),
+            ("11".to_string(), "Sam".to_string(), "1".to_string()),
+            ("12".to_string(), "Zed".to_string(), "2".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_range_frame_unit() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"1".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam Two".to_vec());
+
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, sum(id) over (order by id range between 1 preceding and current row) as running_sum from profiles order by id",
+    )
+    .expect("range frame select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("range frame window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("sum utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("10".to_string(), "10".to_string()),
+            ("11".to_string(), "21".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_groups_frame_unit() {
+    
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let profiles_schema = catalog
+        .table_schema("profiles")
+        .expect("profiles schema should exist");
+    let actor = UserId("test-user".to_string());
+
+    let mut second_profile_row = std::collections::HashMap::new();
+    second_profile_row.insert("id".to_string(), b"11".to_vec());
+    second_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    second_profile_row.insert("name".to_string(), b"Sam".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(11),
+            None,
+            None,
+            11,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &second_profile_row)
+                .expect("second profile row should encode"),
+        ),
+    )
+    .expect("second profile row should append");
+
+    let mut third_profile_row = std::collections::HashMap::new();
+    third_profile_row.insert("id".to_string(), b"12".to_vec());
+    third_profile_row.insert("user_id".to_string(), b"2".to_vec());
+    third_profile_row.insert("name".to_string(), b"Zed".to_vec());
+    wal.append(
+        "profiles",
+        TransactionRecord::with_payload(
+            TransactionId(12),
+            None,
+            None,
+            12,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&profiles_schema, &third_profile_row)
+                .expect("third profile row should encode"),
+        ),
+    )
+    .expect("third profile row should append");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, name, max(id) over (order by name groups between current row and current row) as peer_max from profiles order by id",
+    )
+    .expect("groups frame select should parse");
+
+    let relation = catalog.table("profiles").expect("profiles table should exist");
+    let schema = catalog.table_schema("profiles").expect("profiles schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("groups frame window projection should succeed");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("name utf8"),
+                String::from_utf8(row[2].clone()).expect("peer max utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            ("10".to_string(), "Sam".to_string(), "11".to_string()),
+            ("11".to_string(), "Sam".to_string(), "11".to_string()),
+            ("12".to_string(), "Zed".to_string(), "12".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn execute_relation_select_plan_supports_window_aware_qualify_filtering() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select id, row_number() over (order by id desc) as rn from users qualify rn = 1 order by id",
+    )
+    .expect("qualify window select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("qualify window select should execute");
+
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                String::from_utf8(row[0].clone()).expect("id utf8"),
+                String::from_utf8(row[1].clone()).expect("rn utf8"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows, vec![("2".to_string(), "1".to_string())]);
 }
 
 #[test]
@@ -1903,9 +2757,18 @@ fn execute_joined_select_plan_expands_qualified_wildcard_projection() {
         group_by: Vec::new(),
         having_condition: None,
         has_window_clause: false,
+        limit_by: None,
+        top_percent: None,
+        top_percent_with_ties: None,
+        top_with_ties_limit: None,
+        fetch_percent: None,
+        fetch_percent_with_ties: None,
+        fetch_with_ties_limit: None,
         limit: None,
         offset: None,
         where_condition: None,
+        qualify_condition: None,
+        lock_mode: SelectLockMode::None,
         is_explain: false,
     };
 
@@ -1970,9 +2833,18 @@ fn execute_joined_select_plan_expands_unqualified_wildcard_projection() {
         group_by: Vec::new(),
         having_condition: None,
         has_window_clause: false,
+        limit_by: None,
+        top_percent: None,
+        top_percent_with_ties: None,
+        top_with_ties_limit: None,
+        fetch_percent: None,
+        fetch_percent_with_ties: None,
+        fetch_with_ties_limit: None,
         limit: None,
         offset: None,
         where_condition: None,
+        qualify_condition: None,
+        lock_mode: SelectLockMode::None,
         is_explain: false,
     };
 

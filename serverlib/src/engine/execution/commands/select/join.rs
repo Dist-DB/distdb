@@ -511,6 +511,34 @@ fn ensure_order_by_projection_items(
     read_plan: &SelectReadPlan,
 ) -> Vec<SelectProjectionItem> {
 
+    for field_name in collect_condition_field_names(read_plan.qualify_condition.as_ref()) {
+
+        let covered = projection_items.iter().any(|item| match item {
+
+            SelectProjectionItem::Column {
+                field_name: projected_field_name,
+                output_name,
+            } => projected_field_name == &field_name || output_name == &field_name,
+
+            SelectProjectionItem::Case { output_name, .. }
+            | SelectProjectionItem::InbuiltFunction { output_name, .. }
+            | SelectProjectionItem::WindowFunction { output_name, .. } => {
+                output_name == &field_name
+            }
+
+            SelectProjectionItem::Wildcard { .. } => false,
+
+        });
+
+        if !covered {
+            projection_items.push(SelectProjectionItem::Column {
+                field_name: field_name.clone(),
+                output_name: field_name,
+            });
+        }
+
+    }
+
     for order_by in &read_plan.order_by {
 
         let covered = projection_items.iter().any(|item| match item {
@@ -539,8 +567,79 @@ fn ensure_order_by_projection_items(
 
     }
 
+    if let Some(limit_by) = read_plan.limit_by.as_ref() {
+        for field_name in &limit_by.fields {
+            let covered = projection_items.iter().any(|item| match item {
+                SelectProjectionItem::Column {
+                    field_name: projected_field_name,
+                    output_name,
+                } => projected_field_name == field_name || output_name == field_name,
+
+                SelectProjectionItem::Case { output_name, .. }
+                | SelectProjectionItem::InbuiltFunction { output_name, .. }
+                | SelectProjectionItem::WindowFunction { output_name, .. } => {
+                    output_name == field_name
+                }
+
+                SelectProjectionItem::Wildcard { .. } => false,
+            });
+
+            if !covered {
+                projection_items.push(SelectProjectionItem::Column {
+                    field_name: field_name.clone(),
+                    output_name: field_name.clone(),
+                });
+            }
+        }
+    }
+
     projection_items
 
+}
+
+fn collect_condition_field_names(condition: Option<&SelectCondition>) -> Vec<String> {
+    let Some(condition) = condition else {
+        return Vec::new();
+    };
+
+    let mut fields = Vec::new();
+    collect_condition_field_names_recursive(condition, &mut fields);
+    fields.sort();
+    fields.dedup();
+    fields
+}
+
+fn collect_condition_field_names_recursive(condition: &SelectCondition, fields: &mut Vec<String>) {
+    match condition {
+        SelectCondition::And(children) | SelectCondition::Or(children) => {
+            for child in children {
+                collect_condition_field_names_recursive(child, fields);
+            }
+        }
+        SelectCondition::Not(child) => collect_condition_field_names_recursive(child, fields),
+        SelectCondition::Predicate(predicate) => match predicate {
+            crate::SelectPredicate::Comparison { field_name, .. }
+            | crate::SelectPredicate::Like { field_name, .. }
+            | crate::SelectPredicate::Regex { field_name, .. }
+            | crate::SelectPredicate::InList { field_name, .. }
+            | crate::SelectPredicate::IsNull { field_name, .. }
+            | crate::SelectPredicate::InSubquery { field_name, .. }
+            | crate::SelectPredicate::ScalarSubqueryComparison { field_name, .. }
+            | crate::SelectPredicate::AnySubqueryComparison { field_name, .. }
+            | crate::SelectPredicate::AllSubqueryComparison { field_name, .. } => {
+                fields.push(field_name.clone());
+            }
+            crate::SelectPredicate::FieldComparison {
+                left_field_name,
+                right_field_name,
+                ..
+            } => {
+                fields.push(left_field_name.clone());
+                fields.push(right_field_name.clone());
+            }
+            crate::SelectPredicate::Exists { .. } => {}
+        },
+    }
 }
 
 fn join_field_can_be_null_extended(
@@ -672,6 +771,7 @@ fn count_star_is_strict_full_table(read_plan: &SelectReadPlan) -> bool {
     read_plan.having_condition.is_none() &&
     !read_plan.distinct &&
     read_plan.order_by.is_empty() &&
+    read_plan.limit_by.is_none() &&
     read_plan.limit.is_none() &&
     read_plan.offset.is_none()
     

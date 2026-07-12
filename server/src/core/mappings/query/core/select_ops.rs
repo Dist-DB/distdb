@@ -164,6 +164,7 @@ pub(super) fn execute_select_impl(
         request_id,
         query,
         catalogs,
+        wal,
         statement,
         &statement_sql_lower,
     ) {
@@ -212,6 +213,7 @@ fn handle_select_introspection_request(
     request_id: &str,
     query: &DataQuery,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
     statement: &SqlRequest,
     statement_sql_lower: &str,
 ) -> Option<ConnectorResponse> {
@@ -322,6 +324,49 @@ fn handle_select_introspection_request(
 
     }
 
+    if statement_sql_lower.starts_with("show variables") ||
+        statement_sql_lower.starts_with("show variable")
+    {
+
+        let is_show_variables = statement_sql_lower.starts_with("show variables");
+        let is_show_variable = !is_show_variables && statement_sql_lower.starts_with("show variable");
+
+        let target_db = if is_show_variable {
+            query.database_id.as_str()
+        } else {
+            statement
+                .object_name
+                .as_deref()
+                .unwrap_or(&query.database_id)
+        };
+
+        let Some(catalog) = resolve_catalog(catalogs, target_db) else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("database '{}' not found", target_db),
+            ));
+        };
+
+        let available = recursive_cte_show_variables(catalog);
+        let variable_filter = match parse_show_variable_filter(statement, is_show_variable) {
+            Ok(filter) => filter,
+            Err(message) => {
+                return Some(ConnectorResponse::rejected(request_id.to_string(), message));
+            }
+        };
+
+        let variable_rows = match filter_named_value_rows(available, &variable_filter) {
+            Ok(rows) => rows,
+            Err(message) => {
+                return Some(ConnectorResponse::rejected(request_id.to_string(), message));
+            }
+        };
+
+        let result = serverlib::show_variables_result(variable_rows);
+        return Some(applied_query_response(request_id, result));
+
+    }
+
     if statement_sql_lower.starts_with("show index") ||
         statement_sql_lower.starts_with("show indexes") ||
         statement_sql_lower.starts_with("show keys")
@@ -408,6 +453,56 @@ fn handle_select_introspection_request(
 
         return Some(applied_query_response(request_id, result));
 
+    }
+
+    if statement_sql_lower.starts_with("show slices") {
+
+        let options = match parse_show_slices_options(&statement.sql) {
+            Ok(options) => options,
+            Err(message) => {
+                return Some(ConnectorResponse::rejected(request_id.to_string(), message));
+            }
+        };
+
+        let object_name = statement
+            .object_name
+            .clone()
+            .or_else(|| parse_show_slices_target_view(&statement.sql));
+
+        let Some(object_name) = object_name else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                "show slices missing olap view identifier",
+            ));
+        };
+
+        let (catalog, normalized_object_id, resolved_database_id) =
+            match resolve_catalog_and_object_for_lookup(catalogs, &query.database_id, &object_name)
+            {
+                Ok(resolved) => resolved,
+                Err(message) => {
+                    return Some(ConnectorResponse::rejected(request_id.to_string(), message));
+                }
+            };
+
+        let mut result = match build_show_slices_result(
+            catalog,
+            wal,
+            &normalized_object_id,
+            &resolved_database_id,
+        ) {
+            Ok(result) => result,
+            Err(message) => {
+                return Some(ConnectorResponse::rejected(request_id.to_string(), message));
+            }
+        };
+
+        if let Err(message) = apply_show_slices_options(&mut result, options) {
+            return Some(ConnectorResponse::rejected(request_id.to_string(), message));
+        }
+
+        return Some(applied_query_response(request_id, result));
+        
     }
 
     if statement_sql_lower.starts_with("debug ") {
@@ -585,6 +680,811 @@ fn parse_show_indexes_target_table(sql: &str) -> Option<String> {
 
 }
 
+fn recursive_cte_show_variables(catalog: &DatabaseCatalog) -> Vec<(String, String)> {
+    let settings = catalog.recursive_cte_execution_settings();
+
+    vec![
+        (
+            "cte.max_iterations".to_string(),
+            settings.max_iterations.to_string(),
+        ),
+        ("cte.max_rows".to_string(), settings.max_rows.to_string()),
+        ("cte.timeout_ms".to_string(), settings.timeout_ms.to_string()),
+        (
+            "cte.union_all_repeat_detection".to_string(),
+            settings.detect_repeating_union_all_frontier.to_string(),
+        ),
+    ]
+}
+
+#[derive(Debug, Clone)]
+enum NamedValueFilter {
+    All,
+    ExactName(String),
+    LikePattern {
+        pattern: String,
+        escape_char: Option<char>,
+    },
+}
+
+fn filter_named_value_rows(
+    rows: Vec<(String, String)>,
+    filter: &NamedValueFilter,
+) -> Result<Vec<(String, String)>, String> {
+    match filter {
+        NamedValueFilter::All => Ok(rows),
+        NamedValueFilter::ExactName(name) => Ok(rows
+            .into_iter()
+            .filter(|(row_name, _)| row_name == name)
+            .collect()),
+        NamedValueFilter::LikePattern {
+            pattern,
+            escape_char,
+        } => {
+            if pattern.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            Ok(rows
+                .into_iter()
+                .filter(|(row_name, _)| {
+                    serverlib::engine::sql::compare_like_value(
+                        row_name.as_bytes(),
+                        pattern.as_bytes(),
+                        true,
+                        *escape_char,
+                    )
+                })
+                .collect())
+        }
+    }
+}
+
+fn parse_show_variable_filter(
+    statement: &SqlRequest,
+    is_show_variable: bool,
+) -> Result<NamedValueFilter, String> {
+    if is_show_variable {
+        return parse_show_variable_name(statement)
+            .filter(|name| !name.is_empty())
+            .map(NamedValueFilter::ExactName)
+            .ok_or_else(|| "show variable missing variable identifier".to_string());
+    }
+
+    parse_show_variables_like_pattern(statement)
+}
+
+fn parse_show_variables_like_pattern(statement: &SqlRequest) -> Result<NamedValueFilter, String> {
+    let tokens = statement
+        .sql
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>();
+
+    let Some(like_idx) = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("like")) else {
+        return Ok(NamedValueFilter::All);
+    };
+
+    let Some(raw_pattern) = tokens.get(like_idx + 1) else {
+        return Err("show variables LIKE requires a pattern".to_string());
+    };
+
+    let pattern = strip_sql_token_quotes(raw_pattern).to_string();
+    if pattern.is_empty() {
+        return Err("show variables LIKE requires a pattern".to_string());
+    }
+
+    let escape_char = if tokens
+        .get(like_idx + 2)
+        .is_some_and(|token| token.eq_ignore_ascii_case("escape"))
+    {
+        let Some(raw_escape) = tokens.get(like_idx + 3) else {
+            return Err("show variables LIKE ESCAPE requires a single character".to_string());
+        };
+
+        let escape = strip_sql_token_quotes(raw_escape);
+        let mut chars = escape.chars();
+        let Some(first) = chars.next() else {
+            return Err("show variables LIKE ESCAPE requires a single character".to_string());
+        };
+        if chars.next().is_some() {
+            return Err("show variables LIKE ESCAPE requires a single character".to_string());
+        }
+
+        Some(first)
+    } else {
+        None
+    };
+
+    Ok(NamedValueFilter::LikePattern {
+        pattern,
+        escape_char,
+    })
+}
+
+fn strip_sql_token_quotes(token: &str) -> &str {
+    token
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+}
+
+fn parse_show_variable_name(statement: &SqlRequest) -> Option<String> {
+    let trimmed = statement.sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if lowered.starts_with("show variable") {
+        let suffix = trimmed["show variable".len()..].trim();
+        if !suffix.is_empty() {
+            return Some(normalize_show_variable_name(
+                suffix.split_whitespace().next().unwrap_or(suffix),
+            ));
+        }
+    }
+
+    statement
+        .object_name
+        .as_deref()
+        .map(normalize_show_variable_name)
+        .filter(|name| !name.is_empty())
+}
+
+fn normalize_show_variable_name(name: &str) -> String {
+    let mut normalized = name
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches(';')
+        .to_ascii_lowercase();
+
+    for prefix in ["@@global.", "@@session.", "@@local.", "@@"] {
+        if let Some(stripped) = normalized.strip_prefix(prefix) {
+            normalized = stripped.to_string();
+            break;
+        }
+    }
+
+    normalized
+}
+
+fn parse_show_slices_target_view(sql: &str) -> Option<String> {
+
+    let tokens = sql
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>();
+
+    let target_idx = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("from"))?
+        + 1;
+
+    let raw = tokens.get(target_idx)?;
+    let normalized = raw
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches(';')
+        .to_string();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+
+}
+
+#[derive(Debug, Clone, Default)]
+struct ShowSlicesOptions {
+    filters: Vec<ShowSlicesFilter>,
+    order_by: Option<(String, bool)>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct ShowSlicesFilter {
+    column: String,
+    operator: ShowSlicesFilterOperator,
+    value: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ShowSlicesFilterOperator {
+    Eq,
+    NotEq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+fn parse_show_slices_options(sql: &str) -> Result<ShowSlicesOptions, String> {
+
+    let tokens = sql
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>();
+
+    let mut options = ShowSlicesOptions::default();
+
+    let Some(from_idx) = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("from")) else {
+            return Ok(options);
+        };
+
+    let mut idx = from_idx.saturating_add(2);
+
+    while idx < tokens.len() {
+
+        let token = tokens[idx];
+
+        if token.eq_ignore_ascii_case("where") {
+
+            idx += 1;
+
+            if idx >= tokens.len() {
+                return Err("show slices WHERE clause is malformed".to_string());
+            }
+
+            while idx < tokens.len() {
+
+                if tokens[idx].eq_ignore_ascii_case("order")
+                    || tokens[idx].eq_ignore_ascii_case("limit")
+                {
+                    break;
+                }
+
+                if idx + 2 >= tokens.len() {
+                    return Err("show slices WHERE clause is malformed".to_string());
+                }
+
+                let column = tokens[idx]
+                    .trim()
+                    .trim_matches('`')
+                    .trim_matches('"')
+                    .trim_matches(',')
+                    .trim_matches(';')
+                    .to_string();
+
+                let operator = parse_show_slices_filter_operator(tokens[idx + 1])?;
+
+                let value = tokens[idx + 2]
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('`')
+                    .trim_matches(',')
+                    .trim_matches(';')
+                    .trim_matches('\'')
+                    .to_string();
+
+                if column.is_empty() {
+                    return Err("show slices WHERE clause is malformed".to_string());
+                }
+
+                options.filters.push(ShowSlicesFilter {
+                    column: common::normalize_identifier!(&column),
+                    operator,
+                    value,
+                });
+
+                idx += 3;
+
+                if idx < tokens.len() && tokens[idx].eq_ignore_ascii_case("and") {
+                    idx += 1;
+                }
+
+            }
+
+            continue;
+
+        }
+
+        if token.eq_ignore_ascii_case("order") {
+
+            if idx + 2 >= tokens.len() || !tokens[idx + 1].eq_ignore_ascii_case("by") {
+                return Err("show slices ORDER BY clause is malformed".to_string());
+            }
+
+            let order_column = tokens[idx + 2]
+                .trim()
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_matches(',')
+                .trim_matches(';')
+                .to_string();
+
+            if order_column.is_empty() {
+                return Err("show slices ORDER BY requires a column name".to_string());
+            }
+
+            let mut descending = false;
+            let mut consumed = 3usize;
+
+            if idx + 3 < tokens.len() {
+                let direction = tokens[idx + 3];
+                if direction.eq_ignore_ascii_case("desc") {
+                    descending = true;
+                    consumed = 4;
+                } else if direction.eq_ignore_ascii_case("asc") {
+                    consumed = 4;
+                }
+            }
+
+            options.order_by = Some((common::normalize_identifier!(&order_column), descending));
+            idx += consumed;
+            continue;
+
+        }
+
+        if token.eq_ignore_ascii_case("limit") {
+
+            let Some(raw_limit) = tokens.get(idx + 1) else {
+                return Err("show slices LIMIT requires a numeric value".to_string());
+            };
+
+            let parsed_limit = raw_limit
+                .trim_matches(',')
+                .trim_matches(';')
+                .parse::<usize>()
+                .map_err(|_| "show slices LIMIT must be an unsigned integer".to_string())?;
+
+            options.limit = Some(parsed_limit);
+            idx += 2;
+            continue;
+
+        }
+
+        idx += 1;
+
+    }
+
+    Ok(options)
+
+}
+
+fn apply_show_slices_options(
+    result: &mut serverlib::SelectExecutionResult,
+    options: ShowSlicesOptions,
+) -> Result<(), String> {
+
+    if !options.filters.is_empty() {
+
+        let column_lookup = result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(idx, column)| (common::normalize_identifier!(&column.field_name), idx))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let mut resolved_filters = Vec::with_capacity(options.filters.len());
+
+        for filter in options.filters {
+            let Some(column_index) = column_lookup.get(&filter.column).copied() else {
+                return Err(format!(
+                    "show slices WHERE field '{}' was not found in result columns",
+                    filter.column,
+                ));
+            };
+
+            resolved_filters.push((column_index, filter));
+        }
+
+        result.rows.retain(|row| {
+            resolved_filters.iter().all(|(column_index, filter)| {
+                let row_value = row
+                    .get(*column_index)
+                    .map(|cell| String::from_utf8_lossy(cell).to_string())
+                    .unwrap_or_default();
+
+                show_slices_filter_matches(&row_value, filter)
+            })
+        });
+
+    }
+
+    if let Some((order_column, descending)) = options.order_by {
+
+        let Some(order_index) = result
+            .columns
+            .iter()
+            .position(|column| common::normalize_identifier!(&column.field_name) == order_column)
+        else {
+            return Err(format!(
+                "show slices ORDER BY field '{}' was not found in result columns",
+                order_column,
+            ));
+        };
+
+        result.rows.sort_by(|left, right| {
+            let left_value = left.get(order_index).map(|cell| String::from_utf8_lossy(cell).to_string()).unwrap_or_default();
+            let right_value = right.get(order_index).map(|cell| String::from_utf8_lossy(cell).to_string()).unwrap_or_default();
+
+            let ordering = compare_slice_order_values(&left_value, &right_value);
+
+            if descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+    }
+
+    if let Some(limit) = options.limit {
+        result.rows.truncate(limit);
+    }
+
+    Ok(())
+
+}
+
+fn parse_show_slices_filter_operator(token: &str) -> Result<ShowSlicesFilterOperator, String> {
+    match token {
+        "=" => Ok(ShowSlicesFilterOperator::Eq),
+        "!=" | "<>" => Ok(ShowSlicesFilterOperator::NotEq),
+        ">" => Ok(ShowSlicesFilterOperator::Gt),
+        ">=" => Ok(ShowSlicesFilterOperator::Gte),
+        "<" => Ok(ShowSlicesFilterOperator::Lt),
+        "<=" => Ok(ShowSlicesFilterOperator::Lte),
+        _ => Err("show slices WHERE clause uses an unsupported operator".to_string()),
+    }
+}
+
+fn show_slices_filter_matches(row_value: &str, filter: &ShowSlicesFilter) -> bool {
+    let row_is_null = row_value.eq_ignore_ascii_case("NULL");
+    let filter_is_null = filter.value.eq_ignore_ascii_case("NULL");
+
+    if row_is_null || filter_is_null {
+        return match filter.operator {
+            ShowSlicesFilterOperator::Eq => row_is_null == filter_is_null,
+            ShowSlicesFilterOperator::NotEq => row_is_null != filter_is_null,
+            _ => false,
+        };
+    }
+
+    if let (Ok(left_num), Ok(right_num)) = (row_value.parse::<f64>(), filter.value.parse::<f64>()) {
+        return match filter.operator {
+            ShowSlicesFilterOperator::Eq => left_num == right_num,
+            ShowSlicesFilterOperator::NotEq => left_num != right_num,
+            ShowSlicesFilterOperator::Gt => left_num > right_num,
+            ShowSlicesFilterOperator::Gte => left_num >= right_num,
+            ShowSlicesFilterOperator::Lt => left_num < right_num,
+            ShowSlicesFilterOperator::Lte => left_num <= right_num,
+        };
+    }
+
+    let left = row_value.to_ascii_lowercase();
+    let right = filter.value.to_ascii_lowercase();
+
+    match filter.operator {
+        ShowSlicesFilterOperator::Eq => left == right,
+        ShowSlicesFilterOperator::NotEq => left != right,
+        ShowSlicesFilterOperator::Gt => left > right,
+        ShowSlicesFilterOperator::Gte => left >= right,
+        ShowSlicesFilterOperator::Lt => left < right,
+        ShowSlicesFilterOperator::Lte => left <= right,
+    }
+}
+
+fn compare_slice_order_values(left: &str, right: &str) -> std::cmp::Ordering {
+
+    let left_is_null = left.eq_ignore_ascii_case("NULL");
+    let right_is_null = right.eq_ignore_ascii_case("NULL");
+
+    if left_is_null && right_is_null {
+        return std::cmp::Ordering::Equal;
+    }
+
+    if left_is_null {
+        return std::cmp::Ordering::Less;
+    }
+
+    if right_is_null {
+        return std::cmp::Ordering::Greater;
+    }
+
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(left_num), Ok(right_num)) => left_num
+            .partial_cmp(&right_num)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        _ => left.cmp(right),
+    }
+
+}
+
+fn build_show_slices_result(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    normalized_view_id: &str,
+    resolved_database_id: &str,
+) -> Result<serverlib::SelectExecutionResult, String> {
+
+    let Some(olap_view) = catalog.olap_view(normalized_view_id) else {
+        return Err(format!(
+            "olap view '{}' not found in database '{}'",
+            normalized_view_id,
+            resolved_database_id,
+        ));
+    };
+
+    if olap_view.z_dimension_columns.is_empty() {
+        return Err(format!(
+            "olap view '{}' has no dimensions configured",
+            normalized_view_id,
+        ));
+    }
+
+    let Some(source_dependency) = olap_view.dependencies.first() else {
+        return Err(format!(
+            "olap view '{}' has no source table dependency",
+            normalized_view_id,
+        ));
+    };
+
+    let source_table_id = strip_matching_database_prefix(source_dependency, resolved_database_id);
+
+    let Some(schema) = catalog.table_schema(&source_table_id) else {
+        return Err(format!(
+            "show slices failed: source table '{}' not found for olap view '{}'",
+            source_table_id,
+            normalized_view_id,
+        ));
+    };
+
+    let stream_id = catalog
+        .entity_wal_stream_id(&source_table_id)
+        .unwrap_or_else(|| source_table_id.clone());
+
+    let payload_context = payload_context_for_table(catalog, &source_table_id);
+
+    let live_rows = load_live_rows_with_context(wal, &stream_id, schema, &payload_context)
+        .map_err(|err| format!("show slices failed: cannot load source rows: {err}"))?;
+
+    let dimension_set = olap_view
+        .z_dimension_columns
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+
+    let projected_fields = extract_projected_field_names_from_olap_view_sql(&olap_view.sql)
+        .unwrap_or_default();
+
+    let projected_field_set = if projected_fields.is_empty() {
+        None
+    } else {
+        Some(
+            projected_fields
+                .into_iter()
+                .map(|field| common::normalize_identifier!(&field))
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+
+    let measure_fields = schema
+        .fields
+        .iter()
+        .filter(|field| {
+            !dimension_set.contains(&field.field_name)
+                && !matches!(field.indexed, serverlib::FieldIndex::PrimaryKey)
+                && projected_field_set
+                    .as_ref()
+                    .map(|projection| projection.contains(&field.field_name))
+                    .unwrap_or(true)
+                && matches!(
+                    field.field_type,
+                    serverlib::FieldType::Int(_) |
+                    serverlib::FieldType::UInt(_) |
+                    serverlib::FieldType::Float(_)
+                )
+        })
+        .map(|field| field.field_name.clone())
+        .collect::<Vec<_>>();
+
+    let mut grouped_counts = HashMap::<Vec<String>, SliceAggregate>::new();
+
+    for (_row_id, row_map) in live_rows {
+        
+        let key = olap_view
+            .z_dimension_columns
+            .iter()
+            .map(|dimension| {
+
+                row_map
+                    .get(dimension)
+                    .map(|value| {
+                        let text = serverlib::display_stored_field_value(value)
+                            .trim()
+                            .to_string();
+                        if text.is_empty() {
+                            "NULL".to_string()
+                        } else {
+                            text
+                        }
+                    })
+                    .unwrap_or_else(|| "NULL".to_string())
+                    
+            })
+            .collect::<Vec<_>>();
+
+        let aggregate = grouped_counts
+            .entry(key)
+            .or_insert_with(|| SliceAggregate::new(measure_fields.len()));
+
+        aggregate.row_count += 1;
+
+        for (idx, measure_field) in measure_fields.iter().enumerate() {
+            if let Some(raw_value) = row_map.get(measure_field)
+                && let Some(value) = parse_numeric_slice_value(raw_value) {
+                    aggregate.measure_stats[idx].ingest(value);
+                }
+        }
+
+    }
+
+    let mut grouped_rows = grouped_counts.into_iter().collect::<Vec<_>>();
+    grouped_rows.sort_by(|left, right| compare_slice_coordinates(&left.0, &right.0));
+
+    let mut columns = olap_view
+        .z_dimension_columns
+        .iter()
+        .enumerate()
+        .map(|(idx, dimension)| serverlib::FieldDef {
+            seqno: (idx + 1) as u32,
+            field_name: dimension.clone(),
+            field_type: serverlib::FieldType::Text,
+            nullable: false,
+            indexed: serverlib::FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        })
+        .collect::<Vec<_>>();
+
+    columns.push(serverlib::FieldDef {
+        seqno: (columns.len() + 1) as u32,
+        field_name: "row_count".to_string(),
+        field_type: serverlib::FieldType::UInt(64),
+        nullable: false,
+        indexed: serverlib::FieldIndex::None,
+        default_value: None,
+        metadata: None,
+    });
+
+    for measure_field in &measure_fields {
+        for suffix in ["sum", "min", "max", "avg"] {
+            columns.push(serverlib::FieldDef {
+                seqno: (columns.len() + 1) as u32,
+                field_name: format!("{}_{}", suffix, measure_field),
+                field_type: serverlib::FieldType::Float(64),
+                nullable: false,
+                indexed: serverlib::FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            });
+        }
+    }
+
+    let rows = grouped_rows
+        .into_iter()
+        .map(|(coordinates, aggregate)| {
+            let mut row = coordinates
+                .into_iter()
+                .map(|coordinate| coordinate.into_bytes())
+                .collect::<Vec<_>>();
+
+            row.push(aggregate.row_count.to_string().into_bytes());
+
+            for stats in aggregate.measure_stats {
+                row.push(render_optional_numeric_slice_value(stats.sum).into_bytes());
+                row.push(render_optional_numeric_slice_value(stats.min).into_bytes());
+                row.push(render_optional_numeric_slice_value(stats.max).into_bytes());
+                row.push(render_optional_numeric_slice_value(stats.avg()).into_bytes());
+            }
+
+            row
+        })
+        .collect::<Vec<_>>();
+
+    Ok(serverlib::SelectExecutionResult { columns, rows })
+
+}
+
+#[derive(Debug, Clone)]
+struct SliceAggregate {
+    row_count: usize,
+    measure_stats: Vec<MeasureStats>,
+}
+
+impl SliceAggregate {
+    fn new(measure_count: usize) -> Self {
+        Self {
+            row_count: 0,
+            measure_stats: vec![MeasureStats::default(); measure_count],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct MeasureStats {
+    count: usize,
+    sum: Option<f64>,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+impl MeasureStats {
+    fn ingest(&mut self, value: f64) {
+        self.count += 1;
+
+        self.sum = Some(self.sum.unwrap_or(0.0) + value);
+        self.min = Some(self.min.map_or(value, |current| current.min(value)));
+        self.max = Some(self.max.map_or(value, |current| current.max(value)));
+    }
+
+    fn avg(&self) -> Option<f64> {
+        if self.count == 0 {
+            None
+        } else {
+            self.sum.map(|sum| sum / self.count as f64)
+        }
+    }
+}
+
+fn parse_numeric_slice_value(raw: &[u8]) -> Option<f64> {
+    let rendered = serverlib::display_stored_field_value(raw);
+    let text = rendered.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    text.parse::<f64>().ok()
+}
+
+fn render_optional_numeric_slice_value(value: Option<f64>) -> String {
+    let Some(value) = value else {
+        return "NULL".to_string();
+    };
+
+    if value.fract() == 0.0 {
+        (value as i128).to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn compare_slice_coordinates(left: &[String], right: &[String]) -> std::cmp::Ordering {
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        let left_is_null = left_value.eq_ignore_ascii_case("NULL");
+        let right_is_null = right_value.eq_ignore_ascii_case("NULL");
+
+        let ordering = match (left_is_null, right_is_null) {
+            (true, true) => std::cmp::Ordering::Equal,
+            // Keep NULLs sorted first for stable, explicit introspection output.
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => left_value.cmp(right_value),
+        };
+
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+
+    left.len().cmp(&right.len())
+}
+
+fn extract_projected_field_names_from_olap_view_sql(olap_sql: &str) -> Option<Vec<String>> {
+    let select_sql = extract_view_select_sql(olap_sql).ok()?;
+    let projection = serverlib::parse_select_projection_from_statement(&select_sql).ok()?;
+    projection
+}
+
 fn resolve_catalog_and_read_plan_for_select<'a>(
     catalogs: &'a mut HashMap<String, DatabaseCatalog>,
     requested_database_id: &str,
@@ -662,6 +1562,72 @@ fn execute_select_read_plan(
     read_plan: &serverlib::SelectReadPlan,
 ) -> ConnectorResponse {
 
+    if read_plan.lock_mode != serverlib::SelectLockMode::None {
+        if read_plan.is_explain {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                "select lock clause is not supported with EXPLAIN".to_string(),
+            );
+        }
+
+        let lock_targets = match resolve_select_lock_targets(catalog, read_plan) {
+            Ok(targets) => targets,
+            Err(message) => {
+                return ConnectorResponse::rejected(request_id.to_string(), message);
+            }
+        };
+
+        if lock_targets.is_empty() {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                "select lock clause requires at least one table-backed relation target"
+                    .to_string(),
+            );
+        }
+
+        let acquired_targets = match acquire_select_lock_targets(catalog, &lock_targets) {
+            Ok(acquired) => acquired,
+            Err(message) => {
+                return ConnectorResponse::rejected(request_id.to_string(), message);
+            }
+        };
+
+        let response = execute_select_read_plan_without_lock(
+            request_id,
+            query,
+            catalog,
+            wal,
+            runtime_indexes,
+            read_plan,
+        );
+
+        if let Err(message) = release_select_lock_targets(catalog, &acquired_targets) {
+            return ConnectorResponse::rejected(request_id.to_string(), message);
+        }
+
+        return response;
+    }
+
+    execute_select_read_plan_without_lock(
+        request_id,
+        query,
+        catalog,
+        wal,
+        runtime_indexes,
+        read_plan,
+    )
+
+}
+
+fn execute_select_read_plan_without_lock(
+    request_id: &str,
+    query: &DataQuery,
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    read_plan: &serverlib::SelectReadPlan,
+) -> ConnectorResponse {
+
     if !read_plan.ctes.is_empty() {
 
         let result = match execute_select_with_ctes(catalog, wal, runtime_indexes, read_plan) {
@@ -685,6 +1651,13 @@ fn execute_select_read_plan(
     let table_id = read_plan.table_id.as_str();
 
     if table_id.is_empty() {
+
+        if read_plan.lock_mode != serverlib::SelectLockMode::None {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                "select lock clause requires a direct table target".to_string(),
+            );
+        }
 
         if read_plan.is_explain {
 
@@ -792,7 +1765,7 @@ fn execute_select_read_plan(
 
     }
 
-    let Some(schema) = catalog.table_schema(table_id) else {
+    let Some(schema) = catalog.table_schema(table_id).cloned() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -802,7 +1775,7 @@ fn execute_select_read_plan(
         );
     };
 
-    let Some(table) = catalog.table(table_id) else {
+    let Some(mut scoped_table) = catalog.table(table_id).cloned() else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -811,8 +1784,6 @@ fn execute_select_read_plan(
             ),
         );
     };
-
-    let mut scoped_table = table.clone();
 
     if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
         scoped_table.entity_id = stream_id;
@@ -824,7 +1795,7 @@ fn execute_select_read_plan(
         .where_condition
         .as_ref()
         .and_then(|condition| {
-            collect_indexable_like_filter_for_schema(schema, condition)
+            collect_indexable_like_filter_for_schema(&schema, condition)
         });
 
     let allow_index_short_circuit = read_plan
@@ -832,7 +1803,7 @@ fn execute_select_read_plan(
         .as_ref()
         .map(|condition| {
             collect_indexable_equality_filters_for_schema(
-                schema,
+                &schema,
                 condition,
                 &mut index_filter_map,
             )
@@ -866,10 +1837,10 @@ fn execute_select_read_plan(
         );
     }
 
-    let result = match serverlib::execute_relation_select_plan(
+    match serverlib::execute_relation_select_plan(
         wal,
         &scoped_table,
-        schema,
+        &schema,
         runtime_indexes,
         read_plan,
         &access_plan,
@@ -892,12 +1863,128 @@ fn execute_select_read_plan(
             ))
         },
     ) {
-        Ok(result) => result,
-        Err(message) => return ConnectorResponse::rejected(request_id.to_string(), message),
+        Ok(result) => applied_query_response(request_id, result),
+        Err(message) => ConnectorResponse::rejected(request_id.to_string(), message),
+    }
+
+}
+
+fn resolve_select_lock_targets(
+    catalog: &DatabaseCatalog,
+    read_plan: &serverlib::SelectReadPlan,
+) -> Result<Vec<String>, String> {
+    let mut targets = HashSet::<String>::new();
+    let mut visited_views = HashSet::<String>::new();
+
+    collect_select_lock_targets(catalog, read_plan, &mut targets, &mut visited_views)?;
+
+    let mut ordered = targets.into_iter().collect::<Vec<_>>();
+    ordered.sort();
+    Ok(ordered)
+}
+
+fn collect_select_lock_targets(
+    catalog: &DatabaseCatalog,
+    read_plan: &serverlib::SelectReadPlan,
+    targets: &mut HashSet<String>,
+    visited_views: &mut HashSet<String>,
+) -> Result<(), String> {
+    for cte in &read_plan.ctes {
+        collect_select_lock_targets(catalog, &cte.read_plan, targets, visited_views)?;
+        if let Some(recursive) = cte.recursive_read_plan.as_ref() {
+            collect_select_lock_targets(catalog, recursive, targets, visited_views)?;
+        }
+    }
+
+    collect_select_lock_target_relation(catalog, &read_plan.table_id, targets, visited_views)?;
+
+    for relation in &read_plan.relations {
+        collect_select_lock_target_relation(catalog, &relation.table_id, targets, visited_views)?;
+    }
+
+    for join in &read_plan.joins {
+        collect_select_lock_target_relation(catalog, &join.relation.table_id, targets, visited_views)?;
+    }
+
+    Ok(())
+}
+
+fn collect_select_lock_target_relation(
+    catalog: &DatabaseCatalog,
+    relation_id: &str,
+    targets: &mut HashSet<String>,
+    visited_views: &mut HashSet<String>,
+) -> Result<(), String> {
+    if relation_id.trim().is_empty() {
+        return Ok(());
+    }
+
+    let normalized = common::normalize_identifier!(relation_id);
+
+    if catalog.table(&normalized).is_some() {
+        targets.insert(normalized);
+        return Ok(());
+    }
+
+    let Some(view_sql) = catalog.view(&normalized).map(|view| view.sql.clone()) else {
+        return Ok(());
     };
 
-    applied_query_response(request_id, result)
+    if !visited_views.insert(normalized.clone()) {
+        return Ok(());
+    }
 
+    let view_select_sql = extract_view_select_sql(&view_sql)
+        .map_err(|message| format!("select lock resolution failed: {message}"))?;
+
+    let view_read_plan = serverlib::parse_select_read_plan_from_statement(&view_select_sql)
+        .map_err(|err| {
+            format!(
+                "select lock resolution failed: view '{}' parse failed: {err}",
+                normalized
+            )
+        })?;
+
+    collect_select_lock_targets(catalog, &view_read_plan, targets, visited_views)
+}
+
+fn acquire_select_lock_targets(
+    catalog: &mut DatabaseCatalog,
+    lock_targets: &[String],
+) -> Result<Vec<String>, String> {
+    let mut acquired = Vec::new();
+
+    for table_id in lock_targets {
+        let already_locked = catalog
+            .table(table_id)
+            .is_some_and(|table| table.status() == ObjectStatus::Lock);
+
+        if already_locked {
+            continue;
+        }
+
+        if let Err(err) = catalog.begin_table_write(table_id) {
+            let _ = release_select_lock_targets(catalog, &acquired);
+            return Err(format!("table read lock failed: {err}"));
+        }
+
+        acquired.push(table_id.clone());
+    }
+
+    Ok(acquired)
+}
+
+fn release_select_lock_targets(
+    catalog: &mut DatabaseCatalog,
+    acquired_targets: &[String],
+) -> Result<(), String> {
+    for table_id in acquired_targets.iter().rev() {
+        if let Err(err) = catalog.abort_table_write(table_id) {
+            return Err(format!("table read lock release failed: {err}"));
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_select_read_plan_for_active_database(
@@ -1420,6 +2507,7 @@ pub(super) fn execute_select_with_ctes(
     let mut scoped_handles = Vec::with_capacity(read_plan.ctes.len());
 
     let execution_result = (|| -> Result<serverlib::SelectExecutionResult, String> {
+        let recursive_cte_settings = catalog.recursive_cte_execution_settings().clone();
 
         for cte in &read_plan.ctes {
 
@@ -1430,14 +2518,16 @@ pub(super) fn execute_select_with_ctes(
                 ));
             }
 
-            let cte_result = execute_select_plan_result(catalog, wal, runtime_indexes, &cte.read_plan)
+            let seed_result = execute_select_plan_result(catalog, wal, runtime_indexes, &cte.read_plan)
                 .map_err(|message| format!("cte execution failed: {message}"))?;
 
-            let scoped_handle = serverlib::create_scoped_ephemeral_table(
+            let cte_schema = TableSchema::new(seed_result.columns.clone());
+
+            let mut scoped_handle = serverlib::create_scoped_ephemeral_table(
                 catalog,
                 wal,
                 cte.table_id.clone(),
-                TableSchema::new(cte_result.columns.clone()),
+                cte_schema.clone(),
             )
             .map_err(|message| format!("cte execution failed: {message}"))?;
 
@@ -1446,9 +2536,137 @@ pub(super) fn execute_select_with_ctes(
                 wal,
                 runtime_indexes,
                 scoped_handle.table_id(),
-                &cte_result,
+                &seed_result,
             )
             .map_err(|message| format!("cte execution failed: {message}"))?;
+
+            if let Some(recursive_plan) = cte.recursive_read_plan.as_ref() {
+
+                let mut accumulated = seed_result;
+                if accumulated.rows.len() > recursive_cte_settings.max_rows {
+                    return Err(format!(
+                        "cte execution failed: recursive CTE '{}' exceeded max rows ({})",
+                        cte.table_id,
+                        recursive_cte_settings.max_rows,
+                    ));
+                }
+
+                let mut frontier_rows = accumulated.rows.clone();
+                let mut seen_rows = if cte.recursive_union_all {
+                    HashSet::new()
+                } else {
+                    accumulated
+                        .rows
+                        .iter()
+                        .cloned()
+                        .collect::<HashSet<Vec<Vec<u8>>>>()
+                };
+                let mut seen_frontiers = HashSet::<Vec<Vec<Vec<u8>>>>::new();
+                let iteration_started_at = std::time::Instant::now();
+
+                let mut iterations = 0usize;
+
+                loop {
+                    if iterations >= recursive_cte_settings.max_iterations {
+                        return Err(format!(
+                            "cte execution failed: recursive CTE '{}' exceeded max iterations ({})",
+                            cte.table_id,
+                            recursive_cte_settings.max_iterations,
+                        ));
+                    }
+
+                    if recursive_cte_settings.timeout_ms > 0
+                        && iteration_started_at.elapsed().as_millis()
+                            >= recursive_cte_settings.timeout_ms as u128
+                    {
+                        return Err(format!(
+                            "cte execution failed: recursive CTE '{}' exceeded timeout ({} ms)",
+                            cte.table_id,
+                            recursive_cte_settings.timeout_ms,
+                        ));
+                    }
+
+                    iterations += 1;
+
+                    if frontier_rows.is_empty() {
+                        break;
+                    }
+
+                    if cte.recursive_union_all
+                        && recursive_cte_settings.detect_repeating_union_all_frontier
+                        && !seen_frontiers.insert(frontier_rows.clone())
+                    {
+                        return Err(format!(
+                            "cte execution failed: recursive CTE '{}' detected a repeating UNION ALL frontier",
+                            cte.table_id,
+                        ));
+                    }
+
+                    let frontier_result = serverlib::SelectExecutionResult {
+                        columns: accumulated.columns.clone(),
+                        rows: frontier_rows,
+                    };
+
+                    rematerialize_scoped_table_result(
+                        catalog,
+                        wal,
+                        runtime_indexes,
+                        &mut scoped_handle,
+                        &cte_schema,
+                        &frontier_result,
+                    )
+                    .map_err(|message| format!("cte execution failed: {message}"))?;
+
+                    let recursive_result = execute_select_plan_result(
+                        catalog,
+                        wal,
+                        runtime_indexes,
+                        recursive_plan,
+                    )
+                    .map_err(|message| format!("cte execution failed: {message}"))?;
+
+                    if recursive_result.columns.len() != accumulated.columns.len() {
+                        return Err(format!(
+                            "cte execution failed: recursive term for '{}' returned {} columns but expected {}",
+                            cte.table_id,
+                            recursive_result.columns.len(),
+                            accumulated.columns.len(),
+                        ));
+                    }
+
+                    let mut delta_rows = recursive_result
+                        .rows
+                        .into_iter()
+                        .filter(|row| cte.recursive_union_all || seen_rows.insert(row.clone()))
+                        .collect::<Vec<_>>();
+
+                    if delta_rows.is_empty() {
+                        break;
+                    }
+
+                    accumulated.rows.extend(delta_rows.iter().cloned());
+
+                    if accumulated.rows.len() > recursive_cte_settings.max_rows {
+                        return Err(format!(
+                            "cte execution failed: recursive CTE '{}' exceeded max rows ({})",
+                            cte.table_id,
+                            recursive_cte_settings.max_rows,
+                        ));
+                    }
+
+                    frontier_rows = std::mem::take(&mut delta_rows);
+                }
+
+                rematerialize_scoped_table_result(
+                    catalog,
+                    wal,
+                    runtime_indexes,
+                    &mut scoped_handle,
+                    &cte_schema,
+                    &accumulated,
+                )
+                .map_err(|message| format!("cte execution failed: {message}"))?;
+            }
 
             scoped_handles.push(scoped_handle);
 
@@ -1477,6 +2695,38 @@ pub(super) fn execute_select_with_ctes(
     }
 
     execution_result
+
+}
+
+fn rematerialize_scoped_table_result(
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &mut RuntimeIndexStore,
+    handle: &mut serverlib::ScopedEphemeralTableHandle,
+    schema: &TableSchema,
+    result: &serverlib::SelectExecutionResult,
+) -> Result<(), String> {
+
+    let logical_table_id = handle.table_id().to_string();
+
+    serverlib::release_scoped_ephemeral_table(catalog, wal, handle)
+        .map_err(|err| format!("scoped rematerialization release failed: {err}"))?;
+
+    *handle = serverlib::create_scoped_ephemeral_table(
+        catalog,
+        wal,
+        logical_table_id,
+        schema.clone(),
+    )
+    .map_err(|message| format!("scoped rematerialization create failed: {message}"))?;
+
+    materialize_select_result_into_scoped_table(
+        catalog,
+        wal,
+        runtime_indexes,
+        handle.table_id(),
+        result,
+    )
 
 }
 

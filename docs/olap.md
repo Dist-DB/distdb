@@ -137,6 +137,11 @@ Hypercube shape: 3D — cells indexed by (region, product, year) tuples.
 
 Return metadata about all cells (slices) in an OLAPVIEW:
 
+Current runtime status:
+- `SHOW SLICES FROM <olapview>` is recognized by SQL classification.
+- Slice materialization is wired for a first-pass implementation that returns dimension coordinates, `row_count`, and numeric per-slice aggregates (`sum_<field>`, `min_<field>`, `max_<field>`, `avg_<field>`) for non-dimension numeric fields projected by the OLAPVIEW SELECT.
+- Richer measure selection semantics (for example explicit aggregate configuration) remain follow-up work.
+
 ```sql
 SHOW SLICES FROM sales_by_region_product_year
 ```
@@ -158,6 +163,11 @@ Columns returned:
 - `row_count`: number of source rows in this cell
 - Pre-computed measures (SUM, COUNT, etc.)
 - Optional: `last_updated_tx_id`, `stale_status`
+
+Ordering behavior (current):
+- SHOW SLICES rows are returned in deterministic coordinate order.
+- For each dimension position, `NULL` coordinates sort before non-`NULL` values.
+- SHOW SLICES supports first-pass post-processing with `WHERE` (simple `AND` conjunctions over emitted columns), a single `ORDER BY <column> [ASC|DESC]`, and `LIMIT <n>` over the emitted slice result columns.
 
 ### Drill-Through (Future)
 
@@ -280,7 +290,7 @@ Current: Lazy invalidation (Option A) minimizes commit latency.
 ### Near-term (Beta)
 - [ ] Parallel hypercube building for large tables
 - [ ] Explicit cube refresh schedules (e.g., post-commit or on-demand)
-- [ ] Extended `SHOW SLICES` filtering (WHERE, ORDER BY, LIMIT)
+- [ ] Extended `SHOW SLICES` filtering beyond current first-pass `WHERE`/`ORDER BY`/`LIMIT` semantics
 
 ### Medium-term
 - [ ] Incremental cube updates (delta application on DML)

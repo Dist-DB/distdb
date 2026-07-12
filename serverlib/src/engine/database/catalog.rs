@@ -44,6 +44,42 @@ fn normalize_acl_user_key(user_id: &str) -> String {
 }
 
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecursiveCteExecutionSettings {
+    pub max_iterations: usize,
+    pub max_rows: usize,
+    pub timeout_ms: u64,
+    pub detect_repeating_union_all_frontier: bool,
+}
+
+impl Default for RecursiveCteExecutionSettings {
+    
+    fn default() -> Self {
+        Self {
+            max_iterations: 128,
+            max_rows: 50_000,
+            timeout_ms: 0,
+            detect_repeating_union_all_frontier: true,
+        }
+    }
+
+}
+
+impl RecursiveCteExecutionSettings {
+    
+    pub fn sanitized(mut self) -> Self {
+        if self.max_iterations == 0 {
+            self.max_iterations = 1;
+        }
+        if self.max_rows == 0 {
+            self.max_rows = 1;
+        }
+        self
+    }
+
+}
+
+
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseCatalog {
@@ -63,6 +99,8 @@ pub struct DatabaseCatalog {
     account_acl_entries: HashMap<String, AccountAclEntry>,
     #[serde(default)]
     user_credentials: HashMap<String, UserCredential>,
+    #[serde(default)]
+    recursive_cte_execution_settings: RecursiveCteExecutionSettings,
     entities: HashMap<String, DatabaseEntity>,
 }
 
@@ -165,6 +203,7 @@ impl DatabaseCatalog {
             active_schema_change: None,
             account_acl_entries: HashMap::new(),
             user_credentials: HashMap::new(),
+            recursive_cte_execution_settings: RecursiveCteExecutionSettings::default(),
             entities: HashMap::new(),
         }
     }
@@ -621,6 +660,17 @@ impl DatabaseCatalog {
 
     pub fn active_schema_change(&self) -> Option<&ActiveSchemaChange> {
         self.active_schema_change.as_ref()
+    }
+
+    pub fn recursive_cte_execution_settings(&self) -> &RecursiveCteExecutionSettings {
+        &self.recursive_cte_execution_settings
+    }
+
+    pub fn configure_recursive_cte_execution_settings(
+        &mut self,
+        settings: RecursiveCteExecutionSettings,
+    ) {
+        self.recursive_cte_execution_settings = settings.sanitized();
     }
 
     pub fn execute_schema_migration<E: SchemaMigrationExecutor>(
@@ -1974,7 +2024,16 @@ impl DatabaseCatalog {
         for field in &schema.fields {
             if matches!(field.indexed, FieldIndex::Indexed) {
                 
-                let index_kind = DatabaseIndexKind::Indexed;
+                let index_kind = if field
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.unique)
+                    .unwrap_or(false)
+                {
+                    DatabaseIndexKind::Unique
+                } else {
+                    DatabaseIndexKind::Indexed
+                };
 
                 let index = DatabaseIndex::from_table_fields_with_origin(
                     table_id,

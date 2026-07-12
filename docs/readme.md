@@ -67,7 +67,7 @@ DistDB is split into a few major surfaces:
 
 - OLAP views enable multi-dimensional analysis via memory-resident hypercubes.
 - `CREATE OLAPVIEW` names and defines coordinate-addressed cells over committed table data.
-- `SHOW SLICES FROM <olapview>` returns slice metadata and pre-computed aggregates.
+- `SHOW SLICES FROM <olapview>` returns first-pass slice output with dimension coordinates, row counts, and numeric per-slice aggregates.
 - Hypercubes are derived (not persisted) and rebuilt from live rows on startup or after invalidation.
 - See [olap.md](olap.md) for design philosophy, examples, and current limitations.
 

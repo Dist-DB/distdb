@@ -39,14 +39,14 @@ pub fn create_table_plan_from_statement(
 
     let table_id = common::normalize_identifier!(create_table.name.to_string());
     
-    let (primary_key_fields, indexed_fields) =
+    let (primary_key_fields, indexed_fields, unique_fields) =
         derive_indexed_fields_from_constraints(&create_table.constraints);
 
     let mut fields = Vec::with_capacity(create_table.columns.len());
 
     for (idx, column) in create_table.columns.iter().enumerate() {
 
-        let metadata = extract_field_metadata(column);
+        let mut metadata = extract_field_metadata(column);
 
         let nullable = !column
             .options
@@ -76,6 +76,12 @@ pub fn create_table_plan_from_statement(
         } else {
             FieldIndex::None
         };
+
+        if unique_fields.contains(&common::normalize_identifier!(&column.name.value)) {
+            let mut resolved = metadata.unwrap_or_default();
+            resolved.unique = true;
+            metadata = Some(resolved);
+        }
 
         let default_value = column.options.iter().find_map(|opt| match &opt.option {
             ColumnOption::Default(expr) => parse_default_value(expr.to_string()),
@@ -254,10 +260,11 @@ fn parse_modify_column_change_op(
 
 fn derive_indexed_fields_from_constraints(
     constraints: &[TableConstraint],
-) -> (Vec<String>, HashSet<String>) {
+) -> (Vec<String>, HashSet<String>, HashSet<String>) {
 
     let mut primary = Vec::new();
     let mut indexed = HashSet::new();
+    let mut unique = HashSet::new();
 
     for constraint in constraints {
 
@@ -277,16 +284,21 @@ fn derive_indexed_fields_from_constraints(
             continue;
         }
 
+        if lowered.starts_with("unique") {
+            unique.extend(columns.iter().cloned());
+            indexed.extend(columns);
+            continue;
+        }
+
         if lowered.starts_with("key ")
             || lowered.starts_with("index ")
-            || lowered.starts_with("unique")
         {
             indexed.extend(columns);
         }
 
     }
 
-    (primary, indexed)
+    (primary, indexed, unique)
 
 }
 
@@ -495,7 +507,14 @@ fn extract_field_metadata(column: &sqlparser::ast::ColumnDef) -> Option<FieldMet
                 if lowered.contains("auto_increment") || lowered.contains("autoincrement") {
                     metadata.auto_increment = true;
                 }
-            }
+            },
+
+            ColumnOption::Unique {
+                is_primary: false,
+                ..
+            } => {
+                metadata.unique = true;
+            },
 
             _ => {}
 

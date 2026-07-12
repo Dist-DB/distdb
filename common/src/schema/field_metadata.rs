@@ -13,6 +13,8 @@ pub struct FieldMetadata {
     #[serde(default)]
     pub auto_increment: bool,
     #[serde(default)]
+    pub unique: bool,
+    #[serde(default)]
     pub original_sql_type: Option<String>,
     #[serde(default)]
     pub character_set: Option<String>,

@@ -60,3 +60,15 @@ fn fallback_extracts_entity_name_for_debug() {
     assert_eq!(classified.1, SqlOperation::Select);
     assert_eq!(classified.2.as_deref(), Some("p_sync"));
 }
+
+#[test]
+fn fallback_extracts_table_name_for_update() {
+    let classified = classify_text_fallback(
+        "update users set active = true order by id desc limit 1",
+    )
+    .expect("update should classify");
+
+    assert_eq!(classified.0, SqlDirective::Update);
+    assert_eq!(classified.1, SqlOperation::Update);
+    assert_eq!(classified.2.as_deref(), Some("users"));
+}

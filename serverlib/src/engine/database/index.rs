@@ -6,6 +6,7 @@ use super::field_types::FieldIndex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum DatabaseIndexKind {
 	PrimaryKey,
+	Unique,
 	#[default]
 	Indexed,
 }
@@ -38,6 +39,7 @@ impl DatabaseIndexKind {
 	pub fn prefix(self) -> &'static str {
 		match self {
 			Self::PrimaryKey => "pri",
+			Self::Unique => "uni",
 			Self::Indexed => "ind",
 		}
 	}
@@ -65,8 +67,24 @@ impl DatabaseIndex {
 	pub fn from_table_field(table_id: &str, field: &FieldDef) -> Self {
 		
 		let kind = match field.indexed {
+
 			FieldIndex::PrimaryKey => DatabaseIndexKind::PrimaryKey,
+
+			FieldIndex::Indexed => {
+				if field
+					.metadata
+					.as_ref()
+					.map(|metadata| metadata.unique)
+					.unwrap_or(false)
+				{
+					DatabaseIndexKind::Unique
+				} else {
+					DatabaseIndexKind::Indexed
+				}
+			},
+
 			_ => DatabaseIndexKind::Indexed,
+			
 		};
 
 		Self::from_table_fields_with_origin(
@@ -170,6 +188,10 @@ impl DatabaseIndex {
 
 	pub fn is_primary_key(&self) -> bool {
 		matches!(self.kind, DatabaseIndexKind::PrimaryKey)
+	}
+
+	pub fn is_unique_key(&self) -> bool {
+		matches!(self.kind, DatabaseIndexKind::PrimaryKey | DatabaseIndexKind::Unique)
 	}
 
 	pub fn is_temporary(&self) -> bool {

@@ -48,6 +48,30 @@ fn primary_key_index_uses_pri_prefix() {
 }
 
 #[test]
+fn unique_index_uses_uni_prefix() {
+
+    let field = FieldDef {
+        seqno: 1,
+        field_name: "Email".to_string(),
+        field_type: FieldType::StringFixed(255),
+        nullable: false,
+        indexed: FieldIndex::Indexed,
+        default_value: None,
+        metadata: Some(common::schema::FieldMetadata {
+            unique: true,
+            ..common::schema::FieldMetadata::default()
+        }),
+    };
+
+    let index = DatabaseIndex::from_table_field("UserAccounts", &field);
+
+    assert_eq!(index.kind, DatabaseIndexKind::Unique);
+    assert_eq!(index.origin, DatabaseIndexOrigin::Derived);
+    assert_eq!(index.index_id.0, "uni:useraccounts:email");
+
+}
+
+#[test]
 fn composite_index_id_uses_field_list() {
 
     let index = DatabaseIndex::from_table_fields_with_origin(
