@@ -6,10 +6,11 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, sleep, timeout};
 use tokio_rustls::TlsAcceptor;
 
 use crate::core::config::ServerTlsConfig;
+use common::helpers::p2p::is_ca_bootstrap_frame;
 
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -167,6 +168,50 @@ fn looks_like_tls_client_hello(buf: &[u8]) -> bool {
     buf.len() >= 3 && buf[0] == 22 && buf[1] == 3 && (1..=4).contains(&buf[2])
 }
 
+async fn probe_plaintext_bootstrap_frame(stream: &TcpStream) -> Result<Option<bool>, std::io::Error> {
+
+    let deadline = Instant::now() + Duration::from_millis(OPTIONAL_TLS_PROBE_TIMEOUT_MS);
+    let mut probe = [0u8; 8];
+
+    loop {
+
+        let bytes_peeked = match timeout(
+            Duration::from_millis(25),
+            stream.peek(&mut probe),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(err)) => return Err(err),
+            Err(_) => return Ok(None),
+        };
+
+        if bytes_peeked == 0 {
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            sleep(Duration::from_millis(10)).await;
+            continue;
+        }
+
+        if bytes_peeked >= 3 && looks_like_tls_client_hello(&probe[..bytes_peeked]) {
+            return Ok(Some(false));
+        }
+
+        if bytes_peeked >= 8 {
+            return Ok(Some(is_ca_bootstrap_frame(&probe[4..bytes_peeked])));
+        }
+
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+
+        sleep(Duration::from_millis(10)).await;
+
+    }
+
+}
+
 pub async fn negotiate_connector_stream(
     stream: TcpStream,
     peer_addr: &str,
@@ -186,6 +231,11 @@ pub async fn negotiate_connector_stream(
                     "tls mode is required but no tls acceptor is configured",
                 )
             })?;
+
+            if let Some(is_bootstrap_frame) = probe_plaintext_bootstrap_frame(&stream).await?
+                && is_bootstrap_frame {
+                    return Ok(Box::new(stream));
+                }
             
             let tls_stream = acceptor.accept(stream).await.map_err(|err| {
                 std::io::Error::new(

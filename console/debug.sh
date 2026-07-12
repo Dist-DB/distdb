@@ -1,1 +1,1 @@
-RUST_LOG="info,serverlib::p2p=debug,console=debug" DISTDB_CONSOLE_SIMULATE=0 RUST_BACKTRACE=1 cargo run 127.0.0.1
+RUST_LOG="info,serverlib::p2p=debug,console=debug,peerlib::connector::transport=debug" DISTDB_CONSOLE_SIMULATE=0 RUST_BACKTRACE=1 cargo run 127.0.0.1

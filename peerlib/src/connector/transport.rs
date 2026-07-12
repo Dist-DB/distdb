@@ -591,6 +591,11 @@ fn ensure_live_connection(
     ) && transport.config.tls.ca_path.is_none() {
         let cached = transport.cached_ca_pem();
         if cached.is_none() {
+            log::debug!(
+                "connector attempting CA bootstrap from peer={} addr={}",
+                peer.peer_id,
+                socket_addr
+            );
             match fetch_ca_pem_from_peer(&socket_addr, &peer.peer_id) {
                 Ok(Some(pem)) => {
                     log::info!(
@@ -617,15 +622,27 @@ fn ensure_live_connection(
                 }
             }
         } else {
+            log::debug!(
+                "connector using cached CA cert for peer={} addr={}",
+                peer.peer_id,
+                socket_addr
+            );
             cached
         }
     } else {
         None
     };
 
-    let ca_pem_ref = ca_pem_override.as_deref()
-        .or_else(|| transport.cached_ca_pem().as_deref().map(|_| ca_pem_override.as_deref().unwrap_or("")))
-        .filter(|s| !s.is_empty());
+    let cached_ca_pem = transport.cached_ca_pem();
+    let ca_pem_ref = ca_pem_override.as_deref().or(cached_ca_pem.as_deref());
+
+    log::debug!(
+        "connector TLS root selection peer={} addr={} ca_override={} ca_cached={}",
+        peer.peer_id,
+        socket_addr,
+        ca_pem_override.is_some(),
+        cached_ca_pem.is_some()
+    );
 
     let handshake_timeout_secs = connector_handshake_timeout_secs();
     let mut stream = connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref)?;
@@ -884,6 +901,9 @@ fn connect_connector_stream(
         common::TlsMode::Optional => match connect_tls_stream(socket_addr, tls, ca_pem_override) {
             Ok(stream) => Ok(stream),
             Err(err) => {
+                if ca_pem_override.is_some() {
+                    return Err(err);
+                }
                 log::debug!(
                     "connector optional tls failed for {}; falling back to plaintext: {}",
                     socket_addr,
@@ -933,55 +953,84 @@ fn fetch_ca_pem_from_peer(
         ConnectorError::Transport(format!("failed to flush CA bootstrap request: {err}"))
     })?;
 
-    // Server first sends a connector response frame (usually password challenge).
-    let mut header = [0u8; 4];
-    tcp.read_exact(&mut header).map_err(|err| {
-        ConnectorError::Transport(format!("failed to read CA bootstrap challenge header: {err}"))
-    })?;
-    let skip_len = u32::from_le_bytes(header) as usize;
-    let mut skip_buf = vec![0u8; skip_len];
-    tcp.read_exact(&mut skip_buf).map_err(|err| {
-        ConnectorError::Transport(format!("failed to skip CA bootstrap challenge payload: {err}"))
-    })?;
+    let first_frame = read_len_prefixed_frame(&mut tcp)?;
 
-    if let Ok(frame) = bincode::deserialize::<ConnectorResponse>(&skip_buf)
-        && frame.request_id == SERVER_BOOTSTRAP_REJECT_REQUEST_ID {
-            return match (frame.status, frame.result) {
-                (ResponseStatus::Rejected, ConnectorResult::Error(message)) => {
-                    Err(ConnectorError::Rejected(message))
+    if let Some(response) = decode_ca_bootstrap_response(&first_frame) {
+        return match response {
+            response if response.ok => Ok(response.ca_cert_pem),
+            response => {
+                log::debug!(
+                    "CA bootstrap from {} failed: {}",
+                    socket_addr,
+                    response.error.unwrap_or_else(|| "unknown".to_string())
+                );
+                Ok(None)
+            }
+        };
+    }
+
+    if let Ok(frame) = bincode::deserialize::<ConnectorResponse>(&first_frame)
+        && frame.request_id == SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
+            let second_frame = read_len_prefixed_frame(&mut tcp)?;
+
+            match decode_ca_bootstrap_response(&second_frame) {
+                Some(response) if response.ok => return Ok(response.ca_cert_pem),
+                Some(response) => {
+                    log::debug!(
+                        "CA bootstrap from {} failed after challenge: {}",
+                        socket_addr,
+                        response.error.unwrap_or_else(|| "unknown".to_string())
+                    );
+                    return Ok(None);
                 }
-                _ => Err(ConnectorError::InvalidResponse(
-                    "bootstrap rejection frame had unexpected status/result".to_string(),
-                )),
-            };
+                None => {
+                    let preview = second_frame
+                        .iter()
+                        .take(16)
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    log::debug!(
+                        "CA bootstrap response from {} could not be decoded after challenge; len={} preview={}",
+                        socket_addr,
+                        second_frame.len(),
+                        preview
+                    );
+                    return Ok(None);
+                }
+            }
         }
 
-    // Now read the actual response.
+    let preview = first_frame
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    log::debug!(
+        "CA bootstrap response from {} could not be decoded; len={} preview={}",
+        socket_addr,
+        first_frame.len(),
+        preview
+    );
+    Ok(None)
+
+}
+
+fn read_len_prefixed_frame(tcp: &mut TcpStream) -> Result<Vec<u8>, ConnectorError> {
+
     let mut resp_header = [0u8; 4];
     tcp.read_exact(&mut resp_header).map_err(|err| {
         ConnectorError::Transport(format!("failed to read CA bootstrap response header: {err}"))
     })?;
+
     let resp_len = u32::from_le_bytes(resp_header) as usize;
     let mut resp_buf = vec![0u8; resp_len];
     tcp.read_exact(&mut resp_buf).map_err(|err| {
         ConnectorError::Transport(format!("failed to read CA bootstrap response payload: {err}"))
     })?;
 
-    match decode_ca_bootstrap_response(&resp_buf) {
-        Some(response) if response.ok => Ok(response.ca_cert_pem),
-        Some(response) => {
-            log::debug!(
-                "CA bootstrap from {} failed: {}",
-                socket_addr,
-                response.error.unwrap_or_else(|| "unknown".to_string())
-            );
-            Ok(None)
-        }
-        None => {
-            log::debug!("CA bootstrap response from {} could not be decoded", socket_addr);
-            Ok(None)
-        }
-    }
+    Ok(resp_buf)
 
 }
 

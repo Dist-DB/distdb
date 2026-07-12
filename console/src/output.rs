@@ -92,27 +92,47 @@ fn print_query_table(result: &QueryResult) {
         }
     }
 
-    println!("{}", format_table_separator(&widths));
+    println!("{}", format_table_separator(&widths, 2));
     println!("{}", format_table_row(&headers, &widths));
-    println!("{}", format_table_separator(&widths));
+    println!("{}", format_table_separator(&widths, 1));
 
     for row in &rows {
         println!("{}", format_table_row(row, &widths));
     }
 
-    println!("{}", format_table_separator(&widths));
+    println!("{}", format_table_separator(&widths, 0));
 
 }
 
-fn format_table_separator(widths: &[usize]) -> String {
+fn format_table_separator(widths: &[usize], headerline: u8) -> String {
 
     let mut sep = String::new();
-    sep.push('+');
     
-    for width in widths {
-        sep.push_str(&"-".repeat(*width + 2));
-        sep.push('+');
+    match headerline {
+        0 => sep.push('└'),
+        1 => sep.push('├'),
+        2 => sep.push('┌'),
+        _ => sep.push(' '),
     }
+    
+    for (i, width) in widths.iter().enumerate() {
+        sep.push_str(&"─".repeat(*width + 2));
+        if i < widths.len() - 1 {
+            sep.push(match headerline {
+                0 => '┴',
+                1 => '┼',
+                2 => '┬',
+                _ => ' ',
+            });
+        }
+    }
+
+    sep.push(match headerline {
+        0 => '┘',
+        1 => '┤',
+        2 => '┐',
+        _ => ' ',
+    });
 
     sep
 
@@ -121,7 +141,7 @@ fn format_table_separator(widths: &[usize]) -> String {
 fn format_table_row(cells: &[String], widths: &[usize]) -> String {
 
     let mut line = String::new();
-    line.push('|');
+    line.push('│');
 
     for (i, width) in widths.iter().enumerate() {
         let cell = cells.get(i).map(|s| s.as_str()).unwrap_or("");
@@ -129,7 +149,7 @@ fn format_table_row(cells: &[String], widths: &[usize]) -> String {
         line.push(' ');
         line.push_str(cell);
         line.push_str(&" ".repeat(padding + 1));
-        line.push('|');
+        line.push('│');
     }
 
     line
