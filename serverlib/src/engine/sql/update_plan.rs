@@ -3,23 +3,15 @@ use sqlparser::ast::{AssignmentTarget, BinaryOperator, Expr, Statement, TableFac
 use super::{
     derive_relation_pushdown_conditions, parse_joins_from_table_with_joins,
     parse_mysql_statements, parse_relation_bindings_from_table_with_joins,
+    text_scan::{find_top_level_keyword, split_top_level_csv_trimmed},
+    ORDER_EXPR_ABS_PREFIX, ORDER_EXPR_CEIL_PREFIX, ORDER_EXPR_FLOOR_PREFIX,
+    ORDER_EXPR_LENGTH_PREFIX, ORDER_EXPR_LOWER_PREFIX, ORDER_EXPR_LTRIM_PREFIX,
+    ORDER_EXPR_REVERSE_PREFIX, ORDER_EXPR_ROUND_PREFIX, ORDER_EXPR_ROUND_SCALE_PREFIX,
+    ORDER_EXPR_RTRIM_PREFIX, ORDER_EXPR_TRIM_PREFIX, ORDER_EXPR_UPPER_PREFIX,
     parse_select_condition_from_expr, SelectCondition, SelectJoin, SelectJoinKind,
     SelectOrderByItem, SqlParseError, UpdateArithmeticOp, UpdateAssignment,
     UnaryArithmeticOp, UpdateAssignmentOperand, UpdateAssignmentValue, UpdateRowsPlan,
 };
-
-const ORDER_EXPR_LOWER_PREFIX: &str = "__order_expr_lower__:";
-const ORDER_EXPR_UPPER_PREFIX: &str = "__order_expr_upper__:";
-const ORDER_EXPR_ABS_PREFIX: &str = "__order_expr_abs__:";
-const ORDER_EXPR_LENGTH_PREFIX: &str = "__order_expr_length__:";
-const ORDER_EXPR_REVERSE_PREFIX: &str = "__order_expr_reverse__:";
-const ORDER_EXPR_TRIM_PREFIX: &str = "__order_expr_trim__:";
-const ORDER_EXPR_LTRIM_PREFIX: &str = "__order_expr_ltrim__:";
-const ORDER_EXPR_RTRIM_PREFIX: &str = "__order_expr_rtrim__:";
-const ORDER_EXPR_CEIL_PREFIX: &str = "__order_expr_ceil__:";
-const ORDER_EXPR_FLOOR_PREFIX: &str = "__order_expr_floor__:";
-const ORDER_EXPR_ROUND_PREFIX: &str = "__order_expr_round__:";
-const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = "__order_expr_round_scale__:";
 
 pub fn parse_update_rows_from_statement(statement: &str) -> Result<UpdateRowsPlan, SqlParseError> {
 
@@ -430,7 +422,7 @@ fn parse_update_order_by_items_from_text(
         table_aliases.push(common::normalize_identifier!(&alias.name.value));
     }
 
-    let parts = split_top_level_csv(clause);
+    let parts = split_top_level_csv_trimmed(clause);
     let mut items = Vec::with_capacity(parts.len());
 
     for raw_part in parts {
@@ -614,7 +606,7 @@ fn parse_update_order_expression_token(
     if lowered.starts_with("round(") && raw.ends_with(')') {
         
         let inner = &raw["round(".len()..raw.len() - 1];
-        let args = split_top_level_csv(inner);
+        let args = split_top_level_csv_trimmed(inner);
         if args.len() == 1 {
             let column = parse_update_order_target_column(args[0].as_str(), table_aliases)?;
             return Ok(format!("{ORDER_EXPR_ROUND_PREFIX}{column}"));
@@ -722,175 +714,6 @@ fn parse_update_limit_from_text(clause: &str) -> Result<usize, SqlParseError> {
             first
         ))
     })
-
-}
-
-fn find_top_level_keyword(sql_lower: &str, keyword: &str) -> Option<usize> {
-
-    let bytes = sql_lower.as_bytes();
-    let keyword_bytes = keyword.as_bytes();
-    if keyword_bytes.is_empty() || bytes.len() < keyword_bytes.len() {
-        return None;
-    }
-
-    let mut depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-    let mut idx = 0usize;
-
-    while idx + keyword_bytes.len() <= bytes.len() {
-        let ch = bytes[idx] as char;
-
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            idx += 1;
-            continue;
-        }
-
-        if in_double {
-            if ch == '"' {
-                in_double = false;
-            }
-            idx += 1;
-            continue;
-        }
-
-        if in_backtick {
-            if ch == '`' {
-                in_backtick = false;
-            }
-            idx += 1;
-            continue;
-        }
-
-        match ch {
-            '\'' => {
-                in_single = true;
-                idx += 1;
-                continue;
-            }
-            '"' => {
-                in_double = true;
-                idx += 1;
-                continue;
-            }
-            '`' => {
-                in_backtick = true;
-                idx += 1;
-                continue;
-            }
-            '(' => {
-                depth = depth.saturating_add(1);
-                idx += 1;
-                continue;
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                idx += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        if depth == 0 && &bytes[idx..idx + keyword_bytes.len()] == keyword_bytes {
-            let left_ok = idx == 0
-                || !((bytes[idx - 1] as char).is_ascii_alphanumeric() || bytes[idx - 1] == b'_');
-            let right_idx = idx + keyword_bytes.len();
-            let right_ok = right_idx == bytes.len()
-                || !((bytes[right_idx] as char).is_ascii_alphanumeric() || bytes[right_idx] == b'_');
-
-            if left_ok && right_ok {
-                return Some(idx);
-            }
-        }
-
-        idx += 1;
-    }
-
-    None
-
-}
-
-fn split_top_level_csv(text: &str) -> Vec<String> {
-
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-
-    for ch in text.chars() {
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            current.push(ch);
-            continue;
-        }
-
-        if in_double {
-            if ch == '"' {
-                in_double = false;
-            }
-            current.push(ch);
-            continue;
-        }
-
-        if in_backtick {
-            if ch == '`' {
-                in_backtick = false;
-            }
-            current.push(ch);
-            continue;
-        }
-
-        match ch {
-            
-            '\'' => {
-                in_single = true;
-                current.push(ch);
-            },
-
-            '"' => {
-                in_double = true;
-                current.push(ch);
-            },
-
-            '`' => {
-                in_backtick = true;
-                current.push(ch);
-            },
-
-            '(' => {
-                depth = depth.saturating_add(1);
-                current.push(ch);
-            },
-
-            ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            },
-
-            ',' if depth == 0 => {
-                parts.push(current.trim().to_string());
-                current.clear();
-            },
-
-            _ => current.push(ch),
-        
-        }
-
-    }
-
-    if !current.trim().is_empty() {
-        parts.push(current.trim().to_string());
-    }
-
-    parts
 
 }
 

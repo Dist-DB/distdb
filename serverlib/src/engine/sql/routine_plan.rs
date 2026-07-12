@@ -1,5 +1,6 @@
 use super::{
     evaluate_expression_sql_to_bytes, evaluate_sql_function, parse_select_read_plan_from_statement,
+    text_scan::split_top_level_csv_trimmed,
     IfElseEndBranchPlan, IfElseEndPlan, RoutineArgumentBinding,
     RoutineParameterDeclaration, RoutineParameterMode, SqlParseError,
 };
@@ -450,7 +451,7 @@ fn parse_create_routine_parameter_segments(
     })?;
 
     let raw_params = &header[(open_index + 1)..close_index];
-    Ok(split_top_level_csv(raw_params))
+    Ok(split_top_level_csv_trimmed(raw_params))
 
 }
 
@@ -939,49 +940,6 @@ fn matching_close_parenthesis(text: &str, open_index: usize) -> Option<usize> {
     }
 
     None
-
-}
-
-fn split_top_level_csv(text: &str) -> Vec<String> {
-
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-
-    for ch in text.chars() {
-
-        match ch {
-
-            '(' => {
-                depth += 1;
-                current.push(ch);
-            },
-
-            ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            },
-
-            ',' if depth == 0 => {
-                let trimmed = current.trim();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed.to_string());
-                }
-                current.clear();
-            },
-
-            _ => current.push(ch),
-
-        }
-
-    }
-
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        parts.push(trimmed.to_string());
-    }
-
-    parts
 
 }
 

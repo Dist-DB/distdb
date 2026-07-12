@@ -1,0 +1,12 @@
+pub const ORDER_EXPR_LOWER_PREFIX: &str = "__order_expr_lower__:";
+pub const ORDER_EXPR_UPPER_PREFIX: &str = "__order_expr_upper__:";
+pub const ORDER_EXPR_ABS_PREFIX: &str = "__order_expr_abs__:";
+pub const ORDER_EXPR_LENGTH_PREFIX: &str = "__order_expr_length__:";
+pub const ORDER_EXPR_REVERSE_PREFIX: &str = "__order_expr_reverse__:";
+pub const ORDER_EXPR_TRIM_PREFIX: &str = "__order_expr_trim__:";
+pub const ORDER_EXPR_LTRIM_PREFIX: &str = "__order_expr_ltrim__:";
+pub const ORDER_EXPR_RTRIM_PREFIX: &str = "__order_expr_rtrim__:";
+pub const ORDER_EXPR_CEIL_PREFIX: &str = "__order_expr_ceil__:";
+pub const ORDER_EXPR_FLOOR_PREFIX: &str = "__order_expr_floor__:";
+pub const ORDER_EXPR_ROUND_PREFIX: &str = "__order_expr_round__:";
+pub const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = "__order_expr_round_scale__:";

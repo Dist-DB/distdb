@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use crate::{FieldDef, SelectCondition, SelectOrderByItem, SelectProjectionItem, SelectReadPlan};
 use crate::engine::sql::SelectLimitByPlan;
 use crate::engine::execution::row_matches_condition_with_result;
+use crate::engine::execution::{apply_limit_by_rows, apply_percent_rows, apply_with_ties_rows};
 
 use super::window::apply_window_projection_values;
 
@@ -154,22 +155,7 @@ fn apply_top_percent_post_filter(
     top_percent: Option<usize>,
 ) -> Vec<Vec<Vec<u8>>> {
 
-    let Some(percent) = top_percent else {
-        return rows;
-    };
-
-    if rows.is_empty() || percent == 0 {
-        return Vec::new();
-    }
-
-    let capped_percent = percent.min(100);
-    let total_rows = rows.len();
-    let bounded_rows = total_rows
-        .saturating_mul(capped_percent)
-        .saturating_add(99)
-        / 100;
-
-    rows.into_iter().take(bounded_rows).collect()
+    apply_percent_rows(rows, top_percent)
 
 }
 
@@ -208,18 +194,6 @@ fn apply_top_with_ties_post_filter(
     top_with_ties_limit: Option<usize>,
 ) -> Result<Vec<Vec<Vec<u8>>>, String> {
 
-    let Some(limit) = top_with_ties_limit else {
-        return Ok(rows);
-    };
-
-    if limit == 0 || rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    if limit >= rows.len() {
-        return Ok(rows);
-    }
-
     let mut order_indexes = Vec::with_capacity(order_by.len());
     for item in order_by {
         let Some(index) = columns.iter().position(|column| column.field_name == item.field_name) else {
@@ -231,30 +205,7 @@ fn apply_top_with_ties_post_filter(
         order_indexes.push(index);
     }
 
-    if order_indexes.is_empty() {
-        return Ok(rows.into_iter().take(limit).collect());
-    }
-
-    let boundary_index = limit - 1;
-    let mut end = limit;
-
-    while end < rows.len() && rows_share_order_key(&rows[end], &rows[boundary_index], &order_indexes) {
-        end += 1;
-    }
-
-    Ok(rows.into_iter().take(end).collect())
-
-}
-
-fn rows_share_order_key(
-    left: &[Vec<u8>],
-    right: &[Vec<u8>],
-    order_indexes: &[usize],
-) -> bool {
-
-    order_indexes
-        .iter()
-        .all(|index| left.get(*index) == right.get(*index))
+    Ok(apply_with_ties_rows(rows, &order_indexes, top_with_ties_limit))
 
 }
 
@@ -264,38 +215,12 @@ fn apply_limit_by_post_filter(
     limit_by: Option<&SelectLimitByPlan>,
 ) -> Result<Vec<Vec<Vec<u8>>>, String> {
 
-    let Some(limit_by) = limit_by else {
-        return Ok(rows);
-    };
-
-    let mut key_indexes = Vec::with_capacity(limit_by.fields.len());
-    for field_name in &limit_by.fields {
-        let Some(index) = columns.iter().position(|column| column.field_name == *field_name) else {
-            return Err(format!(
-                "select failed: LIMIT BY column '{}' is not present in result projection",
-                field_name
-            ));
-        };
-        key_indexes.push(index);
-    }
-
-    let mut per_key_counts = HashMap::<Vec<Vec<u8>>, usize>::new();
-    let mut limited_rows = Vec::with_capacity(rows.len());
-
-    for row in rows {
-        let key = key_indexes
-            .iter()
-            .map(|index| row.get(*index).cloned().unwrap_or_default())
-            .collect::<Vec<_>>();
-
-        let count = per_key_counts.entry(key).or_insert(0);
-        if *count < limit_by.per_key_limit {
-            *count += 1;
-            limited_rows.push(row);
-        }
-    }
-
-    Ok(limited_rows)
+    apply_limit_by_rows(
+        rows,
+        columns,
+        limit_by,
+        "select failed: LIMIT BY column",
+    )
 
 }
 

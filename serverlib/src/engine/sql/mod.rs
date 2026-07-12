@@ -17,6 +17,8 @@ mod insert_plan;
 mod update_plan;
 mod delete_plan;
 mod mutation_returning;
+mod mutation_order_expr;
+mod text_scan;
 
 pub use insert_plan::{parse_insert_rows_from_parsed_statement, parse_insert_rows_from_statement};
 pub use update_plan::parse_update_rows_from_statement;
@@ -67,6 +69,12 @@ pub use dialect::{dialect_capabilities_for_target, SqlDialectCapabilities};
 pub use expression::{expression_references_column, SelectExpression};
 pub use predicates::{
     compare_like_value, compare_regex_value, compare_row_value, validate_regex_pattern,
+};
+pub use mutation_order_expr::{
+    ORDER_EXPR_ABS_PREFIX, ORDER_EXPR_CEIL_PREFIX, ORDER_EXPR_FLOOR_PREFIX,
+    ORDER_EXPR_LENGTH_PREFIX, ORDER_EXPR_LOWER_PREFIX, ORDER_EXPR_LTRIM_PREFIX,
+    ORDER_EXPR_REVERSE_PREFIX, ORDER_EXPR_ROUND_PREFIX, ORDER_EXPR_ROUND_SCALE_PREFIX,
+    ORDER_EXPR_RTRIM_PREFIX, ORDER_EXPR_TRIM_PREFIX, ORDER_EXPR_UPPER_PREFIX,
 };
 
 pub use types::{

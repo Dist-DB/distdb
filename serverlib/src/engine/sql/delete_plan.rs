@@ -6,22 +6,13 @@ use sqlparser::ast::{
 use super::{
     derive_relation_pushdown_conditions, parse_joins_from_table_with_joins,
     parse_mysql_statements, parse_relation_bindings_from_table_with_joins,
+    ORDER_EXPR_ABS_PREFIX, ORDER_EXPR_CEIL_PREFIX, ORDER_EXPR_FLOOR_PREFIX,
+    ORDER_EXPR_LENGTH_PREFIX, ORDER_EXPR_LOWER_PREFIX, ORDER_EXPR_LTRIM_PREFIX,
+    ORDER_EXPR_REVERSE_PREFIX, ORDER_EXPR_ROUND_PREFIX, ORDER_EXPR_ROUND_SCALE_PREFIX,
+    ORDER_EXPR_RTRIM_PREFIX, ORDER_EXPR_TRIM_PREFIX, ORDER_EXPR_UPPER_PREFIX,
     parse_select_condition_from_expr, DeleteRowsPlan, SelectCondition, SelectJoin,
     SelectJoinKind, SelectOrderByItem, SqlParseError,
 };
-
-const ORDER_EXPR_LOWER_PREFIX: &str = "__order_expr_lower__:";
-const ORDER_EXPR_UPPER_PREFIX: &str = "__order_expr_upper__:";
-const ORDER_EXPR_ABS_PREFIX: &str = "__order_expr_abs__:";
-const ORDER_EXPR_LENGTH_PREFIX: &str = "__order_expr_length__:";
-const ORDER_EXPR_REVERSE_PREFIX: &str = "__order_expr_reverse__:";
-const ORDER_EXPR_TRIM_PREFIX: &str = "__order_expr_trim__:";
-const ORDER_EXPR_LTRIM_PREFIX: &str = "__order_expr_ltrim__:";
-const ORDER_EXPR_RTRIM_PREFIX: &str = "__order_expr_rtrim__:";
-const ORDER_EXPR_CEIL_PREFIX: &str = "__order_expr_ceil__:";
-const ORDER_EXPR_FLOOR_PREFIX: &str = "__order_expr_floor__:";
-const ORDER_EXPR_ROUND_PREFIX: &str = "__order_expr_round__:";
-const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = "__order_expr_round_scale__:";
 
 pub fn parse_delete_rows_from_statement(statement: &str) -> Result<DeleteRowsPlan, SqlParseError> {
 

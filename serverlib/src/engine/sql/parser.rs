@@ -3,6 +3,9 @@ use sqlparser::dialect::{GenericDialect, MySqlDialect};
 use sqlparser::parser::Parser;
 
 use super::classify;
+use super::text_scan::{
+    find_top_level_phrase_from, split_top_level_assignment, split_top_level_csv_preserve,
+};
 use super::types::ParsedOrFallback;
 use super::SqlParseError;
 
@@ -82,7 +85,7 @@ fn normalize_insert_set_syntax(sql: &str) -> String {
     let mut columns = Vec::new();
     let mut values = Vec::new();
 
-    for assignment in split_top_level_csv(assignment_clause) {
+    for assignment in split_top_level_csv_preserve(assignment_clause) {
         let Some((column, value)) = split_top_level_assignment(assignment.as_str()) else {
             return sql.to_string();
         };
@@ -194,7 +197,7 @@ fn locate_insert_column_list_for_default_values(
         return None;
     }
 
-    let column_count = split_top_level_csv(columns)
+    let column_count = split_top_level_csv_preserve(columns)
         .into_iter()
         .filter(|segment| !segment.trim().is_empty())
         .count();
@@ -237,105 +240,6 @@ fn find_matching_open_paren(bytes: &[u8], close_idx: usize) -> Option<usize> {
 
 }
 
-fn split_top_level_csv(clause: &str) -> Vec<String> {
-
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-
-    for (idx, ch) in clause.char_indices() {
-
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-
-        if in_double {
-            if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-
-        if in_backtick {
-            if ch == '`' {
-                in_backtick = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' => in_single = true,
-            '"' => in_double = true,
-            '`' => in_backtick = true,
-            '(' => depth = depth.saturating_add(1),
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(clause[start..idx].to_string());
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    parts.push(clause[start..].to_string());
-    parts
-
-}
-
-fn split_top_level_assignment(assignment: &str) -> Option<(String, String)> {
-
-    let mut depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-
-    for (idx, ch) in assignment.char_indices() {
-
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-
-        if in_double {
-            if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-
-        if in_backtick {
-            if ch == '`' {
-                in_backtick = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' => in_single = true,
-            '"' => in_double = true,
-            '`' => in_backtick = true,
-            '(' => depth = depth.saturating_add(1),
-            ')' => depth = depth.saturating_sub(1),
-            '=' if depth == 0 => {
-                let left = assignment[..idx].to_string();
-                let right = assignment[idx + ch.len_utf8()..].to_string();
-                return Some((left, right));
-            }
-            _ => {}
-        }
-    }
-
-    None
-
-}
 
 fn normalize_insert_set_target_column(target: &str) -> Option<String> {
 
@@ -377,105 +281,6 @@ fn is_valid_insert_set_identifier_part(part: &str) -> bool {
 
 }
 
-fn find_top_level_phrase_from(sql: &str, phrase: &str, start: usize) -> Option<usize> {
-
-    if phrase.is_empty() || start >= sql.len() {
-        return None;
-    }
-
-    let bytes = sql.as_bytes();
-    let phrase_bytes = phrase.as_bytes();
-    if phrase_bytes.len() > bytes.len() {
-        return None;
-    }
-
-    let mut depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-    let mut idx = start;
-
-    while idx + phrase_bytes.len() <= bytes.len() {
-        let byte = bytes[idx];
-
-        if in_single {
-            if byte == b'\'' {
-                in_single = false;
-            }
-            idx += 1;
-            continue;
-        }
-
-        if in_double {
-            if byte == b'"' {
-                in_double = false;
-            }
-            idx += 1;
-            continue;
-        }
-
-        if in_backtick {
-            if byte == b'`' {
-                in_backtick = false;
-            }
-            idx += 1;
-            continue;
-        }
-
-        match byte {
-            
-            b'\'' => {
-                in_single = true;
-                idx += 1;
-                continue;
-            },
-            
-            b'"' => {
-                in_double = true;
-                idx += 1;
-                continue;
-            },
-            
-            b'`' => {
-                in_backtick = true;
-                idx += 1;
-                continue;
-            },
-            
-            b'(' => {
-                depth = depth.saturating_add(1);
-                idx += 1;
-                continue;
-            },
-            
-            b')' => {
-                depth = depth.saturating_sub(1);
-                idx += 1;
-                continue;
-            },
-            
-            _ => {}
-
-        }
-
-        if depth == 0
-            && bytes[idx..idx + phrase_bytes.len()].eq_ignore_ascii_case(phrase_bytes)
-        {
-            let before_ok = idx == 0 || !is_ascii_word(bytes[idx - 1]);
-            let after_end = idx + phrase_bytes.len();
-            let after_ok = after_end >= bytes.len() || !is_ascii_word(bytes[after_end]);
-
-            if before_ok && after_ok {
-                return Some(idx);
-            }
-        }
-
-        idx += 1;
-    }
-
-    None
-
-}
 
 fn skip_ascii_whitespace_bytes(bytes: &[u8], mut idx: usize) -> usize {
 

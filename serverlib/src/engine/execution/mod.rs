@@ -5,6 +5,7 @@ pub mod join;
 pub mod runtime;
 pub mod select;
 pub mod commands;
+pub mod row_windowing;
 
 
 #[cfg(test)]
@@ -67,4 +68,5 @@ pub use runtime::{
     ConditionValueProvider,
     JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 };
+pub use row_windowing::{apply_limit_by_rows, apply_percent_rows, apply_with_ties_rows};
 pub use crate::engine::sql::compare_row_value;

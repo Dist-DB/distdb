@@ -257,22 +257,7 @@ fn apply_union_percent(
     fetch_percent: Option<usize>,
 ) -> Vec<Vec<Vec<u8>>> {
 
-    let Some(percent) = fetch_percent else {
-        return rows;
-    };
-
-    if rows.is_empty() || percent == 0 {
-        return Vec::new();
-    }
-
-    let capped_percent = percent.min(100);
-    let total_rows = rows.len();
-    let bounded_rows = total_rows
-        .saturating_mul(capped_percent)
-        .saturating_add(99)
-        / 100;
-
-    rows.into_iter().take(bounded_rows).collect()
+    serverlib::apply_percent_rows(rows, fetch_percent)
 
 }
 
@@ -304,38 +289,12 @@ fn apply_union_limit_by(
     limit_by: Option<&serverlib::SelectLimitByPlan>,
 ) -> Result<Vec<Vec<Vec<u8>>>, String> {
 
-    let Some(limit_by) = limit_by else {
-        return Ok(rows);
-    };
-
-    let mut key_indexes = Vec::with_capacity(limit_by.fields.len());
-    for field_name in &limit_by.fields {
-        let Some(index) = columns.iter().position(|column| column.field_name == *field_name) else {
-            return Err(format!(
-                "LIMIT BY column '{}' is not present in UNION output",
-                field_name
-            ));
-        };
-        key_indexes.push(index);
-    }
-
-    let mut per_key_counts = std::collections::HashMap::<Vec<Vec<u8>>, usize>::new();
-    let mut limited_rows = Vec::with_capacity(rows.len());
-
-    for row in rows {
-        let key = key_indexes
-            .iter()
-            .map(|index| row.get(*index).cloned().unwrap_or_default())
-            .collect::<Vec<_>>();
-
-        let count = per_key_counts.entry(key).or_insert(0);
-        if *count < limit_by.per_key_limit {
-            *count += 1;
-            limited_rows.push(row);
-        }
-    }
-
-    Ok(limited_rows)
+    serverlib::apply_limit_by_rows(
+        rows,
+        columns,
+        limit_by,
+        "LIMIT BY column",
+    )
 
 }
 
@@ -345,18 +304,6 @@ fn apply_union_with_ties(
     order_by: &[serverlib::SelectOrderByItem],
     with_ties_limit: Option<usize>,
 ) -> Result<Vec<Vec<Vec<u8>>>, String> {
-
-    let Some(limit) = with_ties_limit else {
-        return Ok(rows);
-    };
-
-    if limit == 0 || rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    if limit >= rows.len() {
-        return Ok(rows);
-    }
 
     let mut order_indexes = Vec::with_capacity(order_by.len());
     const UNION_ORDER_BY_ORDINAL_PREFIX: &str = "__union_order_by_ordinal__";
@@ -391,22 +338,7 @@ fn apply_union_with_ties(
         order_indexes.push(index);
     }
 
-    if order_indexes.is_empty() {
-        return Ok(rows.into_iter().take(limit).collect());
-    }
-
-    let boundary_index = limit - 1;
-    let mut end = limit;
-
-    while end < rows.len()
-        && order_indexes
-            .iter()
-            .all(|index| rows[end].get(*index) == rows[boundary_index].get(*index))
-    {
-        end += 1;
-    }
-
-    Ok(rows.into_iter().take(end).collect())
+    Ok(serverlib::apply_with_ties_rows(rows, &order_indexes, with_ties_limit))
 
 }
 

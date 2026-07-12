@@ -1,18 +1,18 @@
 use super::*;
 use crate::core::mappings::query::core::wal_ops::table_stream_id;
 
-const ORDER_EXPR_LOWER_PREFIX: &str = "__order_expr_lower__:";
-const ORDER_EXPR_UPPER_PREFIX: &str = "__order_expr_upper__:";
-const ORDER_EXPR_ABS_PREFIX: &str = "__order_expr_abs__:";
-const ORDER_EXPR_LENGTH_PREFIX: &str = "__order_expr_length__:";
-const ORDER_EXPR_REVERSE_PREFIX: &str = "__order_expr_reverse__:";
-const ORDER_EXPR_TRIM_PREFIX: &str = "__order_expr_trim__:";
-const ORDER_EXPR_LTRIM_PREFIX: &str = "__order_expr_ltrim__:";
-const ORDER_EXPR_RTRIM_PREFIX: &str = "__order_expr_rtrim__:";
-const ORDER_EXPR_CEIL_PREFIX: &str = "__order_expr_ceil__:";
-const ORDER_EXPR_FLOOR_PREFIX: &str = "__order_expr_floor__:";
-const ORDER_EXPR_ROUND_PREFIX: &str = "__order_expr_round__:";
-const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = "__order_expr_round_scale__:";
+const ORDER_EXPR_LOWER_PREFIX: &str = serverlib::ORDER_EXPR_LOWER_PREFIX;
+const ORDER_EXPR_UPPER_PREFIX: &str = serverlib::ORDER_EXPR_UPPER_PREFIX;
+const ORDER_EXPR_ABS_PREFIX: &str = serverlib::ORDER_EXPR_ABS_PREFIX;
+const ORDER_EXPR_LENGTH_PREFIX: &str = serverlib::ORDER_EXPR_LENGTH_PREFIX;
+const ORDER_EXPR_REVERSE_PREFIX: &str = serverlib::ORDER_EXPR_REVERSE_PREFIX;
+const ORDER_EXPR_TRIM_PREFIX: &str = serverlib::ORDER_EXPR_TRIM_PREFIX;
+const ORDER_EXPR_LTRIM_PREFIX: &str = serverlib::ORDER_EXPR_LTRIM_PREFIX;
+const ORDER_EXPR_RTRIM_PREFIX: &str = serverlib::ORDER_EXPR_RTRIM_PREFIX;
+const ORDER_EXPR_CEIL_PREFIX: &str = serverlib::ORDER_EXPR_CEIL_PREFIX;
+const ORDER_EXPR_FLOOR_PREFIX: &str = serverlib::ORDER_EXPR_FLOOR_PREFIX;
+const ORDER_EXPR_ROUND_PREFIX: &str = serverlib::ORDER_EXPR_ROUND_PREFIX;
+const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = serverlib::ORDER_EXPR_ROUND_SCALE_PREFIX;
 
 pub(super) fn execute_insert_impl(
     request_id: &str,
