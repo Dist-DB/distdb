@@ -1519,6 +1519,115 @@ pub(crate) fn execute_create_view_impl(
 
 }
 
+pub(super) fn execute_create_olap_view_impl(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let (view_id, z_dimension_columns, dependencies) = match parse_create_olap_view_spec(&statement.sql) {
+        Ok(spec) => spec,
+        Err(err) => {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("create olap view parse failed: {err}"),
+            );
+        }
+    };
+
+    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", query.database_id),
+        );
+    };
+
+    let wal_id = catalog.database_id.0.clone();
+    let created_at = common::epoch_nanos!();
+    let sql_dependencies = dependencies.clone();
+
+    match catalog.register_olap_view(
+        view_id.clone(),
+        statement.sql.clone(),
+        z_dimension_columns,
+        TableSchema::new(Vec::new()),
+        dependencies.clone(),
+    ) {
+
+        Ok(()) => {
+
+            let Some(entity_wal_id) = catalog.entity_wal_stream_id(&view_id) else {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    "create olap view WAL stream lookup failed".to_string(),
+                );
+            };
+
+            if let Err(err) = apply_entity_metadata_with_wal(
+                catalog,
+                wal,
+                &wal_id,
+                &entity_wal_id,
+                &view_id,
+                created_at,
+                "create olap view",
+            ) {
+                return ConnectorResponse::rejected(request_id.to_string(), err);
+            }
+
+            if let Err(err) = catalog.set_sql_definition(
+                &view_id,
+                SqlObjectKind::OlapView,
+                statement.sql.clone(),
+                sql_dependencies,
+            ) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create olap view definition apply failed: {err}"),
+                );
+            }
+
+            if let Err(err) = append_sql_definition_upsert_with_wal(
+                catalog,
+                wal,
+                &wal_id,
+                &entity_wal_id,
+                &view_id,
+                SqlObjectKind::OlapView,
+                &statement.sql,
+                dependencies,
+                created_at,
+                "create olap view",
+            ) {
+                return ConnectorResponse::rejected(request_id.to_string(), err);
+            }
+
+            if let Err(err) = persist_entity_snapshot(catalog, &view_id, node_data_dir) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create olap view entity snapshot write failed: {err}"),
+                );
+            }
+
+            ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+            )
+
+        },
+
+        Err(err) => ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("create olap view failed: {err}"),
+        ),
+
+    }
+
+}
+
 pub(super) fn execute_create_trigger_impl(
     request_id: &str,
     query: &DataQuery,
@@ -1910,6 +2019,61 @@ fn persist_entity_snapshot(
         &file,
     )
     .map_err(|err| err.to_string())
+
+}
+
+fn parse_create_olap_view_spec(statement_sql: &str) -> Result<(String, Vec<String>, Vec<String>), String> {
+
+    let normalized = statement_sql.trim().trim_end_matches(';').trim();
+    let lowered = normalized.to_ascii_lowercase();
+    let prefix = "create olapview";
+
+    if !lowered.starts_with(prefix) {
+        return Err("statement is not CREATE OLAPVIEW".to_string());
+    }
+
+    let prefix_len = prefix.len();
+    let using_idx = lowered[prefix_len..]
+        .find(" using ")
+        .map(|idx| idx + prefix_len)
+        .ok_or_else(|| "missing USING clause".to_string())?;
+
+    let as_idx = lowered[using_idx + " using ".len()..]
+        .find(" as ")
+        .map(|idx| idx + using_idx + " using ".len())
+        .ok_or_else(|| "missing AS clause".to_string())?;
+
+    let view_id = normalized[prefix_len..using_idx].trim();
+    if view_id.is_empty() {
+        return Err("missing OLAP view identifier".to_string());
+    }
+
+    let dimension_text = normalized[using_idx + " using ".len()..as_idx].trim();
+    if dimension_text.is_empty() {
+        return Err("missing OLAP view dimension list".to_string());
+    }
+
+    let select_sql = normalized[as_idx + " as ".len()..].trim();
+    if select_sql.is_empty() {
+        return Err("missing OLAP view SELECT statement".to_string());
+    }
+
+    let z_dimension_columns = dimension_text
+        .split(',')
+        .map(str::trim)
+        .filter(|col| !col.is_empty())
+        .map(|col| common::normalize_identifier!(col))
+        .collect::<Vec<_>>();
+
+    if z_dimension_columns.is_empty() {
+        return Err("missing OLAP view dimension list".to_string());
+    }
+
+    let dependency_sql = format!("create view __olapview_dependencies__ as {select_sql}");
+    let dependencies = serverlib::parse_create_view_dependencies_from_sql(&dependency_sql)
+        .map_err(|err| err.to_string())?;
+
+    Ok((common::normalize_identifier!(view_id), z_dimension_columns, dependencies))
 
 }
 

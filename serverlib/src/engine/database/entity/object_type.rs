@@ -3,6 +3,7 @@
 pub enum DatabaseObjectType {
     Table,
     View,
+    OlapView,
     Relationship,
     Trigger,
     StoredProcedure,

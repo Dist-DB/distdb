@@ -56,6 +56,15 @@ pub(super) fn classify_statement(
         ));
     }
 
+    if normalized_lower.starts_with("show slices") {
+        return Ok((
+            SqlDirective::Retrieve,
+            SqlOperation::ShowSlices,
+            extract_show_slices_target(normalized),
+            required_privilege_for_operation(SqlOperation::Select),
+        ));
+    }
+
     let (directive, operation, object_name) = match statement {
 
         Statement::Query(query) => {
@@ -288,6 +297,7 @@ pub(super) fn classify_statement(
         SqlOperation::CreateDatabase |
         SqlOperation::CreateTable |
         SqlOperation::CreateView |
+        SqlOperation::CreateOlapView |
         SqlOperation::CreateTrigger |
         SqlOperation::CreateStoredProcedure |
         SqlOperation::CallStoredProcedure |
@@ -333,13 +343,32 @@ fn extract_show_indexes_target(statement: &str) -> Option<String> {
 
 }
 
+fn extract_show_slices_target(statement: &str) -> Option<String> {
+
+    let tokens = statement
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>();
+
+    let target_idx = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("from"))?
+        + 1;
+
+    let raw = tokens.get(target_idx)?;
+    normalize_fallback_object_name(raw)
+
+}
+
 // Mapping security model privileges to SQL operations. This is a simplified mapping and may not cover all cases.
 fn required_privilege_for_operation(operation: SqlOperation) -> Option<AccountPrivilege> {
 
     match operation {
 
         SqlOperation::Select | 
-        SqlOperation::UnionQuery            => Some(AccountPrivilege::Select),
+        SqlOperation::UnionQuery |
+        SqlOperation::ShowSlices            => Some(AccountPrivilege::Select),
 
         SqlOperation::Insert                => Some(AccountPrivilege::Insert),
 
@@ -351,6 +380,7 @@ fn required_privilege_for_operation(operation: SqlOperation) -> Option<AccountPr
         SqlOperation::CreateDatabase |
         SqlOperation::CreateTable |
         SqlOperation::CreateView |
+        SqlOperation::CreateOlapView |
         SqlOperation::CreateTrigger |
         SqlOperation::CreateStoredProcedure |
         SqlOperation::CreateOther           => Some(AccountPrivilege::Create),
@@ -646,6 +676,14 @@ pub(super) fn classify_text_fallback(
             SqlOperation::CreateStoredProcedure,
             object_name,
             required_privilege_for_operation(SqlOperation::CreateStoredProcedure),
+        )),
+
+        ("create", "olapview") |
+        ("create", "olap_view") => Some((
+            SqlDirective::Create,
+            SqlOperation::CreateOlapView,
+            object_name,
+            required_privilege_for_operation(SqlOperation::CreateOlapView),
         )),
 
         ("create", "user") => Some((

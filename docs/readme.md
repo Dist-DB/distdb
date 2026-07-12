@@ -33,6 +33,7 @@ If you are new to the codebase, read these pages in order:
 3. [security.md](security.md): transport security, CA bootstrapping, and trust decisions.
 4. [replication.md](replication.md): affinity-based replication model and synchronization order.
 5. [sql-compliance.md](sql-compliance.md): feature coverage and limits relative to MySQL 8.x.
+6. [olap.md](olap.md): OLAP views, hypercubes, and multi-dimensional analysis (optional, if using analytics).
 
 For design constraints and implementation ownership:
 
@@ -48,6 +49,8 @@ DistDB is split into a few major surfaces:
 - `serverlib`: reusable database behavior, SQL planning, execution primitives, runtime data structures, and replication/security building blocks.
 - `server`: orchestration layer for query handling, sessions, transactions, WAL coordination, security, and peer interaction.
 - `connector`: client/server transport types and protocol-facing integration.
+- `clientlib`: reusable client-side library for transport/session/query operations used by client-facing binaries.
+- `peerlib`: centralized peer-facing library for shared peer coordination/runtime behavior used across node-facing surfaces.
 - `console`: operator-facing CLI for exercising the platform.
 - `client`: example client surface.
 
@@ -59,6 +62,14 @@ DistDB is split into a few major surfaces:
 - Core DDL and DML are implemented for the currently supported statement set.
 - `SELECT`, joins, ordering, limits, and several routine/trigger surfaces are available.
 - Unsupported syntax is expected to fail explicitly rather than being silently rewritten.
+
+### OLAP and Analytics
+
+- OLAP views enable multi-dimensional analysis via memory-resident hypercubes.
+- `CREATE OLAPVIEW` names and defines coordinate-addressed cells over committed table data.
+- `SHOW SLICES FROM <olapview>` returns slice metadata and pre-computed aggregates.
+- Hypercubes are derived (not persisted) and rebuilt from live rows on startup or after invalidation.
+- See [olap.md](olap.md) for design philosophy, examples, and current limitations.
 
 ### Transactions and durability
 

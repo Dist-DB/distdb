@@ -23,6 +23,17 @@ fn fallback_extracts_parameterized_function_name_for_create() {
 }
 
 #[test]
+fn fallback_extracts_olap_view_name_for_create() {
+    let classified = classify_text_fallback(
+        "create olapview sales_by_region using region, product as select id, region, product from orders;",
+    )
+    .expect("create olapview should classify");
+
+    assert_eq!(classified.1, SqlOperation::CreateOlapView);
+    assert_eq!(classified.2.as_deref(), Some("sales_by_region"));
+}
+
+#[test]
 fn fallback_extracts_parameterized_procedure_name_for_call() {
     let classified = classify_text_fallback("call p_arg_route(1);")
         .expect("call procedure should classify");

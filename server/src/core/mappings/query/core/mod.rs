@@ -61,6 +61,7 @@ use dispatch_ops::execute_parsed_query;
 use mutation_ops::{execute_delete_impl, execute_insert_impl, execute_update_impl};
 use ddl_ops::{
     execute_alter_table_impl, execute_alter_view_impl, execute_create_database_impl,
+    execute_create_olap_view_impl,
     execute_create_other_impl, execute_create_stored_procedure_impl,
     execute_create_table_impl, execute_create_trigger_impl,
     execute_truncate_table_impl,

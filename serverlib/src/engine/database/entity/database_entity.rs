@@ -4,6 +4,7 @@ use crate::engine::database::entity::kind::DatabaseEntityKind;
 use crate::engine::database::entity::metadata::EntityMetadata;
 
 use crate::engine::database::core::ObjectStatus;
+use crate::engine::database::olap_view::DatabaseOlapView;
 use crate::engine::database::relationship::DatabaseRelationship;
 use crate::engine::database::stored_procedure::DatabaseStoredProcedure;
 use crate::engine::database::table::DatabaseTable;
@@ -16,6 +17,7 @@ use crate::engine::database::view::DatabaseView;
 pub enum DatabaseEntity {
     Table(DatabaseTable),
     View(DatabaseView),
+    OlapView(DatabaseOlapView),
     Relationship(DatabaseRelationship),
     Trigger(DatabaseTrigger),
     StoredProcedure(DatabaseStoredProcedure),
@@ -27,6 +29,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => t.name(),
             Self::View(v) => v.name(),
+            Self::OlapView(v) => v.name(),
             Self::Relationship(r) => r.name(),
             Self::Trigger(t) => t.name(),
             Self::StoredProcedure(p) => p.name(),
@@ -37,6 +40,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(_) => DatabaseEntityKind::Table,
             Self::View(_) => DatabaseEntityKind::View,
+            Self::OlapView(_) => DatabaseEntityKind::OlapView,
             Self::Relationship(_) => DatabaseEntityKind::Relationship,
             Self::Trigger(_) => DatabaseEntityKind::Trigger,
             Self::StoredProcedure(_) => DatabaseEntityKind::StoredProcedure,
@@ -47,6 +51,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => t.storage_key(),
             Self::View(v) => v.storage_key(),
+            Self::OlapView(v) => v.storage_key(),
             Self::Relationship(r) => r.storage_key(),
             Self::Trigger(t) => t.storage_key(),
             Self::StoredProcedure(p) => p.storage_key(),
@@ -57,6 +62,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => t.set_entity_id(entity_id),
             Self::View(v) => v.set_entity_id(entity_id),
+            Self::OlapView(v) => v.set_entity_id(entity_id),
             Self::Relationship(r) => r.set_entity_id(entity_id),
             Self::Trigger(t) => t.set_entity_id(entity_id),
             Self::StoredProcedure(p) => p.set_entity_id(entity_id),
@@ -67,6 +73,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => t.status(),
             Self::View(v) => v.status(),
+            Self::OlapView(v) => v.status(),
             Self::Relationship(r) => r.status(),
             Self::Trigger(t) => t.status(),
             Self::StoredProcedure(p) => p.status(),
@@ -77,6 +84,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => t.metadata(),
             Self::View(v) => v.metadata(),
+            Self::OlapView(v) => v.metadata(),
             Self::Relationship(r) => r.metadata(),
             Self::Trigger(t) => t.metadata(),
             Self::StoredProcedure(p) => p.metadata(),
@@ -87,6 +95,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => t.wal_stream_id(database_wal_id),
             Self::View(v) => v.wal_stream_id(database_wal_id),
+            Self::OlapView(v) => v.wal_stream_id(database_wal_id),
             Self::Relationship(r) => r.wal_stream_id(database_wal_id),
             Self::Trigger(t) => t.wal_stream_id(database_wal_id),
             Self::StoredProcedure(p) => p.wal_stream_id(database_wal_id),
@@ -97,6 +106,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => Some(t.schema_revision()),
             Self::View(v) => v.schema_revision(),
+            Self::OlapView(v) => v.schema_revision(),
             Self::Relationship(r) => r.schema_revision(),
             Self::Trigger(t) => t.schema_revision(),
             Self::StoredProcedure(p) => p.schema_revision(),
@@ -107,6 +117,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => Some(t.schema()),
             Self::View(v) => v.schema(),
+            Self::OlapView(v) => v.schema(),
             Self::Relationship(r) => r.schema(),
             Self::Trigger(t) => t.schema(),
             Self::StoredProcedure(p) => p.schema(),
@@ -117,6 +128,7 @@ impl DatabaseEntityAspect for DatabaseEntity {
         match self {
             Self::Table(t) => t.normalize_in_place(),
             Self::View(v) => v.normalize_in_place(),
+            Self::OlapView(v) => v.normalize_in_place(),
             Self::Relationship(r) => r.normalize_in_place(),
             Self::Trigger(t) => t.normalize_in_place(),
             Self::StoredProcedure(p) => p.normalize_in_place(),

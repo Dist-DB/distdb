@@ -36,6 +36,7 @@ pub enum SqlOperation {
     CreateDatabase,
     CreateTable,
     CreateView,
+    CreateOlapView,
     CreateTrigger,
     CreateStoredProcedure,
     CallStoredProcedure,
@@ -49,6 +50,7 @@ pub enum SqlOperation {
     AlterTable,
     AlterView,
     AlterOther,
+    ShowSlices,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -32,6 +32,7 @@ use crate::engine::database::transaction::{
 };
 
 use crate::engine::database::view::DatabaseView;
+use crate::engine::database::olap_view::DatabaseOlapView;
 use crate::engine::security::{AccountAclEntry, PrivilegeSelector, UserCredential};
 use crate::engine::sql::{TriggerEventKind, TriggerTiming};
 use crate::core::identity::UserId;
@@ -244,6 +245,8 @@ impl DatabaseCatalog {
                 
                 DatabaseObjectType::View => DatabaseError::ViewNotFound,
                 
+                DatabaseObjectType::OlapView => DatabaseError::OlapViewNotFound,
+                
                 DatabaseObjectType::Trigger => DatabaseError::TriggerNotFound,
                 
                 DatabaseObjectType::StoredProcedure => DatabaseError::StoredProcedureNotFound,
@@ -273,6 +276,14 @@ impl DatabaseCatalog {
                     Ok(())
                 }
                 _ => Err(DatabaseError::ViewNotFound),
+            },
+            
+            DatabaseObjectType::OlapView => match self.entities.get(&resolved_key) {
+                Some(DatabaseEntity::OlapView(_)) => {
+                    self.entities.remove(&resolved_key);
+                    Ok(())
+                }
+                _ => Err(DatabaseError::OlapViewNotFound),
             },
             
             DatabaseObjectType::Trigger => match self.entities.get(&resolved_key) {
@@ -484,6 +495,11 @@ impl DatabaseCatalog {
                 _ => None,
             },
             
+            DatabaseObjectType::OlapView => match entity_key.as_deref().and_then(|key| self.entities.get(key)) {
+                Some(DatabaseEntity::OlapView(view)) => Some(DatabaseObjectRef::OlapView(view)),
+                _ => None,
+            },
+            
             DatabaseObjectType::Relationship => entity_key.as_deref().and_then(|key| self.entities.get(key)).and_then(|entity| match entity {
                 DatabaseEntity::Relationship(relationship) => Some(DatabaseObjectRef::Relationship(relationship)),
                 _ => None,
@@ -528,6 +544,8 @@ impl DatabaseCatalog {
                 DatabaseEntity::Table(table) => Some(DatabaseObjectRef::Table(table)),
                 
                 DatabaseEntity::View(view) => Some(DatabaseObjectRef::View(view)),
+                
+                DatabaseEntity::OlapView(view) => Some(DatabaseObjectRef::OlapView(view)),
                 
                 DatabaseEntity::Relationship(relationship) => Some(DatabaseObjectRef::Relationship(relationship)),
                 
@@ -993,6 +1011,8 @@ impl DatabaseCatalog {
 
             DatabaseEntity::View(view) => view.metadata = payload.metadata,
 
+            DatabaseEntity::OlapView(view) => view.metadata = payload.metadata,
+
             DatabaseEntity::Relationship(relationship) => relationship.metadata = payload.metadata,
 
             DatabaseEntity::Trigger(trigger) => trigger.metadata = payload.metadata,
@@ -1036,6 +1056,8 @@ impl DatabaseCatalog {
 
                     SqlObjectKind::View => self.view(&object_id).is_some(),
 
+                    SqlObjectKind::OlapView => self.olap_view(&object_id).is_some(),
+
                     SqlObjectKind::Trigger => self.trigger(&object_id).is_some(),
 
                     SqlObjectKind::StoredProcedure => self.stored_procedure(&object_id).is_some(),
@@ -1070,6 +1092,30 @@ impl DatabaseCatalog {
                         
                         Ok(())
                         
+                    },
+
+                    SqlObjectKind::OlapView => {
+
+                        if self.olap_view(&object_id).is_none() {
+                            self.register_olap_view(
+                                object_id.clone(),
+                                payload.sql.clone(),
+                                Vec::new(),
+                                TableSchema::new(Vec::new()),
+                                normalized_dependencies.clone(),
+                            )?;
+                        }
+
+                        let view = self.olap_view_mut(&object_id).ok_or(DatabaseError::OlapViewNotFound)?;
+                        view.sql = payload.sql;
+                        view.dependencies = normalized_dependencies;
+
+                        if existed_before {
+                            self.accept_schema_epoch(payload.schema_epoch);
+                        }
+
+                        Ok(())
+
                     },
 
                     SqlObjectKind::Trigger => {
@@ -1130,6 +1176,14 @@ impl DatabaseCatalog {
 
                 SqlObjectKind::View => match self.drop_view(&object_id) {
                     Ok(()) | Err(DatabaseError::ViewNotFound) => {
+                        self.accept_schema_epoch(payload.schema_epoch);
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                },
+
+                SqlObjectKind::OlapView => match self.drop_olap_view(&object_id) {
+                    Ok(()) | Err(DatabaseError::OlapViewNotFound) => {
                         self.accept_schema_epoch(payload.schema_epoch);
                         Ok(())
                     }
@@ -1421,6 +1475,80 @@ impl DatabaseCatalog {
 
     pub fn drop_view(&mut self, view_id: &str) -> DatabaseResult<()> {
         self.drop_object(DatabaseObjectType::View, view_id)
+    }
+
+    /// Register a new OLAP view definition. The `z_dimension_columns` must
+    /// name fields present in the SELECT schema. Schema validation is the
+    /// caller's responsibility at `CREATE OLAPVIEW` time.
+    pub fn register_olap_view(
+        &mut self,
+        view_id: impl Into<String>,
+        sql: impl Into<String>,
+        z_dimension_columns: Vec<String>,
+        schema: TableSchema,
+        dependencies: Vec<String>,
+    ) -> DatabaseResult<()> {
+
+        let view_id = common::normalize_identifier!(view_id.into());
+
+        if self.resolve_entity_key(&view_id).is_some() {
+            return Err(DatabaseError::DuplicateEntity);
+        }
+
+        let view = DatabaseOlapView::new(
+            view_id.clone(),
+            sql.into(),
+            z_dimension_columns,
+            schema,
+            dependencies,
+        );
+        let storage_key = view.storage_key();
+
+        self.entities.insert(storage_key, DatabaseEntity::OlapView(view));
+
+        self.bump_schema_epoch();
+
+        Ok(())
+
+    }
+
+    pub fn olap_view(&self, view_id: &str) -> Option<&DatabaseOlapView> {
+        
+        match self.object(DatabaseObjectType::OlapView, view_id) {
+
+            Some(DatabaseObjectRef::OlapView(view)) => Some(view),
+
+            _ => None,
+            
+        }
+
+    }
+
+    pub fn olap_view_ids(&self) -> Vec<String> {
+
+        self.entities
+            .values()
+            .filter_map(|entity| match entity {
+                DatabaseEntity::OlapView(view) => Some(view.name().to_string()),
+                _ => None,
+            })
+            .collect()
+
+    }
+
+    pub fn drop_olap_view(&mut self, view_id: &str) -> DatabaseResult<()> {
+        self.drop_object(DatabaseObjectType::OlapView, view_id)
+    }
+
+    fn olap_view_mut(&mut self, view_id: &str) -> Option<&mut DatabaseOlapView> {
+
+        let key = self.resolve_entity_key(view_id)?;
+
+        match self.entities.get_mut(&key) {
+            Some(DatabaseEntity::OlapView(view)) => Some(view),
+            _ => None,
+        }
+
     }
 
     pub fn relationship(&self, relationship_id: &str) -> Option<&DatabaseRelationship> {

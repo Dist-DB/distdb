@@ -114,6 +114,8 @@ fn query_operation_handler(operation: SqlOperation) -> Option<QueryOperationHand
         
         SqlOperation::CreateTable => Some(execute_create_table),
 
+        SqlOperation::CreateOlapView => Some(execute_create_olap_view),
+
         SqlOperation::CreateOther => Some(execute_create_other),
         
         SqlOperation::DropDatabase |
@@ -138,6 +140,8 @@ fn query_operation_handler(operation: SqlOperation) -> Option<QueryOperationHand
         SqlOperation::TruncateTable => Some(execute_truncate_table),
         
         SqlOperation::AlterOther => Some(execute_alter_other),
+
+        SqlOperation::ShowSlices => Some(execute_select),
 
     }
 
@@ -263,6 +267,24 @@ fn execute_create_table(
 ) -> ConnectorResponse {
 
     execute_create_table_impl(
+        request_id,
+        query,
+        ctx.catalogs,
+        ctx.wal,
+        ctx.node_data_dir,
+        statement,
+    )
+
+}
+
+fn execute_create_olap_view(
+    ctx: &mut QueryExecutionContext<'_>,
+    request_id: &str,
+    query: &DataQuery,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    execute_create_olap_view_impl(
         request_id,
         query,
         ctx.catalogs,

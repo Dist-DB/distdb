@@ -1,5 +1,6 @@
 
 pub mod affinity;
+pub mod olap;
 pub mod ir_compiler;
 pub mod replication_executor;
 pub mod database;
@@ -13,7 +14,7 @@ pub use security::{AccountAclEntry, RoleGrant, UserCredential};
 pub use database::core::{
 	DatabaseCatalog, DatabaseError, DatabaseId, DatabaseIndex, DatabaseRelationship,
 	DatabaseReplicaState, DatabaseResult, DatabaseStoredProcedure, DatabaseTable,
-	DatabaseTrigger, DatabaseView, DatabaseEntity,
+	DatabaseTrigger, DatabaseView, DatabaseOlapView, DatabaseEntity,
 	EntityMetadata,
 	DatabaseEntityAspect, DatabaseEntityKind, DatabaseObjectRef, DatabaseObjectType,
 	IndexId, ObjectStatus,

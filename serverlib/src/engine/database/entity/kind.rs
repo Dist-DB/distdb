@@ -3,6 +3,7 @@
 pub enum DatabaseEntityKind {
     Table,
     View,
+    OlapView,
     Relationship,
     Trigger,
     StoredProcedure,
@@ -17,6 +18,8 @@ impl std::fmt::Display for DatabaseEntityKind {
             DatabaseEntityKind::Table => write!(f, "table"),
             
             DatabaseEntityKind::View => write!(f, "view"),
+            
+            DatabaseEntityKind::OlapView => write!(f, "olap_view"),
             
             DatabaseEntityKind::Relationship => write!(f, "relationship"),
             

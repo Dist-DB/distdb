@@ -40,3 +40,4 @@ pub use crate::engine::database::stored_procedure::DatabaseStoredProcedure;
 pub use crate::engine::database::table::DatabaseTable;
 pub use crate::engine::database::trigger::DatabaseTrigger;
 pub use crate::engine::database::view::DatabaseView;
+pub use crate::engine::database::olap_view::DatabaseOlapView;

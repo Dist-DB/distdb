@@ -22,3 +22,4 @@ pub mod table;
 pub mod transaction;
 pub mod trigger;
 pub mod view;
+pub mod olap_view;
