@@ -1,5 +1,6 @@
 use crate::engine::sql::{
-    parse_if_else_end_plan_from_create_procedure_statement, parse_mysql8_sql_requests,
+    parse_create_procedure_action_statements, parse_if_else_end_plan_from_create_procedure_statement,
+    parse_mysql8_sql_requests,
     parse_select_read_plan_from_statement, IfElseEndPlan, SelectProjectionItem, SelectReadPlan,
     SqlDirective, SqlOperation,
 };
@@ -17,6 +18,7 @@ pub enum StoredProcedureResourceDirection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StoredProcedureResourceKind {
     Variable,
+    RuntimeVariable,
     Table,
     Dependency,
     ResultSet,
@@ -618,13 +620,15 @@ fn resource_kind_sort_key(kind: StoredProcedureResourceKind) -> u8 {
 
         StoredProcedureResourceKind::Variable => 0,
 
-        StoredProcedureResourceKind::Table => 1,
+        StoredProcedureResourceKind::RuntimeVariable => 1,
 
-        StoredProcedureResourceKind::Dependency => 2,
+        StoredProcedureResourceKind::Table => 2,
 
-        StoredProcedureResourceKind::ResultSet => 3,
+        StoredProcedureResourceKind::Dependency => 3,
 
-        StoredProcedureResourceKind::Function => 4,
+        StoredProcedureResourceKind::ResultSet => 4,
+
+        StoredProcedureResourceKind::Function => 5,
     
     }
 
@@ -838,6 +842,12 @@ where
                 resources.extend(collect_resources_from_if_else_plan(&plan, services, function_names));
             }
         }
+
+        if let Ok(action_statements) = parse_create_procedure_action_statements(procedure_sql) {
+            for action_sql in action_statements {
+                resources.extend(collect_resources_from_sql(&action_sql, services, function_names));
+            }
+        }
     }
 
     resources
@@ -887,6 +897,7 @@ where
     if let Ok(select_plan) = parse_select_read_plan_from_statement(trimmed) {
         resources.extend(collect_resources_from_select_plan(&select_plan));
         resources.extend(collect_builtin_function_references(trimmed, function_names));
+        resources.extend(collect_runtime_variable_references(trimmed));
         let _ = services;
         return resources;
     }
@@ -934,6 +945,8 @@ where
             resources.extend(collect_builtin_function_references(trimmed, function_names));
 
         }
+
+        resources.extend(collect_runtime_variable_references(trimmed));
 
     }
 
@@ -1113,6 +1126,47 @@ fn collect_builtin_function_references(
         })
         .collect()
 
+}
+
+fn collect_runtime_variable_references(sql: &str) -> Vec<StoredProcedureResourceEntry> {
+
+    let mut resources = Vec::new();
+    let chars = sql.chars().collect::<Vec<_>>();
+    let mut idx = 0usize;
+
+    while idx + 1 < chars.len() {
+        if chars[idx] == '@' && chars[idx + 1] == '@' {
+            let start = idx;
+            idx += 2;
+
+            while idx < chars.len() {
+                let ch = chars[idx];
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                    idx += 1;
+                    continue;
+                }
+                break;
+            }
+
+            let raw = chars[start..idx].iter().collect::<String>();
+            let normalized = raw.trim().to_ascii_lowercase();
+            if normalized.len() > 2 {
+                resources.push(StoredProcedureResourceEntry {
+                    name: normalized,
+                    kind: StoredProcedureResourceKind::RuntimeVariable,
+                    direction: StoredProcedureResourceDirection::Ref,
+                    detail: Some("runtime variable reference".to_string()),
+                });
+            }
+
+            continue;
+        }
+
+        idx += 1;
+    }
+
+    resources
+    
 }
 
 fn collect_compilation_result_sets<S>(

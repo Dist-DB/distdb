@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) type SessionVariableOverrides = HashMap<String, String>;
+
 const CTE_MAX_ITERATIONS_MIN: usize = 1;
 const CTE_MAX_ITERATIONS_MAX: usize = 10_000;
 const CTE_MAX_ROWS_MIN: usize = 1;
@@ -42,6 +44,31 @@ struct VariableDefinition {
     mutability: VariableMutability,
     visibility: VariableVisibility,
     supported_scopes: &'static [VariableScope],
+    value_kind: VariableValueKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VariableValueKind {
+    UsizeRange { min: usize, max: usize },
+    U64Range { min: u64, max: u64 },
+    Bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ParsedVariableValue {
+    Usize(usize),
+    U64(u64),
+    Bool(bool),
+}
+
+impl ParsedVariableValue {
+    fn as_string(self) -> String {
+        match self {
+            Self::Usize(value) => value.to_string(),
+            Self::U64(value) => value.to_string(),
+            Self::Bool(value) => value.to_string(),
+        }
+    }
 }
 
 const SESSION_LOCAL_SCOPES: &[VariableScope] = &[VariableScope::Session, VariableScope::Local];
@@ -52,24 +79,37 @@ const VARIABLE_DEFINITIONS: &[VariableDefinition] = &[
         mutability: VariableMutability::ReadWrite,
         visibility: VariableVisibility::Visible,
         supported_scopes: SESSION_LOCAL_SCOPES,
+        value_kind: VariableValueKind::UsizeRange {
+            min: CTE_MAX_ITERATIONS_MIN,
+            max: CTE_MAX_ITERATIONS_MAX,
+        },
     },
     VariableDefinition {
         name: "cte.max_rows",
         mutability: VariableMutability::ReadWrite,
         visibility: VariableVisibility::Visible,
         supported_scopes: SESSION_LOCAL_SCOPES,
+        value_kind: VariableValueKind::UsizeRange {
+            min: CTE_MAX_ROWS_MIN,
+            max: CTE_MAX_ROWS_MAX,
+        },
     },
     VariableDefinition {
         name: "cte.timeout_ms",
         mutability: VariableMutability::ReadWrite,
         visibility: VariableVisibility::Visible,
         supported_scopes: SESSION_LOCAL_SCOPES,
+        value_kind: VariableValueKind::U64Range {
+            min: CTE_TIMEOUT_MS_MIN,
+            max: CTE_TIMEOUT_MS_MAX,
+        },
     },
     VariableDefinition {
         name: "cte.union_all_repeat_detection",
         mutability: VariableMutability::ReadWrite,
         visibility: VariableVisibility::Visible,
         supported_scopes: SESSION_LOCAL_SCOPES,
+        value_kind: VariableValueKind::Bool,
     },
 ];
 
@@ -99,6 +139,7 @@ pub(super) fn parse_statement_scope_prefix(assignments_sql: &str) -> Option<(Var
 }
 
 pub(super) fn parse_scoped_variable_target(input: &str) -> (Option<VariableScope>, String) {
+
     let normalized = input
         .trim()
         .trim_matches('`')
@@ -125,12 +166,15 @@ pub(super) fn parse_scoped_variable_target(input: &str) -> (Option<VariableScope
     }
 
     (None, normalized)
+
 }
 
 fn resolve_variable_definition(variable_name: &str) -> Option<&'static VariableDefinition> {
+    
     VARIABLE_DEFINITIONS
         .iter()
         .find(|definition| definition.name == variable_name)
+
 }
 
 fn validate_variable_access(
@@ -138,6 +182,7 @@ fn validate_variable_access(
     scope: VariableScope,
     require_mutability: Option<VariableMutability>,
 ) -> Result<&'static VariableDefinition, String> {
+
     let Some(definition) = resolve_variable_definition(variable_name) else {
         return Err(format!("unsupported variable '{variable_name}'"));
     };
@@ -156,6 +201,7 @@ fn validate_variable_access(
     }
 
     Ok(definition)
+
 }
 
 fn visible_variable_definitions() -> impl Iterator<Item = &'static VariableDefinition> {
@@ -164,28 +210,182 @@ fn visible_variable_definitions() -> impl Iterator<Item = &'static VariableDefin
         .filter(|definition| definition.visibility == VariableVisibility::Visible)
 }
 
-pub(super) fn recursive_cte_variable_rows(catalog: &DatabaseCatalog) -> Vec<(String, String)> {
+fn session_user_id_for_acl(session_user: Option<&str>) -> Option<String> {
 
-    let settings = catalog.recursive_cte_execution_settings();
-
-    let mut rows = Vec::new();
-
-    for definition in visible_variable_definitions() {
-        let value = match definition.name {
-            "cte.max_iterations" => settings.max_iterations.to_string(),
-            "cte.max_rows" => settings.max_rows.to_string(),
-            "cte.timeout_ms" => settings.timeout_ms.to_string(),
-            "cte.union_all_repeat_detection" => {
-                settings.detect_repeating_union_all_frontier.to_string()
-            }
-            _ => continue,
-        };
-
-        rows.push((definition.name.to_string(), value));
+    let raw = session_user?.trim();
+    if raw.is_empty() {
+        return None;
     }
 
-    rows
+    let user_id = raw
+        .split('@')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .to_ascii_lowercase();
+
+    if user_id.is_empty() {
+        None
+    } else {
+        Some(user_id)
+    }
+
+}
+
+fn has_variable_read_access(catalog: &DatabaseCatalog, session_user: Option<&str>) -> bool {
+
+    let Some(user_id) = session_user_id_for_acl(session_user) else {
+        return true;
+    };
+
+    if user_id.eq_ignore_ascii_case("root") {
+        return true;
+    }
+
+    let Some(acl_entry) = catalog.effective_account_acl_entry(&user_id) else {
+        return false;
+    };
+
+    [
+        serverlib::engine::security::AccountPrivilege::SystemVariablesAdmin,
+        serverlib::engine::security::AccountPrivilege::SessionVariablesAdmin,
+        serverlib::engine::security::AccountPrivilege::SensitiveVariablesObserver,
+    ]
+    .iter()
+    .any(|privilege| acl_entry.has_privilege_for_object(*privilege, None))
+
+}
+
+fn variable_value_by_name(
+    settings: &serverlib::RecursiveCteExecutionSettings,
+    variable_name: &str,
+) -> Option<String> {
+
+    match variable_name {
+
+        "cte.max_iterations"    => Some(settings.max_iterations.to_string()),
+
+        "cte.max_rows"          => Some(settings.max_rows.to_string()),
+
+        "cte.timeout_ms"        => Some(settings.timeout_ms.to_string()),
+
+        "cte.union_all_repeat_detection" => Some(settings.detect_repeating_union_all_frontier.to_string()),
+
+        _ => None,
+
+    }
+
+}
+
+pub(super) fn readable_variable_rows(
+    catalog: &DatabaseCatalog,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
+    session_user: Option<&str>,
+) -> Vec<(String, String)> {
+    if !has_variable_read_access(catalog, session_user) {
+        return Vec::new();
+    }
+
+    let settings = effective_recursive_cte_execution_settings(catalog, session_variable_overrides);
+
+    visible_variable_definitions()
+        .filter_map(|definition| {
+            variable_value_by_name(&settings, definition.name)
+                .map(|value| (definition.name.to_string(), value))
+        })
+        .collect()
+}
+
+pub(super) fn runtime_variable_bindings(
+    catalog: &DatabaseCatalog,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
+    session_user: Option<&str>,
+) -> HashMap<String, Vec<u8>> {
     
+    let mut bindings = HashMap::new();
+
+    for (name, value) in readable_variable_rows(catalog, session_variable_overrides, session_user) {
+        
+        let bytes = value.into_bytes();
+
+        bindings.insert(name.clone(), bytes.clone());
+        bindings.insert(format!("@@session.{name}"), bytes.clone());
+        bindings.insert(format!("@@global.{name}"), bytes.clone());
+
+        if let Some((_, short_name)) = name.rsplit_once('.') {
+            bindings.entry(short_name.to_string()).or_insert(bytes.clone());
+        }
+
+    }
+
+    bindings
+
+}
+
+pub(super) fn recursive_cte_variable_rows(catalog: &DatabaseCatalog) -> Vec<(String, String)> {
+
+    readable_variable_rows(catalog, None, None)
+
+}
+
+pub(super) fn recursive_cte_variable_rows_with_session(
+    catalog: &DatabaseCatalog,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
+) -> Vec<(String, String)> {
+
+    readable_variable_rows(catalog, session_variable_overrides, None)
+    
+}
+
+pub(super) fn effective_recursive_cte_execution_settings(
+    catalog: &DatabaseCatalog,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
+) -> serverlib::RecursiveCteExecutionSettings {
+
+    let mut settings = catalog.recursive_cte_execution_settings().clone();
+
+    let Some(overrides) = session_variable_overrides else {
+        return settings;
+    };
+
+    for (variable_name, variable_value) in overrides {
+        if let Err(message) = apply_variable_assignment(
+            &mut settings,
+            variable_name,
+            variable_value,
+            VariableScope::Session,
+        ) {
+            log::warn!(
+                "ignoring invalid session variable override name={} value={} reason={}",
+                variable_name,
+                variable_value,
+                message,
+            );
+        }
+    }
+
+    settings
+
+}
+
+pub(super) fn apply_session_variable_assignment(
+    session_variable_overrides: &mut SessionVariableOverrides,
+    variable_name: &str,
+    variable_value: &str,
+    scope: VariableScope,
+) -> Result<(), String> {
+
+    let definition = validate_variable_access(
+        variable_name,
+        scope,
+        Some(VariableMutability::ReadWrite),
+    )?;
+
+    let normalized_value = parse_variable_value(definition, variable_value)?.as_string();
+
+    session_variable_overrides.insert(variable_name.to_string(), normalized_value);
+    Ok(())
+
 }
 
 pub(super) fn apply_variable_assignment(
@@ -195,51 +395,93 @@ pub(super) fn apply_variable_assignment(
     scope: VariableScope,
 ) -> Result<(), String> {
 
-    validate_variable_access(
+    let definition = validate_variable_access(
         variable_name,
         scope,
         Some(VariableMutability::ReadWrite),
     )?;
 
-    match variable_name {
+    let parsed_value = parse_variable_value(definition, variable_value)?;
+    apply_parsed_variable_value(next_settings, variable_name, parsed_value)
 
-        "cte.max_iterations" => {
-            next_settings.max_iterations = parse_usize_in_range(
-                "cte.max_iterations",
-                variable_value,
-                CTE_MAX_ITERATIONS_MIN,
-                CTE_MAX_ITERATIONS_MAX,
-            )?;
+}
+
+fn parse_variable_value(
+    definition: &VariableDefinition,
+    variable_value: &str,
+) -> Result<ParsedVariableValue, String> {
+
+    match definition.value_kind {
+
+        VariableValueKind::UsizeRange { min, max } => Ok(ParsedVariableValue::Usize(
+            parse_usize_in_range(definition.name, variable_value, min, max)?,
+        )),
+        
+        VariableValueKind::U64Range { min, max } => Ok(ParsedVariableValue::U64(
+            parse_u64_in_range(definition.name, variable_value, min, max)?,
+        )),
+        
+        VariableValueKind::Bool => Ok(ParsedVariableValue::Bool(parse_boolean_value(
+            definition.name,
+            variable_value,
+        )?)),
+
+    }
+    
+}
+
+fn apply_parsed_variable_value(
+    next_settings: &mut serverlib::RecursiveCteExecutionSettings,
+    variable_name: &str,
+    parsed_value: ParsedVariableValue,
+) -> Result<(), String> {
+
+    match (variable_name, parsed_value) {
+
+        ("cte.max_iterations", ParsedVariableValue::Usize(value)) => {
+            next_settings.max_iterations = value;
             Ok(())
         },
 
-        "cte.max_rows" => {
-            next_settings.max_rows = parse_usize_in_range(
-                "cte.max_rows",
-                variable_value,
-                CTE_MAX_ROWS_MIN,
-                CTE_MAX_ROWS_MAX,
-            )?;
+        ("cte.max_rows", ParsedVariableValue::Usize(value)) => {
+            next_settings.max_rows = value;
             Ok(())
         },
 
-        "cte.timeout_ms" => {
-            next_settings.timeout_ms = parse_u64_in_range(
-                "cte.timeout_ms",
-                variable_value,
-                CTE_TIMEOUT_MS_MIN,
-                CTE_TIMEOUT_MS_MAX,
-            )?;
+        ("cte.timeout_ms", ParsedVariableValue::U64(value)) => {
+            next_settings.timeout_ms = value;
             Ok(())
         },
 
-        "cte.union_all_repeat_detection" => {
-            next_settings.detect_repeating_union_all_frontier =
-                parse_boolean_value("cte.union_all_repeat_detection", variable_value)?;
+        ("cte.union_all_repeat_detection", ParsedVariableValue::Bool(value)) => {
+            next_settings.detect_repeating_union_all_frontier = value;
             Ok(())
         },
 
         _ => Err(format!("unsupported variable '{variable_name}'")),
+
+    }
+
+}
+
+fn value_for_definition_from_settings(
+    definition: &VariableDefinition,
+    settings: &serverlib::RecursiveCteExecutionSettings,
+) -> Option<String> {
+
+    match definition.name {
+
+        "cte.max_iterations" => Some(settings.max_iterations.to_string()),
+
+        "cte.max_rows" => Some(settings.max_rows.to_string()),
+
+        "cte.timeout_ms" => Some(settings.timeout_ms.to_string()),
+
+        "cte.union_all_repeat_detection" => {
+            Some(settings.detect_repeating_union_all_frontier.to_string())
+        },
+
+        _ => None,
 
     }
 

@@ -6,6 +6,7 @@ use common::helpers::create_dir;
 use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore};
 
 use crate::core::config::ServerRuntimeConfig;
+use crate::core::mappings::query::SessionVariableOverrides;
 use crate::core::transaction_coordinator::TransactionCoordinator;
 use crate::engine::wal_probe::{WalProbeResult, run_wal_probe};
 use crate::helpers::ServerAppError;
@@ -16,6 +17,13 @@ pub struct SessionState {
     pub connection_id: usize,
     pub user_id: String,
     pub last_insert_id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuerySessionContext {
+    pub session_id: String,
+    pub connection_id: usize,
+    pub session_user: String,
 }
 
 #[derive(Debug)]
@@ -30,6 +38,7 @@ pub struct ServerApp {
     pub(super) tx_snapshot_by_session: HashMap<String, SessionSnapshot>,
     pub(super) tx_read_observations_by_session: HashMap<String, Vec<ReadObservation>>,
     pub(super) session_state_by_id: HashMap<String, SessionState>,
+    pub(super) session_variable_overrides_by_id: HashMap<String, SessionVariableOverrides>,
 }
 
 #[derive(Debug)]
@@ -82,6 +91,7 @@ impl ServerApp {
             tx_snapshot_by_session: HashMap::new(),
             tx_read_observations_by_session: HashMap::new(),
             session_state_by_id: HashMap::new(),
+            session_variable_overrides_by_id: HashMap::new(),
         })
 
     }
@@ -153,6 +163,11 @@ impl ServerApp {
     }
 
     pub fn init_session(&mut self, session_id: String, connection_id: usize, user_id: String) {
+        
+        self.session_variable_overrides_by_id
+            .entry(session_id.clone())
+            .or_default();
+
         self.session_state_by_id.insert(
             session_id.clone(),
             SessionState {
@@ -162,16 +177,49 @@ impl ServerApp {
                 last_insert_id: 0,
             },
         );
+
     }
 
     pub fn get_session(&self, session_id: &str) -> Option<SessionState> {
         self.session_state_by_id.get(session_id).cloned()
     }
 
+    pub fn query_session_context(&self, session_id: &str) -> Option<QuerySessionContext> {
+
+        self.get_session(session_id).map(|session| QuerySessionContext {
+                session_id: session.session_id,
+                connection_id: session.connection_id,
+                session_user: format!("{}@localhost", session.user_id),
+            })
+
+    }
+
     pub fn set_last_insert_id(&mut self, session_id: &str, last_insert_id: i64) {
         if let Some(session) = self.session_state_by_id.get_mut(session_id) {
             session.last_insert_id = last_insert_id;
         }
+    }
+
+    pub fn take_session_variable_overrides(&mut self, session_id: &str) -> SessionVariableOverrides {
+        self.session_variable_overrides_by_id
+            .remove(session_id)
+            .unwrap_or_default()
+    }
+
+    pub fn session_variable_overrides_for(&self, session_id: &str) -> SessionVariableOverrides {
+        self.session_variable_overrides_by_id
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn put_session_variable_overrides(
+        &mut self,
+        session_id: &str,
+        overrides: SessionVariableOverrides,
+    ) {
+        self.session_variable_overrides_by_id
+            .insert(session_id.to_string(), overrides);
     }
 
     pub fn run_wal_smoke_test(&self) -> Result<WalProbeResult, ServerAppError> {

@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Instant;
 
 use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
 use serverlib::{
     AclMutationKind, AccountAclEntry, ConcurrentWalManager, DatabaseCatalog, SqlOperation,
-    SqlRequest, TransactionId, UserCredential, UserId,
+    RuntimeIndexStore, SqlRequest, TransactionId, UserCredential, UserId,
     parse_mysql8_sql_requests,
 };
 
@@ -12,12 +13,12 @@ use crate::core::app::helpers::{
     CommandKind, SessionTxMarkerType, command_info, is_staged_dml_query,
     is_staged_dml_requests, is_transactional_read_query, is_transactional_read_requests,
 };
-use crate::core::app::state::SessionSnapshot;
+use crate::core::app::state::{QuerySessionContext, SessionSnapshot};
 use crate::core::app::ServerApp;
 use crate::core::mappings::query::{
-    abort_external_write_group, commit_external_write_group, handle_query_command,
-    handle_query_command_with_parsed,
-    handle_query_command_in_write_group,
+    abort_external_write_group, commit_external_write_group, handle_query_command_with_session_variables,
+    handle_query_command_with_parsed_and_session_variables,
+    handle_query_command_in_write_group, SessionVariableOverrides,
 };
 use crate::core::transaction_coordinator::QueryRoutingDecision;
 
@@ -351,14 +352,22 @@ impl ServerApp {
             return None;
         }
 
-        if create_user_targets.iter().any(|item| item.is_none()) || create_user_targets.len() != parsed_requests.len() {
+        if create_user_targets.iter().any(|item| item.is_none()) || 
+            create_user_targets.len() != parsed_requests.len() 
+        {
             return Some(ConnectorResponse::rejected(
                 request_id.to_string(),
                 "CREATE USER requires syntax: CREATE USER '<userid>' IDENTIFIED BY '<password>' and cannot be combined with non-CREATE USER statements in the same request".to_string(),
             ));
         }
 
-        let session_user = self.session_user_for_authorization(session_id);
+        let Some(session_user) = self.session_user_for_authorization(session_id) else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("invalid session '{}'", session_id),
+            ));
+        };
+        
         if !session_user.eq_ignore_ascii_case("root") {
             return Some(ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -458,11 +467,88 @@ impl ServerApp {
 
     }
 
-    fn session_user_for_authorization(&self, session_id: &str) -> String {
+    fn session_user_for_authorization(&self, session_id: &str) -> Option<String> {
         self
             .get_session(session_id)
             .map(|state| state.user_id)
-            .unwrap_or_else(|| "root".to_string())
+    }
+
+    fn execute_parsed_query_with_session_context(
+        request_id: &str,
+        query: &connector::DataQuery,
+        catalogs: &mut HashMap<String, DatabaseCatalog>,
+        wal: &ConcurrentWalManager,
+        node_data_dir: &Path,
+        runtime_indexes: &mut RuntimeIndexStore,
+        parsed: Vec<SqlRequest>,
+        parse_ms: u64,
+        session_ctx: &QuerySessionContext,
+        session_variable_overrides: &mut SessionVariableOverrides,
+    ) -> ConnectorResponse {
+        handle_query_command_with_parsed_and_session_variables(
+            request_id,
+            query,
+            catalogs,
+            wal,
+            node_data_dir,
+            runtime_indexes,
+            parsed,
+            parse_ms,
+            &session_ctx.session_id,
+            session_ctx.connection_id,
+            Some(session_ctx.session_user.clone()),
+            session_variable_overrides,
+        )
+    }
+
+    pub(super) fn execute_query_with_session_context(
+        request_id: &str,
+        query: &connector::DataQuery,
+        catalogs: &mut HashMap<String, DatabaseCatalog>,
+        wal: &ConcurrentWalManager,
+        node_data_dir: &Path,
+        runtime_indexes: &mut RuntimeIndexStore,
+        session_ctx: &QuerySessionContext,
+        session_variable_overrides: &mut SessionVariableOverrides,
+    ) -> ConnectorResponse {
+        handle_query_command_with_session_variables(
+            request_id,
+            query,
+            catalogs,
+            wal,
+            node_data_dir,
+            runtime_indexes,
+            &session_ctx.session_id,
+            session_ctx.connection_id,
+            Some(session_ctx.session_user.clone()),
+            session_variable_overrides,
+        )
+    }
+
+    fn execute_query_in_write_group_with_session_context(
+        request_id: &str,
+        query: &connector::DataQuery,
+        catalogs: &mut HashMap<String, DatabaseCatalog>,
+        wal: &ConcurrentWalManager,
+        node_data_dir: &Path,
+        runtime_indexes: &mut RuntimeIndexStore,
+        write_group_id: TransactionId,
+        touched_tables: &mut HashSet<String>,
+        session_ctx: &QuerySessionContext,
+    ) -> ConnectorResponse {
+        handle_query_command_in_write_group(
+            request_id,
+            query,
+            catalogs,
+            wal,
+            node_data_dir,
+            runtime_indexes,
+            write_group_id,
+            touched_tables,
+            &session_ctx.session_id,
+            session_ctx.connection_id,
+            Some(session_ctx.session_user.clone()),
+        )
     }
 
     fn parse_database_and_object_from_acl_target(
@@ -531,7 +617,12 @@ impl ServerApp {
             ));
         }
 
-        let session_user = self.session_user_for_authorization(session_id);
+        let Some(session_user) = self.session_user_for_authorization(session_id) else {
+            return Some(ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("invalid session '{}'", session_id),
+            ));
+        };
 
         if !session_user.eq_ignore_ascii_case("root") {
             return Some(ConnectorResponse::rejected(
@@ -691,7 +782,9 @@ impl ServerApp {
         parsed_requests: &[SqlRequest],
     ) -> Result<(), String> {
 
-        let session_user = self.session_user_for_authorization(session_id);
+        let Some(session_user) = self.session_user_for_authorization(session_id) else {
+            return Err(format!("invalid session '{}'", session_id));
+        };
 
         if session_user.eq_ignore_ascii_case("root") {
             return Ok(());
@@ -775,6 +868,13 @@ impl ServerApp {
         session_id: &str,
     ) -> Option<ConnectorResponse> {
 
+        if self.get_session(session_id).is_none() {
+            return Some(ConnectorResponse::rejected(
+                request.request_id.clone(),
+                format!("invalid session '{}'", session_id),
+            ));
+        }
+
         let ConnectorCommand::Query { query } = &request.command else {
             return None;
         };
@@ -808,10 +908,17 @@ impl ServerApp {
 
         let mut catalogs = self.catalogs.clone();
         let mut runtime_indexes = self.runtime_indexes.clone();
-        let session_state = self.get_session(session_id);
-        let connection_id = session_state.map(|s| s.connection_id).unwrap_or(0);
+        
+        let Some(session_ctx) = self.query_session_context(session_id) else {
+            return Some(ConnectorResponse::rejected(
+                request.request_id.clone(),
+                format!("invalid session '{}'", session_id),
+            ));
+        };
 
-        Some(handle_query_command_with_parsed(
+        let mut session_variable_overrides = self.session_variable_overrides_for(session_id);
+
+        let response = Self::execute_parsed_query_with_session_context(
             &request.request_id,
             query,
             &mut catalogs,
@@ -820,10 +927,11 @@ impl ServerApp {
             &mut runtime_indexes,
             parsed,
             parse_ms,
-            session_id,
-            connection_id,
-            Some("root@localhost".to_string()),
-        ))
+            &session_ctx,
+            &mut session_variable_overrides,
+        );
+
+        Some(response)
 
     }
 
@@ -986,6 +1094,21 @@ impl ServerApp {
         session_id: &str,
     ) -> ConnectorResponse {
 
+        if self.get_session(session_id).is_none() {
+            #[cfg(test)]
+            {
+                self.init_session(session_id.to_string(), 0, "root".to_string());
+            }
+
+            #[cfg(not(test))]
+            {
+                return ConnectorResponse::rejected(
+                    request.request_id.clone(),
+                    format!("invalid session '{}'", session_id),
+                );
+            }
+        }
+
         let command_info = command_info(&request.command);
         let command_path = command_info.path;
 
@@ -1095,13 +1218,20 @@ impl ServerApp {
                         ) {
                             
                             Ok(QueryRoutingDecision::ExecuteImmediately) => {
-                                let session_state = self.get_session(session_id);
-                                let (connection_id, session_user) = session_state
-                                    .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
-                                    .unwrap_or((0, None));
+
+                                let Some(session_ctx) = self.query_session_context(session_id) else {
+                                    return ConnectorResponse::rejected(
+                                        request.request_id.clone(),
+                                        format!("invalid session '{}'", session_id),
+                                    );
+                                };
+                                let connection_id = session_ctx.connection_id;
+
+                                let mut session_variable_overrides =
+                                    self.take_session_variable_overrides(session_id);
 
                                 let response = if let Some(parsed_requests) = parsed_requests.clone() {
-                                    handle_query_command_with_parsed(
+                                    Self::execute_parsed_query_with_session_context(
                                         &request.request_id,
                                         query,
                                         &mut self.catalogs,
@@ -1110,12 +1240,11 @@ impl ServerApp {
                                         &mut self.runtime_indexes,
                                         parsed_requests,
                                         parsed_requests_parse_ms as u64,
-                                        session_id,
-                                        connection_id,
-                                        session_user,
+                                        &session_ctx,
+                                        &mut session_variable_overrides,
                                     )
                                 } else {
-                                    handle_query_command(
+                                    handle_query_command_with_session_variables(
                                         &request.request_id,
                                         query,
                                         &mut self.catalogs,
@@ -1124,9 +1253,12 @@ impl ServerApp {
                                         &mut self.runtime_indexes,
                                         session_id,
                                         connection_id,
-                                        session_user,
+                                        Some(session_ctx.session_user.clone()),
+                                        &mut session_variable_overrides,
                                     )
                                 };
+
+                                self.put_session_variable_overrides(session_id, session_variable_overrides);
 
                                 // Update session last_insert_id if INSERT just happened
                                 use crate::core::mappings::query::get_and_clear_last_insert_id;
@@ -1135,6 +1267,7 @@ impl ServerApp {
                                 }
 
                                 response
+                                
                             },
                             
                             Ok(QueryRoutingDecision::Staged) => ConnectorResponse::applied(
@@ -1468,10 +1601,9 @@ impl ServerApp {
 
         self.validate_staged_queries(request_id, session_id, staged_queries)?;
 
-        let session_state = self.get_session(session_id);
-        let (connection_id, session_user) = session_state
-            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
-            .unwrap_or((0, None));
+        let session_ctx = self
+            .query_session_context(session_id)
+            .ok_or_else(|| format!("invalid session '{}'", session_id))?;
 
         let mut total_affected_rows = 0u64;
         let write_group_id = TransactionId(
@@ -1485,7 +1617,8 @@ impl ServerApp {
         for (idx, staged_query) in staged_queries.iter().enumerate() {
 
             let apply_request_id = format!("{}::apply{}", request_id, idx + 1);
-            let response = handle_query_command_in_write_group(
+
+            let response = Self::execute_query_in_write_group_with_session_context(
                 &apply_request_id,
                 staged_query,
                 &mut self.catalogs,
@@ -1494,9 +1627,7 @@ impl ServerApp {
                 &mut self.runtime_indexes,
                 write_group_id,
                 &mut touched_tables,
-                session_id,
-                connection_id,
-                session_user.clone(),
+                &session_ctx,
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
@@ -1598,6 +1729,7 @@ impl ServerApp {
         let sandbox_wal = ConcurrentWalManager::new();
 
         let mut sandbox_indexes = if let Some((table_ids, skip_wal_seed)) = validation_plan {
+
             let scoped_indexes = snapshot_runtime_indexes.clone_for_tables(&sandbox_catalogs, &table_ids);
 
             if skip_wal_seed {
@@ -1627,10 +1759,9 @@ impl ServerApp {
 
         };
 
-        let session_state = self.get_session(session_id);
-        let (connection_id, session_user) = session_state
-            .map(|s| (s.connection_id, Some(format!("{}@localhost", s.user_id))))
-            .unwrap_or((0, None));
+        let session_ctx = self
+            .query_session_context(session_id)
+            .ok_or_else(|| format!("invalid session '{}'", session_id))?;
 
         let validation_write_group_id = TransactionId(
             std::time::SystemTime::now()
@@ -1645,7 +1776,7 @@ impl ServerApp {
 
             let dry_run_request_id = format!("{}::dryrun{}", request_id, idx + 1);
             
-            let response = handle_query_command_in_write_group(
+            let response = Self::execute_query_in_write_group_with_session_context(
                 &dry_run_request_id,
                 staged_query,
                 &mut sandbox_catalogs,
@@ -1654,9 +1785,7 @@ impl ServerApp {
                 &mut sandbox_indexes,
                 validation_write_group_id,
                 &mut validation_touched_tables,
-                session_id,
-                connection_id,
-                session_user.clone(),
+                &session_ctx,
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {

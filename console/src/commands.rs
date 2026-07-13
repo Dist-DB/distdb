@@ -95,6 +95,10 @@ pub fn resolve_database_for_sql(
         return Ok(database_name.to_string());
     }
 
+    if let Some(database_name) = database_from_qualified_show_sql(sql) {
+        return Ok(database_name.to_string());
+    }
+
     Err("no active database selected; run `use <database>;` first")
 
 }
@@ -299,6 +303,46 @@ fn database_from_qualified_select_sql(sql: &str) -> Option<&str> {
     }
 
     Some(database_name)
+
+}
+
+fn database_from_qualified_show_sql(sql: &str) -> Option<&str> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let mut tokens = trimmed.split_whitespace();
+
+    let first = tokens.next()?;
+    let second = tokens.next()?;
+
+    if !first.eq_ignore_ascii_case("show") {
+        return None;
+    }
+
+    let (database_name, object_name) = second.rsplit_once('.')?;
+    if database_name.trim().is_empty() || object_name.trim().is_empty() {
+        return None;
+    }
+
+    let normalized_object = object_name
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .to_ascii_lowercase();
+
+    if normalized_object != "tables" {
+        return None;
+    }
+
+    let normalized_database = database_name
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"');
+
+    if normalized_database.is_empty() {
+        None
+    } else {
+        Some(normalized_database)
+    }
 
 }
 

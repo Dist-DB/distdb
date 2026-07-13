@@ -1,4 +1,5 @@
 use super::*;
+use super::variables::SessionVariableOverrides;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -9,6 +10,7 @@ pub(super) fn execute_union_query_impl(
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> ConnectorResponse {
 
     let (
@@ -22,29 +24,44 @@ pub(super) fn execute_union_query_impl(
         offset,
     ) =
         match serverlib::parse_union_select_read_plans_from_statement(&statement.sql) {
+
             Ok(parsed) => parsed,
+
             Err(err) => {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("union query execution failed: {err}"),
                 )
             }
+
         };
 
     let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("database '{}' not found", query.database_id),
         );
+
     };
 
     let mut set_stack = Vec::<serverlib::SelectExecutionResult>::new();
 
     for step in steps {
+
         match step {
+
             serverlib::SelectSetQueryStep::Branch(plan) => {
+
                 let result = if !plan.ctes.is_empty() {
-                    match execute_select_with_ctes(catalog, wal, runtime_indexes, &plan) {
+                    
+                    match execute_select_with_ctes(
+                        catalog,
+                        wal,
+                        runtime_indexes,
+                        &plan,
+                        session_variable_overrides,
+                    ) {
                         Ok(result) => result,
                         Err(message) => {
                             return ConnectorResponse::rejected(
@@ -53,22 +70,30 @@ pub(super) fn execute_union_query_impl(
                             )
                         }
                     }
+
                 } else {
+
                     match execute_select_plan_result(catalog, wal, runtime_indexes, &plan) {
+
                         Ok(result) => result,
+
                         Err(message) => {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
                                 format!("set query execution failed: {message}"),
                             )
                         }
+
                     }
+
                 };
 
                 set_stack.push(result);
-            }
+
+            },
 
             serverlib::SelectSetQueryStep::BoundaryOperation(boundary_operation) => {
+
                 let Some(right_result) = set_stack.pop() else {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
@@ -111,8 +136,11 @@ pub(super) fn execute_union_query_impl(
 
                 left_result.rows = rows;
                 set_stack.push(left_result);
+
             }
+
         }
+
     }
 
     let Some(set_result) = set_stack.pop() else {
@@ -133,15 +161,20 @@ pub(super) fn execute_union_query_impl(
     let mut rows = set_result.rows;
 
     if !order_by.is_empty() {
+
         let mut order_indexes = Vec::with_capacity(order_by.len());
         const UNION_ORDER_BY_ORDINAL_PREFIX: &str = "__union_order_by_ordinal__";
 
         for item in &order_by {
+
             let index = if let Some(raw_ordinal) =
                 item.field_name.strip_prefix(UNION_ORDER_BY_ORDINAL_PREFIX)
             {
+
                 let ordinal = match raw_ordinal.parse::<usize>() {
+                    
                     Ok(value) => value,
+
                     Err(_) => {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
@@ -151,6 +184,7 @@ pub(super) fn execute_union_query_impl(
                             ),
                         )
                     }
+
                 };
 
                 if ordinal == 0 || ordinal > columns.len() {
@@ -165,11 +199,14 @@ pub(super) fn execute_union_query_impl(
                 }
 
                 ordinal - 1
+            
             } else {
+
                 let Some(index) = columns
                     .iter()
                     .position(|column| column.field_name == item.field_name)
                 else {
+
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
                         format!(
@@ -177,16 +214,20 @@ pub(super) fn execute_union_query_impl(
                             item.field_name
                         ),
                     );
+
                 };
 
                 index
             };
 
             order_indexes.push((index, item.descending));
+
         }
 
         rows.sort_by(|left, right| {
+
             for (index, descending) in &order_indexes {
+
                 let ordering = compare_union_cell_values(
                     left.get(*index),
                     right.get(*index),
@@ -204,40 +245,54 @@ pub(super) fn execute_union_query_impl(
 
             Ordering::Equal
         });
+
     }
 
     rows = match apply_union_limit_by(rows, &columns, limit_by.as_ref()) {
+
         Ok(rows) => rows,
+
         Err(message) => {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("union query execution failed: {message}"),
             );
         }
+
     };
 
     if let Some(percent) = fetch_percent_with_ties {
+
         rows = match apply_union_percent_with_ties(rows, &columns, &order_by, percent) {
+
             Ok(rows) => rows,
+
             Err(message) => {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("union query execution failed: {message}"),
                 );
             }
+
         };
+
     } else {
+
         rows = apply_union_percent(rows, fetch_percent);
 
         rows = match apply_union_with_ties(rows, &columns, &order_by, fetch_with_ties_limit) {
+
             Ok(rows) => rows,
+
             Err(message) => {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("union query execution failed: {message}"),
                 );
             }
+
         };
+
     }
 
     rows = apply_union_row_window(rows, limit, offset);
@@ -250,6 +305,7 @@ pub(super) fn execute_union_query_impl(
             timings: empty_query_timings(),
         }),
     )
+
 }
 
 fn apply_union_percent(
@@ -309,7 +365,9 @@ fn apply_union_with_ties(
     const UNION_ORDER_BY_ORDINAL_PREFIX: &str = "__union_order_by_ordinal__";
 
     for item in order_by {
+
         let index = if let Some(raw_ordinal) = item.field_name.strip_prefix(UNION_ORDER_BY_ORDINAL_PREFIX) {
+
             let ordinal = raw_ordinal
                 .parse::<usize>()
                 .map_err(|_| format!("invalid ORDER BY ordinal '{}'", raw_ordinal))?;
@@ -323,7 +381,9 @@ fn apply_union_with_ties(
             }
 
             ordinal - 1
+
         } else {
+
             columns
                 .iter()
                 .position(|column| column.field_name == item.field_name)
@@ -333,9 +393,11 @@ fn apply_union_with_ties(
                         item.field_name
                     )
                 })?
+
         };
 
         order_indexes.push(index);
+
     }
 
     Ok(serverlib::apply_with_ties_rows(rows, &order_indexes, with_ties_limit))
@@ -363,6 +425,7 @@ pub(super) fn apply_set_boundary_operation(
         },
 
         serverlib::SelectSetBoundaryOp::ExceptDistinct => {
+            
             dedupe_union_rows_with_columns(&mut left_rows, comparison_columns);
 
             let mut right_seen = HashSet::<Vec<Vec<u8>>>::new();
@@ -376,9 +439,11 @@ pub(super) fn apply_set_boundary_operation(
             });
 
             left_rows
+
         },
 
         serverlib::SelectSetBoundaryOp::IntersectDistinct => {
+
             dedupe_union_rows_with_columns(&mut left_rows, comparison_columns);
 
             let mut right_seen = HashSet::<Vec<Vec<u8>>>::new();
@@ -392,6 +457,7 @@ pub(super) fn apply_set_boundary_operation(
             });
 
             left_rows
+
         },
 
     }
@@ -459,7 +525,9 @@ pub(super) fn apply_union_row_window(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Vec<Vec<Vec<u8>>> {
+
     let start = offset.unwrap_or(0).min(rows.len());
+    
     let end = limit
         .map(|limit| start.saturating_add(limit).min(rows.len()))
         .unwrap_or(rows.len());
@@ -468,6 +536,7 @@ pub(super) fn apply_union_row_window(
         .skip(start)
         .take(end.saturating_sub(start))
         .collect()
+
 }
 
 fn dedupe_union_rows_with_columns(
@@ -482,6 +551,7 @@ fn resolve_union_column_type(
     left: &serverlib::FieldType,
     right: &serverlib::FieldType,
 ) -> Option<serverlib::FieldType> {
+    
     use serverlib::FieldType;
 
     if left == right {
@@ -502,36 +572,36 @@ fn resolve_union_column_type(
             Some(FieldType::UInt((*left_bits).max(*right_bits)))
         },
 
-        (FieldType::Int(left_bits), FieldType::UInt(right_bits))
-        | (FieldType::UInt(right_bits), FieldType::Int(left_bits)) => {
+        (FieldType::Int(left_bits), FieldType::UInt(right_bits)) |
+        (FieldType::UInt(right_bits), FieldType::Int(left_bits)) => {
             Some(resolve_mixed_signed_unsigned_int(*left_bits, *right_bits))
         },
 
-        (FieldType::Float(left_bits), FieldType::Int(_))
-        | (FieldType::Int(_), FieldType::Float(left_bits))
-        | (FieldType::Float(left_bits), FieldType::UInt(_))
-        | (FieldType::UInt(_), FieldType::Float(left_bits)) => {
+        (FieldType::Float(left_bits), FieldType::Int(_)) |
+        (FieldType::Int(_), FieldType::Float(left_bits)) |
+        (FieldType::Float(left_bits), FieldType::UInt(_)) |
+        (FieldType::UInt(_), FieldType::Float(left_bits)) => {
             Some(FieldType::Float((*left_bits).max(64)))
         },
 
-        (FieldType::Date, FieldType::Date)
-        | (FieldType::DateTime, FieldType::DateTime)
-        | (FieldType::Timestamp, FieldType::Timestamp) => Some(left.clone()),
+        (FieldType::Date, FieldType::Date) |
+        (FieldType::DateTime, FieldType::DateTime) |
+        (FieldType::Timestamp, FieldType::Timestamp) => Some(left.clone()),
 
-        (FieldType::Date, FieldType::DateTime)
-        | (FieldType::DateTime, FieldType::Date)
-        | (FieldType::Date, FieldType::Timestamp)
-        | (FieldType::Timestamp, FieldType::Date)
-        | (FieldType::DateTime, FieldType::Timestamp)
-        | (FieldType::Timestamp, FieldType::DateTime) => Some(FieldType::DateTime),
+        (FieldType::Date, FieldType::DateTime) |
+        (FieldType::DateTime, FieldType::Date) |
+        (FieldType::Date, FieldType::Timestamp) |
+        (FieldType::Timestamp, FieldType::Date) |
+        (FieldType::DateTime, FieldType::Timestamp) |
+        (FieldType::Timestamp, FieldType::DateTime) => Some(FieldType::DateTime),
 
         (FieldType::StringFixed(left_len), FieldType::StringFixed(right_len)) => {
             Some(FieldType::StringFixed((*left_len).max(*right_len)))
         },
 
-        (FieldType::StringFixed(_), FieldType::Text)
-        | (FieldType::Text, FieldType::StringFixed(_))
-        | (FieldType::Text, FieldType::Text) => Some(FieldType::Text),
+        (FieldType::StringFixed(_), FieldType::Text) |
+        (FieldType::Text, FieldType::StringFixed(_)) |
+        (FieldType::Text, FieldType::Text) => Some(FieldType::Text),
 
         (FieldType::Enum(left_variants), FieldType::Enum(right_variants)) => {
             let left_max = max_enum_variant_len(left_variants);
@@ -539,56 +609,56 @@ fn resolve_union_column_type(
             Some(FieldType::StringFixed(left_max.max(right_max).max(1)))
         },
 
-        (FieldType::Enum(variants), FieldType::StringFixed(len))
-        | (FieldType::StringFixed(len), FieldType::Enum(variants)) => {
+        (FieldType::Enum(variants), FieldType::StringFixed(len)) |
+        (FieldType::StringFixed(len), FieldType::Enum(variants)) => {
             let enum_max = max_enum_variant_len(variants);
             Some(FieldType::StringFixed(enum_max.max(*len).max(1)))
         },
 
-        (FieldType::Enum(_), FieldType::Text)
-        | (FieldType::Text, FieldType::Enum(_)) => Some(FieldType::Text),
+        (FieldType::Enum(_), FieldType::Text) |
+        (FieldType::Text, FieldType::Enum(_)) => Some(FieldType::Text),
 
         (FieldType::Blob, FieldType::Blob) => Some(FieldType::Blob),
         (FieldType::Spatial, FieldType::Spatial) => Some(FieldType::Spatial),
 
         // First-pass MySQL-like coercion: mixing scalar/date/string-like families
         // yields textual result typing in UNION metadata.
-        (FieldType::Int(_), FieldType::StringFixed(_))
-        | (FieldType::StringFixed(_), FieldType::Int(_))
-        | (FieldType::Int(_), FieldType::Text)
-        | (FieldType::Text, FieldType::Int(_))
-        | (FieldType::UInt(_), FieldType::StringFixed(_))
-        | (FieldType::StringFixed(_), FieldType::UInt(_))
-        | (FieldType::UInt(_), FieldType::Text)
-        | (FieldType::Text, FieldType::UInt(_))
-        | (FieldType::Float(_), FieldType::StringFixed(_))
-        | (FieldType::StringFixed(_), FieldType::Float(_))
-        | (FieldType::Float(_), FieldType::Text)
-        | (FieldType::Text, FieldType::Float(_))
-        | (FieldType::Date, FieldType::StringFixed(_))
-        | (FieldType::StringFixed(_), FieldType::Date)
-        | (FieldType::Date, FieldType::Text)
-        | (FieldType::Text, FieldType::Date)
-        | (FieldType::DateTime, FieldType::StringFixed(_))
-        | (FieldType::StringFixed(_), FieldType::DateTime)
-        | (FieldType::DateTime, FieldType::Text)
-        | (FieldType::Text, FieldType::DateTime)
-        | (FieldType::Timestamp, FieldType::StringFixed(_))
-        | (FieldType::StringFixed(_), FieldType::Timestamp)
-        | (FieldType::Timestamp, FieldType::Text)
-        | (FieldType::Text, FieldType::Timestamp)
-        | (FieldType::Enum(_), FieldType::Int(_))
-        | (FieldType::Int(_), FieldType::Enum(_))
-        | (FieldType::Enum(_), FieldType::UInt(_))
-        | (FieldType::UInt(_), FieldType::Enum(_))
-        | (FieldType::Enum(_), FieldType::Float(_))
-        | (FieldType::Float(_), FieldType::Enum(_))
-        | (FieldType::Enum(_), FieldType::Date)
-        | (FieldType::Date, FieldType::Enum(_))
-        | (FieldType::Enum(_), FieldType::DateTime)
-        | (FieldType::DateTime, FieldType::Enum(_))
-        | (FieldType::Enum(_), FieldType::Timestamp)
-        | (FieldType::Timestamp, FieldType::Enum(_)) => Some(FieldType::Text),
+        (FieldType::Int(_), FieldType::StringFixed(_)) |
+        (FieldType::StringFixed(_), FieldType::Int(_)) |
+        (FieldType::Int(_), FieldType::Text) |
+        (FieldType::Text, FieldType::Int(_)) |
+        (FieldType::UInt(_), FieldType::StringFixed(_)) |
+        (FieldType::StringFixed(_), FieldType::UInt(_)) |
+        (FieldType::UInt(_), FieldType::Text) |
+        (FieldType::Text, FieldType::UInt(_)) |
+        (FieldType::Float(_), FieldType::StringFixed(_)) |
+        (FieldType::StringFixed(_), FieldType::Float(_)) |
+        (FieldType::Float(_), FieldType::Text) |
+        (FieldType::Text, FieldType::Float(_)) |
+        (FieldType::Date, FieldType::StringFixed(_)) |
+        (FieldType::StringFixed(_), FieldType::Date) |
+        (FieldType::Date, FieldType::Text) |
+        (FieldType::Text, FieldType::Date) |
+        (FieldType::DateTime, FieldType::StringFixed(_)) |
+        (FieldType::StringFixed(_), FieldType::DateTime) |
+        (FieldType::DateTime, FieldType::Text) |
+        (FieldType::Text, FieldType::DateTime) |
+        (FieldType::Timestamp, FieldType::StringFixed(_)) |
+        (FieldType::StringFixed(_), FieldType::Timestamp) |
+        (FieldType::Timestamp, FieldType::Text) |
+        (FieldType::Text, FieldType::Timestamp) |
+        (FieldType::Enum(_), FieldType::Int(_)) |
+        (FieldType::Int(_), FieldType::Enum(_)) |
+        (FieldType::Enum(_), FieldType::UInt(_)) |
+        (FieldType::UInt(_), FieldType::Enum(_)) |
+        (FieldType::Enum(_), FieldType::Float(_)) |
+        (FieldType::Float(_), FieldType::Enum(_)) |
+        (FieldType::Enum(_), FieldType::Date) |
+        (FieldType::Date, FieldType::Enum(_)) |
+        (FieldType::Enum(_), FieldType::DateTime) |
+        (FieldType::DateTime, FieldType::Enum(_)) |
+        (FieldType::Enum(_), FieldType::Timestamp) |
+        (FieldType::Timestamp, FieldType::Enum(_)) => Some(FieldType::Text),
 
         _ => None,
 
@@ -677,13 +747,16 @@ fn union_row_comparison_key(
     row: &[Vec<u8>],
     columns: &[serverlib::FieldDef],
 ) -> Vec<Vec<u8>> {
+    
     row.iter()
         .enumerate()
         .map(|(index, cell)| union_cell_compare_key(cell, columns.get(index)))
         .collect()
+
 }
 
 fn union_cell_compare_key(cell: &[u8], column: Option<&serverlib::FieldDef>) -> Vec<u8> {
+
     let Some(column) = column else {
         return cell.to_vec();
     };
@@ -693,31 +766,39 @@ fn union_cell_compare_key(cell: &[u8], column: Option<&serverlib::FieldDef>) -> 
     }
 
     cell.to_vec()
+
 }
 
 fn union_column_uses_case_insensitive_collation(column: &serverlib::FieldDef) -> bool {
+
     let Some(collation) = column.metadata.as_ref().and_then(|metadata| metadata.collation.as_deref()) else {
         return false;
     };
 
     let normalized = collation.trim().to_ascii_lowercase();
     normalized.ends_with("_ci") || normalized.contains("_ci_")
+
 }
 
 fn resolve_mixed_signed_unsigned_int(left_signed_bits: u8, right_unsigned_bits: u8) -> serverlib::FieldType {
+
     // Keep UNION integer results in integer family instead of widening to float.
     // We conservatively promote mixed signed/unsigned values to signed 64-bit.
+    
     if left_signed_bits >= right_unsigned_bits {
         serverlib::FieldType::Int(left_signed_bits.max(64))
     } else {
         serverlib::FieldType::Int(64)
     }
+
 }
 
 fn max_enum_variant_len(variants: &[String]) -> usize {
+
     variants
         .iter()
         .map(|variant| variant.len())
         .max()
         .unwrap_or(1)
+
 }

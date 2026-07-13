@@ -183,6 +183,14 @@ fn resolve_database_without_selection_allows_qualified_select() {
 }
 
 #[test]
+fn resolve_database_without_selection_allows_qualified_show_tables() {
+	let database = resolve_database_for_sql(None, false, "show locations.tables;", "main")
+		.expect("qualified show tables should resolve database");
+
+	assert_eq!(database, "locations");
+}
+
+#[test]
 fn resolve_database_without_selection_allows_show_databases() {
 	let database = resolve_database_for_sql(None, false, "show databases;", "main")
 		.expect("show databases should not require explicit selection");

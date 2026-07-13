@@ -7,7 +7,7 @@ use serverlib::{ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, Transa
 use crate::core::app::state::ReadObservation;
 use crate::core::app::ServerApp;
 use crate::core::mappings::query::{
-    commit_external_write_group, handle_query_command, handle_query_command_in_write_group,
+    commit_external_write_group, handle_query_command_in_write_group_with_session_variables,
 };
 
 impl ServerApp {
@@ -168,12 +168,17 @@ impl ServerApp {
 
         let mut touched_tables = HashSet::new();
 
-        let session_state = self.get_session(session_id);
-        let connection_id = session_state.map(|s| s.connection_id).unwrap_or(0);
+        let Some(session_ctx) = self.query_session_context(session_id) else {
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("invalid session '{}'", session_id),
+            );
+        };
+        let mut session_variable_overrides = self.take_session_variable_overrides(session_id);
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
             let apply_request_id = format!("{}::txread{}", request_id, idx + 1);
-            let response = handle_query_command_in_write_group(
+            let response = handle_query_command_in_write_group_with_session_variables(
                 &apply_request_id,
                 staged_query,
                 &mut sandbox_catalogs,
@@ -182,9 +187,10 @@ impl ServerApp {
                 &mut sandbox_indexes,
                 write_group_id,
                 &mut touched_tables,
-                session_id,
-                connection_id,
-                Some("root@localhost".to_string()),
+                &session_ctx.session_id,
+                session_ctx.connection_id,
+                Some(session_ctx.session_user.clone()),
+                &mut session_variable_overrides,
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
@@ -210,17 +216,18 @@ impl ServerApp {
                 );
             }
 
-        let response = handle_query_command(
+        let response = Self::execute_query_with_session_context(
             request_id,
             query,
             &mut sandbox_catalogs,
             &sandbox_wal,
             &self.node_data_dir,
             &mut sandbox_indexes,
-            session_id,
-            connection_id,
-            Some("root@localhost".to_string()),
+            &session_ctx,
+            &mut session_variable_overrides,
         );
+
+        self.put_session_variable_overrides(session_id, session_variable_overrides);
 
         if matches!(response.status, connector::ResponseStatus::Applied) {
             self.record_simple_read_observation(

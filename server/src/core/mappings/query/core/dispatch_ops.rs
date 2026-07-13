@@ -1,8 +1,11 @@
 use super::*;
 use super::variables::{
     apply_variable_assignment,
+    apply_session_variable_assignment,
     parse_scoped_variable_target,
     parse_statement_scope_prefix,
+    runtime_variable_bindings,
+    SessionVariableOverrides,
     VariableScope,
 };
 
@@ -13,7 +16,58 @@ struct QueryExecutionContext<'a> {
     runtime_indexes: &'a mut RuntimeIndexStore,
     external_write_group_id: Option<TransactionId>,
     touched_write_tables: Option<&'a mut HashSet<String>>,
-    session_id: &'a str,
+    session_state: &'a mut DispatchSessionState,
+}
+
+struct DispatchSessionState {
+    session_id: String,
+    session_variable_overrides: Option<SessionVariableOverrides>,
+}
+
+impl DispatchSessionState {
+
+    fn from_query_context(session_context: &QueryExecutionSessionContext<'_>) -> Self {
+        Self {
+            session_id: session_context.session_id().to_string(),
+            session_variable_overrides: session_context.session_variable_overrides().cloned(),
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        self.session_id.as_str()
+    }
+
+    fn session_variable_overrides(&self) -> Option<&SessionVariableOverrides> {
+        self.session_variable_overrides.as_ref()
+    }
+
+    fn session_variable_overrides_snapshot(&self) -> Option<SessionVariableOverrides> {
+        self.session_variable_overrides.clone()
+    }
+
+    fn take_session_variable_overrides(&mut self) -> Option<SessionVariableOverrides> {
+        self.session_variable_overrides.take()
+    }
+
+    fn replace_session_variable_overrides(
+        &mut self,
+        overrides: Option<SessionVariableOverrides>,
+    ) {
+        self.session_variable_overrides = overrides;
+    }
+
+    fn commit_into_query_context(self, session_context: &mut QueryExecutionSessionContext<'_>) {
+        session_context.replace_session_variable_overrides(self.session_variable_overrides);
+    }
+
+}
+
+impl QueryExecutionContext<'_> {
+
+    fn session_id(&self) -> &str {
+        self.session_state.session_id()
+    }
+
 }
 
 type QueryOperationHandler = fn(
@@ -33,7 +87,7 @@ pub(super) fn execute_parsed_query(
     parsed: Vec<SqlRequest>,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
-    session_id: &str,
+    session_context: &mut QueryExecutionSessionContext<'_>,
 ) -> ConnectorResponse {
 
     if parsed.is_empty() {
@@ -43,6 +97,44 @@ pub(super) fn execute_parsed_query(
         );
     }
 
+    let mut session_state = DispatchSessionState::from_query_context(session_context);
+
+    let response = execute_parsed_query_with_session_parts(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        parsed,
+        external_write_group_id,
+        touched_tables,
+        &mut session_state,
+        session_context.session_variable_overrides().cloned(),
+    );
+
+    session_state.commit_into_query_context(session_context);
+
+    response
+
+}
+
+fn execute_parsed_query_with_session_parts(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    parsed: Vec<SqlRequest>,
+    external_write_group_id: Option<TransactionId>,
+    touched_tables: Option<&mut HashSet<String>>,
+    session_state: &mut DispatchSessionState,
+    session_variable_overrides: Option<SessionVariableOverrides>,
+) -> ConnectorResponse {
+
+    session_state.replace_session_variable_overrides(session_variable_overrides);
+
     let mut ctx = QueryExecutionContext {
         catalogs,
         wal,
@@ -50,7 +142,7 @@ pub(super) fn execute_parsed_query(
         runtime_indexes,
         external_write_group_id,
         touched_write_tables: touched_tables,
-        session_id,
+        session_state,
     };
 
     let mut last_response = ConnectorResponse::applied(
@@ -184,14 +276,22 @@ fn execute_alter_other(
     }
 
     if lowered.starts_with("set ") {
+        let mut session_variable_overrides = ctx.session_state.take_session_variable_overrides();
+
         let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
+            ctx.session_state
+                .replace_session_variable_overrides(session_variable_overrides);
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("database '{}' not found", query.database_id),
             );
         };
 
-        return match apply_set_variables(catalog, &statement.sql) {
+        let response = match apply_set_variables_with_session(
+            catalog,
+            &statement.sql,
+            session_variable_overrides.as_mut(),
+        ) {
             Ok(_) => ConnectorResponse::applied(
                 request_id.to_string(),
                 ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
@@ -201,6 +301,11 @@ fn execute_alter_other(
                 format!("set variable failed: {message}"),
             ),
         };
+
+        ctx.session_state
+            .replace_session_variable_overrides(session_variable_overrides);
+
+        return response;
     }
 
     if lowered.starts_with("set names") ||
@@ -226,6 +331,14 @@ fn execute_alter_other(
 }
 
 fn apply_set_variables(catalog: &mut DatabaseCatalog, sql: &str) -> Result<(), String> {
+    apply_set_variables_with_session(catalog, sql, None)
+}
+
+fn apply_set_variables_with_session(
+    catalog: &mut DatabaseCatalog,
+    sql: &str,
+    session_variable_overrides: Option<&mut SessionVariableOverrides>,
+) -> Result<(), String> {
     let normalized_sql = sql.trim().trim_end_matches(';').trim();
 
     if normalized_sql.len() < 3 || !normalized_sql[..3].eq_ignore_ascii_case("set") {
@@ -244,7 +357,13 @@ fn apply_set_variables(catalog: &mut DatabaseCatalog, sql: &str) -> Result<(), S
         return Err("missing variable assignment".to_string());
     }
 
-    let mut next_settings = catalog.recursive_cte_execution_settings().clone();
+    let mut next_system_settings = catalog.recursive_cte_execution_settings().clone();
+    let mut next_session_overrides = session_variable_overrides
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    let session_overrides_available = session_variable_overrides.is_some();
+    let mut system_settings_changed = false;
     let mut seen_variables = HashSet::<String>::new();
 
     for assignment in assignments_sql
@@ -281,16 +400,42 @@ fn apply_set_variables(catalog: &mut DatabaseCatalog, sql: &str) -> Result<(), S
             ));
         }
 
-        apply_variable_assignment(
-            &mut next_settings,
-            &variable_name,
-            variable_value,
-            effective_scope,
-        )?;
+        if effective_scope == VariableScope::Global {
+            apply_variable_assignment(
+                &mut next_system_settings,
+                &variable_name,
+                variable_value,
+                effective_scope,
+            )?;
+            system_settings_changed = true;
+        } else if session_overrides_available {
+            apply_session_variable_assignment(
+                &mut next_session_overrides,
+                &variable_name,
+                variable_value,
+                effective_scope,
+            )?;
+        } else {
+            // Legacy path used by direct query-core helpers that do not pass session state.
+            apply_variable_assignment(
+                &mut next_system_settings,
+                &variable_name,
+                variable_value,
+                effective_scope,
+            )?;
+            system_settings_changed = true;
+        }
 
     }
 
-    catalog.configure_recursive_cte_execution_settings(next_settings);
+    if system_settings_changed {
+        catalog.configure_recursive_cte_execution_settings(next_system_settings);
+    }
+
+    if let Some(overrides) = session_variable_overrides {
+        *overrides = next_session_overrides;
+    }
+
     Ok(())
 }
 
@@ -509,6 +654,8 @@ fn execute_select(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
+    let session_variable_overrides = ctx.session_state.session_variable_overrides_snapshot();
+
     execute_select_impl(
         request_id,
         query,
@@ -517,6 +664,7 @@ fn execute_select(
         ctx.node_data_dir,
         ctx.runtime_indexes,
         statement,
+        session_variable_overrides.as_ref(),
     )
 
 }
@@ -527,6 +675,9 @@ fn execute_union_query(
     query: &DataQuery,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
+
+    let session_variable_overrides = ctx.session_state.session_variable_overrides_snapshot();
+
     execute_union_query_impl(
         request_id,
         query,
@@ -534,6 +685,7 @@ fn execute_union_query(
         ctx.wal,
         ctx.runtime_indexes,
         statement,
+        session_variable_overrides.as_ref(),
     )
     
 }
@@ -622,9 +774,19 @@ fn execute_call_stored_procedure(
 
     let mut local_entities = serverlib::ProcedureLocalEntityScope::new(format!(
         "proc_{}_{}",
-        common::normalize_identifier!(ctx.session_id),
+        common::normalize_identifier!(ctx.session_id()),
         procedure.procedure_id,
     ));
+
+    let runtime_context = serverlib::inbuilt_sql_runtime_context();
+    for (name, value) in runtime_variable_bindings(
+        catalog,
+        ctx.session_state.session_variable_overrides(),
+        runtime_context.session_user.as_deref(),
+    ) {
+        local_entities.set_variable(name, value);
+    }
+
     let mut output_mappings: Vec<(String, String)> = Vec::new();
 
     if let Some(parsed_call_statement) = statement.parsed_statement.as_ref() {
@@ -1713,7 +1875,7 @@ fn execute_call_action_statement(
         sql: rewritten_sql,
     };
 
-    let response = execute_parsed_query(
+    let response = execute_parsed_query_with_session_parts(
         request_id,
         &action_query,
         ctx.catalogs,
@@ -1723,7 +1885,8 @@ fn execute_call_action_statement(
         rewritten_parsed,
         ctx.external_write_group_id,
         None,
-        ctx.session_id,
+        ctx.session_state,
+        ctx.session_state.session_variable_overrides_snapshot(),
     );
 
     if matches!(response.status, connector::ResponseStatus::Rejected) {
@@ -1956,7 +2119,7 @@ fn execute_local_cursor_open_statement(
         sql: rewritten_sql,
     };
 
-    let response = execute_parsed_query(
+    let response = execute_parsed_query_with_session_parts(
         "cursor-open",
         &action_query,
         ctx.catalogs,
@@ -1966,7 +2129,8 @@ fn execute_local_cursor_open_statement(
         parsed,
         ctx.external_write_group_id,
         None,
-        ctx.session_id,
+        ctx.session_state,
+        ctx.session_state.session_variable_overrides_snapshot(),
     );
 
     if matches!(response.status, connector::ResponseStatus::Rejected) {

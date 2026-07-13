@@ -6143,6 +6143,76 @@ fn connector_client_path_can_query_show_tables_without_simulation() {
 }
 
 #[test]
+fn connector_client_path_can_show_tables_for_explicit_database_token() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-client-show-explicit-db-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let mut main_catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("main catalog should be created");
+    main_catalog
+        .register_table(
+            "users",
+            TableSchema::new(vec![FieldDef {
+                seqno: 1,
+                field_name: "id".to_string(),
+                field_type: FieldType::Int(64),
+                nullable: false,
+                indexed: FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            }]),
+        )
+        .expect("users table should register");
+
+    let locations_catalog =
+        DatabaseCatalog::create_empty_from_name("locations").expect("locations catalog should be created");
+
+    app.catalogs.insert("main".to_string(), main_catalog);
+    app.catalogs.insert("locations".to_string(), locations_catalog);
+
+    let transport = InProcessServerTransport {
+        app: RefCell::new(app),
+    };
+    let client = ConnectorClient::new(transport);
+
+    let request = ConnectorRequest::new(
+        "req-client-show-explicit-db-1",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "locations".to_string(),
+                sql: "show main.tables".to_string(),
+            },
+        },
+    );
+
+    let response = client
+        .execute(&request)
+        .expect("connector client should receive applied response");
+
+    assert_eq!(response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = response.result else {
+        panic!("expected query result");
+    };
+
+    let row_values = result
+        .rows
+        .iter()
+        .map(|row| String::from_utf8_lossy(&row[0]).to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(row_values, vec!["users"]);
+}
+
+#[test]
 fn connector_client_path_can_query_select_without_simulation() {
     let unique_suffix = common::epoch_nanos!();
 

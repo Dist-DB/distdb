@@ -187,6 +187,31 @@ fn compile_artifact_tracks_complex_select_dialect_inside_procedure_branches() {
 }
 
 #[test]
+fn compile_artifact_tracks_runtime_variable_references() {
+
+    let services = DefaultSQLProgramaticCompilerServices;
+    let artifact = compile_sql_programatic_artifact_with_context(
+        "create procedure p() begin set @x = @@session.cte.max_rows; select @@global.cte.timeout_ms; end",
+        StoredProcedureCompilerContext::new(&services)
+            .with_directive(Some(SqlDirective::Create))
+            .with_database_id(Some("main")),
+    );
+
+    assert!(artifact.resources.iter().any(|entry| {
+        entry.kind == StoredProcedureResourceKind::RuntimeVariable
+            && entry.direction == StoredProcedureResourceDirection::Ref
+            && entry.name == "@@session.cte.max_rows"
+    }));
+
+    assert!(artifact.resources.iter().any(|entry| {
+        entry.kind == StoredProcedureResourceKind::RuntimeVariable
+            && entry.direction == StoredProcedureResourceDirection::Ref
+            && entry.name == "@@global.cte.timeout_ms"
+    }));
+
+}
+
+#[test]
 fn compile_artifact_detects_builtin_function_usage_in_branches() {
 
     let services = MockCompilerServices {

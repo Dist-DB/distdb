@@ -59,6 +59,57 @@ fn expected_os_user_identity() -> String {
         .unwrap_or_else(|| "root@localhost".to_string())
 }
 
+fn query_as_session(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &PathBuf,
+    runtime_indexes: &mut RuntimeIndexStore,
+    session_id: &str,
+    connection_id: usize,
+) -> connector::ConnectorResponse {
+    let mut session_overrides = SessionVariableOverrides::new();
+
+    query_as_session_with_overrides(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        session_id,
+        connection_id,
+        &mut session_overrides,
+    )
+}
+
+fn query_as_session_with_overrides(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &PathBuf,
+    runtime_indexes: &mut RuntimeIndexStore,
+    session_id: &str,
+    connection_id: usize,
+    session_overrides: &mut SessionVariableOverrides,
+) -> connector::ConnectorResponse {
+
+    handle_query_command_with_session_variables(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        session_id,
+        connection_id,
+        Some(expected_os_user_identity()),
+        session_overrides,
+    )
+}
+
 #[test]
 fn explain_inner_statement_detects_prefix_case_insensitive() {
     let (inner, is_explain) = explain_inner_statement("  ExPlAiN   select 1  ");
@@ -145,7 +196,7 @@ fn select_from_dotted_table_without_active_database_resolves_catalog_prefix() {
         sql: "select * from main.users".to_string(),
     };
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-dotted-select",
         &data_query,
         &mut catalogs,
@@ -154,7 +205,6 @@ fn select_from_dotted_table_without_active_database_resolves_catalog_prefix() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(
@@ -184,7 +234,7 @@ fn select_from_dotted_table_with_active_database_strips_matching_prefix() {
         sql: "select * from locations.places".to_string(),
     };
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-dotted-select-active-db",
         &data_query,
         &mut catalogs,
@@ -193,7 +243,6 @@ fn select_from_dotted_table_with_active_database_strips_matching_prefix() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(
@@ -267,7 +316,7 @@ fn begin_transaction_is_accepted_as_noop_mutation() {
         sql: "begin".to_string(),
     };
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-begin",
         &data_query,
         &mut catalogs,
@@ -276,7 +325,6 @@ fn begin_transaction_is_accepted_as_noop_mutation() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let ConnectorResult::Mutation(result) = response.result else {
@@ -320,7 +368,7 @@ fn insert_returning_returns_inserted_rows() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-insert-returning",
         &DataQuery {
             database_id: "main".to_string(),
@@ -332,7 +380,6 @@ fn insert_returning_returns_inserted_rows() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(response);
@@ -351,7 +398,7 @@ fn replace_into_replaces_existing_primary_key_row() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-replace",
         &DataQuery {
             database_id: "main".to_string(),
@@ -364,11 +411,10 @@ fn replace_into_replaces_existing_primary_key_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-replace-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -381,11 +427,10 @@ fn replace_into_replaces_existing_primary_key_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let replace = handle_query_command(
+    let replace = query_as_session(
         "req-replace-users",
         &DataQuery {
             database_id: "main".to_string(),
@@ -397,7 +442,6 @@ fn replace_into_replaces_existing_primary_key_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -422,7 +466,7 @@ fn replace_into_replaces_existing_unique_key_row() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-replace-unique",
         &DataQuery {
             database_id: "main".to_string(),
@@ -435,11 +479,10 @@ fn replace_into_replaces_existing_unique_key_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-replace-unique-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -452,11 +495,10 @@ fn replace_into_replaces_existing_unique_key_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let replace = handle_query_command(
+    let replace = query_as_session(
         "req-replace-users-unique",
         &DataQuery {
             database_id: "main".to_string(),
@@ -468,7 +510,6 @@ fn replace_into_replaces_existing_unique_key_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -480,7 +521,7 @@ fn replace_into_replaces_existing_unique_key_row() {
         ]]
     );
 
-    let rows = query_result_rows(handle_query_command(
+    let rows = query_result_rows(query_as_session(
         "req-select-users-replace-unique",
         &DataQuery {
             database_id: "main".to_string(),
@@ -492,7 +533,6 @@ fn replace_into_replaces_existing_unique_key_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     ));
 
     assert_eq!(
@@ -517,7 +557,7 @@ fn replace_into_with_duplicate_values_keeps_last_payload() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-replace-duplicate-values",
         &DataQuery {
             database_id: "main".to_string(),
@@ -529,11 +569,10 @@ fn replace_into_with_duplicate_values_keeps_last_payload() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let replace = handle_query_command(
+    let replace = query_as_session(
         "req-replace-duplicate-values",
         &DataQuery {
             database_id: "main".to_string(),
@@ -545,11 +584,10 @@ fn replace_into_with_duplicate_values_keeps_last_payload() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(replace.status, connector::ResponseStatus::Applied));
 
-    let read = handle_query_command(
+    let read = query_as_session(
         "req-select-replace-duplicate-values",
         &DataQuery {
             database_id: "main".to_string(),
@@ -561,7 +599,6 @@ fn replace_into_with_duplicate_values_keeps_last_payload() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -582,7 +619,7 @@ fn insert_accepts_placeholder_literals_as_raw_values() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-placeholder-insert",
         &DataQuery {
             database_id: "main".to_string(),
@@ -594,11 +631,10 @@ fn insert_accepts_placeholder_literals_as_raw_values() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let insert = handle_query_command(
+    let insert = query_as_session(
         "req-insert-placeholder-literal",
         &DataQuery {
             database_id: "main".to_string(),
@@ -610,7 +646,6 @@ fn insert_accepts_placeholder_literals_as_raw_values() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -630,7 +665,7 @@ fn insert_default_values_uses_schema_defaults() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-default-values",
         &DataQuery {
             database_id: "main".to_string(),
@@ -642,11 +677,10 @@ fn insert_default_values_uses_schema_defaults() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let insert = handle_query_command(
+    let insert = query_as_session(
         "req-insert-default-values",
         &DataQuery {
             database_id: "main".to_string(),
@@ -658,7 +692,6 @@ fn insert_default_values_uses_schema_defaults() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -678,7 +711,7 @@ fn insert_default_values_with_column_list_uses_defaults() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-default-values-column-list",
         &DataQuery {
             database_id: "main".to_string(),
@@ -690,11 +723,10 @@ fn insert_default_values_with_column_list_uses_defaults() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let insert = handle_query_command(
+    let insert = query_as_session(
         "req-insert-default-values-column-list",
         &DataQuery {
             database_id: "main".to_string(),
@@ -706,7 +738,6 @@ fn insert_default_values_with_column_list_uses_defaults() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -730,7 +761,7 @@ fn insert_set_syntax_inserts_row() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-insert-set",
         &DataQuery {
             database_id: "main".to_string(),
@@ -742,11 +773,10 @@ fn insert_set_syntax_inserts_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let insert = handle_query_command(
+    let insert = query_as_session(
         "req-insert-users-set",
         &DataQuery {
             database_id: "main".to_string(),
@@ -759,7 +789,6 @@ fn insert_set_syntax_inserts_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -783,7 +812,7 @@ fn insert_set_syntax_with_qualified_targets_inserts_row() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-insert-set-qualified",
         &DataQuery {
             database_id: "main".to_string(),
@@ -795,11 +824,10 @@ fn insert_set_syntax_with_qualified_targets_inserts_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let insert = handle_query_command(
+    let insert = query_as_session(
         "req-insert-users-set-qualified",
         &DataQuery {
             database_id: "main".to_string(),
@@ -812,7 +840,6 @@ fn insert_set_syntax_with_qualified_targets_inserts_row() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -832,7 +859,7 @@ fn insert_default_values_rejects_when_required_column_has_no_default() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-default-values-reject",
         &DataQuery {
             database_id: "main".to_string(),
@@ -844,11 +871,10 @@ fn insert_default_values_rejects_when_required_column_has_no_default() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let insert = handle_query_command(
+    let insert = query_as_session(
         "req-insert-default-values-reject",
         &DataQuery {
             database_id: "main".to_string(),
@@ -860,7 +886,6 @@ fn insert_default_values_rejects_when_required_column_has_no_default() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(matches!(insert.status, connector::ResponseStatus::Rejected));
@@ -881,7 +906,7 @@ fn insert_ignore_skips_duplicate_primary_keys() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-insert-ignore",
         &DataQuery {
             database_id: "main".to_string(),
@@ -893,11 +918,10 @@ fn insert_ignore_skips_duplicate_primary_keys() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-insert-ignore-users",
         &DataQuery {
             database_id: "main".to_string(),
@@ -909,7 +933,6 @@ fn insert_ignore_skips_duplicate_primary_keys() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(response);
@@ -927,7 +950,7 @@ fn insert_rejects_duplicate_non_primary_unique_key() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-unique-reject",
         &DataQuery {
             database_id: "main".to_string(),
@@ -939,11 +962,10 @@ fn insert_rejects_duplicate_non_primary_unique_key() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-users-unique-reject-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -955,11 +977,10 @@ fn insert_rejects_duplicate_non_primary_unique_key() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let duplicate = handle_query_command(
+    let duplicate = query_as_session(
         "req-insert-users-unique-reject-duplicate",
         &DataQuery {
             database_id: "main".to_string(),
@@ -971,7 +992,6 @@ fn insert_rejects_duplicate_non_primary_unique_key() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(matches!(duplicate.status, connector::ResponseStatus::Rejected));
@@ -992,7 +1012,7 @@ fn insert_ignore_skips_duplicate_non_primary_unique_key() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-unique-ignore",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1004,11 +1024,10 @@ fn insert_ignore_skips_duplicate_non_primary_unique_key() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-insert-ignore-users-unique",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1020,7 +1039,6 @@ fn insert_ignore_skips_duplicate_non_primary_unique_key() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(response);
@@ -1039,7 +1057,7 @@ fn insert_on_duplicate_key_update_updates_existing_rows() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1052,11 +1070,10 @@ fn insert_on_duplicate_key_update_updates_existing_rows() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1069,11 +1086,10 @@ fn insert_on_duplicate_key_update_updates_existing_rows() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1085,7 +1101,6 @@ fn insert_on_duplicate_key_update_updates_existing_rows() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(upsert);
@@ -1111,7 +1126,7 @@ fn insert_on_duplicate_key_update_supports_values_column_reference() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-values",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1124,11 +1139,10 @@ fn insert_on_duplicate_key_update_supports_values_column_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-values-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1141,11 +1155,10 @@ fn insert_on_duplicate_key_update_supports_values_column_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-values",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1157,7 +1170,6 @@ fn insert_on_duplicate_key_update_supports_values_column_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(upsert);
@@ -1183,7 +1195,7 @@ fn insert_on_duplicate_key_update_supports_unique_key_conflicts_without_primary_
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-unique-no-pk",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1195,11 +1207,10 @@ fn insert_on_duplicate_key_update_supports_unique_key_conflicts_without_primary_
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-unique-no-pk-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1212,11 +1223,10 @@ fn insert_on_duplicate_key_update_supports_unique_key_conflicts_without_primary_
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-unique-no-pk",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1228,7 +1238,6 @@ fn insert_on_duplicate_key_update_supports_unique_key_conflicts_without_primary_
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1249,7 +1258,7 @@ fn insert_on_duplicate_key_update_supports_existing_column_reference() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-existing-col-ref",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1261,11 +1270,10 @@ fn insert_on_duplicate_key_update_supports_existing_column_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-existing-col-ref-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1277,11 +1285,10 @@ fn insert_on_duplicate_key_update_supports_existing_column_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-existing-col-ref",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1293,7 +1300,6 @@ fn insert_on_duplicate_key_update_supports_existing_column_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(upsert);
@@ -1315,7 +1321,7 @@ fn insert_on_duplicate_key_update_supports_arithmetic_assignment_expression() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1327,11 +1333,10 @@ fn insert_on_duplicate_key_update_supports_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-arithmetic-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1343,11 +1348,10 @@ fn insert_on_duplicate_key_update_supports_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1359,7 +1363,6 @@ fn insert_on_duplicate_key_update_supports_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1380,7 +1383,7 @@ fn insert_on_duplicate_key_update_supports_nested_arithmetic_assignment_expressi
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-nested-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1392,11 +1395,10 @@ fn insert_on_duplicate_key_update_supports_nested_arithmetic_assignment_expressi
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-nested-arithmetic-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1408,11 +1410,10 @@ fn insert_on_duplicate_key_update_supports_nested_arithmetic_assignment_expressi
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-nested-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1424,7 +1425,6 @@ fn insert_on_duplicate_key_update_supports_nested_arithmetic_assignment_expressi
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1445,7 +1445,7 @@ fn insert_on_duplicate_key_update_supports_arithmetic_function_operand_expressio
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-fn-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1457,11 +1457,10 @@ fn insert_on_duplicate_key_update_supports_arithmetic_function_operand_expressio
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-fn-arithmetic-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1473,11 +1472,10 @@ fn insert_on_duplicate_key_update_supports_arithmetic_function_operand_expressio
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-fn-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1489,7 +1487,6 @@ fn insert_on_duplicate_key_update_supports_arithmetic_function_operand_expressio
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1510,7 +1507,7 @@ fn insert_on_duplicate_key_update_supports_unary_arithmetic_operand_expression()
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-unary-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1522,11 +1519,10 @@ fn insert_on_duplicate_key_update_supports_unary_arithmetic_operand_expression()
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-unary-arithmetic-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1538,11 +1534,10 @@ fn insert_on_duplicate_key_update_supports_unary_arithmetic_operand_expression()
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-unary-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1554,7 +1549,6 @@ fn insert_on_duplicate_key_update_supports_unary_arithmetic_operand_expression()
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1575,7 +1569,7 @@ fn insert_on_duplicate_key_update_supports_top_level_unary_expression() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-top-unary",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1587,11 +1581,10 @@ fn insert_on_duplicate_key_update_supports_top_level_unary_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-top-unary-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1603,11 +1596,10 @@ fn insert_on_duplicate_key_update_supports_top_level_unary_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-top-unary",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1619,7 +1611,6 @@ fn insert_on_duplicate_key_update_supports_top_level_unary_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1640,7 +1631,7 @@ fn update_rows_supports_nested_arithmetic_assignment_expression() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-nested-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1652,11 +1643,10 @@ fn update_rows_supports_nested_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-update-nested-arithmetic-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1668,11 +1658,10 @@ fn update_rows_supports_nested_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-nested-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1684,7 +1673,6 @@ fn update_rows_supports_nested_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1705,7 +1693,7 @@ fn update_rows_supports_arithmetic_function_operand_expression() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-fn-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1717,11 +1705,10 @@ fn update_rows_supports_arithmetic_function_operand_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-update-fn-arithmetic-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1733,11 +1720,10 @@ fn update_rows_supports_arithmetic_function_operand_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-fn-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1749,7 +1735,6 @@ fn update_rows_supports_arithmetic_function_operand_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1770,7 +1755,7 @@ fn update_rows_supports_top_level_unary_assignment_expression() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-top-unary",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1782,11 +1767,10 @@ fn update_rows_supports_top_level_unary_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-update-top-unary-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1798,11 +1782,10 @@ fn update_rows_supports_top_level_unary_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-top-unary",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1814,7 +1797,6 @@ fn update_rows_supports_top_level_unary_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1835,7 +1817,7 @@ fn update_rows_supports_unary_arithmetic_operand_expression() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-unary-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1847,11 +1829,10 @@ fn update_rows_supports_unary_arithmetic_operand_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-update-unary-arithmetic-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1863,11 +1844,10 @@ fn update_rows_supports_unary_arithmetic_operand_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-unary-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1879,7 +1859,6 @@ fn update_rows_supports_unary_arithmetic_operand_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1900,7 +1879,7 @@ fn update_order_by_lower_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-order-lower",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1912,7 +1891,6 @@ fn update_order_by_lower_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -1920,7 +1898,7 @@ fn update_order_by_lower_expression_is_applied_before_limit() {
         "insert into users (id, name, active) values (1, 'B', false)",
         "insert into users (id, name, active) values (2, 'a', false)",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-update-order-lower",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -1932,12 +1910,11 @@ fn update_order_by_lower_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-users-order-lower",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1949,11 +1926,10 @@ fn update_order_by_lower_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(update.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-order-lower",
         &DataQuery {
             database_id: "main".to_string(),
@@ -1965,7 +1941,6 @@ fn update_order_by_lower_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -1989,7 +1964,7 @@ fn update_order_by_abs_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-order-abs",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2001,7 +1976,6 @@ fn update_order_by_abs_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2009,7 +1983,7 @@ fn update_order_by_abs_expression_is_applied_before_limit() {
         "insert into users (id, score, active) values (1, -1, false)",
         "insert into users (id, score, active) values (2, -5, false)",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-update-order-abs",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2021,12 +1995,11 @@ fn update_order_by_abs_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-users-order-abs",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2038,11 +2011,10 @@ fn update_order_by_abs_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(update.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-order-abs",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2054,7 +2026,6 @@ fn update_order_by_abs_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -2078,7 +2049,7 @@ fn update_order_by_trim_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-order-trim",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2090,7 +2061,6 @@ fn update_order_by_trim_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2098,7 +2068,7 @@ fn update_order_by_trim_expression_is_applied_before_limit() {
         "insert into users (id, name, active) values (1, '  a', false)",
         "insert into users (id, name, active) values (2, ' b', false)",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-update-order-trim",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2110,12 +2080,11 @@ fn update_order_by_trim_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-users-order-trim",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2127,11 +2096,10 @@ fn update_order_by_trim_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(update.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-order-trim",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2143,7 +2111,6 @@ fn update_order_by_trim_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -2167,7 +2134,7 @@ fn update_order_by_round_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-order-round",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2179,7 +2146,6 @@ fn update_order_by_round_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2187,7 +2153,7 @@ fn update_order_by_round_expression_is_applied_before_limit() {
         "insert into users (id, score, active) values (1, 1.2, false)",
         "insert into users (id, score, active) values (2, 1.8, false)",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-update-order-round",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2199,12 +2165,11 @@ fn update_order_by_round_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-users-order-round",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2216,11 +2181,10 @@ fn update_order_by_round_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(update.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-order-round",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2232,7 +2196,6 @@ fn update_order_by_round_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -2256,7 +2219,7 @@ fn update_order_by_round_with_scale_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-update-order-round-scale",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2268,7 +2231,6 @@ fn update_order_by_round_with_scale_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2276,7 +2238,7 @@ fn update_order_by_round_with_scale_expression_is_applied_before_limit() {
         "insert into users (id, score, active) values (1, 1.24, false)",
         "insert into users (id, score, active) values (2, 1.26, false)",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-update-order-round-scale",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2288,12 +2250,11 @@ fn update_order_by_round_with_scale_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-users-order-round-scale",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2305,11 +2266,10 @@ fn update_order_by_round_with_scale_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(update.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-order-round-scale",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2321,7 +2281,6 @@ fn update_order_by_round_with_scale_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -2345,7 +2304,7 @@ fn delete_order_by_lower_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-delete-order-lower",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2357,7 +2316,6 @@ fn delete_order_by_lower_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2365,7 +2323,7 @@ fn delete_order_by_lower_expression_is_applied_before_limit() {
         "insert into users (id, name) values (1, 'B')",
         "insert into users (id, name) values (2, 'a')",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-delete-order-lower",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2377,12 +2335,11 @@ fn delete_order_by_lower_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let deleted = handle_query_command(
+    let deleted = query_as_session(
         "req-delete-users-order-lower",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2394,11 +2351,10 @@ fn delete_order_by_lower_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-delete-order-lower",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2410,7 +2366,6 @@ fn delete_order_by_lower_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(query_result_rows(selected), vec![vec!["1".to_string()]]);
@@ -2428,7 +2383,7 @@ fn delete_order_by_length_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-delete-order-length",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2440,7 +2395,6 @@ fn delete_order_by_length_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2448,7 +2402,7 @@ fn delete_order_by_length_expression_is_applied_before_limit() {
         "insert into users (id, name) values (1, 'aa')",
         "insert into users (id, name) values (2, 'bbbb')",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-delete-order-length",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2460,12 +2414,11 @@ fn delete_order_by_length_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let deleted = handle_query_command(
+    let deleted = query_as_session(
         "req-delete-users-order-length",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2477,11 +2430,10 @@ fn delete_order_by_length_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-delete-order-length",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2493,7 +2445,6 @@ fn delete_order_by_length_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(query_result_rows(selected), vec![vec!["1".to_string()]]);
@@ -2511,7 +2462,7 @@ fn delete_order_by_ltrim_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-delete-order-ltrim",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2523,7 +2474,6 @@ fn delete_order_by_ltrim_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2531,7 +2481,7 @@ fn delete_order_by_ltrim_expression_is_applied_before_limit() {
         "insert into users (id, name) values (1, '  b')",
         "insert into users (id, name) values (2, ' a')",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-delete-order-ltrim",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2543,12 +2493,11 @@ fn delete_order_by_ltrim_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let deleted = handle_query_command(
+    let deleted = query_as_session(
         "req-delete-users-order-ltrim",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2560,11 +2509,10 @@ fn delete_order_by_ltrim_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-delete-order-ltrim",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2576,7 +2524,6 @@ fn delete_order_by_ltrim_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(query_result_rows(selected), vec![vec!["1".to_string()]]);
@@ -2594,7 +2541,7 @@ fn delete_order_by_floor_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-delete-order-floor",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2606,7 +2553,6 @@ fn delete_order_by_floor_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2614,7 +2560,7 @@ fn delete_order_by_floor_expression_is_applied_before_limit() {
         "insert into users (id, score) values (1, 1.9)",
         "insert into users (id, score) values (2, 1.1)",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-delete-order-floor",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2626,12 +2572,11 @@ fn delete_order_by_floor_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let deleted = handle_query_command(
+    let deleted = query_as_session(
         "req-delete-users-order-floor",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2643,11 +2588,10 @@ fn delete_order_by_floor_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-delete-order-floor",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2659,7 +2603,6 @@ fn delete_order_by_floor_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(query_result_rows(selected), vec![vec!["2".to_string()]]);
@@ -2677,7 +2620,7 @@ fn delete_order_by_round_with_scale_expression_is_applied_before_limit() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-delete-order-round-scale",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2689,7 +2632,6 @@ fn delete_order_by_round_with_scale_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
@@ -2697,7 +2639,7 @@ fn delete_order_by_round_with_scale_expression_is_applied_before_limit() {
         "insert into users (id, score) values (1, 1.24)",
         "insert into users (id, score) values (2, 1.26)",
     ] {
-        let inserted = handle_query_command(
+        let inserted = query_as_session(
             "req-insert-users-delete-order-round-scale",
             &DataQuery {
                 database_id: "main".to_string(),
@@ -2709,12 +2651,11 @@ fn delete_order_by_round_with_scale_expression_is_applied_before_limit() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(inserted.status, connector::ResponseStatus::Applied));
     }
 
-    let deleted = handle_query_command(
+    let deleted = query_as_session(
         "req-delete-users-order-round-scale",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2726,11 +2667,10 @@ fn delete_order_by_round_with_scale_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(deleted.status, connector::ResponseStatus::Applied));
 
-    let selected = handle_query_command(
+    let selected = query_as_session(
         "req-select-users-delete-order-round-scale",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2742,7 +2682,6 @@ fn delete_order_by_round_with_scale_expression_is_applied_before_limit() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(query_result_rows(selected), vec![vec!["2".to_string()]]);
@@ -2760,7 +2699,7 @@ fn insert_ignore_with_on_duplicate_key_update_is_supported() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-ignore",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2772,11 +2711,10 @@ fn insert_ignore_with_on_duplicate_key_update_is_supported() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-ignore-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2788,11 +2726,10 @@ fn insert_ignore_with_on_duplicate_key_update_is_supported() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-ignore",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2804,7 +2741,6 @@ fn insert_ignore_with_on_duplicate_key_update_is_supported() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(upsert);
@@ -2826,7 +2762,7 @@ fn insert_on_duplicate_key_update_rejects_primary_key_assignment() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-pk",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2838,11 +2774,10 @@ fn insert_on_duplicate_key_update_rejects_primary_key_assignment() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-upsert-pk-seed",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2854,11 +2789,10 @@ fn insert_on_duplicate_key_update_rejects_primary_key_assignment() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-pk",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2871,7 +2805,6 @@ fn insert_on_duplicate_key_update_rejects_primary_key_assignment() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(matches!(upsert.status, connector::ResponseStatus::Rejected));
@@ -2897,7 +2830,7 @@ fn insert_on_duplicate_key_update_handles_intra_statement_duplicate_keys() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_table = handle_query_command(
+    let create_table = query_as_session(
         "req-create-users-upsert-staged",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2909,11 +2842,10 @@ fn insert_on_duplicate_key_update_handles_intra_statement_duplicate_keys() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
 
-    let upsert = handle_query_command(
+    let upsert = query_as_session(
         "req-insert-upsert-staged",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2925,12 +2857,11 @@ fn insert_on_duplicate_key_update_handles_intra_statement_duplicate_keys() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(matches!(upsert.status, connector::ResponseStatus::Applied));
 
-    let rows = query_result_rows(handle_query_command(
+    let rows = query_result_rows(query_as_session(
         "req-select-upsert-staged",
         &DataQuery {
             database_id: "main".to_string(),
@@ -2942,7 +2873,6 @@ fn insert_on_duplicate_key_update_handles_intra_statement_duplicate_keys() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     ));
 
     assert_eq!(
@@ -3008,7 +2938,7 @@ fn update_returning_returns_updated_rows() {
 
     catalogs.insert("main".to_string(), catalog);
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-update-returning",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3020,7 +2950,6 @@ fn update_returning_returns_updated_rows() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(response);
@@ -3038,7 +2967,7 @@ fn update_supports_existing_column_assignment_reference() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_users = handle_query_command(
+    let create_users = query_as_session(
         "req-create-users-update-col-ref",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3051,11 +2980,10 @@ fn update_supports_existing_column_assignment_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-users-update-col-ref",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3068,11 +2996,10 @@ fn update_supports_existing_column_assignment_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-users-col-ref",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3084,7 +3011,6 @@ fn update_supports_existing_column_assignment_reference() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -3104,7 +3030,7 @@ fn update_supports_arithmetic_assignment_expression() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_users = handle_query_command(
+    let create_users = query_as_session(
         "req-create-users-update-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3116,11 +3042,10 @@ fn update_supports_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
 
-    let seed = handle_query_command(
+    let seed = query_as_session(
         "req-insert-users-update-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3132,11 +3057,10 @@ fn update_supports_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(seed.status, connector::ResponseStatus::Applied));
 
-    let update = handle_query_command(
+    let update = query_as_session(
         "req-update-users-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3149,7 +3073,6 @@ fn update_supports_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(
@@ -3158,7 +3081,7 @@ fn update_supports_arithmetic_assignment_expression() {
         update
     );
 
-    let verify = handle_query_command(
+    let verify = query_as_session(
         "req-select-users-arithmetic",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3170,7 +3093,6 @@ fn update_supports_arithmetic_assignment_expression() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -3190,7 +3112,7 @@ fn update_order_by_limit_updates_only_ranked_subset() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_users = handle_query_command(
+    let create_users = query_as_session(
         "req-create-users-update-order-limit",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3202,7 +3124,6 @@ fn update_order_by_limit_updates_only_ranked_subset() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
 
@@ -3220,7 +3141,7 @@ fn update_order_by_limit_updates_only_ranked_subset() {
             "insert into users (id, active) values (3, 'false')",
         ),
     ] {
-        let response = handle_query_command(
+        let response = query_as_session(
             request_id,
             &DataQuery {
                 database_id: "main".to_string(),
@@ -3232,12 +3153,11 @@ fn update_order_by_limit_updates_only_ranked_subset() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(response.status, connector::ResponseStatus::Applied));
     }
 
-    let update_response = handle_query_command(
+    let update_response = query_as_session(
         "req-update-order-limit",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3249,7 +3169,6 @@ fn update_order_by_limit_updates_only_ranked_subset() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(
         matches!(update_response.status, connector::ResponseStatus::Applied),
@@ -3257,7 +3176,7 @@ fn update_order_by_limit_updates_only_ranked_subset() {
         update_response
     );
 
-    let rows = query_result_rows(handle_query_command(
+    let rows = query_result_rows(query_as_session(
         "req-select-users-update-order-limit",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3269,7 +3188,6 @@ fn update_order_by_limit_updates_only_ranked_subset() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     ));
 
     assert_eq!(
@@ -3336,7 +3254,7 @@ fn delete_returning_returns_deleted_rows() {
 
     catalogs.insert("main".to_string(), catalog);
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-delete-returning",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3348,7 +3266,6 @@ fn delete_returning_returns_deleted_rows() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let rows = query_result_rows(response);
@@ -3366,7 +3283,7 @@ fn delete_order_by_limit_deletes_only_ranked_subset() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let create_users = handle_query_command(
+    let create_users = query_as_session(
         "req-create-users-delete-order-limit",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3378,7 +3295,6 @@ fn delete_order_by_limit_deletes_only_ranked_subset() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
     assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
 
@@ -3396,7 +3312,7 @@ fn delete_order_by_limit_deletes_only_ranked_subset() {
             "insert into users (id, email) values (3, 'c@example.com')",
         ),
     ] {
-        let response = handle_query_command(
+        let response = query_as_session(
             request_id,
             &DataQuery {
                 database_id: "main".to_string(),
@@ -3408,12 +3324,11 @@ fn delete_order_by_limit_deletes_only_ranked_subset() {
             &mut runtime_indexes,
             "session-test",
             1,
-            Some("root@localhost".to_string()),
         );
         assert!(matches!(response.status, connector::ResponseStatus::Applied));
     }
 
-    let delete_response = handle_query_command(
+    let delete_response = query_as_session(
         "req-delete-order-limit",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3425,7 +3340,6 @@ fn delete_order_by_limit_deletes_only_ranked_subset() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     let ConnectorResult::Mutation(delete_mutation) = delete_response.result else {
@@ -3433,7 +3347,7 @@ fn delete_order_by_limit_deletes_only_ranked_subset() {
     };
     assert_eq!(delete_mutation.affected_rows, 1);
 
-    let remaining = handle_query_command(
+    let remaining = query_as_session(
         "req-select-users-delete-order-limit",
         &DataQuery {
             database_id: "main".to_string(),
@@ -3445,7 +3359,6 @@ fn delete_order_by_limit_deletes_only_ranked_subset() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert_eq!(
@@ -4835,6 +4748,7 @@ fn set_variable_cte_max_iterations_limits_recursive_cte_execution() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
 
     let create_table = handle_query_command(
         "req-create-edges-set-max-iterations",
@@ -4889,7 +4803,7 @@ fn set_variable_cte_max_iterations_limits_recursive_cte_execution() {
         );
     }
 
-    let set_response = handle_query_command(
+    let set_response = query_as_session_with_overrides(
         "req-set-max-iterations",
         &DataQuery {
             database_id: "main".to_string(),
@@ -4901,11 +4815,11 @@ fn set_variable_cte_max_iterations_limits_recursive_cte_execution() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
     assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
 
-    let recursive_query = handle_query_command(
+    let recursive_query = query_as_session_with_overrides(
         "req-recursive-cte-set-max-iterations",
         &DataQuery {
             database_id: "main".to_string(),
@@ -4918,7 +4832,7 @@ fn set_variable_cte_max_iterations_limits_recursive_cte_execution() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
 
     assert!(matches!(
@@ -4944,8 +4858,9 @@ fn set_variable_cte_union_all_repeat_detection_can_be_disabled() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
 
-    let create_users = handle_query_command(
+    let create_users = query_as_session_with_overrides(
         "req-create-users-recursive-cte-repeat-toggle",
         &DataQuery {
             database_id: "main".to_string(),
@@ -4957,11 +4872,11 @@ fn set_variable_cte_union_all_repeat_detection_can_be_disabled() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
     assert!(matches!(create_users.status, connector::ResponseStatus::Applied));
 
-    let insert_user = handle_query_command(
+    let insert_user = query_as_session_with_overrides(
         "req-insert-users-recursive-cte-repeat-toggle",
         &DataQuery {
             database_id: "main".to_string(),
@@ -4973,11 +4888,11 @@ fn set_variable_cte_union_all_repeat_detection_can_be_disabled() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
     assert!(matches!(insert_user.status, connector::ResponseStatus::Applied));
 
-    let set_response = handle_query_command(
+    let set_response = query_as_session_with_overrides(
         "req-set-recursive-cte-repeat-toggle",
         &DataQuery {
             database_id: "main".to_string(),
@@ -4990,11 +4905,11 @@ fn set_variable_cte_union_all_repeat_detection_can_be_disabled() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
     assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
 
-    let response = handle_query_command(
+    let response = query_as_session_with_overrides(
         "req-recursive-cte-repeat-toggle",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5007,7 +4922,7 @@ fn set_variable_cte_union_all_repeat_detection_can_be_disabled() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
 
     assert!(matches!(response.status, connector::ResponseStatus::Rejected));
@@ -5035,8 +4950,9 @@ fn show_variables_includes_recursive_cte_runtime_controls() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
 
-    let response = handle_query_command(
+    let response = handle_query_command_with_session_variables(
         "req-show-variables-cte",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5049,6 +4965,7 @@ fn show_variables_includes_recursive_cte_runtime_controls() {
         "session-test",
         1,
         Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
 
     assert!(matches!(response.status, connector::ResponseStatus::Applied));
@@ -5079,8 +4996,9 @@ fn show_variable_reflects_set_variable_updates() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
 
-    let set_response = handle_query_command(
+    let set_response = handle_query_command_with_session_variables(
         "req-set-variables-show-variable",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5093,10 +5011,11 @@ fn show_variable_reflects_set_variable_updates() {
         "session-test",
         1,
         Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
     assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
 
-    let show_timeout = handle_query_command(
+    let show_timeout = handle_query_command_with_session_variables(
         "req-show-variable-timeout",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5109,6 +5028,7 @@ fn show_variable_reflects_set_variable_updates() {
         "session-test",
         1,
         Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
 
     assert!(matches!(show_timeout.status, connector::ResponseStatus::Applied));
@@ -5117,7 +5037,7 @@ fn show_variable_reflects_set_variable_updates() {
         vec![vec!["cte.timeout_ms".to_string(), "42".to_string()]]
     );
 
-    let show_max_rows = handle_query_command(
+    let show_max_rows = handle_query_command_with_session_variables(
         "req-show-variable-max-rows",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5130,6 +5050,7 @@ fn show_variable_reflects_set_variable_updates() {
         "session-test",
         1,
         Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
 
     assert!(matches!(show_max_rows.status, connector::ResponseStatus::Applied));
@@ -5151,7 +5072,7 @@ fn set_variable_rejects_out_of_range_values() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-set-variable-out-of-range",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5163,7 +5084,6 @@ fn set_variable_rejects_out_of_range_values() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(matches!(response.status, connector::ResponseStatus::Rejected));
@@ -5189,7 +5109,7 @@ fn set_variable_rejects_duplicate_assignments() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-set-variable-duplicate-assignment",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5201,7 +5121,6 @@ fn set_variable_rejects_duplicate_assignments() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(matches!(response.status, connector::ResponseStatus::Rejected));
@@ -5227,7 +5146,7 @@ fn set_variable_rejects_unsupported_global_scope() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
 
-    let response = handle_query_command(
+    let response = query_as_session(
         "req-set-variable-global-scope-reject",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5239,7 +5158,6 @@ fn set_variable_rejects_unsupported_global_scope() {
         &mut runtime_indexes,
         "session-test",
         1,
-        Some("root@localhost".to_string()),
     );
 
     assert!(matches!(response.status, connector::ResponseStatus::Rejected));
@@ -5264,8 +5182,9 @@ fn set_variable_accepts_explicit_session_scope() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
 
-    let set_response = handle_query_command(
+    let set_response = handle_query_command_with_session_variables(
         "req-set-variable-session-scope",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5278,10 +5197,11 @@ fn set_variable_accepts_explicit_session_scope() {
         "session-test",
         1,
         Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
     assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
 
-    let show_response = handle_query_command(
+    let show_response = handle_query_command_with_session_variables(
         "req-show-variable-session-scope",
         &DataQuery {
             database_id: "main".to_string(),
@@ -5294,12 +5214,206 @@ fn set_variable_accepts_explicit_session_scope() {
         "session-test",
         1,
         Some("root@localhost".to_string()),
+        &mut session_overrides,
     );
 
     assert!(matches!(show_response.status, connector::ResponseStatus::Applied));
     assert_eq!(
         query_result_rows(show_response),
         vec![vec!["cte.max_rows".to_string(), "333".to_string()]]
+    );
+}
+
+#[test]
+fn set_variable_does_not_bleed_between_sessions() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+    let mut session_a_overrides = SessionVariableOverrides::new();
+    let mut session_b_overrides = SessionVariableOverrides::new();
+
+    let set_session_a = handle_query_command_with_session_variables(
+        "req-set-session-a-max-rows",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.max_rows = 333".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-a",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_a_overrides,
+    );
+    assert!(matches!(set_session_a.status, connector::ResponseStatus::Applied));
+
+    let show_session_a = handle_query_command_with_session_variables(
+        "req-show-session-a-max-rows",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variable cte.max_rows".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-a",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_a_overrides,
+    );
+    assert!(matches!(show_session_a.status, connector::ResponseStatus::Applied));
+    assert_eq!(
+        query_result_rows(show_session_a),
+        vec![vec!["cte.max_rows".to_string(), "333".to_string()]]
+    );
+
+    let show_session_b = handle_query_command_with_session_variables(
+        "req-show-session-b-max-rows",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variable cte.max_rows".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-b",
+        2,
+        Some("root@localhost".to_string()),
+        &mut session_b_overrides,
+    );
+    assert!(matches!(show_session_b.status, connector::ResponseStatus::Applied));
+    assert_eq!(
+        query_result_rows(show_session_b),
+        vec![vec!["cte.max_rows".to_string(), "50000".to_string()]]
+    );
+}
+
+#[test]
+fn udf_style_function_expression_can_read_runtime_variables() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
+
+    let set_response = handle_query_command_with_session_variables(
+        "req-set-runtime-var-for-udf-read",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.max_rows = 345".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-udf",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_overrides,
+    );
+    assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
+
+    let read_response = handle_query_command_with_session_variables(
+        "req-read-runtime-var-via-udf-style-fn",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select coalesce(cte.max_rows, 0) as runtime_value".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-udf",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_overrides,
+    );
+
+    assert!(matches!(read_response.status, connector::ResponseStatus::Applied));
+    assert_eq!(
+        query_result_rows(read_response),
+        vec![vec!["345".to_string()]]
+    );
+}
+
+#[test]
+fn call_procedure_can_read_runtime_variables_in_session_context() {
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+
+    catalog
+        .register_stored_procedure(
+            "p_read_runtime_var",
+            "create procedure p_read_runtime_var(out p_out bigint) begin set p_out = cte.max_rows; end",
+            Vec::new(),
+        )
+        .expect("procedure should be registered");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert("main".to_string(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
+
+    let set_response = handle_query_command_with_session_variables(
+        "req-set-runtime-var-for-procedure-read",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.max_rows = 456".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-proc",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_overrides,
+    );
+    assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
+
+    let call_response = handle_query_command_with_session_variables(
+        "req-call-read-runtime-var-procedure",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "call p_read_runtime_var(out_slot)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-proc",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_overrides,
+    );
+
+    assert!(matches!(call_response.status, connector::ResponseStatus::Applied));
+
+    let columns = query_result_columns(call_response.clone());
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].field_name, "out_slot");
+
+    assert_eq!(
+        query_result_rows(call_response),
+        vec![vec!["456".to_string()]]
     );
 }
 

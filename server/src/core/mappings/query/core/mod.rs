@@ -8,6 +8,8 @@ mod set_ops;
 mod variables;
 mod wal_ops;
 
+pub(crate) use variables::SessionVariableOverrides;
+
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -98,6 +100,53 @@ pub(crate) fn get_and_clear_last_insert_id() -> Option<i64> {
     })
 }
 
+pub(super) struct QueryExecutionSessionContext<'a> {
+    session_id: &'a str,
+    connection_id: usize,
+    session_user: Option<String>,
+    session_variable_overrides: Option<&'a mut SessionVariableOverrides>,
+}
+
+impl<'a> QueryExecutionSessionContext<'a> {
+
+    pub(super) fn new(
+        session_id: &'a str,
+        connection_id: usize,
+        session_user: Option<String>,
+        session_variable_overrides: Option<&'a mut SessionVariableOverrides>,
+    ) -> Self {
+        Self {
+            session_id,
+            connection_id,
+            session_user,
+            session_variable_overrides,
+        }
+    }
+
+    pub(super) fn session_id(&self) -> &str {
+        self.session_id
+    }
+
+    pub(super) fn session_variable_overrides(
+        &self,
+    ) -> Option<&SessionVariableOverrides> {
+        self.session_variable_overrides.as_deref()
+    }
+
+    pub(super) fn replace_session_variable_overrides(
+        &mut self,
+        overrides: Option<SessionVariableOverrides>,
+    ) {
+        if let (Some(overrides), Some(target)) = (
+            overrides,
+            self.session_variable_overrides.as_deref_mut(),
+        ) {
+            *target = overrides;
+        }
+    }
+
+}
+
 pub(crate) fn handle_query_command(
     request_id: &str,
     query: &DataQuery,
@@ -109,13 +158,49 @@ pub(crate) fn handle_query_command(
     connection_id: usize,
     session_user: Option<String>,
 ) -> ConnectorResponse {
+    let mut session_variable_overrides = SessionVariableOverrides::new();
+
+    handle_query_command_with_session_variables(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        session_id,
+        connection_id,
+        session_user,
+        &mut session_variable_overrides,
+    )
+
+}
+
+pub(crate) fn handle_query_command_with_session_variables(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
+    session_variable_overrides: &mut SessionVariableOverrides,
+) -> ConnectorResponse {
+
+    let mut session_context = QueryExecutionSessionContext::new(
+        session_id,
+        connection_id,
+        session_user,
+        Some(session_variable_overrides),
+    );
 
     let runtime_context = inbuilt_runtime_context_for_query(
         request_id,
         query,
-        session_id,
-        connection_id,
-        session_user,
+        &session_context,
+        catalogs,
+        session_context.session_variable_overrides.as_deref(),
     );
 
     with_inbuilt_sql_runtime_context(&runtime_context, || {
@@ -128,7 +213,7 @@ pub(crate) fn handle_query_command(
             runtime_indexes,
             None,
             None,
-            session_id,
+            &mut session_context,
         )
     })
 
@@ -147,13 +232,53 @@ pub(crate) fn handle_query_command_with_parsed(
     connection_id: usize,
     session_user: Option<String>,
 ) -> ConnectorResponse {
+    let mut session_variable_overrides = SessionVariableOverrides::new();
+
+    handle_query_command_with_parsed_and_session_variables(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        parsed,
+        parse_ms,
+        session_id,
+        connection_id,
+        session_user,
+        &mut session_variable_overrides,
+    )
+
+}
+
+pub(crate) fn handle_query_command_with_parsed_and_session_variables(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    parsed: Vec<SqlRequest>,
+    parse_ms: u64,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
+    session_variable_overrides: &mut SessionVariableOverrides,
+) -> ConnectorResponse {
+
+    let mut session_context = QueryExecutionSessionContext::new(
+        session_id,
+        connection_id,
+        session_user,
+        Some(session_variable_overrides),
+    );
 
     let runtime_context = inbuilt_runtime_context_for_query(
         request_id,
         query,
-        session_id,
-        connection_id,
-        session_user,
+        &session_context,
+        catalogs,
+        session_context.session_variable_overrides.as_deref(),
     );
 
     with_inbuilt_sql_runtime_context(&runtime_context, || {
@@ -168,7 +293,7 @@ pub(crate) fn handle_query_command_with_parsed(
             parse_ms,
             None,
             None,
-            session_id,
+            &mut session_context,
         )
     })
 
@@ -187,13 +312,53 @@ pub(crate) fn handle_query_command_in_write_group(
     connection_id: usize,
     session_user: Option<String>,
 ) -> ConnectorResponse {
+    let mut session_variable_overrides = SessionVariableOverrides::new();
+
+    handle_query_command_in_write_group_with_session_variables(
+        request_id,
+        query,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        write_group_id,
+        touched_tables,
+        session_id,
+        connection_id,
+        session_user,
+        &mut session_variable_overrides,
+    )
+
+}
+
+pub(crate) fn handle_query_command_in_write_group_with_session_variables(
+    request_id: &str,
+    query: &DataQuery,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    write_group_id: TransactionId,
+    touched_tables: &mut HashSet<String>,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
+    session_variable_overrides: &mut SessionVariableOverrides,
+) -> ConnectorResponse {
+
+    let mut session_context = QueryExecutionSessionContext::new(
+        session_id,
+        connection_id,
+        session_user,
+        Some(session_variable_overrides),
+    );
 
     let runtime_context = inbuilt_runtime_context_for_query(
         request_id,
         query,
-        session_id,
-        connection_id,
-        session_user,
+        &session_context,
+        catalogs,
+        session_context.session_variable_overrides.as_deref(),
     );
 
     with_inbuilt_sql_runtime_context(&runtime_context, || {
@@ -206,7 +371,7 @@ pub(crate) fn handle_query_command_in_write_group(
             runtime_indexes,
             Some(write_group_id),
             Some(touched_tables),
-            session_id,
+            &mut session_context,
         )
     })
 
@@ -215,9 +380,9 @@ pub(crate) fn handle_query_command_in_write_group(
 fn inbuilt_runtime_context_for_query(
     _request_id: &str,
     query: &DataQuery,
-    _session_id: &str,
-    connection_id: usize,
-    session_user: Option<String>,
+    session_context: &QueryExecutionSessionContext<'_>,
+    catalogs: &HashMap<String, DatabaseCatalog>,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> InbuiltSqlRuntimeContext {
 
     let system_user = std::env::var("USER")
@@ -230,17 +395,30 @@ fn inbuilt_runtime_context_for_query(
         .map(|user| format!("{}@localhost", user))
         .unwrap_or_else(|| "root@localhost".to_string());
 
-    let session_user = session_user.unwrap_or_else(|| "root".to_string());
+    let session_user = session_context
+        .session_user
+        .clone()
+        .unwrap_or_else(|| "root@localhost".to_string());
+
+    let argument_bindings = resolve_catalog(catalogs, &query.database_id)
+        .map(|catalog| {
+            variables::runtime_variable_bindings(
+                catalog,
+                session_variable_overrides,
+                Some(session_user.as_str()),
+            )
+        })
+        .unwrap_or_default();
 
     InbuiltSqlRuntimeContext {
         current_database: Some(query.database_id.clone()),
         current_user: Some(current_user),
         session_user: Some(session_user),
         system_user: Some(system_user),
-        connection_id: Some(connection_id as i64),
+        connection_id: Some(session_context.connection_id as i64),
         last_insert_id: None,
         version: None,
-        argument_bindings: HashMap::new(),
+        argument_bindings,
     }
     
 }
@@ -254,7 +432,7 @@ fn handle_query_command_internal(
     runtime_indexes: &mut RuntimeIndexStore,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
-    session_id: &str,
+    session_context: &mut QueryExecutionSessionContext<'_>,
 ) -> ConnectorResponse {
 
     let parse_start = Instant::now();
@@ -274,7 +452,7 @@ fn handle_query_command_internal(
                 parse_ms,
                 external_write_group_id,
                 touched_tables,
-                session_id,
+                session_context,
             )
         },
 
@@ -297,7 +475,7 @@ fn handle_query_command_internal_with_parsed(
     parse_ms: u64,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
-    session_id: &str,
+    session_context: &mut QueryExecutionSessionContext<'_>,
 ) -> ConnectorResponse {
 
     let request_start = Instant::now();
@@ -323,7 +501,7 @@ fn handle_query_command_internal_with_parsed(
         parsed,
         external_write_group_id,
         touched_tables,
-        session_id,
+        session_context,
     );
 
     with_query_timings(response, make_query_timings(request_start, parse_ms))

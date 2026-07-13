@@ -861,7 +861,11 @@ async fn execute_app_request_for_session(
 
     if matches!(access_mode, CatalogAccessMode::Read) {
         let app_read = app.read().await;
-        if let Some(response) = app_read.handle_read_only_connector_request_for_session(request, session_id) {
+        let session_exists = app_read.get_session(session_id).is_some();
+
+        if session_exists
+            && let Some(response) = app_read.handle_read_only_connector_request_for_session(request, session_id)
+        {
             return response;
         }
     }

@@ -1,5 +1,10 @@
 use super::*;
-use super::variables::{normalize_variable_name, recursive_cte_variable_rows};
+use super::variables::{
+    effective_recursive_cte_execution_settings,
+    normalize_variable_name,
+    readable_variable_rows,
+    SessionVariableOverrides,
+};
 
 pub(super) fn execute_select_plan_result(
     catalog: &DatabaseCatalog,
@@ -157,6 +162,7 @@ pub(super) fn execute_select_impl(
     _node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> ConnectorResponse {
 
     let statement_sql_lower = statement.sql.to_ascii_lowercase();
@@ -168,6 +174,7 @@ pub(super) fn execute_select_impl(
         wal,
         statement,
         &statement_sql_lower,
+        session_variable_overrides,
     ) {
         return response;
     }
@@ -206,7 +213,15 @@ pub(super) fn execute_select_impl(
 
     };
 
-    execute_select_read_plan(request_id, query, catalog, wal, runtime_indexes, &read_plan)
+    execute_select_read_plan(
+        request_id,
+        query,
+        catalog,
+        wal,
+        runtime_indexes,
+        &read_plan,
+        session_variable_overrides,
+    )
 
 }
 
@@ -217,6 +232,7 @@ fn handle_select_introspection_request(
     wal: &ConcurrentWalManager,
     statement: &SqlRequest,
     statement_sql_lower: &str,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> Option<ConnectorResponse> {
 
     let statement_sql_lower = statement_sql_lower.trim().trim_end_matches(';').trim();
@@ -297,11 +313,15 @@ fn handle_select_introspection_request(
 
     }
 
-    if statement_sql_lower.starts_with("show tables") {
+    if statement_sql_lower.starts_with("show tables") ||
+        parse_show_tables_target_database(&statement.sql).is_some()
+    {
 
-        let target_db = statement
-            .object_name
+        let show_tables_target_db = parse_show_tables_target_database(&statement.sql);
+
+        let target_db = show_tables_target_db
             .as_deref()
+            .or_else(|| statement.object_name.as_deref())
             .unwrap_or(&query.database_id);
 
         let Some(catalog) = resolve_catalog(catalogs, target_db) else {
@@ -348,7 +368,13 @@ fn handle_select_introspection_request(
             ));
         };
 
-        let available = recursive_cte_show_variables(catalog);
+        let session_user = serverlib::inbuilt_sql_runtime_context().session_user;
+        let available = recursive_cte_show_variables(
+            catalog,
+            session_variable_overrides,
+            session_user.as_deref(),
+        );
+
         let variable_filter = match parse_show_variable_filter(statement, is_show_variable) {
             Ok(filter) => filter,
             Err(message) => {
@@ -681,8 +707,41 @@ fn parse_show_indexes_target_table(sql: &str) -> Option<String> {
 
 }
 
-fn recursive_cte_show_variables(catalog: &DatabaseCatalog) -> Vec<(String, String)> {
-    recursive_cte_variable_rows(catalog)
+fn parse_show_tables_target_database(sql: &str) -> Option<String> {
+
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+
+    if tokens.len() != 2 || !tokens[0].eq_ignore_ascii_case("show") {
+        return None;
+    }
+
+    let raw_target = tokens[1].trim();
+    let lowered = raw_target.to_ascii_lowercase();
+
+    if !lowered.ends_with(".tables") {
+        return None;
+    }
+
+    let raw_database = &raw_target[..raw_target.len().saturating_sub(".tables".len())];
+    let normalized = common::normalize_identifier!(
+        raw_database.trim().trim_matches('`').trim_matches('"')
+    );
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+
+}
+
+fn recursive_cte_show_variables(
+    catalog: &DatabaseCatalog,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
+    session_user: Option<&str>,
+) -> Vec<(String, String)> {
+    readable_variable_rows(catalog, session_variable_overrides, session_user)
 }
 
 #[derive(Debug, Clone)]
@@ -699,12 +758,16 @@ fn filter_named_value_rows(
     rows: Vec<(String, String)>,
     filter: &NamedValueFilter,
 ) -> Result<Vec<(String, String)>, String> {
+
     match filter {
+
         NamedValueFilter::All => Ok(rows),
+
         NamedValueFilter::ExactName(name) => Ok(rows
             .into_iter()
             .filter(|(row_name, _)| row_name == name)
             .collect()),
+
         NamedValueFilter::LikePattern {
             pattern,
             escape_char,
@@ -725,13 +788,16 @@ fn filter_named_value_rows(
                 })
                 .collect())
         }
+
     }
+
 }
 
 fn parse_show_variable_filter(
     statement: &SqlRequest,
     is_show_variable: bool,
 ) -> Result<NamedValueFilter, String> {
+
     if is_show_variable {
         return parse_show_variable_name(statement)
             .filter(|name| !name.is_empty())
@@ -740,9 +806,11 @@ fn parse_show_variable_filter(
     }
 
     parse_show_variables_like_pattern(statement)
+
 }
 
 fn parse_show_variables_like_pattern(statement: &SqlRequest) -> Result<NamedValueFilter, String> {
+
     let tokens = statement
         .sql
         .trim()
@@ -791,6 +859,7 @@ fn parse_show_variables_like_pattern(statement: &SqlRequest) -> Result<NamedValu
         pattern,
         escape_char,
     })
+
 }
 
 fn strip_sql_token_quotes(token: &str) -> &str {
@@ -802,6 +871,7 @@ fn strip_sql_token_quotes(token: &str) -> &str {
 }
 
 fn parse_show_variable_name(statement: &SqlRequest) -> Option<String> {
+
     let trimmed = statement.sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
 
@@ -819,6 +889,7 @@ fn parse_show_variable_name(statement: &SqlRequest) -> Option<String> {
         .as_deref()
         .map(normalize_variable_name)
         .filter(|name| !name.is_empty())
+
 }
 
 fn parse_show_slices_target_view(sql: &str) -> Option<String> {
@@ -1074,6 +1145,7 @@ fn apply_show_slices_options(
         };
 
         result.rows.sort_by(|left, right| {
+            
             let left_value = left.get(order_index).map(|cell| String::from_utf8_lossy(cell).to_string()).unwrap_or_default();
             let right_value = right.get(order_index).map(|cell| String::from_utf8_lossy(cell).to_string()).unwrap_or_default();
 
@@ -1084,7 +1156,9 @@ fn apply_show_slices_options(
             } else {
                 ordering
             }
+        
         });
+
     }
 
     if let Some(limit) = options.limit {
@@ -1096,18 +1170,30 @@ fn apply_show_slices_options(
 }
 
 fn parse_show_slices_filter_operator(token: &str) -> Result<ShowSlicesFilterOperator, String> {
+
     match token {
-        "=" => Ok(ShowSlicesFilterOperator::Eq),
-        "!=" | "<>" => Ok(ShowSlicesFilterOperator::NotEq),
-        ">" => Ok(ShowSlicesFilterOperator::Gt),
-        ">=" => Ok(ShowSlicesFilterOperator::Gte),
-        "<" => Ok(ShowSlicesFilterOperator::Lt),
-        "<=" => Ok(ShowSlicesFilterOperator::Lte),
-        _ => Err("show slices WHERE clause uses an unsupported operator".to_string()),
+
+        "="     => Ok(ShowSlicesFilterOperator::Eq),
+        
+        "!=" | 
+        "<>"    => Ok(ShowSlicesFilterOperator::NotEq),
+        
+        ">"     => Ok(ShowSlicesFilterOperator::Gt),
+        
+        ">="    => Ok(ShowSlicesFilterOperator::Gte),
+        
+        "<"     => Ok(ShowSlicesFilterOperator::Lt),
+        
+        "<="    => Ok(ShowSlicesFilterOperator::Lte),
+
+        _       => Err("show slices WHERE clause uses an unsupported operator".to_string()),
+    
     }
+
 }
 
 fn show_slices_filter_matches(row_value: &str, filter: &ShowSlicesFilter) -> bool {
+
     let row_is_null = row_value.eq_ignore_ascii_case("NULL");
     let filter_is_null = filter.value.eq_ignore_ascii_case("NULL");
 
@@ -1121,12 +1207,12 @@ fn show_slices_filter_matches(row_value: &str, filter: &ShowSlicesFilter) -> boo
 
     if let (Ok(left_num), Ok(right_num)) = (row_value.parse::<f64>(), filter.value.parse::<f64>()) {
         return match filter.operator {
-            ShowSlicesFilterOperator::Eq => left_num == right_num,
+            ShowSlicesFilterOperator::Eq    => left_num == right_num,
             ShowSlicesFilterOperator::NotEq => left_num != right_num,
-            ShowSlicesFilterOperator::Gt => left_num > right_num,
-            ShowSlicesFilterOperator::Gte => left_num >= right_num,
-            ShowSlicesFilterOperator::Lt => left_num < right_num,
-            ShowSlicesFilterOperator::Lte => left_num <= right_num,
+            ShowSlicesFilterOperator::Gt    => left_num > right_num,
+            ShowSlicesFilterOperator::Gte   => left_num >= right_num,
+            ShowSlicesFilterOperator::Lt    => left_num < right_num,
+            ShowSlicesFilterOperator::Lte   => left_num <= right_num,
         };
     }
 
@@ -1134,13 +1220,14 @@ fn show_slices_filter_matches(row_value: &str, filter: &ShowSlicesFilter) -> boo
     let right = filter.value.to_ascii_lowercase();
 
     match filter.operator {
-        ShowSlicesFilterOperator::Eq => left == right,
+        ShowSlicesFilterOperator::Eq    => left == right,
         ShowSlicesFilterOperator::NotEq => left != right,
-        ShowSlicesFilterOperator::Gt => left > right,
-        ShowSlicesFilterOperator::Gte => left >= right,
-        ShowSlicesFilterOperator::Lt => left < right,
-        ShowSlicesFilterOperator::Lte => left <= right,
+        ShowSlicesFilterOperator::Gt    => left > right,
+        ShowSlicesFilterOperator::Gte   => left >= right,
+        ShowSlicesFilterOperator::Lt    => left < right,
+        ShowSlicesFilterOperator::Lte   => left <= right,
     }
+
 }
 
 fn compare_slice_order_values(left: &str, right: &str) -> std::cmp::Ordering {
@@ -1389,6 +1476,7 @@ struct MeasureStats {
 }
 
 impl MeasureStats {
+
     fn ingest(&mut self, value: f64) {
         self.count += 1;
 
@@ -1404,18 +1492,24 @@ impl MeasureStats {
             self.sum.map(|sum| sum / self.count as f64)
         }
     }
+
 }
 
 fn parse_numeric_slice_value(raw: &[u8]) -> Option<f64> {
+
     let rendered = serverlib::display_stored_field_value(raw);
     let text = rendered.trim();
+    
     if text.is_empty() || text.eq_ignore_ascii_case("null") {
         return None;
     }
+    
     text.parse::<f64>().ok()
+
 }
 
 fn render_optional_numeric_slice_value(value: Option<f64>) -> String {
+
     let Some(value) = value else {
         return "NULL".to_string();
     };
@@ -1425,10 +1519,13 @@ fn render_optional_numeric_slice_value(value: Option<f64>) -> String {
     } else {
         value.to_string()
     }
+
 }
 
 fn compare_slice_coordinates(left: &[String], right: &[String]) -> std::cmp::Ordering {
+
     for (left_value, right_value) in left.iter().zip(right.iter()) {
+
         let left_is_null = left_value.eq_ignore_ascii_case("NULL");
         let right_is_null = right_value.eq_ignore_ascii_case("NULL");
 
@@ -1443,9 +1540,11 @@ fn compare_slice_coordinates(left: &[String], right: &[String]) -> std::cmp::Ord
         if ordering != std::cmp::Ordering::Equal {
             return ordering;
         }
+
     }
 
     left.len().cmp(&right.len())
+
 }
 
 fn extract_projected_field_names_from_olap_view_sql(olap_sql: &str) -> Option<Vec<String>> {
@@ -1529,9 +1628,11 @@ fn execute_select_read_plan(
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
     read_plan: &serverlib::SelectReadPlan,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> ConnectorResponse {
 
     if read_plan.lock_mode != serverlib::SelectLockMode::None {
+
         if read_plan.is_explain {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
@@ -1568,6 +1669,7 @@ fn execute_select_read_plan(
             wal,
             runtime_indexes,
             read_plan,
+            session_variable_overrides,
         );
 
         if let Err(message) = release_select_lock_targets(catalog, &acquired_targets) {
@@ -1584,6 +1686,7 @@ fn execute_select_read_plan(
         wal,
         runtime_indexes,
         read_plan,
+        session_variable_overrides,
     )
 
 }
@@ -1595,11 +1698,18 @@ fn execute_select_read_plan_without_lock(
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
     read_plan: &serverlib::SelectReadPlan,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> ConnectorResponse {
 
     if !read_plan.ctes.is_empty() {
 
-        let result = match execute_select_with_ctes(catalog, wal, runtime_indexes, read_plan) {
+        let result = match execute_select_with_ctes(
+            catalog,
+            wal,
+            runtime_indexes,
+            read_plan,
+            session_variable_overrides,
+        ) {
             
             Ok(result) => result,
             
@@ -1814,6 +1924,7 @@ fn execute_select_read_plan_without_lock(
         read_plan,
         &access_plan,
         &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
+            
             serverlib::execute_sql_function_with_lookup(
                 catalog,
                 wal,
@@ -1821,8 +1932,10 @@ fn execute_select_read_plan_without_lock(
                 function,
                 lookup,
             )
+
         }),
         &mut |row_map, condition| {
+
             Ok(serverlib::row_matches_select_condition(
                 row_map,
                 condition,
@@ -1830,6 +1943,7 @@ fn execute_select_read_plan_without_lock(
                 wal,
                 runtime_indexes,
             ))
+
         },
     ) {
         Ok(result) => applied_query_response(request_id, result),
@@ -1842,6 +1956,7 @@ fn resolve_select_lock_targets(
     catalog: &DatabaseCatalog,
     read_plan: &serverlib::SelectReadPlan,
 ) -> Result<Vec<String>, String> {
+
     let mut targets = HashSet::<String>::new();
     let mut visited_views = HashSet::<String>::new();
 
@@ -1849,7 +1964,9 @@ fn resolve_select_lock_targets(
 
     let mut ordered = targets.into_iter().collect::<Vec<_>>();
     ordered.sort();
+    
     Ok(ordered)
+
 }
 
 fn collect_select_lock_targets(
@@ -1858,6 +1975,7 @@ fn collect_select_lock_targets(
     targets: &mut HashSet<String>,
     visited_views: &mut HashSet<String>,
 ) -> Result<(), String> {
+    
     for cte in &read_plan.ctes {
         collect_select_lock_targets(catalog, &cte.read_plan, targets, visited_views)?;
         if let Some(recursive) = cte.recursive_read_plan.as_ref() {
@@ -1876,6 +1994,7 @@ fn collect_select_lock_targets(
     }
 
     Ok(())
+
 }
 
 fn collect_select_lock_target_relation(
@@ -1884,6 +2003,7 @@ fn collect_select_lock_target_relation(
     targets: &mut HashSet<String>,
     visited_views: &mut HashSet<String>,
 ) -> Result<(), String> {
+
     if relation_id.trim().is_empty() {
         return Ok(());
     }
@@ -1915,12 +2035,14 @@ fn collect_select_lock_target_relation(
         })?;
 
     collect_select_lock_targets(catalog, &view_read_plan, targets, visited_views)
+
 }
 
 fn acquire_select_lock_targets(
     catalog: &mut DatabaseCatalog,
     lock_targets: &[String],
 ) -> Result<Vec<String>, String> {
+
     let mut acquired = Vec::new();
 
     for table_id in lock_targets {
@@ -1941,12 +2063,14 @@ fn acquire_select_lock_targets(
     }
 
     Ok(acquired)
+
 }
 
 fn release_select_lock_targets(
     catalog: &mut DatabaseCatalog,
     acquired_targets: &[String],
 ) -> Result<(), String> {
+
     for table_id in acquired_targets.iter().rev() {
         if let Err(err) = catalog.abort_table_write(table_id) {
             return Err(format!("table read lock release failed: {err}"));
@@ -1954,6 +2078,7 @@ fn release_select_lock_targets(
     }
 
     Ok(())
+
 }
 
 fn normalize_select_read_plan_for_active_database(
@@ -2471,12 +2596,14 @@ pub(super) fn execute_select_with_ctes(
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
     read_plan: &serverlib::SelectReadPlan,
+    session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> Result<serverlib::SelectExecutionResult, String> {
 
     let mut scoped_handles = Vec::with_capacity(read_plan.ctes.len());
 
     let execution_result = (|| -> Result<serverlib::SelectExecutionResult, String> {
-        let recursive_cte_settings = catalog.recursive_cte_execution_settings().clone();
+        let recursive_cte_settings =
+            effective_recursive_cte_execution_settings(catalog, session_variable_overrides);
 
         for cte in &read_plan.ctes {
 

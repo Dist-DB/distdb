@@ -89,9 +89,10 @@ pub fn evaluate_inbuilt_sql_function_with_lookup(
 ) -> Result<Option<Vec<u8>>, String> {
 
     let mut context = inbuilt_sql_runtime_context();
-    context.argument_bindings.clear();
+    let mut merged_bindings = context.argument_bindings.clone();
 
     for field_name in sql_function_column_references(function) {
+
         if let Some(value) = lookup(&field_name)
             .or_else(|| {
                 field_name
@@ -99,16 +100,18 @@ pub fn evaluate_inbuilt_sql_function_with_lookup(
                     .and_then(|(_, column)| lookup(column))
             })
         {
-            context.argument_bindings.insert(field_name.clone(), value.clone());
+            merged_bindings.insert(field_name.clone(), value.clone());
 
             if let Some((_, column_name)) = field_name.split_once('.') {
-                context
-                    .argument_bindings
+                merged_bindings
                     .entry(column_name.to_string())
                     .or_insert(value);
             }
         }
+
     }
+
+    context.argument_bindings = merged_bindings;
 
     evaluate_inbuilt_sql_function_with_context(function, &context)
 
@@ -151,6 +154,7 @@ pub fn evaluate_expression_sql_to_bytes(
 ) -> Result<Vec<u8>, String> {
 
     let statement_sql = format!("select {expression_sql}");
+    
     let statements = Parser::parse_sql(&MySqlDialect {}, &statement_sql)
         .map_err(|err| format!("expression parse failed: {err}"))?;
 
