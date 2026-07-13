@@ -440,6 +440,7 @@ fn set_variable_maps_to_alter_schema_other_operation() {
     assert_eq!(requests[0].directive, SqlDirective::AlterSchema);
     assert_eq!(requests[0].operation, SqlOperation::AlterOther);
     assert_eq!(requests[0].object_name.as_deref(), Some("autocommit"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::SystemVariablesAdmin));
 }
 
 #[test]

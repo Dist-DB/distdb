@@ -320,7 +320,7 @@ pub(super) fn classify_statement(
         directive,
         operation,
         object_name,
-        required_privilege_for_operation(operation),
+        required_privilege_for_statement(statement, operation),
     ))
 
 }
@@ -398,6 +398,21 @@ fn required_privilege_for_operation(operation: SqlOperation) -> Option<AccountPr
         SqlOperation::AlterView | 
         SqlOperation::AlterOther            => Some(AccountPrivilege::Alter),
         
+    }
+
+}
+
+fn required_privilege_for_statement(
+    statement: &Statement,
+    operation: SqlOperation,
+) -> Option<AccountPrivilege> {
+
+    match statement {
+        
+        Statement::SetVariable { .. }       => Some(AccountPrivilege::SystemVariablesAdmin),
+        
+        _ => required_privilege_for_operation(operation),
+
     }
 
 }

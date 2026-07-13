@@ -1,4 +1,5 @@
 use super::*;
+use super::variables::{normalize_variable_name, recursive_cte_variable_rows};
 
 pub(super) fn execute_select_plan_result(
     catalog: &DatabaseCatalog,
@@ -681,20 +682,7 @@ fn parse_show_indexes_target_table(sql: &str) -> Option<String> {
 }
 
 fn recursive_cte_show_variables(catalog: &DatabaseCatalog) -> Vec<(String, String)> {
-    let settings = catalog.recursive_cte_execution_settings();
-
-    vec![
-        (
-            "cte.max_iterations".to_string(),
-            settings.max_iterations.to_string(),
-        ),
-        ("cte.max_rows".to_string(), settings.max_rows.to_string()),
-        ("cte.timeout_ms".to_string(), settings.timeout_ms.to_string()),
-        (
-            "cte.union_all_repeat_detection".to_string(),
-            settings.detect_repeating_union_all_frontier.to_string(),
-        ),
-    ]
+    recursive_cte_variable_rows(catalog)
 }
 
 #[derive(Debug, Clone)]
@@ -820,7 +808,7 @@ fn parse_show_variable_name(statement: &SqlRequest) -> Option<String> {
     if lowered.starts_with("show variable") {
         let suffix = trimmed["show variable".len()..].trim();
         if !suffix.is_empty() {
-            return Some(normalize_show_variable_name(
+            return Some(normalize_variable_name(
                 suffix.split_whitespace().next().unwrap_or(suffix),
             ));
         }
@@ -829,27 +817,8 @@ fn parse_show_variable_name(statement: &SqlRequest) -> Option<String> {
     statement
         .object_name
         .as_deref()
-        .map(normalize_show_variable_name)
+        .map(normalize_variable_name)
         .filter(|name| !name.is_empty())
-}
-
-fn normalize_show_variable_name(name: &str) -> String {
-    let mut normalized = name
-        .trim()
-        .trim_matches('`')
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_matches(';')
-        .to_ascii_lowercase();
-
-    for prefix in ["@@global.", "@@session.", "@@local.", "@@"] {
-        if let Some(stripped) = normalized.strip_prefix(prefix) {
-            normalized = stripped.to_string();
-            break;
-        }
-    }
-
-    normalized
 }
 
 fn parse_show_slices_target_view(sql: &str) -> Option<String> {

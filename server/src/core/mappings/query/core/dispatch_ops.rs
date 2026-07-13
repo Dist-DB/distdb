@@ -1,4 +1,10 @@
 use super::*;
+use super::variables::{
+    apply_variable_assignment,
+    parse_scoped_variable_target,
+    parse_statement_scope_prefix,
+    VariableScope,
+};
 
 struct QueryExecutionContext<'a> {
     catalogs: &'a mut HashMap<String, DatabaseCatalog>,
@@ -197,11 +203,11 @@ fn execute_alter_other(
         };
     }
 
-    if lowered.starts_with("set names")
-        || lowered == "set names default"
-        || lowered.starts_with("set role")
-        || lowered.starts_with("set time zone")
-        || lowered.starts_with("set transaction")
+    if lowered.starts_with("set names") ||
+        lowered == "set names default" || 
+        lowered.starts_with("set role") ||
+        lowered.starts_with("set time zone") ||
+        lowered.starts_with("set transaction")
     {
         return ConnectorResponse::applied(
             request_id.to_string(),
@@ -228,18 +234,10 @@ fn apply_set_variables(catalog: &mut DatabaseCatalog, sql: &str) -> Result<(), S
 
     let mut assignments_sql = normalized_sql[3..].trim();
 
-    for scope_prefix in ["global", "session", "local"] {
-        if assignments_sql
-            .get(..scope_prefix.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scope_prefix))
-            && assignments_sql
-                .chars()
-                .nth(scope_prefix.len())
-                .is_some_and(char::is_whitespace)
-        {
-            assignments_sql = assignments_sql[scope_prefix.len()..].trim_start();
-            break;
-        }
+    let mut statement_scope = None;
+    if let Some((scope, consumed_len)) = parse_statement_scope_prefix(assignments_sql) {
+        statement_scope = Some(scope);
+        assignments_sql = assignments_sql[consumed_len..].trim_start();
     }
 
     if assignments_sql.is_empty() {
@@ -247,90 +245,53 @@ fn apply_set_variables(catalog: &mut DatabaseCatalog, sql: &str) -> Result<(), S
     }
 
     let mut next_settings = catalog.recursive_cte_execution_settings().clone();
+    let mut seen_variables = HashSet::<String>::new();
 
     for assignment in assignments_sql
         .split(',')
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
     {
+
         let Some((raw_name, raw_value)) = assignment.split_once('=') else {
             return Err(format!("invalid assignment '{assignment}'"));
         };
 
-        let variable_name = normalize_set_variable_name(raw_name);
+        let (assignment_scope, variable_name) = parse_scoped_variable_target(raw_name);
         let variable_value = raw_value.trim();
 
-        match variable_name.as_str() {
-            "cte.max_iterations" => {
-                let parsed = variable_value.parse::<usize>().map_err(|_| {
-                    format!(
-                        "cte.max_iterations expects a positive integer, received '{variable_value}'"
-                    )
-                })?;
+        let effective_scope = assignment_scope
+            .or(statement_scope)
+            .unwrap_or(VariableScope::Session);
 
-                if parsed == 0 {
-                    return Err("cte.max_iterations must be greater than 0".to_string());
-                }
-
-                next_settings.max_iterations = parsed;
-            }
-
-            "cte.max_rows" => {
-                let parsed = variable_value.parse::<usize>().map_err(|_| {
-                    format!("cte.max_rows expects a positive integer, received '{variable_value}'")
-                })?;
-
-                if parsed == 0 {
-                    return Err("cte.max_rows must be greater than 0".to_string());
-                }
-
-                next_settings.max_rows = parsed;
-            }
-
-            "cte.timeout_ms" => {
-                let parsed = variable_value.parse::<u64>().map_err(|_| {
-                    format!("cte.timeout_ms expects a non-negative integer, received '{variable_value}'")
-                })?;
-
-                next_settings.timeout_ms = parsed;
-            }
-
-            "cte.union_all_repeat_detection" => {
-                next_settings.detect_repeating_union_all_frontier =
-                    parse_boolean_set_value(variable_value)?;
-            }
-
-            _ => {
-                return Err(format!("unsupported variable '{raw_name}'"));
-            }
+        if assignment_scope.is_some()
+            && statement_scope.is_some()
+            && assignment_scope != statement_scope
+        {
+            return Err(format!(
+                "conflicting scope for variable '{}': statement scope and assignment scope differ",
+                raw_name.trim()
+            ));
         }
+
+        if !seen_variables.insert(variable_name.clone()) {
+            return Err(format!(
+                "duplicate variable assignment '{}'",
+                raw_name.trim()
+            ));
+        }
+
+        apply_variable_assignment(
+            &mut next_settings,
+            &variable_name,
+            variable_value,
+            effective_scope,
+        )?;
+
     }
 
     catalog.configure_recursive_cte_execution_settings(next_settings);
     Ok(())
-}
-
-fn normalize_set_variable_name(input: &str) -> String {
-    let mut normalized = input.trim().to_ascii_lowercase();
-
-    for prefix in ["@@global.", "@@session.", "@@local.", "@@"] {
-        if let Some(stripped) = normalized.strip_prefix(prefix) {
-            normalized = stripped.to_string();
-            break;
-        }
-    }
-
-    normalized
-}
-
-fn parse_boolean_set_value(input: &str) -> Result<bool, String> {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "on" => Ok(true),
-        "0" | "false" | "off" => Ok(false),
-        other => Err(format!(
-            "cte.union_all_repeat_detection expects true/false (or 1/0), received '{other}'"
-        )),
-    }
 }
 
 fn execute_alter_table(

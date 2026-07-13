@@ -5,6 +5,7 @@ mod ddl_ops;
 mod mutation_ops;
 mod select_ops;
 mod set_ops;
+mod variables;
 mod wal_ops;
 
 

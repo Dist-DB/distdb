@@ -5140,6 +5140,208 @@ fn show_variable_reflects_set_variable_updates() {
 }
 
 #[test]
+fn set_variable_rejects_out_of_range_values() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let response = handle_query_command(
+        "req-set-variable-out-of-range",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.timeout_ms = 3600001".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("cte.timeout_ms is out of allowed range"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn set_variable_rejects_duplicate_assignments() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let response = handle_query_command(
+        "req-set-variable-duplicate-assignment",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.max_rows = 100, cte.max_rows = 200".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("duplicate variable assignment"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn set_variable_rejects_unsupported_global_scope() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let response = handle_query_command(
+        "req-set-variable-global-scope-reject",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set @@global.cte.max_rows = 100".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("does not support 'global' scope"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
+fn set_variable_accepts_explicit_session_scope() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let set_response = handle_query_command(
+        "req-set-variable-session-scope",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set session cte.max_rows = 333".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+    assert!(matches!(set_response.status, connector::ResponseStatus::Applied));
+
+    let show_response = handle_query_command(
+        "req-show-variable-session-scope",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variable cte.max_rows".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(show_response.status, connector::ResponseStatus::Applied));
+    assert_eq!(
+        query_result_rows(show_response),
+        vec![vec!["cte.max_rows".to_string(), "333".to_string()]]
+    );
+}
+
+#[test]
+fn set_variable_rejects_conflicting_statement_and_assignment_scopes() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let response = handle_query_command(
+        "req-set-variable-scope-conflict",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set session @@local.cte.max_rows = 50".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(matches!(response.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected error result")
+    };
+
+    assert!(
+        message.contains("conflicting scope"),
+        "unexpected rejection message: {message}"
+    );
+}
+
+#[test]
 fn show_variables_like_filters_recursive_cte_controls() {
     let mut catalogs = HashMap::new();
     catalogs.insert(
