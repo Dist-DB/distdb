@@ -15,4 +15,5 @@ use self::catalogs::{resolve_catalog, resolve_catalog_mut};
 use self::explain::{explain_inner_statement, explain_join_mutation_plan, explain_mutation_plan};
 
 #[cfg(test)]
+#[path = "mod_test.rs"]
 mod tests;
