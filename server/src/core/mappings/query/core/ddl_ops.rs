@@ -1325,6 +1325,7 @@ fn parse_create_index_spec(
     let open_paren = suffix
         .find('(')
         .ok_or_else(|| "CREATE INDEX missing column list".to_string())?;
+    
     let close_paren = suffix
         .rfind(')')
         .ok_or_else(|| "CREATE INDEX missing closing ')'".to_string())?;
@@ -1782,6 +1783,7 @@ pub(super) fn execute_create_stored_procedure_impl(
     let created_at = common::epoch_nanos!();
 
     if is_create_function {
+        
         let services = serverlib::DefaultSQLProgramaticCompilerServices;
         let return_type = match serverlib::parse_create_function_return_type_from_statement(&statement.sql) {
             Ok(return_type) => return_type,
@@ -1815,6 +1817,7 @@ pub(super) fn execute_create_stored_procedure_impl(
                 format!("create function validation failed: {details}"),
             );
         }
+
     }
 
     let created =

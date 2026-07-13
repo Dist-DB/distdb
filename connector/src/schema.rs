@@ -22,6 +22,7 @@ pub struct FieldSpec {
 }
 
 impl FieldSpec {
+
     pub fn new(name: impl Into<String>, kind: FieldKind) -> Self {
         Self {
             name: name.into(),
@@ -47,6 +48,7 @@ impl FieldSpec {
         self.indexed = FieldIndex::PrimaryKey;
         self
     }
+    
 }
 
 /// A client-side description of a schema change: which table to alter and
@@ -64,6 +66,7 @@ pub struct SchemaChangeRequest {
 }
 
 impl SchemaChangeRequest {
+
     pub fn new(table_id: impl Into<String>) -> Self {
         Self {
             table_id: table_id.into(),
@@ -87,6 +90,7 @@ impl SchemaChangeRequest {
         self.update.push(spec);
         self
     }
+    
 }
 
 #[cfg(test)]

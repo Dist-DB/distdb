@@ -12,13 +12,21 @@ pub enum MeasureAggregation {
 impl std::fmt::Display for MeasureAggregation {
 
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
         match self {
+
             Self::Sum   => write!(f, "SUM"),
+
             Self::Count => write!(f, "COUNT"),
+
             Self::Min   => write!(f, "MIN"),
+
             Self::Max   => write!(f, "MAX"),
+
             Self::Avg   => write!(f, "AVG"),
+
         }
+        
     }
 
 }

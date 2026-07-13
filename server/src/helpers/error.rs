@@ -7,12 +7,19 @@ pub enum ServerAppError {
 }
 
 impl Display for ServerAppError {
+
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+
         match self {
+
             Self::InvalidConfig(msg) => write!(f, "invalid server config: {msg}"),
+
             Self::Runtime(msg) => write!(f, "server runtime error: {msg}"),
+
         }
+
     }
+    
 }
 
 impl std::error::Error for ServerAppError {}

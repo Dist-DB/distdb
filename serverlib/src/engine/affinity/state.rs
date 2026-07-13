@@ -21,14 +21,9 @@ impl std::fmt::Display for AffinityProcessorError {
         
         match self {
 
-            Self::MissingAffinityDocument => {
-                write!(f, "missing affinity document for replication planning")
-            },
+            Self::MissingAffinityDocument => write!(f, "missing affinity document for replication planning"),
 
-            Self::SchemaValidationPartnerRequired => write!(
-                f,
-                "schema change requires at least one reachable partner in same affinity"
-            ),
+            Self::SchemaValidationPartnerRequired => write!(f, "schema change requires at least one reachable partner in same affinity"),
             
         }
     

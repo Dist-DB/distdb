@@ -63,14 +63,17 @@ impl StoredProcedureResourceManifest {
         let mut inbound_parameter_map = BTreeMap::new();
 
         for (index, entry) in entries.iter().enumerate() {
+            
             by_name
                 .entry(entry.name.to_ascii_lowercase())
                 .or_default()
                 .push(index);
+            
             by_scope
                 .entry((entry.kind, entry.direction))
                 .or_default()
                 .push(index);
+
         }
 
         for parameter in inbound_parameters {
@@ -307,9 +310,11 @@ pub fn validate_sql_programatic_procedure_artifact(
 fn validate_sql_programatic_inbound_bindings(
     artifact: &SQLProgramaticCompilationArtifact,
 ) -> Vec<SQLProgramaticValidationIssue> {
+
     let mut issues = Vec::new();
 
     for binding_name in artifact.resources.inbound_parameters().keys() {
+
         let declared_inbound = artifact
             .resources
             .find_by_name(binding_name)
@@ -327,6 +332,7 @@ fn validate_sql_programatic_inbound_bindings(
     }
 
     issues
+
 }
 
 pub trait StoredProcedureCompilerServices {
@@ -529,6 +535,7 @@ where
             resources,
             result_sets,
         }
+
     }
 
     pub fn lower_ir(&self, sql: &str) -> StoredProcedureIr {
@@ -606,22 +613,37 @@ fn normalize_compilation_resources(
 }
 
 fn resource_kind_sort_key(kind: StoredProcedureResourceKind) -> u8 {
+
     match kind {
+
         StoredProcedureResourceKind::Variable => 0,
+
         StoredProcedureResourceKind::Table => 1,
+
         StoredProcedureResourceKind::Dependency => 2,
+
         StoredProcedureResourceKind::ResultSet => 3,
+
         StoredProcedureResourceKind::Function => 4,
+    
     }
+
 }
 
 fn resource_direction_sort_key(direction: StoredProcedureResourceDirection) -> u8 {
+
     match direction {
+
         StoredProcedureResourceDirection::In => 0,
+
         StoredProcedureResourceDirection::Out => 1,
+
         StoredProcedureResourceDirection::Internal => 2,
+
         StoredProcedureResourceDirection::Ref => 3,
+
     }
+    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -151,13 +151,19 @@ impl<T: Transport> ServerP2pRuntime<T> {
         self.running = true;
 
         while self.running {
+            
             match events.recv_timeout(self.idle_wait) {
+                
                 Ok(event) => {
                     let _ = self.handle_event(event)?;
-                }
+                },
+
                 Err(RecvTimeoutError::Timeout) => continue,
+
                 Err(RecvTimeoutError::Disconnected) => break,
+
             }
+
         }
 
         self.running = false;
@@ -174,7 +180,7 @@ impl<T: Transport> ServerP2pRuntime<T> {
             match source.next_event(self.idle_wait) {
                 Some(event) => {
                     let _ = self.handle_event(event)?;
-                }
+                },
                 None => break,
             }
         }

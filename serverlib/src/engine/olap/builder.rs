@@ -202,15 +202,15 @@ fn aggregate(vals: &[f64], agg: MeasureAggregation) -> Option<f64> {
 
     Some(match agg {
 
-        MeasureAggregation::Sum => vals.iter().sum(),
+        MeasureAggregation::Sum     => vals.iter().sum(),
 
-        MeasureAggregation::Count => vals.len() as f64,
+        MeasureAggregation::Count   => vals.len() as f64,
 
-        MeasureAggregation::Min => vals.iter().cloned().fold(f64::INFINITY, f64::min),
+        MeasureAggregation::Min     => vals.iter().cloned().fold(f64::INFINITY, f64::min),
 
-        MeasureAggregation::Max => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        MeasureAggregation::Max     => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
 
-        MeasureAggregation::Avg => {
+        MeasureAggregation::Avg     => {
             let sum: f64 = vals.iter().sum();
             sum / vals.len() as f64
         }

@@ -16,12 +16,19 @@ pub enum DimensionCoordinate {
 impl std::fmt::Display for DimensionCoordinate {
 
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        
         match self {
-            Self::Null          => write!(f, "NULL"),
-            Self::Text(s)       => write!(f, "{s}"),
-            Self::Integer(n)    => write!(f, "{n}"),
-            Self::Boolean(b)    => write!(f, "{b}"),
+            
+            Self::Null                  => write!(f, "NULL"),
+
+            Self::Text(s)      => write!(f, "{s}"),
+
+            Self::Integer(n)      => write!(f, "{n}"),
+
+            Self::Boolean(b)     => write!(f, "{b}"),
+
         }
+
     }
 
 }

@@ -38,6 +38,7 @@ impl ServerSwarmEventSource for StubSwarmSource {
 }
 
 fn node(id: &str, addr: &str) -> PeerNode {
+    
     PeerNode {
         id: id.to_string(),
         addrs: vec![addr.to_string()],

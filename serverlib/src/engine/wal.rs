@@ -1089,6 +1089,7 @@ fn decode_records_parallel(
             let ranges = &frame_ranges[start..end];
 
             handles.push(scope.spawn(move || {
+                
                 let mut records = Vec::with_capacity(ranges.len());
                 let mut first_error = None;
 
@@ -1107,6 +1108,7 @@ fn decode_records_parallel(
                     records,
                     first_error,
                 }
+
             }));
 
         }

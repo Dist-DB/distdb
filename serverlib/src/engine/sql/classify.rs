@@ -185,7 +185,7 @@ pub(super) fn classify_statement(
                 _ => SqlOperation::DropOther,
             };
             (SqlDirective::AlterSchema, operation, object_name)
-        }
+        },
 
         Statement::AlterTable { name, .. } => (
             SqlDirective::AlterSchema,
@@ -262,12 +262,12 @@ pub(super) fn classify_statement(
         Statement::SetTimeZone { .. } |
         Statement::SetTransaction { .. } => {
             (SqlDirective::AlterSchema, SqlOperation::AlterOther, None)
-        }
+        },
 
         Statement::StartTransaction { .. } | 
         Statement::Commit { .. } => {
             (SqlDirective::AlterSchema, SqlOperation::AlterOther, None)
-        }
+        },
 
         Statement::Rollback { savepoint, .. } => (
             SqlDirective::AlterSchema,
@@ -454,7 +454,8 @@ fn first_object_name_in_set_expr(set_expr: &SetExpr) -> Option<String> {
 
         SetExpr::SetOperation { left, right, .. } => {
             first_object_name_in_set_expr(left).or_else(|| first_object_name_in_set_expr(right))
-        }
+        },
+
         _ => None,
 
     }
@@ -553,8 +554,8 @@ pub(super) fn classify_text_fallback(
 
         "show" => {
             if tokens.get(1).is_some_and(|token| {
-                token.eq_ignore_ascii_case("privileges")
-                    || token.eq_ignore_ascii_case("priviledges")
+                token.eq_ignore_ascii_case("privileges") ||
+                token.eq_ignore_ascii_case("priviledges")
             }) {
                 return Some((
                     SqlDirective::Retrieve,
@@ -565,9 +566,9 @@ pub(super) fn classify_text_fallback(
             }
 
             if tokens.get(1).is_some_and(|token| {
-                token.eq_ignore_ascii_case("index")
-                    || token.eq_ignore_ascii_case("indexes")
-                    || token.eq_ignore_ascii_case("keys")
+                token.eq_ignore_ascii_case("index") ||
+                token.eq_ignore_ascii_case("indexes") ||
+                token.eq_ignore_ascii_case("keys")
             }) {
                 let object_name = tokens
                     .iter()
