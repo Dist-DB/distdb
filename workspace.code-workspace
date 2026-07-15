@@ -1,6 +1,10 @@
 {
   "folders": [
     {
+      "name": "website",
+      "path": "./../distdb-web"
+    },
+    {
       "name": ".github",
       "path": "./.github"
     },

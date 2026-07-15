@@ -118,69 +118,113 @@ enum ConnectorWireStream {
 }
 
 impl std::fmt::Debug for ConnectorWireStream {
+    
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
         match self {
+            
             Self::Plain(_) => f.write_str("ConnectorWireStream::Plain"),
+
             Self::Tls(_) => f.write_str("ConnectorWireStream::Tls"),
+
         }
+
     }
+
 }
 
 impl Read for ConnectorWireStream {
+    
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+
         match self {
+
             Self::Plain(stream) => stream.read(buf),
+
             Self::Tls(stream) => stream.read(buf),
+
         }
+
     }
+
 }
 
 impl Write for ConnectorWireStream {
+
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+
         match self {
+
             Self::Plain(stream) => stream.write(buf),
+
             Self::Tls(stream) => stream.write(buf),
+
         }
+
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+
         match self {
+
             Self::Plain(stream) => stream.flush(),
+
             Self::Tls(stream) => stream.flush(),
+
         }
+
     }
+
 }
 
 impl ConnectorWireStream {
+
     fn set_timeouts(
         &mut self,
         read_timeout: Option<std::time::Duration>,
         write_timeout: Option<std::time::Duration>,
     ) -> Result<(), ConnectorError> {
+
         match self {
+
             Self::Plain(stream) => {
+                
                 stream
                     .set_read_timeout(read_timeout)
                     .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+
                 stream
                     .set_write_timeout(write_timeout)
                     .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+                
                 Ok(())
-            }
+            
+            },
+
             Self::Tls(stream) => {
+
                 let tcp = stream.get_mut();
+
                 tcp.set_read_timeout(read_timeout)
                     .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+
                 tcp.set_write_timeout(write_timeout)
                     .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+
                 Ok(())
+
             }
+
         }
+
     }
+
 }
 
 impl ConnectorP2pTransport {
+
     pub fn new(config: ConnectorP2pConfig) -> Self {
+
         Self {
             config,
             peers: HashMap::new(),
@@ -189,13 +233,16 @@ impl ConnectorP2pTransport {
             live_connection: Arc::new(Mutex::new(None)),
             cached_ca_pem: Arc::new(Mutex::new(None)),
         }
+
     }
 
     pub fn cached_ca_pem(&self) -> Option<String> {
+
         self.cached_ca_pem
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
+
     }
 
     pub fn discovery_mode(&self) -> ConnectorDiscoveryMode {
@@ -233,11 +280,13 @@ impl ConnectorP2pTransport {
             .peers
             .iter()
             .filter(|(existing_peer_id, existing_peer)| {
+
                 **existing_peer_id != peer_id
                     && existing_peer
                         .addrs
                         .iter()
                         .any(|existing_addr| peer.addrs.iter().any(|new_addr| new_addr == existing_addr))
+                        
             })
             .map(|(existing_peer_id, _)| existing_peer_id.clone())
             .collect::<Vec<_>>();
@@ -287,7 +336,9 @@ impl ConnectorP2pTransport {
     }
 
     pub fn select_peer(&mut self, peer_id: impl AsRef<str>) -> Result<(), ConnectorError> {
+
         let peer_id = peer_id.as_ref();
+
         if self.peers.contains_key(peer_id) {
             if self.active_peer_id.as_deref() != Some(peer_id) {
                 self.clear_live_connection("peer switch");
@@ -300,17 +351,21 @@ impl ConnectorP2pTransport {
         Err(ConnectorError::Transport(format!(
             "peer '{peer_id}' is not discovered"
         )))
+
     }
 
     pub fn active_peer(&self) -> Option<&ConnectorPeer> {
+
         self.active_peer_id
             .as_ref()
             .and_then(|peer_id| self.peers.get(peer_id))
+
     }
 
     /// Queue a response by request id. This is used by tests and by future
     /// network handlers that decode p2p responses and hand them to the client.
     pub fn queue_response(&mut self, response: ConnectorResponse) {
+
         log::debug!(
             "connector transport queue response request_id={} status={:?}",
             response.request_id,
@@ -318,6 +373,7 @@ impl ConnectorP2pTransport {
         );
         self.queued_responses
             .insert(response.request_id.clone(), response);
+
     }
 
     pub fn queued_response_count(&self) -> usize {
@@ -362,6 +418,7 @@ impl ConnectorP2pTransport {
         read_timeout: Option<std::time::Duration>,
         write_timeout: Option<std::time::Duration>,
     ) -> Result<(), ConnectorError> {
+
         let mut connection = self
             .live_connection
             .lock()
@@ -374,6 +431,7 @@ impl ConnectorP2pTransport {
         };
 
         live.stream.set_timeouts(read_timeout, write_timeout)
+
     }
 
     pub fn set_session_auth_token(&self, token: Option<String>) -> Result<(), ConnectorError> {
@@ -439,6 +497,7 @@ impl ConnectorP2pTransport {
             }
         
     }
+
 }
 
 impl ConnectorTransport for ConnectorP2pTransport {
@@ -589,7 +648,9 @@ fn ensure_live_connection(
         transport.config.tls.mode,
         common::TlsMode::Optional | common::TlsMode::Required
     ) && transport.config.tls.ca_path.is_none() {
+
         let cached = transport.cached_ca_pem();
+        
         if cached.is_none() {
             log::debug!(
                 "connector attempting CA bootstrap from peer={} addr={}",
@@ -597,7 +658,9 @@ fn ensure_live_connection(
                 socket_addr
             );
             match fetch_ca_pem_from_peer(&socket_addr, &peer.peer_id) {
+
                 Ok(Some(pem)) => {
+
                     log::info!(
                         "connector auto-discovered CA cert from peer={} addr={}",
                         peer.peer_id,
@@ -607,11 +670,14 @@ fn ensure_live_connection(
                         *guard = Some(pem.clone());
                     }
                     Some(pem)
-                }
+
+                },
+
                 Ok(None) => {
                     log::debug!("CA auto-discovery from {} returned no cert", socket_addr);
                     None
-                }
+                },
+
                 Err(err) => {
                     if let ConnectorError::Rejected(message) = &err
                         && message.to_ascii_lowercase().contains("bootstrapp") {
@@ -620,7 +686,9 @@ fn ensure_live_connection(
                     log::debug!("CA auto-discovery from {} failed: {}", socket_addr, err);
                     None
                 }
+
             }
+
         } else {
             log::debug!(
                 "connector using cached CA cert for peer={} addr={}",
@@ -629,6 +697,7 @@ fn ensure_live_connection(
             );
             cached
         }
+
     } else {
         None
     };
@@ -646,6 +715,7 @@ fn ensure_live_connection(
 
     let handshake_timeout_secs = connector_handshake_timeout_secs();
     let mut stream = connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref)?;
+
     stream.set_timeouts(
         Some(std::time::Duration::from_secs(handshake_timeout_secs)),
         Some(std::time::Duration::from_secs(handshake_timeout_secs)),
@@ -856,8 +926,10 @@ fn connect_tls_stream(
 
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+    
     tcp.set_write_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+    
     tcp.set_nodelay(true)
         .map_err(|e| ConnectorError::Transport(format!("failed to set TCP_NODELAY: {e}")))?;
 
@@ -877,16 +949,20 @@ fn connect_tls_stream(
 }
 
 fn connect_plain_stream(socket_addr: &str) -> Result<ConnectorWireStream, ConnectorError> {
+
     let tcp = connect_tcp_with_timeout(socket_addr)?;
 
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
+    
     tcp.set_write_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
+
     tcp.set_nodelay(true)
         .map_err(|e| ConnectorError::Transport(format!("failed to set TCP_NODELAY: {e}")))?;
 
     Ok(ConnectorWireStream::Plain(tcp))
+
 }
 
 fn connect_connector_stream(
@@ -1059,6 +1135,7 @@ fn normalize_peer_addr(raw: &str) -> String {
 }
 
 fn connect_tcp_with_timeout(socket_addr: &str) -> Result<TcpStream, ConnectorError> {
+
     let timeout = std::time::Duration::from_secs(connector_connect_timeout_secs());
 
     let addrs = socket_addr
@@ -1092,6 +1169,7 @@ fn connect_tcp_with_timeout(socket_addr: &str) -> Result<TcpStream, ConnectorErr
     Err(ConnectorError::Transport(format!(
         "failed to connect to {socket_addr}: {err}",
     )))
+
 }
 
 fn extract_session_id(message: &str) -> Option<String> {
