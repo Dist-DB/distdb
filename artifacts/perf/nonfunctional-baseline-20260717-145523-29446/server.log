@@ -1,0 +1,6 @@
+Distdb server (www.distdb.com)
+Copyright (c) 2026 Sam Colak. All rights reserved.
+[2026-07-17T12:55:23Z INFO  server] starting server node_id=perf-baseline-node with runtime config: data_dir=/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145523-29446, listen_addr=127.0.0.1, port=19401, tls=off, ca_root=false, services=affinity.replication,p2p.discovery,sql.query,tls.ca.distribution
+[2026-07-17T12:55:23Z INFO  server::core::app::state] node data directory: /Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145523-29446/perf-baseline-node
+[2026-07-17T12:55:23Z INFO  server::core::app::state] server app created for node_id=perf-baseline-node
+Error: Os { code: 48, kind: AddrInUse, message: "Address already in use" }

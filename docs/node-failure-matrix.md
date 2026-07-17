@@ -29,14 +29,14 @@ The matrix provides a single operational reference for:
 | Network partition (affinity peers split) | No data safety claim beyond documented bounded model without full partition proof | Divergence risk until healing | Requires explicit partition reconvergence validation | Implemented/Partial | `scripts/e2e/partition_reconvergence.sh`; `scripts/e2e/unilateral_write_delayed_heal.sh`; `scripts/e2e/repeated_partition_heal_cycles.sh` (deterministic reconvergence + delayed-heal + repeated-cycle invariants); see `docs/partition-split-brain-matrix.md` for SB-001..SB-004 closure tracking |
 | Concurrent writers same logical data path | Conflict/isolation controls should prevent invalid visibility outcomes in documented scope | Writes may serialize/reject based on checks | Deterministic result per defined isolation contract | Implemented/Partial | `scripts/e2e/split_brain_dual_primary.sh`; `server/src/core/app/mod_test.rs::snapshot_isolation_rejects_concurrent_write_write_conflicts`; `server/src/core/app/mod_test.rs::snapshot_isolation_keeps_repeatable_reads_within_transaction`; `server/src/core/app/mod_test.rs::snapshot_isolation_transactional_reads_see_own_staged_writes` |
 | Concurrent writers across relations/streams | Stream-local durability preserved | Outcomes bounded by current lock/isolation behavior | Requires explicit multi-stream contention validation | Implemented/Partial | `server/src/core/app/mod_test.rs::commit_shares_one_group_id_across_touched_tables` (group-shared commit path validated); full adversarial multi-stream writer matrix still required |
-| Rolling restart in multi-node setup | No claim yet of full rolling-upgrade safety | Service degradation possible | Requires published rolling-upgrade guarantee set | Planned | Required beta gate |
+| Rolling restart in multi-node setup | Adjacent-version rolling restart and rollback path preserves bounded service continuity in drill scope | Service remains available from peer that is not under restart | Restarted node returns to ready and resumes local state checks across N->N+1->N transitions | Implemented/Partial | `scripts/e2e/rolling_restart_upgrade_safety.sh`; `.github/workflows/operability-upgrade-safety.yml`; `.github/workflows/nightly-evidence.yml`; `docs/operability-upgrade-safety.md` |
 
 ## Required Beta Evidence Additions
 
 1. Complete `docs/partition-split-brain-matrix.md` to `Implemented/Tested` for all `SB-*` scenarios with expected vs observed outcomes.
 2. Concurrent-writer stress suite across contention classes.
 3. Recovery timing and convergence metrics publication.
-4. Rolling upgrade behavior with backward/forward compatibility assertions.
+4. Cross-version rolling upgrade matrix expansion with explicit backward/forward compatibility window assertions.
 
 ## Operator Guidance (Alpha)
 

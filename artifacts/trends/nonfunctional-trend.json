@@ -25,5 +25,59 @@
          "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-134647-37910/summary.json"
       },
       "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-134647-37910/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T12:54:57Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145441-26293",
+         "config" : {
+            "mixed_ops" : 80,
+            "read_ops" : 90,
+            "seed_rows" : 200,
+            "write_ops" : 60
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T12:54:57Z",
+         "git_sha" : "ebf7b1b",
+         "kind" : "nonfunctional_baseline",
+         "profiles" : [
+            "write_heavy",
+            "read_heavy",
+            "mixed",
+            "recovery"
+         ],
+         "run_id" : "20260717-145441-26293",
+         "started_at_utc" : "2026-07-17T12:54:41Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145441-26293/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145441-26293/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T12:55:39Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145523-29446",
+         "config" : {
+            "mixed_ops" : 80,
+            "read_ops" : 90,
+            "seed_rows" : 200,
+            "write_ops" : 60
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T12:55:39Z",
+         "git_sha" : "ebf7b1b",
+         "kind" : "nonfunctional_baseline",
+         "profiles" : [
+            "write_heavy",
+            "read_heavy",
+            "mixed",
+            "recovery"
+         ],
+         "run_id" : "20260717-145523-29446",
+         "started_at_utc" : "2026-07-17T12:55:23Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145523-29446/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-145523-29446/manifest.json"
    }
 ]

@@ -14,5 +14,21 @@
          "status" : "pass"
       },
       "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/security/security-baseline-20260717-134642-37819/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T12:53:29Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/security/security-baseline-20260717-143941-9600",
+         "exit_code" : 0,
+         "findings_log" : "/Users/samcolak/Source Code/rust/distdb/distdb/docs/security-findings-log.md",
+         "finished_at_utc" : "2026-07-17T12:39:55Z",
+         "git_sha" : "0211694",
+         "kind" : "security_adversarial_baseline",
+         "log_file" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/security/security-baseline-20260717-143941-9600/run.log",
+         "run_id" : "20260717-143941-9600",
+         "started_at_utc" : "2026-07-17T12:39:41Z",
+         "status" : "pass"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/security/security-baseline-20260717-143941-9600/manifest.json"
    }
 ]

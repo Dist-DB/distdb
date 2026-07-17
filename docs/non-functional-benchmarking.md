@@ -42,6 +42,11 @@ Trend ledger append command:
 	- `nonfunctional-trend.json`
 	- `split-brain-trend.json`
 
+One-command governance accumulation cycle:
+
+- `bash scripts/perf/run_nonfunctional_governance_cycle.sh`
+- runs baseline + threshold checks + trend append, then reports current trend-entry depth and remaining runs needed to satisfy governance minimum history target.
+
 ## Profile Definitions
 
 1. write-heavy
@@ -79,6 +84,37 @@ To move from `Yellow` to `Green`:
 1. maintain trend history,
 2. enforce regression budgets,
 3. close critical regressions before release declaration.
+
+## Governance Policy
+
+### Ownership and cadence
+
+- primary owners: `server` and `serverlib` maintainers.
+- required review cadence: weekly review of latest `nonfunctional-trend.json` entries.
+- required review trigger: any threshold failure in CI/nightly requires same-day owner acknowledgement.
+
+### Regression disposition model
+
+Classify each failed non-functional run as one of:
+
+1. `Critical regression`: performance/recovery degradation blocks release progression until fixed or explicitly accepted with mitigation and expiry.
+2. `Accepted variance`: bounded environment/noise-related deviation with documented rationale and follow-up window.
+3. `Invalid run`: infrastructure/test harness issue; rerun required and original run excluded from posture decisions.
+
+All failed runs must be logged with disposition in release-tracking updates before release posture changes.
+
+### Escalation rules
+
+1. one `Critical regression` in the latest nightly window blocks non-functional promotion and release posture upgrades.
+2. two consecutive non-functional threshold failures (any profile) trigger mandatory owner review and remediation plan.
+3. unresolved critical non-functional regressions are incompatible with `Beta Ready` posture.
+
+### Minimum trend-history gate
+
+For confidence claims beyond initial baseline:
+
+- require at least `3` ingested non-functional trend entries in `artifacts/trends/nonfunctional-trend.json`.
+- enforce this gate in evidence validation for scheduled/nightly runs.
 
 ## Initial Regression Budgets
 

@@ -47,6 +47,8 @@ For design constraints and implementation ownership:
 - [non-functional-benchmarking.md](non-functional-benchmarking.md)
 - [security-adversarial-matrix.md](security-adversarial-matrix.md)
 - [security-findings-log.md](security-findings-log.md)
+- [operability-upgrade-safety.md](operability-upgrade-safety.md)
+- [operability-runbooks.md](operability-runbooks.md)
 
 ## Platform Overview
 
@@ -149,6 +151,8 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - [non-functional-benchmarking.md](non-functional-benchmarking.md): baseline performance/recovery benchmark profiles and evidence format.
 - [security-adversarial-matrix.md](security-adversarial-matrix.md): adversarial security scenario matrix and baseline evidence status.
 - [security-findings-log.md](security-findings-log.md): security severity rubric, triage disposition model, and tracked findings evidence.
+- [operability-upgrade-safety.md](operability-upgrade-safety.md): rolling restart and upgrade-safety contract, compatibility expectations, and drill evidence.
+- [operability-runbooks.md](operability-runbooks.md): minimum operator runbooks for crash/restart, lag recovery, degraded peers, and rollback.
 
 ### Feature coverage
 
@@ -165,6 +169,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - If you need non-functional evidence, read [non-functional-benchmarking.md](non-functional-benchmarking.md).
 - If you need security confidence evidence, read [security-adversarial-matrix.md](security-adversarial-matrix.md).
 - If you need security finding triage/disposition detail, read [security-findings-log.md](security-findings-log.md).
+- If you need operability and upgrade confidence evidence, read [operability-upgrade-safety.md](operability-upgrade-safety.md) and [operability-runbooks.md](operability-runbooks.md).
 - If you are changing execution behavior, read [architecture-boundaries.md](architecture-boundaries.md), [select-architecture.md](select-architecture.md), and the relevant compliance page before editing code.
 
 ## Liability Disclaimer

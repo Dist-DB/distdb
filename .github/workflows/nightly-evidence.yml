@@ -17,9 +17,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Build current binaries
+        run: |
+          set -euo pipefail
+          (cd server && cargo build --quiet)
+          (cd console && cargo build --quiet)
+
+      - name: Build previous server binary for cross-version operability drill
+        run: |
+          set -euo pipefail
+          previous_ref="${OPERABILITY_OLD_REF:-HEAD~1}"
+          prev_tree="$RUNNER_TEMP/distdb-prev"
+          git worktree add --detach "$prev_tree" "$previous_ref"
+          (cd "$prev_tree/server" && cargo build --quiet)
+          cp "$prev_tree/server/target/debug/server" "$RUNNER_TEMP/server-old"
+          git worktree remove --force "$prev_tree"
 
       - name: Run split-brain evidence bundle
         run: bash scripts/e2e/split_brain_evidence_bundle.sh
@@ -30,14 +48,24 @@ jobs:
       - name: Run non-functional baseline
         run: bash scripts/perf/nonfunctional_baseline.sh
 
+      - name: Run operability rolling restart and upgrade-safety drill
+        env:
+          DISTDB_SERVER_BIN_OLD: ${{ runner.temp }}/server-old
+          DISTDB_SERVER_BIN_NEW: ${{ github.workspace }}/server/target/debug/server
+        run: bash scripts/e2e/rolling_restart_upgrade_safety.sh
+
       - name: Check non-functional regression thresholds
         run: bash scripts/perf/check_nonfunctional_thresholds.sh
 
-      - name: Check artifact evidence quality
-        run: bash scripts/check_artifact_evidence_quality.sh
-
       - name: Append artifact trend ledgers
         run: bash scripts/append_artifact_trends.sh
+
+      - name: Check artifact evidence quality
+        env:
+          DISTDB_REQUIRE_OPERABILITY_EVIDENCE: "true"
+          DISTDB_REQUIRE_NONFUNCTIONAL_TREND_HISTORY: "true"
+          DISTDB_NONFUNCTIONAL_TREND_MIN_ENTRIES: "3"
+        run: bash scripts/check_artifact_evidence_quality.sh
 
       - name: Resolve nightly artifact directories
         id: nightly_artifacts
@@ -47,14 +75,17 @@ jobs:
           latest_e2e_dir="$(ls -dt artifacts/e2e/split-brain-evidence-* 2>/dev/null | head -n 1 || true)"
           latest_security_dir="$(ls -dt artifacts/security/security-baseline-* 2>/dev/null | head -n 1 || true)"
           latest_perf_dir="$(ls -dt artifacts/perf/nonfunctional-baseline-* 2>/dev/null | head -n 1 || true)"
+          latest_operability_dir="$(ls -dt artifacts/e2e/rolling-upgrade-safety-* 2>/dev/null | head -n 1 || true)"
 
           [[ -n "$latest_e2e_dir" ]] || { echo "no split-brain artifact directory found"; exit 1; }
           [[ -n "$latest_security_dir" ]] || { echo "no security artifact directory found"; exit 1; }
           [[ -n "$latest_perf_dir" ]] || { echo "no non-functional artifact directory found"; exit 1; }
+          [[ -n "$latest_operability_dir" ]] || { echo "no operability artifact directory found"; exit 1; }
 
           echo "latest_e2e_dir=$latest_e2e_dir" >> "$GITHUB_OUTPUT"
           echo "latest_security_dir=$latest_security_dir" >> "$GITHUB_OUTPUT"
           echo "latest_perf_dir=$latest_perf_dir" >> "$GITHUB_OUTPUT"
+          echo "latest_operability_dir=$latest_operability_dir" >> "$GITHUB_OUTPUT"
 
       - name: Upload nightly evidence artifacts
         uses: actions/upload-artifact@v4
@@ -64,5 +95,6 @@ jobs:
             ${{ steps.nightly_artifacts.outputs.latest_e2e_dir }}
             ${{ steps.nightly_artifacts.outputs.latest_security_dir }}
             ${{ steps.nightly_artifacts.outputs.latest_perf_dir }}
+            ${{ steps.nightly_artifacts.outputs.latest_operability_dir }}
             artifacts/trends/*.json
           if-no-files-found: error

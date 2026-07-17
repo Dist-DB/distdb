@@ -1,0 +1,33 @@
+Distdb server (www.distdb.com)
+Copyright (c) 2026 Sam Colak. All rights reserved.
+[2026-07-17T13:00:50Z INFO  server] starting server node_id=op-node-b with runtime config: data_dir=/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-20260717-150048-34964/node-b, listen_addr=127.0.0.1, port=19502, tls=off, ca_root=false, services=affinity.replication,p2p.discovery,sql.query,tls.ca.distribution
+[2026-07-17T13:00:50Z INFO  server::core::app::state] node data directory: /Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-20260717-150048-34964/node-b/op-node-b
+[2026-07-17T13:00:50Z INFO  server::core::app::state] server app created for node_id=op-node-b
+[2026-07-17T13:00:50Z INFO  server] connector request listener bound at 127.0.0.1:19502
+[2026-07-17T13:00:50Z INFO  server::core::app::lifecycle] loaded catalog '/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-20260717-150048-34964/node-b/op-node-b/539faf2715f7f97a.dbcat' for database='539faf2715f7f97a' with 0 table identifier(s) before WAL replay
+[2026-07-17T13:00:50Z INFO  server::core::app::lifecycle] loaded catalog '/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-20260717-150048-34964/node-b/op-node-b/6959545634f300eb.dbcat' for database='6959545634f300eb' with 0 table identifier(s) before WAL replay
+[2026-07-17T13:00:50Z INFO  server::core::app::lifecycle] default system catalog 'main' already present in loaded catalogs
+[2026-07-17T13:00:50Z INFO  server::core::app::lifecycle] replayed 3 catalog transaction(s) for database='539faf2715f7f97a' elapsed_ms=0 tables_after_replay=1
+[2026-07-17T13:00:50Z INFO  server::core::app::lifecycle] catalog replay complete catalogs=2 tables=1 transactions=3 elapsed_ms=0
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Ready next=Indexing
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=539faf2715f7f97a previous=Ready next=Indexing
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019f702a50a27491a60a3a035e5144cb table_id=heartbeat previous=Load next=Indexing
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap mode materialize_non_primary=true preload_accessors_on_bootstrap=true warm_equality_cache_on_bootstrap=true non_primary_field_allowlist=<none> non_primary_index_allowlist=<none>
+[2026-07-17T13:00:50Z WARN  serverlib::engine::database::runtime_index] runtime index snapshot save skipped table=heartbeat reason=missing runtime index state 'pri:heartbeat:id'
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap table complete database=539faf2715f7f97a table=heartbeat indexes=1 live_rows=4 live_row_materialization_ms=0 index_rebuild_ms=0 equality_warm_ms=0 elapsed_ms=20
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap complete tables=1 indexes=1 live_rows=4 elapsed_ms=21
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Indexing next=Ready
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=539faf2715f7f97a previous=Indexing next=Ready
+[2026-07-17T13:00:50Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019f702a50a27491a60a3a035e5144cb table_id=heartbeat previous=Indexing next=Ready
+[2026-07-17T13:00:50Z INFO  server::core::app::state] server bootstrap complete for node_id=op-node-b data_dir=/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-20260717-150048-34964/node-b/op-node-b catalogs=2 tables=1 load_catalogs_ms=0 replay_catalog_wal_ms=0 runtime_index_bootstrap_ms=21 total_ms=22
+[2026-07-17T13:00:50Z INFO  server] server runtime initialized for node=op-node-b with 2 active WAL worker(s) and 1 probe records
+[2026-07-17T13:00:50Z INFO  server] connector bootstrap gate opened; server is ready to accept requests
+[2026-07-17T13:00:50Z INFO  server] server process is running; press Ctrl+C to shutdown
+[2026-07-17T13:00:50Z INFO  server] connector peer connected from 127.0.0.1:53687 (active_connections=1)
+[2026-07-17T13:00:50Z INFO  server] connector peer connected from 127.0.0.1:53688 (active_connections=2)
+[2026-07-17T13:00:50Z INFO  server] connector peer disconnected from 127.0.0.1:53687 (active_connections=1)
+[2026-07-17T13:00:50Z INFO  server] connector peer disconnected from 127.0.0.1:53688 (active_connections=0)
+[2026-07-17T13:00:50Z INFO  server] connector peer connected from 127.0.0.1:53693 (active_connections=1)
+[2026-07-17T13:00:50Z INFO  server] connector peer connected from 127.0.0.1:53694 (active_connections=2)
+[2026-07-17T13:00:50Z INFO  server] connector peer disconnected from 127.0.0.1:53693 (active_connections=1)
+[2026-07-17T13:00:50Z INFO  server] connector peer disconnected from 127.0.0.1:53694 (active_connections=0)

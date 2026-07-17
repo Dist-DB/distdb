@@ -1,0 +1,64 @@
+name: operability-upgrade-safety
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 5 * * 1"
+
+concurrency:
+  group: operability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build current binaries
+        run: |
+          set -euo pipefail
+          (cd server && cargo build --quiet)
+          (cd console && cargo build --quiet)
+
+      - name: Build previous server binary
+        run: |
+          set -euo pipefail
+          previous_ref="${OPERABILITY_OLD_REF:-HEAD~1}"
+          prev_tree="$RUNNER_TEMP/distdb-prev"
+          git worktree add --detach "$prev_tree" "$previous_ref"
+          (cd "$prev_tree/server" && cargo build --quiet)
+          cp "$prev_tree/server/target/debug/server" "$RUNNER_TEMP/server-old"
+          git worktree remove --force "$prev_tree"
+
+      - name: Run cross-version rolling restart and upgrade-safety drill
+        env:
+          DISTDB_SERVER_BIN_OLD: ${{ runner.temp }}/server-old
+          DISTDB_SERVER_BIN_NEW: ${{ github.workspace }}/server/target/debug/server
+        run: bash scripts/e2e/rolling_restart_upgrade_safety.sh
+
+      - name: Resolve operability artifact directory
+        id: operability_artifacts
+        run: |
+          set -euo pipefail
+          latest_dir="$(ls -dt artifacts/e2e/rolling-upgrade-safety-* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "$latest_dir" ]]; then
+            echo "no operability artifact directory found"
+            exit 1
+          fi
+          echo "latest_dir=$latest_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload operability drill artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: operability-upgrade-safety-${{ github.run_id }}
+          path: ${{ steps.operability_artifacts.outputs.latest_dir }}
+          if-no-files-found: error
