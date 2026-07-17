@@ -42,6 +42,10 @@ Trend ledger append command:
 	- `nonfunctional-trend.json`
 	- `split-brain-trend.json`
 
+Findings governance log:
+
+- `docs/nonfunctional-findings-log.md`
+
 One-command governance accumulation cycle:
 
 - `bash scripts/perf/run_nonfunctional_governance_cycle.sh`
