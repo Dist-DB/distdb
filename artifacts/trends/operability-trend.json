@@ -1,0 +1,209 @@
+[
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:21Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161303-49139",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~1",
+            "window_label" : "head-1"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:13:06Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161303-49139",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:13:03Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161303-49139/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161303-49139/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:21Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161306-49257",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~2",
+            "window_label" : "head-2"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:13:09Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161306-49257",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:13:06Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161306-49257/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161306-49257/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:21Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161309-48780",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~3",
+            "window_label" : "head-3"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:13:11Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161309-48780",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:13:09Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161309-48780/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161309-48780/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:42Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161255-48781",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~1",
+            "window_label" : "head-1"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:12:58Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161255-48781",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:12:55Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161255-48781/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161255-48781/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:42Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161127-45701",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~1",
+            "window_label" : "head-1"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:11:30Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161127-45701",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:11:27Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161127-45701/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-1-20260717-161127-45701/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:43Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161258-48899",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~2",
+            "window_label" : "head-2"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:13:01Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161258-48899",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:12:58Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161258-48899/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161258-48899/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:43Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161130-45817",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~2",
+            "window_label" : "head-2"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:11:33Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161130-45817",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:11:30Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161130-45817/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-2-20260717-161130-45817/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:43Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161301-49019",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~3",
+            "window_label" : "head-3"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:13:03Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161301-49019",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:13:01Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161301-49019/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161301-49019/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-07-17T14:13:43Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161133-45700",
+         "compatibility_window" : {
+            "old_ref" : "HEAD~3",
+            "window_label" : "head-3"
+         },
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-07-17T14:11:36Z",
+         "git_sha" : "d594263",
+         "kind" : "operability_rolling_upgrade_safety",
+         "run_id" : "20260717-161133-45700",
+         "server_bin_new" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_bin_old" : "/Users/samcolak/Source Code/rust/distdb/distdb/server/target/debug/server",
+         "server_sha256_new" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "server_sha256_old" : "9a1b7b01a1f7855e7d990426b88cfdd6777514f285cd506870e0d5d985c3b0f4",
+         "started_at_utc" : "2026-07-17T14:11:33Z",
+         "status" : "pass",
+         "summary_json" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161133-45700/summary.json"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-head-3-20260717-161133-45700/manifest.json"
+   }
+]

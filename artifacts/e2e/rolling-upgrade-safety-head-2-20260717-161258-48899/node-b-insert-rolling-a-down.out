@@ -1,0 +1,16 @@
+[2026-07-17T14:12:59Z INFO  console] console bootstrap peers: /ip4/127.0.0.1/tcp/19502
+[2026-07-17T14:12:59Z INFO  peerlib::connector::transport] connector transport active peer set to /ip4/127.0.0.1/tcp/19502
+[2026-07-17T14:12:59Z INFO  peerlib::connector::transport] connector transport established persistent stream peer=/ip4/127.0.0.1/tcp/19502 addr=127.0.0.1:19502
+[2026-07-17T14:12:59Z INFO  peerlib::connector::transport] connector transport active peer set to op-node-b
+[2026-07-17T14:12:59Z INFO  peerlib::connector::transport] connector transport established persistent stream peer=op-node-b addr=127.0.0.1:19502
+[2026-07-17T14:12:59Z INFO  console] notification: connection to op-node-b is successful (session root@op-node-b)
+[2026-07-17T14:12:59Z INFO  console] session_id=043dc1fdb9d979d5fb8045058e68a7a8
+notification: startup peer connection established
+Distdb console (www.distdb.com)
+Copyright (c) 2026 Sam Colak. All rights reserved.
+Type help for commands, or \q to quit
+Default delimiter is ';' (use delimiter <token> to change)
+ok: 0 row(s) affected
+[2026-07-17T14:12:59Z INFO  console] database switched to opsdb
+ok: 1 row(s) affected
+[2026-07-17T14:12:59Z INFO  peerlib::connector::transport] connector transport disconnected peer=op-node-b reason=disconnect directive
