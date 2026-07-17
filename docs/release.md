@@ -4,13 +4,13 @@ This page tracks current release posture, what is in scope for alpha, and what o
 
 ## Current Recommendation
 
-DistDB is ready for a **Developer Alpha** release, with explicitly scoped expectations.
+DistDB is ready for a **Beta Ready** release, with explicitly scoped expectations.
 
-The platform is not yet positioned as broad MySQL parity. It is positioned as a documented, partially complete SQL/runtime system with working durability/replay and validated core execution paths.
+The platform is not positioned as broad MySQL parity. It is positioned as a documented, partially complete SQL/runtime system with working durability/replay, validated core execution paths, and objective beta confidence gates.
 
-## What Alpha Means Here
+## What Beta Ready Means Here
 
-Alpha scope is:
+Beta Ready scope is:
 
 - core SQL execution paths are wired for the documented statement set,
 - durability/replay behavior is validated for schema and index lifecycle changes,
@@ -28,9 +28,9 @@ Alpha scope is:
 	- `serverlib`: 517 passed
 	- `server`: 176 passed
 
-## Explicit Alpha Limits
+## Explicit Scope Limits
 
-The following are still intentionally partial and should remain explicit in any alpha announcement:
+The following are still intentionally partial and should remain explicit in any beta-ready announcement:
 
 - broad MySQL syntax/behavior parity,
 - full optimizer/cost-based planning parity,
@@ -47,22 +47,22 @@ Refer to:
 
 ## Operator Expectations
 
-For alpha users:
+For beta-ready users:
 
 - use the documented statement surface only,
 - treat unsupported syntax rejection as expected behavior,
 - validate behavior against compliance docs before filing compatibility bugs,
 - assume interface and behavior may evolve between alpha milestones.
 
-## Suggested Alpha Messaging
+## Suggested Beta Messaging
 
 Recommended wording:
 
-"DistDB Developer Alpha provides a documented subset of SQL/runtime behavior with validated WAL-backed durability/replay for the currently supported surface. It is not a full MySQL compatibility release."
+"DistDB Beta Ready provides a documented subset of SQL/runtime behavior with validated WAL-backed durability/replay and enforced beta confidence gates for the currently supported surface. It is not a full MySQL compatibility release."
 
-## Exit Criteria Toward Beta
+## Exit Criteria Toward General Availability
 
-Use these gates to move from alpha to beta readiness:
+Use these gates to move from beta-ready posture toward a broader general-availability posture:
 
 - close or significantly narrow currently documented `Partial` coverage in core statement and routine/trigger surfaces,
 - complete broader end-to-end resilience testing around restart/replay/replication under failure conditions,

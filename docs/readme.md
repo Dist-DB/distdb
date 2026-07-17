@@ -9,16 +9,16 @@ DistDB is a distributed SQL database project built around a Rust execution core,
 
 ## Release Status
 
-DistDB is currently in **Developer Alpha**.
+DistDB is currently **Beta Ready**.
 
 This means:
 
-- the platform is usable for development and controlled evaluation,
+- the platform has met the four-domain beta confidence gates,
 - core behavior is documented and validated for the supported surface,
-- compatibility and behavior are still evolving,
-- partial/unsupported areas are expected and documented.
+- compatibility and behavior remain scoped to the documented contracts,
+- partial/unsupported areas are still expected and documented.
 
-For current alpha scope and expectations, see [release.md](release.md).
+For current release scope and expectations, see [release.md](release.md).
 
 ## Quick-start
 
