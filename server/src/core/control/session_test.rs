@@ -61,4 +61,40 @@
 
         assert!(apply_bootstrap_password_wal_payload(&payload).is_ok());
     }
+
+    #[test]
+    fn apply_bootstrap_password_wal_payload_rejects_non_utf8_payload() {
+        let payload = vec![0xff, 0xfe, 0xfd, 0x00];
+
+        let err = apply_bootstrap_password_wal_payload(&payload)
+            .expect_err("non-utf8 payload should be rejected");
+        assert!(
+            err.contains("cannot decode wal payload"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn apply_bootstrap_password_wal_payload_rejects_malformed_segments() {
+        let payload = b"root\nnonce-only".to_vec();
+
+        let err = apply_bootstrap_password_wal_payload(&payload)
+            .expect_err("malformed segment count should be rejected");
+        assert!(
+            err.contains("wal payload is malformed"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn apply_bootstrap_password_wal_payload_rejects_invalid_encrypted_password_state() {
+        let payload = b"root\nnonce\nnot-valid-ciphertext".to_vec();
+
+        assert!(
+            apply_bootstrap_password_wal_payload(&payload).is_err(),
+            "invalid encrypted payload state should be rejected"
+        );
+    }
     

@@ -464,6 +464,122 @@ fn grant_and_revoke_queries_update_object_acl_access() {
 }
 
 #[test]
+fn authorization_interleaving_grant_revoke_cycles_enforce_post_revoke_denial() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-interleaving-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let create_users_table = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+
+    let create_users_table_response =
+        app.handle_connector_request_for_session(&create_users_table, "root-session");
+    assert_eq!(create_users_table_response.status, ResponseStatus::Applied);
+
+    app.init_session("alice-session-a".to_string(), 1, "alice".to_string());
+    app.init_session("alice-session-b".to_string(), 2, "alice".to_string());
+
+    let show_users_columns = |request_id: &str| ConnectorRequest {
+        request_id: request_id.to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let grant = |request_id: &str| ConnectorRequest {
+        request_id: request_id.to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice".to_string(),
+            },
+        },
+    };
+
+    let revoke = |request_id: &str| ConnectorRequest {
+        request_id: request_id.to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on users from alice".to_string(),
+            },
+        },
+    };
+
+    for cycle in 0..5 {
+
+        let grant_response = app.handle_connector_request_for_session(
+            &grant(&format!("grant-users-select-{cycle}")),
+            "root-session",
+        );
+        assert_eq!(grant_response.status, ResponseStatus::Applied);
+
+        let allow_a = app.handle_connector_request_for_session(
+            &show_users_columns(&format!("show-users-columns-allow-a-{cycle}")),
+            "alice-session-a",
+        );
+        assert_eq!(allow_a.status, ResponseStatus::Applied);
+
+        let allow_b = app.handle_connector_request_for_session(
+            &show_users_columns(&format!("show-users-columns-allow-b-{cycle}")),
+            "alice-session-b",
+        );
+        assert_eq!(allow_b.status, ResponseStatus::Applied);
+
+        let revoke_response = app.handle_connector_request_for_session(
+            &revoke(&format!("revoke-users-select-{cycle}")),
+            "root-session",
+        );
+        assert_eq!(revoke_response.status, ResponseStatus::Applied);
+
+        let deny_a = app.handle_connector_request_for_session(
+            &show_users_columns(&format!("show-users-columns-deny-a-{cycle}")),
+            "alice-session-a",
+        );
+        assert_eq!(deny_a.status, ResponseStatus::Rejected);
+
+        let deny_b = app.handle_connector_request_for_session(
+            &show_users_columns(&format!("show-users-columns-deny-b-{cycle}")),
+            "alice-session-b",
+        );
+        assert_eq!(deny_b.status, ResponseStatus::Rejected);
+
+    }
+
+}
+
+#[test]
 fn create_user_creates_acl_entry_and_wal_snapshot() {
 
     let unique_suffix = std::time::SystemTime::now()

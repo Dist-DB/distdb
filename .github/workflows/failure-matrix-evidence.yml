@@ -1,0 +1,31 @@
+name: failure-matrix-evidence
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/failure-matrix-evidence.yml"
+      - "scripts/check_failure_matrix_evidence.sh"
+      - "docs/node-failure-matrix.md"
+  pull_request:
+    paths:
+      - ".github/workflows/failure-matrix-evidence.yml"
+      - "scripts/check_failure_matrix_evidence.sh"
+      - "docs/node-failure-matrix.md"
+
+concurrency:
+  group: failure-matrix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate failure matrix evidence
+        run: bash scripts/check_failure_matrix_evidence.sh

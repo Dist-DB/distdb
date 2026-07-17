@@ -40,6 +40,13 @@ For design constraints and implementation ownership:
 - [architecture-boundaries.md](architecture-boundaries.md)
 - [select-architecture.md](select-architecture.md)
 - [at-rest-encryption.md](at-rest-encryption.md)
+- [consistency-isolation.md](consistency-isolation.md)
+- [node-failure-matrix.md](node-failure-matrix.md)
+- [beta-confidence-scorecard.md](beta-confidence-scorecard.md)
+- [partition-split-brain-matrix.md](partition-split-brain-matrix.md)
+- [non-functional-benchmarking.md](non-functional-benchmarking.md)
+- [security-adversarial-matrix.md](security-adversarial-matrix.md)
+- [security-findings-log.md](security-findings-log.md)
 
 ## Platform Overview
 
@@ -135,6 +142,13 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - [architecture-boundaries.md](architecture-boundaries.md): ownership rules between `serverlib` and `server`.
 - [select-architecture.md](select-architecture.md): SELECT planning and execution decisions.
 - [at-rest-encryption.md](at-rest-encryption.md): current at-rest encryption direction and constraints.
+- [consistency-isolation.md](consistency-isolation.md): current alpha consistency and isolation contract.
+- [node-failure-matrix.md](node-failure-matrix.md): node/network failure expectations and evidence status.
+- [beta-confidence-scorecard.md](beta-confidence-scorecard.md): four-domain beta confidence gates and status tracking.
+- [partition-split-brain-matrix.md](partition-split-brain-matrix.md): executable partition/split-brain scenario gate matrix.
+- [non-functional-benchmarking.md](non-functional-benchmarking.md): baseline performance/recovery benchmark profiles and evidence format.
+- [security-adversarial-matrix.md](security-adversarial-matrix.md): adversarial security scenario matrix and baseline evidence status.
+- [security-findings-log.md](security-findings-log.md): security severity rubric, triage disposition model, and tracked findings evidence.
 
 ### Feature coverage
 
@@ -145,6 +159,12 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 
 - If you want to run the system, start with [using.md](using.md).
 - If you want to understand security or deployment posture, read [security.md](security.md) and [replication.md](replication.md).
+- If you need guarantee boundaries, read [consistency-isolation.md](consistency-isolation.md) and [node-failure-matrix.md](node-failure-matrix.md).
+- If you need partition confidence details, read [partition-split-brain-matrix.md](partition-split-brain-matrix.md).
+- If you need release confidence posture, read [beta-confidence-scorecard.md](beta-confidence-scorecard.md) alongside [release.md](release.md).
+- If you need non-functional evidence, read [non-functional-benchmarking.md](non-functional-benchmarking.md).
+- If you need security confidence evidence, read [security-adversarial-matrix.md](security-adversarial-matrix.md).
+- If you need security finding triage/disposition detail, read [security-findings-log.md](security-findings-log.md).
 - If you are changing execution behavior, read [architecture-boundaries.md](architecture-boundaries.md), [select-architecture.md](select-architecture.md), and the relevant compliance page before editing code.
 
 ## Liability Disclaimer

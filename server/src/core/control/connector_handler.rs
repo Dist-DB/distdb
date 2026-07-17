@@ -56,6 +56,26 @@ const SERVER_BOOTSTRAP_STATUS_SQL: &str = "__distdb_bootstrap_status__";
 const SERVER_SHOW_ENTITIES_SQL: &str = "__distdb_show_entities__";
 const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
 
+fn validate_affinity_join_request(
+    join_req: &peerlib::AffinityJoinRequest,
+    document: &serverlib::AffinityDocument,
+) -> Result<(), String> {
+
+    if join_req.affinity_id != document.affinity_id {
+        return Err("affinity id mismatch".to_string());
+    }
+
+    if let Some(expected_key) = document.replication_security.key_id.as_deref()
+        && !expected_key.is_empty()
+        && join_req.affinity_key != expected_key
+    {
+        return Err("invalid affinity key".to_string());
+    }
+
+    Ok(())
+
+}
+
 async fn append_set_password_wal_record(
     app: &Arc<RwLock<ServerApp>>,
     database_hint: &str,
@@ -1950,17 +1970,28 @@ pub async fn handle_connector_stream(
                 let response = if let Some(processor) = processor_lock.as_ref() {
 
                     if let Some(doc) = processor.document() {
-                        
-                        let mut merged_doc = doc.clone();
-                        for summary in summaries {
-                            merged_doc.upsert_database_schema(summary);
-                        }
 
-                        AffinityJoinResponse {
-                            request_id: join_req.request_id.clone(),
-                            ok: true,
-                            error: None,
-                            document: Some(affinity_document_to_wire(&merged_doc)),
+                        if let Err(err) = validate_affinity_join_request(join_req, doc) {
+                            AffinityJoinResponse {
+                                request_id: join_req.request_id.clone(),
+                                ok: false,
+                                error: Some(err),
+                                document: None,
+                            }
+                        } else {
+                        
+                            let mut merged_doc = doc.clone();
+                            for summary in summaries {
+                                merged_doc.upsert_database_schema(summary);
+                            }
+
+                            AffinityJoinResponse {
+                                request_id: join_req.request_id.clone(),
+                                ok: true,
+                                error: None,
+                                document: Some(affinity_document_to_wire(&merged_doc)),
+                            }
+
                         }
 
                     } else {

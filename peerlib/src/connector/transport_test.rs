@@ -18,6 +18,15 @@
         stream.flush().expect("frame should flush");
     }
 
+    fn write_raw_frame(stream: &mut std::net::TcpStream, payload: &[u8]) {
+        let len = payload.len() as u32;
+        stream
+            .write_all(&len.to_le_bytes())
+            .and_then(|_| stream.write_all(payload))
+            .expect("raw frame should write");
+        stream.flush().expect("raw frame should flush");
+    }
+
     fn read_request(stream: &mut std::net::TcpStream) -> ConnectorRequest {
         let mut len_buf = [0u8; 4];
         stream
@@ -29,6 +38,19 @@
             .read_exact(&mut payload)
             .expect("request payload should read");
         bincode::deserialize::<ConnectorRequest>(&payload).expect("request should decode")
+    }
+
+    fn read_len_prefixed_payload(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut len_buf = [0u8; 4];
+        stream
+            .read_exact(&mut len_buf)
+            .expect("payload length should read");
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut payload = vec![0u8; len];
+        stream
+            .read_exact(&mut payload)
+            .expect("payload bytes should read");
+        payload
     }
 
     #[test]
@@ -321,6 +343,165 @@
             .connect_active_peer()
             .expect_err("bootstrap rejection should fail connect");
         assert!(matches!(err, ConnectorError::Rejected(_)));
+
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn connect_active_peer_rejects_malformed_challenge_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should exist");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("server should accept");
+            write_raw_frame(&mut stream, b"not-bincode");
+        });
+
+        let mut transport = ConnectorP2pTransport::new(
+            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Off),
+        );
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "peer-1".to_string(),
+            addrs: vec![addr.to_string()],
+            is_discovered: true,
+        });
+
+        let err = transport
+            .connect_active_peer()
+            .expect_err("malformed challenge should fail connect");
+
+        match err {
+            ConnectorError::Transport(message) => {
+                assert!(
+                    message.contains("failed to decode response payload"),
+                    "expected decode error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected transport decode error, got: {:?}", other),
+        }
+
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn request_drops_live_connection_after_malformed_response_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should exist");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("server should accept");
+
+            write_frame(
+                &mut stream,
+                &ConnectorResponse::rejected(
+                    SERVER_PASSWORD_CHALLENGE_REQUEST_ID,
+                    "auth required session_id=server-seed",
+                ),
+            );
+
+            let _req = read_request(&mut stream);
+            write_raw_frame(&mut stream, b"malformed-response");
+        });
+
+        let mut transport = ConnectorP2pTransport::new(
+            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Off),
+        );
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "peer-1".to_string(),
+            addrs: vec![addr.to_string()],
+            is_discovered: true,
+        });
+
+        transport
+            .connect_active_peer()
+            .expect("active peer should connect");
+        assert!(transport.has_live_connection());
+
+        let req = ConnectorRequest::new(
+            "req-malformed",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        );
+
+        let err = transport
+            .request(&req)
+            .expect_err("malformed response should fail request");
+
+        match err {
+            ConnectorError::Transport(message) => {
+                assert!(
+                    message.contains("failed to decode response payload"),
+                    "expected decode error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected transport decode error, got: {:?}", other),
+        }
+
+        assert!(
+            !transport.has_live_connection(),
+            "live connection should be dropped after malformed response"
+        );
+
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn fetch_ca_pem_from_peer_returns_none_on_malformed_direct_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should exist");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("server should accept");
+
+            // Consume request frame, then return malformed CA bootstrap response bytes.
+            let _request = read_len_prefixed_payload(&mut stream);
+            write_raw_frame(&mut stream, b"malformed-ca-bootstrap-response");
+        });
+
+        let result = fetch_ca_pem_from_peer(&addr.to_string(), "peer-1")
+            .expect("malformed CA response should not hard-fail transport");
+
+        assert!(
+            result.is_none(),
+            "malformed CA response should be treated as absent CA"
+        );
+
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn fetch_ca_pem_from_peer_returns_none_when_challenge_precedes_malformed_ca_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should exist");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("server should accept");
+
+            let _request = read_len_prefixed_payload(&mut stream);
+
+            write_frame(
+                &mut stream,
+                &ConnectorResponse::rejected(
+                    SERVER_PASSWORD_CHALLENGE_REQUEST_ID,
+                    "auth required session_id=server-seed",
+                ),
+            );
+
+            write_raw_frame(&mut stream, b"malformed-post-challenge-ca-response");
+        });
+
+        let result = fetch_ca_pem_from_peer(&addr.to_string(), "peer-1")
+            .expect("malformed post-challenge CA response should not hard-fail transport");
+
+        assert!(
+            result.is_none(),
+            "malformed post-challenge CA response should be treated as absent CA"
+        );
 
         server.join().expect("server thread should finish");
     }

@@ -611,3 +611,54 @@
         assert!(!is_show_catalog_workers_query("show catalog worker"));
     }
 
+    fn affinity_doc_with_key(affinity_id: &str, affinity_key: Option<&str>) -> serverlib::AffinityDocument {
+        serverlib::AffinityDocument {
+            affinity_id: affinity_id.to_string(),
+            affinity_revision: 1,
+            members: Vec::new(),
+            databases: Vec::new(),
+            replication_security: serverlib::ReplicationSecuritySummary {
+                policy_revision: 1,
+                key_id: affinity_key.map(str::to_string),
+                updated_epoch_ms: 0,
+            },
+        }
+    }
+
+    fn affinity_join_request(affinity_id: &str, affinity_key: &str) -> peerlib::AffinityJoinRequest {
+        peerlib::AffinityJoinRequest {
+            request_id: "req-1".to_string(),
+            affinity_id: affinity_id.to_string(),
+            requester_node_id: "node-01".to_string(),
+            requester_addrs: vec!["/ip4/127.0.0.1/tcp/9000".to_string()],
+            affinity_key: affinity_key.to_string(),
+        }
+    }
+
+    #[test]
+    fn affinity_join_request_rejects_invalid_key() {
+        let doc = affinity_doc_with_key("aff-prod", Some("expected-key"));
+        let req = affinity_join_request("aff-prod", "wrong-key");
+
+        let result = validate_affinity_join_request(&req, &doc);
+        assert_eq!(result, Err("invalid affinity key".to_string()));
+    }
+
+    #[test]
+    fn affinity_join_request_rejects_affinity_id_mismatch() {
+        let doc = affinity_doc_with_key("aff-prod", Some("expected-key"));
+        let req = affinity_join_request("aff-other", "expected-key");
+
+        let result = validate_affinity_join_request(&req, &doc);
+        assert_eq!(result, Err("affinity id mismatch".to_string()));
+    }
+
+    #[test]
+    fn affinity_join_request_accepts_matching_affinity_and_key() {
+        let doc = affinity_doc_with_key("aff-prod", Some("expected-key"));
+        let req = affinity_join_request("aff-prod", "expected-key");
+
+        let result = validate_affinity_join_request(&req, &doc);
+        assert!(result.is_ok(), "expected matching request to be accepted");
+    }
+

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVER_BIN="$ROOT_DIR/server/target/debug/server"
 CONSOLE_BIN="$ROOT_DIR/console/target/debug/console"
+
 DATA_ROOT="$ROOT_DIR/server/data/e2e"
 
 mkdir -p "$DATA_ROOT"
@@ -18,6 +19,16 @@ fail() {
 }
 
 require_binaries() {
+  if [[ ! -x "$SERVER_BIN" ]]; then
+    log "server binary missing; building server crate"
+    (cd "$ROOT_DIR/server" && cargo build --quiet)
+  fi
+
+  if [[ ! -x "$CONSOLE_BIN" ]]; then
+    log "console binary missing; building console crate"
+    (cd "$ROOT_DIR/console" && cargo build --quiet)
+  fi
+
   [[ -x "$SERVER_BIN" ]] || fail "server binary missing at $SERVER_BIN"
   [[ -x "$CONSOLE_BIN" ]] || fail "console binary missing at $CONSOLE_BIN"
 }

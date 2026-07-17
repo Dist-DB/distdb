@@ -1,0 +1,38 @@
+name: non-functional-baseline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+concurrency:
+  group: nonfunctional-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run non-functional baseline
+        run: bash scripts/perf/nonfunctional_baseline.sh
+
+      - name: Check non-functional regression thresholds
+        run: bash scripts/perf/check_nonfunctional_thresholds.sh
+
+      - name: Upload non-functional baseline artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: non-functional-baseline-${{ github.run_id }}
+          path: |
+            server/data/perf/nonfunctional-baseline-*/summary.json
+            server/data/perf/nonfunctional-baseline-*/*.csv
+            server/data/perf/nonfunctional-baseline-*/*.log
+          if-no-files-found: error

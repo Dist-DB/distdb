@@ -62,6 +62,26 @@
     }
 
     #[test]
+    fn decode_service_message_rejects_missing_magic_prefix() {
+        let payload = vec![1u8, 2u8, 3u8, 4u8];
+        assert!(decode_service_message(&payload).is_none());
+    }
+
+    #[test]
+    fn decode_service_message_rejects_truncated_bincode_payload() {
+        let message = ServiceMessage::NodeAnnounce(peerlib::PeerNode {
+            id: "sam01".to_string(),
+            addrs: vec!["/ip4/127.0.0.1/tcp/4001".to_string()],
+            is_local: false,
+        });
+
+        let mut encoded = encode_service_message(&message).expect("message should encode");
+        encoded.truncate(SERVICE_MESSAGE_MAGIC.len() + 1);
+
+        assert!(decode_service_message(&encoded).is_none());
+    }
+
+    #[test]
     fn normalize_bootstrap_addr_parses_bare_port() {
         assert_eq!(
             normalize_bootstrap_addr("4001"),

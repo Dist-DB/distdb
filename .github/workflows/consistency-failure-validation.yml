@@ -1,0 +1,59 @@
+name: consistency-failure-validation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/consistency-failure-validation.yml"
+      - "scripts/run_consistency_failure_validation.sh"
+      - "scripts/e2e/split_brain_dual_primary.sh"
+      - "scripts/e2e/unilateral_write_delayed_heal.sh"
+      - "scripts/e2e/repeated_partition_heal_cycles.sh"
+      - "scripts/e2e/split_brain_evidence_bundle.sh"
+      - "docs/consistency-isolation.md"
+      - "docs/node-failure-matrix.md"
+      - "docs/partition-split-brain-matrix.md"
+      - "docs/non-functional-benchmarking.md"
+      - "server/**"
+      - "serverlib/**"
+  pull_request:
+    paths:
+      - ".github/workflows/consistency-failure-validation.yml"
+      - "scripts/run_consistency_failure_validation.sh"
+      - "scripts/e2e/split_brain_dual_primary.sh"
+      - "scripts/e2e/unilateral_write_delayed_heal.sh"
+      - "scripts/e2e/repeated_partition_heal_cycles.sh"
+      - "scripts/e2e/split_brain_evidence_bundle.sh"
+      - "docs/consistency-isolation.md"
+      - "docs/node-failure-matrix.md"
+      - "docs/partition-split-brain-matrix.md"
+      - "docs/non-functional-benchmarking.md"
+      - "server/**"
+      - "serverlib/**"
+
+concurrency:
+  group: consistency-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run consistency/failure validation subset
+        env:
+          CONSISTENCY_RUN_EXTENDED_E2E: "false"
+          CONSISTENCY_RUN_PARTITION_RECONVERGENCE: "false"
+          CONSISTENCY_RUN_SPLIT_BRAIN_DUAL_PRIMARY: "false"
+          CONSISTENCY_RUN_UNILATERAL_WRITE_DELAYED_HEAL: "false"
+          CONSISTENCY_RUN_REPEATED_PARTITION_HEAL_CYCLES: "false"
+          CONSISTENCY_RUN_SPLIT_BRAIN_EVIDENCE_BUNDLE: "false"
+        run: bash scripts/run_consistency_failure_validation.sh
