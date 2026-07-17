@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MATRIX_FILE="$ROOT_DIR/docs/partition-split-brain-matrix.md"
+ARTIFACTS_ROOT="${DISTDB_ARTIFACTS_ROOT:-$ROOT_DIR/artifacts}"
+PRIMARY_DATA_ROOT="${SPLIT_BRAIN_DATA_ROOT:-$ARTIFACTS_ROOT/e2e}"
+LEGACY_DATA_ROOT="$ROOT_DIR/server/data/e2e"
 
 resolve_report_file() {
   if [[ -n "${SPLIT_BRAIN_REPORT_FILE:-}" ]]; then
@@ -11,7 +14,10 @@ resolve_report_file() {
   fi
 
   local latest_dir
-  latest_dir="$(ls -dt "$ROOT_DIR"/server/data/e2e/split-brain-evidence-* 2>/dev/null | head -n 1 || true)"
+  latest_dir="$(ls -dt "$PRIMARY_DATA_ROOT"/split-brain-evidence-* 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$latest_dir" ]]; then
+    latest_dir="$(ls -dt "$LEGACY_DATA_ROOT"/split-brain-evidence-* 2>/dev/null | head -n 1 || true)"
+  fi
   if [[ -z "$latest_dir" ]]; then
     return 1
   fi
@@ -33,9 +39,10 @@ fi
 obs_date="$(date +%Y-%m-%d)"
 command_text="CONSISTENCY_RUN_SPLIT_BRAIN_EVIDENCE_BUNDLE=true bash scripts/run_consistency_failure_validation.sh"
 
-rows_tmp="$ROOT_DIR/server/data/e2e/.split-brain-rows-$$.tmp"
-filtered_tmp="$ROOT_DIR/server/data/e2e/.split-brain-filtered-$$.tmp"
-out_tmp="$ROOT_DIR/server/data/e2e/.split-brain-matrix-$$.tmp"
+mkdir -p "$PRIMARY_DATA_ROOT"
+rows_tmp="$PRIMARY_DATA_ROOT/.split-brain-rows-$$.tmp"
+filtered_tmp="$PRIMARY_DATA_ROOT/.split-brain-filtered-$$.tmp"
+out_tmp="$PRIMARY_DATA_ROOT/.split-brain-matrix-$$.tmp"
 trap 'rm -f "$rows_tmp" "$filtered_tmp" "$out_tmp"' EXIT
 
 awk -F'|' '

@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ARTIFACTS_ROOT="${DISTDB_ARTIFACTS_ROOT:-$ROOT_DIR/artifacts}"
+PERF_DATA_ROOT="${PERF_DATA_ROOT:-$ARTIFACTS_ROOT/perf}"
+LEGACY_PERF_DATA_ROOT="$ROOT_DIR/server/data/perf"
 
 resolve_summary_file() {
   if [[ -n "${PERF_SUMMARY_JSON:-}" ]]; then
@@ -10,7 +13,10 @@ resolve_summary_file() {
   fi
 
   local latest_summary
-  latest_summary="$(ls -dt "$ROOT_DIR"/server/data/perf/nonfunctional-baseline-*/summary.json 2>/dev/null | head -n 1 || true)"
+  latest_summary="$(ls -dt "$PERF_DATA_ROOT"/nonfunctional-baseline-*/summary.json 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$latest_summary" ]]; then
+    latest_summary="$(ls -dt "$LEGACY_PERF_DATA_ROOT"/nonfunctional-baseline-*/summary.json 2>/dev/null | head -n 1 || true)"
+  fi
   if [[ -z "$latest_summary" ]]; then
     return 1
   fi
@@ -36,7 +42,8 @@ MIN_WRITE_THROUGHPUT="${PERF_MIN_WRITE_THROUGHPUT:-15}"
 MIN_READ_THROUGHPUT="${PERF_MIN_READ_THROUGHPUT:-20}"
 MIN_MIXED_THROUGHPUT="${PERF_MIN_MIXED_THROUGHPUT:-15}"
 
-metrics_tmp="$ROOT_DIR/server/data/perf/.nonfunctional-metrics-$$.tmp"
+mkdir -p "$PERF_DATA_ROOT"
+metrics_tmp="$PERF_DATA_ROOT/.nonfunctional-metrics-$$.tmp"
 trap 'rm -f "$metrics_tmp"' EXIT
 
 awk '

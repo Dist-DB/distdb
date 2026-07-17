@@ -1,0 +1,12 @@
+{
+  "run_id": "20260717-143445-7315",
+  "kind": "security_adversarial_baseline",
+  "status": "pass",
+  "exit_code": 0,
+  "started_at_utc": "2026-07-17T12:34:45Z",
+  "finished_at_utc": "2026-07-17T12:34:58Z",
+  "git_sha": "0211694",
+  "artifacts_dir": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/security/security-baseline-20260717-143445-7315",
+  "log_file": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/security/security-baseline-20260717-143445-7315/run.log",
+  "findings_log": "/Users/samcolak/Source Code/rust/distdb/distdb/docs/security-findings-log.md"
+}

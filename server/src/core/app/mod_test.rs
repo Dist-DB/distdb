@@ -1,4 +1,8 @@
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use super::*;
 use crate::core::config::ServerRuntimeConfig;
@@ -464,6 +468,3308 @@ fn grant_and_revoke_queries_update_object_acl_access() {
 }
 
 #[test]
+fn schema_grant_preserves_access_after_object_revoke_until_schema_revoke() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-schema-object-precedence-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    for (request_id, sql) in [
+        (
+            "create-users",
+            "create table users (id bigint not null primary key)",
+        ),
+        (
+            "create-orders",
+            "create table orders (id bigint not null primary key)",
+        ),
+    ] {
+        let create_table = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        let response = app.handle_connector_request_for_session(&create_table, "root-session");
+        assert_eq!(response.status, ResponseStatus::Applied);
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let show_users_columns = ConnectorRequest {
+        request_id: "show-users-columns".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let before_grant = app.handle_connector_request_for_session(&show_users_columns, "alice-session");
+    assert_eq!(before_grant.status, ResponseStatus::Rejected);
+
+    let grant_schema = ConnectorRequest {
+        request_id: "grant-schema-main-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_schema_response = app.handle_connector_request_for_session(&grant_schema, "root-session");
+    assert_eq!(grant_schema_response.status, ResponseStatus::Applied);
+
+    let after_schema_grant = app.handle_connector_request_for_session(&show_users_columns, "alice-session");
+    assert_eq!(after_schema_grant.status, ResponseStatus::Applied);
+
+    let revoke_users_object = ConnectorRequest {
+        request_id: "revoke-users-select-object".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on users from alice".to_string(),
+            },
+        },
+    };
+
+    let revoke_users_response =
+        app.handle_connector_request_for_session(&revoke_users_object, "root-session");
+    assert_eq!(revoke_users_response.status, ResponseStatus::Applied);
+
+    let after_object_revoke = app.handle_connector_request_for_session(&show_users_columns, "alice-session");
+    assert_eq!(after_object_revoke.status, ResponseStatus::Applied);
+
+    let revoke_schema = ConnectorRequest {
+        request_id: "revoke-schema-main-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on schema main from alice".to_string(),
+            },
+        },
+    };
+
+    let revoke_schema_response = app.handle_connector_request_for_session(&revoke_schema, "root-session");
+    assert_eq!(revoke_schema_response.status, ResponseStatus::Applied);
+
+    let after_schema_revoke = app.handle_connector_request_for_session(&show_users_columns, "alice-session");
+    assert_eq!(after_schema_revoke.status, ResponseStatus::Rejected);
+
+}
+
+#[test]
+fn object_grant_survives_schema_revoke_and_remains_object_scoped() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-schema-object-survival-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    for (request_id, sql) in [
+        (
+            "create-users",
+            "create table users (id bigint not null primary key)",
+        ),
+        (
+            "create-orders",
+            "create table orders (id bigint not null primary key)",
+        ),
+    ] {
+        let create_table = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        let response = app.handle_connector_request_for_session(&create_table, "root-session");
+        assert_eq!(response.status, ResponseStatus::Applied);
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let show_users_columns = ConnectorRequest {
+        request_id: "show-users-columns".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_orders_columns = ConnectorRequest {
+        request_id: "show-orders-columns".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    let grant_users_object = ConnectorRequest {
+        request_id: "grant-users-select-object".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_schema = ConnectorRequest {
+        request_id: "grant-schema-main-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_users_object, "root-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_schema, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users_columns, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders_columns, "alice-session").status,
+        ResponseStatus::Applied
+    );
+
+    let revoke_schema = ConnectorRequest {
+        request_id: "revoke-schema-main-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on schema main from alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&revoke_schema, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users_columns, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders_columns, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn qualified_object_grant_uses_explicit_database_not_query_hint() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-qualified-object-target-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        let response = app.handle_connector_request_for_session(&create_db, "root-session");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        let create_users_response =
+            app.handle_connector_request_for_session(&create_users, "root-session");
+        assert_eq!(create_users_response.status, ResponseStatus::Applied);
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let grant_qualified_object = ConnectorRequest {
+        request_id: "grant-qualified-object-analytics-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on analytics.users to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_response =
+        app.handle_connector_request_for_session(&grant_qualified_object, "root-session");
+    assert_eq!(grant_response.status, ResponseStatus::Applied);
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-users-analytics".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-users-main".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let analytics_allowed =
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session");
+    assert_eq!(analytics_allowed.status, ResponseStatus::Applied);
+
+    let main_denied = app.handle_connector_request_for_session(&show_main_users, "alice-session");
+    assert_eq!(main_denied.status, ResponseStatus::Rejected);
+
+}
+
+#[test]
+fn schema_grant_uses_explicit_schema_not_query_hint_database() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-schema-target-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        let response = app.handle_connector_request_for_session(&create_db, "root-session");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        let create_users_response =
+            app.handle_connector_request_for_session(&create_users, "root-session");
+        assert_eq!(create_users_response.status, ResponseStatus::Applied);
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let grant_schema = ConnectorRequest {
+        request_id: "grant-schema-analytics-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema analytics to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_response = app.handle_connector_request_for_session(&grant_schema, "root-session");
+    assert_eq!(grant_response.status, ResponseStatus::Applied);
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-users-analytics".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-users-main".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let analytics_allowed =
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session");
+    assert_eq!(analytics_allowed.status, ResponseStatus::Applied);
+
+    let main_denied = app.handle_connector_request_for_session(&show_main_users, "alice-session");
+    assert_eq!(main_denied.status, ResponseStatus::Rejected);
+
+}
+
+#[test]
+fn qualified_object_revoke_only_affects_targeted_database_object() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-qualified-object-revoke-target-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        let response = app.handle_connector_request_for_session(&create_db, "root-session");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        let create_users_response =
+            app.handle_connector_request_for_session(&create_users, "root-session");
+        assert_eq!(create_users_response.status, ResponseStatus::Applied);
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let grant_main_users = ConnectorRequest {
+        request_id: "grant-main-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_analytics_users = ConnectorRequest {
+        request_id: "grant-analytics-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on analytics.users to alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_main_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_analytics_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-before-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-before-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+
+    let revoke_analytics_users = ConnectorRequest {
+        request_id: "revoke-analytics-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on analytics.users from alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&revoke_analytics_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let show_main_after_revoke = ConnectorRequest {
+        request_id: "show-main-users-after-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_after_revoke = ConnectorRequest {
+        request_id: "show-analytics-users-after-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_after_revoke, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_after_revoke, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn schema_revoke_only_affects_targeted_database_not_other_schema_grants() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-schema-revoke-target-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        let response = app.handle_connector_request_for_session(&create_db, "root-session");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        let create_users_response =
+            app.handle_connector_request_for_session(&create_users, "root-session");
+        assert_eq!(create_users_response.status, ResponseStatus::Applied);
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let grant_main_schema = ConnectorRequest {
+        request_id: "grant-main-schema".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_analytics_schema = ConnectorRequest {
+        request_id: "grant-analytics-schema".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema analytics to alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_main_schema, "root-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_analytics_schema, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-before-schema-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-before-schema-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+
+    let revoke_analytics_schema = ConnectorRequest {
+        request_id: "revoke-analytics-schema".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on schema analytics from alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&revoke_analytics_schema, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let show_main_after_revoke = ConnectorRequest {
+        request_id: "show-main-users-after-schema-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_after_revoke = ConnectorRequest {
+        request_id: "show-analytics-users-after-schema-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_after_revoke, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_after_revoke, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn mixed_cross_database_revoke_order_keeps_scope_isolated_per_step() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-mixed-revoke-order-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        let response = app.handle_connector_request_for_session(&create_db, "root-session");
+        assert_eq!(response.status, ResponseStatus::Applied);
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        let create_users_response =
+            app.handle_connector_request_for_session(&create_users, "root-session");
+        assert_eq!(create_users_response.status, ResponseStatus::Applied);
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let grant_main_users = ConnectorRequest {
+        request_id: "grant-main-users-object".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice".to_string(),
+            },
+        },
+    };
+
+    let grant_analytics_schema = ConnectorRequest {
+        request_id: "grant-analytics-schema".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema analytics to alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_main_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_analytics_schema, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-mixed-revoke-order".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-mixed-revoke-order".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+
+    let revoke_analytics_schema = ConnectorRequest {
+        request_id: "revoke-analytics-schema-mixed".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on schema analytics from alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&revoke_analytics_schema, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+    let revoke_main_users = ConnectorRequest {
+        request_id: "revoke-main-users-object-mixed".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on users from alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&revoke_main_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn malformed_qualified_acl_target_is_rejected() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-malformed-qualified-target-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let malformed_grant = ConnectorRequest {
+        request_id: "grant-malformed-qualified-target".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on analytics. to alice".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&malformed_grant, "root-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = response.result else {
+        panic!("expected parser rejection for malformed qualified ACL target");
+    };
+
+    assert!(message.to_lowercase().contains("parse") || message.to_lowercase().contains("syntax"));
+
+}
+
+#[test]
+fn schema_grant_with_grant_option_tracks_grant_acl_and_revokes_cleanly() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-grant-option-schema-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let grant_with_option = ConnectorRequest {
+        request_id: "grant-schema-main-select-with-option".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to alice with grant option".to_string(),
+            },
+        },
+    };
+
+    let grant_response = app.handle_connector_request_for_session(&grant_with_option, "root-session");
+    assert_eq!(grant_response.status, ResponseStatus::Applied);
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    let catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist");
+
+    let granted_acl = catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist after grant with option");
+
+    assert!(granted_acl.acl.contains("SELECT"));
+    assert!(granted_acl.grant_acl.contains("SELECT"));
+
+    let revoke_schema = ConnectorRequest {
+        request_id: "revoke-schema-main-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on schema main from alice".to_string(),
+            },
+        },
+    };
+
+    let revoke_response = app.handle_connector_request_for_session(&revoke_schema, "root-session");
+    assert_eq!(revoke_response.status, ResponseStatus::Applied);
+
+    let catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist after revoke");
+
+    let revoked_acl = catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should still exist after revoke");
+
+    assert!(!revoked_acl.acl.contains("SELECT"));
+    assert!(!revoked_acl.grant_acl.contains("SELECT"));
+
+}
+
+#[test]
+fn acl_and_non_acl_batch_is_rejected_without_applying_acl_side_effect() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-acl-batch-reject-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let create_users = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let mixed_batch = ConnectorRequest {
+        request_id: "mixed-acl-non-acl-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice; show columns from users".to_string(),
+            },
+        },
+    };
+
+    let mixed_response = app.handle_connector_request_for_session(&mixed_batch, "root-session");
+    assert_eq!(mixed_response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(message) = mixed_response.result else {
+        panic!("expected mixed ACL/non-ACL batch rejection error");
+    };
+
+    assert!(message.contains("GRANT/REVOKE cannot be combined with non-ACL statements"));
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-after-mixed-batch-reject".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let alice_response = app.handle_connector_request_for_session(&show_users, "alice-session");
+    assert_eq!(alice_response.status, ResponseStatus::Rejected);
+
+}
+
+#[test]
+fn non_root_acl_batch_is_rejected_without_acl_side_effects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-non-root-acl-batch-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    for (request_id, sql) in [
+        (
+            "create-users",
+            "create table users (id bigint not null primary key)",
+        ),
+        (
+            "create-orders",
+            "create table orders (id bigint not null primary key)",
+        ),
+    ] {
+        let create_table = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_table, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+    app.init_session("alice-session".to_string(), 2, "alice".to_string());
+
+    let non_root_acl_batch = ConnectorRequest {
+        request_id: "non-root-acl-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; grant select on orders to bob".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&non_root_acl_batch, "alice-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(_) = response.result else {
+        panic!("expected non-root ACL batch rejection error");
+    };
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-bob-after-non-root-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_orders = ConnectorRequest {
+        request_id: "show-orders-bob-after-non-root-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn root_acl_only_batch_applies_multiple_acl_mutations() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-root-acl-batch-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    for (request_id, sql) in [
+        (
+            "create-users",
+            "create table users (id bigint not null primary key)",
+        ),
+        (
+            "create-orders",
+            "create table orders (id bigint not null primary key)",
+        ),
+    ] {
+        let create_table = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_table, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let root_acl_batch = ConnectorRequest {
+        request_id: "root-acl-only-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; grant select on orders to bob".to_string(),
+            },
+        },
+    };
+
+    let batch_response = app.handle_connector_request_for_session(&root_acl_batch, "root-session");
+    assert_eq!(batch_response.status, ResponseStatus::Applied);
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-bob-after-root-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_orders = ConnectorRequest {
+        request_id: "show-orders-bob-after-root-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Applied
+    );
+
+}
+
+#[test]
+fn non_root_cross_database_acl_batch_is_rejected_without_side_effects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-non-root-cross-db-acl-batch-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_users, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+    app.init_session("bob-session".to_string(), 2, "bob".to_string());
+
+    let non_root_acl_batch = ConnectorRequest {
+        request_id: "non-root-cross-db-acl-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; grant select on analytics.users to bob".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&non_root_acl_batch, "alice-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(_) = response.result else {
+        panic!("expected non-root cross-database ACL batch rejection error");
+    };
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-bob-after-non-root-cross-db-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-bob-after-non-root-cross-db-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn non_root_delegated_grant_attempt_is_rejected_even_after_access_grant() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-non-root-delegated-grant-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let create_users = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+    app.init_session("bob-session".to_string(), 2, "bob".to_string());
+
+    let root_grants_alice_access = ConnectorRequest {
+        request_id: "root-grant-select-users-to-alice".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&root_grants_alice_access, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let non_root_delegation_attempt = ConnectorRequest {
+        request_id: "alice-delegated-grant-attempt".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&non_root_delegation_attempt, "alice-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(_) = response.result else {
+        panic!("expected non-root delegated grant attempt rejection error");
+    };
+
+    let show_users_as_alice = ConnectorRequest {
+        request_id: "show-users-as-alice-after-delegation-attempt".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_users_as_bob = ConnectorRequest {
+        request_id: "show-users-as-bob-after-delegation-attempt".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users_as_alice, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users_as_bob, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn non_root_cross_database_delegated_grant_attempt_is_rejected_without_side_effects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-non-root-cross-db-delegated-grant-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_users, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+    app.init_session("bob-session".to_string(), 2, "bob".to_string());
+
+    let root_grants_alice_schema_access = ConnectorRequest {
+        request_id: "root-grant-main-schema-to-alice".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to alice".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&root_grants_alice_schema_access, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let non_root_cross_db_delegation_attempt = ConnectorRequest {
+        request_id: "alice-cross-db-delegated-grant-attempt".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on analytics.users to bob".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(
+        &non_root_cross_db_delegation_attempt,
+        "alice-session",
+    );
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(_) = response.result else {
+        panic!("expected non-root cross-database delegated grant rejection error");
+    };
+
+    let show_main_users_as_alice = ConnectorRequest {
+        request_id: "show-main-users-as-alice-after-cross-db-delegation-attempt".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_analytics_users_as_bob = ConnectorRequest {
+        request_id: "show-analytics-users-as-bob-after-cross-db-delegation-attempt".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users_as_alice, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users_as_bob, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn root_acl_batch_with_malformed_statement_has_no_partial_side_effects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-root-acl-batch-malformed-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let create_users = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_users, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let malformed_acl_batch = ConnectorRequest {
+        request_id: "root-acl-batch-malformed".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; grant select on analytics. to bob".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&malformed_acl_batch, "root-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(_) = response.result else {
+        panic!("expected malformed ACL batch rejection error");
+    };
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-bob-after-malformed-root-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn cross_database_grant_option_is_scoped_to_target_database_only() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-cross-db-grant-option-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_users, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let grant_option_analytics = ConnectorRequest {
+        request_id: "grant-schema-analytics-select-with-option".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema analytics to alice with grant option".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_option_analytics, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let analytics_id = serverlib::DatabaseId::from_database_name("analytics")
+        .expect("analytics database id should normalize")
+        .0;
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+
+    let analytics_catalog = app
+        .catalogs
+        .get(&analytics_id)
+        .expect("analytics catalog should exist");
+    let analytics_acl = analytics_catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist in analytics");
+    assert!(analytics_acl.acl.contains("SELECT"));
+    assert!(analytics_acl.grant_acl.contains("SELECT"));
+
+    if let Some(main_catalog) = app.catalogs.get(&main_id)
+        && let Some(main_acl) = main_catalog.effective_account_acl_entry("alice")
+    {
+        assert!(!main_acl.acl.contains("SELECT"));
+        assert!(!main_acl.grant_acl.contains("SELECT"));
+    }
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-grant-option-scope".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-grant-option-scope".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn root_multi_target_acl_batch_with_late_malformed_statement_has_no_partial_side_effects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-root-multi-target-malformed-batch-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        for table in ["users", "orders"] {
+            let create_table = ConnectorRequest {
+                request_id: format!("create-{table}-{database_name}"),
+                command: ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: database_name.to_string(),
+                        sql: format!("create table {table} (id bigint not null primary key)"),
+                    },
+                },
+            };
+            assert_eq!(
+                app.handle_connector_request_for_session(&create_table, "root-session").status,
+                ResponseStatus::Applied
+            );
+        }
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let malformed_acl_batch = ConnectorRequest {
+        request_id: "root-multi-target-acl-batch-malformed-late".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; grant select on analytics.orders to bob; grant select on analytics. to bob".to_string(),
+            },
+        },
+    };
+
+    let response = app.handle_connector_request_for_session(&malformed_acl_batch, "root-session");
+    assert_eq!(response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(_) = response.result else {
+        panic!("expected malformed multi-target ACL batch rejection error");
+    };
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-after-multi-target-malformed-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_orders = ConnectorRequest {
+        request_id: "show-analytics-orders-after-multi-target-malformed-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_orders, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn cross_database_revoke_cleans_grant_option_only_for_target_database() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-cross-db-revoke-grant-option-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_users, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    let grant_main_with_option = ConnectorRequest {
+        request_id: "grant-main-schema-select-with-option".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to alice with grant option".to_string(),
+            },
+        },
+    };
+
+    let grant_analytics_with_option = ConnectorRequest {
+        request_id: "grant-analytics-schema-select-with-option".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema analytics to alice with grant option".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_main_with_option, "root-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&grant_analytics_with_option, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let revoke_analytics = ConnectorRequest {
+        request_id: "revoke-analytics-schema-select".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on schema analytics from alice".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&revoke_analytics, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+    let analytics_id = serverlib::DatabaseId::from_database_name("analytics")
+        .expect("analytics database id should normalize")
+        .0;
+
+    let main_catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist");
+    let main_acl = main_catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist in main");
+    assert!(main_acl.acl.contains("SELECT"));
+    assert!(main_acl.grant_acl.contains("SELECT"));
+
+    let analytics_catalog = app
+        .catalogs
+        .get(&analytics_id)
+        .expect("analytics catalog should exist");
+    let analytics_acl = analytics_catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist in analytics");
+    assert!(!analytics_acl.acl.contains("SELECT"));
+    assert!(!analytics_acl.grant_acl.contains("SELECT"));
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-after-analytics-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-after-analytics-revoke".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn acl_batch_recovery_after_malformed_request_applies_next_valid_batch_deterministically() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-acl-batch-recovery-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    for table in ["users", "orders"] {
+        let create_table = ConnectorRequest {
+            request_id: format!("create-{table}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: format!("create table {table} (id bigint not null primary key)"),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_table, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let malformed_batch = ConnectorRequest {
+        request_id: "malformed-acl-batch-first".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; grant select on analytics. to bob".to_string(),
+            },
+        },
+    };
+
+    let malformed_response = app.handle_connector_request_for_session(&malformed_batch, "root-session");
+    assert_eq!(malformed_response.status, ResponseStatus::Rejected);
+
+    let ConnectorResult::Error(_) = malformed_response.result else {
+        panic!("expected malformed ACL batch rejection error");
+    };
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-after-malformed-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_orders = ConnectorRequest {
+        request_id: "show-orders-after-malformed-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+    let valid_batch = ConnectorRequest {
+        request_id: "valid-acl-batch-after-malformed".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; grant select on orders to bob".to_string(),
+            },
+        },
+    };
+
+    let valid_response = app.handle_connector_request_for_session(&valid_batch, "root-session");
+    assert_eq!(valid_response.status, ResponseStatus::Applied);
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Applied
+    );
+
+}
+
+#[test]
+fn cross_database_grant_option_transition_chain_remains_scope_isolated() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-cross-db-grant-option-chain-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        let create_users = ConnectorRequest {
+            request_id: format!("create-users-{database_name}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: database_name.to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_users, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    for (request_id, sql) in [
+        (
+            "grant-main-select-with-option",
+            "grant select on schema main to alice with grant option",
+        ),
+        (
+            "grant-analytics-select-with-option",
+            "grant select on schema analytics to alice with grant option",
+        ),
+        (
+            "revoke-analytics-select",
+            "revoke select on schema analytics from alice",
+        ),
+        (
+            "regrant-analytics-select-no-option",
+            "grant select on schema analytics to alice",
+        ),
+        (
+            "regrant-analytics-select-with-option",
+            "grant select on schema analytics to alice with grant option",
+        ),
+        ("revoke-main-select", "revoke select on schema main from alice"),
+    ] {
+        let request = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&request, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+    let analytics_id = serverlib::DatabaseId::from_database_name("analytics")
+        .expect("analytics database id should normalize")
+        .0;
+
+    let main_catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist");
+    let main_acl = main_catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist in main");
+    assert!(!main_acl.acl.contains("SELECT"));
+    assert!(!main_acl.grant_acl.contains("SELECT"));
+
+    let analytics_catalog = app
+        .catalogs
+        .get(&analytics_id)
+        .expect("analytics catalog should exist");
+    let analytics_acl = analytics_catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist in analytics");
+    assert!(analytics_acl.acl.contains("SELECT"));
+    assert!(analytics_acl.grant_acl.contains("SELECT"));
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-after-transition-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-after-transition-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+
+}
+
+#[test]
+fn repeated_malformed_acl_batches_at_different_positions_preserve_acl_state_until_valid_batch() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-malformed-batch-positions-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    for table in ["users", "orders", "invoices"] {
+        let create_table = ConnectorRequest {
+            request_id: format!("create-{table}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: format!("create table {table} (id bigint not null primary key)"),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_table, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let initial_valid_grant = ConnectorRequest {
+        request_id: "initial-valid-grant-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&initial_valid_grant, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-malformed-position-test".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_orders = ConnectorRequest {
+        request_id: "show-orders-malformed-position-test".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+    let show_invoices = ConnectorRequest {
+        request_id: "show-invoices-malformed-position-test".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from invoices".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_invoices, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+    for (request_id, sql) in [
+        (
+            "malformed-batch-head",
+            "grant select on analytics. to bob; grant select on orders to bob",
+        ),
+        (
+            "malformed-batch-middle",
+            "grant select on orders to bob; grant select on analytics. to bob; grant select on invoices to bob",
+        ),
+        (
+            "malformed-batch-tail",
+            "grant select on orders to bob; grant select on invoices to bob; grant select on analytics. to bob",
+        ),
+    ] {
+        let malformed_batch = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+
+        let response = app.handle_connector_request_for_session(&malformed_batch, "root-session");
+        assert_eq!(response.status, ResponseStatus::Rejected);
+        let ConnectorResult::Error(_) = response.result else {
+            panic!("expected malformed ACL batch rejection error");
+        };
+
+        assert_eq!(
+            app.handle_connector_request_for_session(&show_users, "bob-session").status,
+            ResponseStatus::Applied
+        );
+        assert_eq!(
+            app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+            ResponseStatus::Rejected
+        );
+        assert_eq!(
+            app.handle_connector_request_for_session(&show_invoices, "bob-session").status,
+            ResponseStatus::Rejected
+        );
+    }
+
+    let final_valid_batch = ConnectorRequest {
+        request_id: "final-valid-batch-after-malformed-position-series".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on orders to bob; grant select on invoices to bob".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&final_valid_batch, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_invoices, "bob-session").status,
+        ResponseStatus::Applied
+    );
+
+}
+
+#[test]
+fn cross_database_object_acl_transition_chain_remains_target_isolated() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-cross-db-object-chain-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        for table in ["users", "orders"] {
+            let create_table = ConnectorRequest {
+                request_id: format!("create-{database_name}-{table}"),
+                command: ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: database_name.to_string(),
+                        sql: format!("create table {table} (id bigint not null primary key)"),
+                    },
+                },
+            };
+            assert_eq!(
+                app.handle_connector_request_for_session(&create_table, "root-session").status,
+                ResponseStatus::Applied
+            );
+        }
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    for (request_id, sql) in [
+        ("grant-main-users", "grant select on users to alice"),
+        (
+            "grant-analytics-orders",
+            "grant select on analytics.orders to alice",
+        ),
+        (
+            "revoke-analytics-orders",
+            "revoke select on analytics.orders from alice",
+        ),
+        (
+            "grant-analytics-users",
+            "grant select on analytics.users to alice",
+        ),
+        ("revoke-main-users", "revoke select on users from alice"),
+    ] {
+        let request = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&request, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-after-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_main_orders = ConnectorRequest {
+        request_id: "show-main-orders-after-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-after-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_analytics_orders = ConnectorRequest {
+        request_id: "show-analytics-orders-after-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_orders, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_orders, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn alternating_malformed_grant_revoke_batches_preserve_state_until_valid_reconciliation() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-malformed-grant-revoke-alternating-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    for table in ["users", "orders"] {
+        let create_table = ConnectorRequest {
+            request_id: format!("create-{table}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: format!("create table {table} (id bigint not null primary key)"),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_table, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let initial_grant = ConnectorRequest {
+        request_id: "initial-grant-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&initial_grant, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-after-alternating-malformed".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_orders = ConnectorRequest {
+        request_id: "show-orders-after-alternating-malformed".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+    for (request_id, sql) in [
+        (
+            "malformed-grant-head",
+            "grant select on analytics. to bob; revoke select on users from bob",
+        ),
+        (
+            "malformed-revoke-tail",
+            "grant select on orders to bob; revoke select on analytics. from bob",
+        ),
+        (
+            "malformed-grant-tail",
+            "revoke select on users from bob; grant select on analytics. to bob",
+        ),
+        (
+            "malformed-revoke-head",
+            "revoke select on analytics. from bob; grant select on orders to bob",
+        ),
+    ] {
+        let malformed_batch = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+
+        let response = app.handle_connector_request_for_session(&malformed_batch, "root-session");
+        assert_eq!(response.status, ResponseStatus::Rejected);
+        let ConnectorResult::Error(_) = response.result else {
+            panic!("expected malformed alternating ACL batch rejection error");
+        };
+
+        assert_eq!(
+            app.handle_connector_request_for_session(&show_users, "bob-session").status,
+            ResponseStatus::Applied
+        );
+        assert_eq!(
+            app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+            ResponseStatus::Rejected
+        );
+    }
+
+    let valid_reconciliation_batch = ConnectorRequest {
+        request_id: "valid-reconciliation-after-alternating-malformed".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on orders to bob; revoke select on users from bob".to_string(),
+            },
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&valid_reconciliation_batch, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Applied
+    );
+
+}
+
+#[test]
+fn cross_database_schema_grant_with_object_revoke_chain_preserves_scope_precedence() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-schema-object-chain-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        for table in ["users", "orders"] {
+            let create_table = ConnectorRequest {
+                request_id: format!("create-{database_name}-{table}"),
+                command: ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: database_name.to_string(),
+                        sql: format!("create table {table} (id bigint not null primary key)"),
+                    },
+                },
+            };
+            assert_eq!(
+                app.handle_connector_request_for_session(&create_table, "root-session").status,
+                ResponseStatus::Applied
+            );
+        }
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    for (request_id, sql) in [
+        ("grant-main-schema", "grant select on schema main to alice"),
+        (
+            "grant-analytics-schema",
+            "grant select on schema analytics to alice",
+        ),
+        ("revoke-main-users", "revoke select on main.users from alice"),
+        (
+            "revoke-analytics-orders",
+            "revoke select on analytics.orders from alice",
+        ),
+        (
+            "grant-analytics-users-object",
+            "grant select on analytics.users to alice",
+        ),
+        ("revoke-analytics-schema", "revoke select on schema analytics from alice"),
+    ] {
+        let request = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&request, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-after-schema-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_main_orders = ConnectorRequest {
+        request_id: "show-main-orders-after-schema-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-after-schema-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_analytics_orders = ConnectorRequest {
+        request_id: "show-analytics-orders-after-schema-object-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_orders, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_orders, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn mixed_schema_object_malformed_batch_rejects_without_partial_side_effects() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-schema-object-malformed-batch-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    for table in ["users", "orders"] {
+        let create_table = ConnectorRequest {
+            request_id: format!("create-{table}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: format!("create table {table} (id bigint not null primary key)"),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_table, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let malformed_mixed_batch = ConnectorRequest {
+        request_id: "malformed-schema-object-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on analytics. to bob; grant select on schema main to bob; revoke select on users from bob".to_string(),
+            },
+        },
+    };
+
+    let malformed_response = app.handle_connector_request_for_session(&malformed_mixed_batch, "root-session");
+    assert_eq!(malformed_response.status, ResponseStatus::Rejected);
+    let ConnectorResult::Error(_) = malformed_response.result else {
+        panic!("expected malformed mixed schema/object batch rejection error");
+    };
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-after-malformed-schema-object-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_orders = ConnectorRequest {
+        request_id: "show-orders-after-malformed-schema-object-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+    let valid_reconciliation_batch = ConnectorRequest {
+        request_id: "valid-schema-object-reconciliation-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to bob; revoke select on users from bob; grant select on orders to bob".to_string(),
+            },
+        },
+    };
+
+    let valid_response = app.handle_connector_request_for_session(&valid_reconciliation_batch, "root-session");
+    assert_eq!(valid_response.status, ResponseStatus::Applied);
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Applied
+    );
+
+}
+
+#[test]
+fn cross_database_mixed_schema_object_grant_option_chain_scopes_grant_acl_and_access() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-mixed-schema-object-grant-option-chain-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    for database_name in ["main", "analytics"] {
+        let create_db = ConnectorRequest {
+            request_id: format!("create-db-{database_name}"),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: database_name.to_string(),
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_db, "root-session").status,
+            ResponseStatus::Applied
+        );
+
+        for table in ["users", "orders"] {
+            let create_table = ConnectorRequest {
+                request_id: format!("create-{database_name}-{table}"),
+                command: ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: database_name.to_string(),
+                        sql: format!("create table {table} (id bigint not null primary key)"),
+                    },
+                },
+            };
+            assert_eq!(
+                app.handle_connector_request_for_session(&create_table, "root-session").status,
+                ResponseStatus::Applied
+            );
+        }
+    }
+
+    app.init_session("alice-session".to_string(), 1, "alice".to_string());
+
+    for (request_id, sql) in [
+        (
+            "grant-main-schema-with-option",
+            "grant select on schema main to alice with grant option",
+        ),
+        (
+            "grant-analytics-users-object",
+            "grant select on analytics.users to alice",
+        ),
+        (
+            "grant-analytics-schema-with-option",
+            "grant select on schema analytics to alice with grant option",
+        ),
+        (
+            "revoke-analytics-schema",
+            "revoke select on schema analytics from alice",
+        ),
+        ("revoke-main-orders", "revoke select on main.orders from alice"),
+    ] {
+        let request = ConnectorRequest {
+            request_id: request_id.to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: sql.to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&request, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+    let analytics_id = serverlib::DatabaseId::from_database_name("analytics")
+        .expect("analytics database id should normalize")
+        .0;
+
+    let main_catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist");
+    let main_acl = main_catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist in main");
+    assert!(main_acl.acl.contains("SELECT"));
+    assert!(main_acl.grant_acl.contains("SELECT"));
+
+    let analytics_catalog = app
+        .catalogs
+        .get(&analytics_id)
+        .expect("analytics catalog should exist");
+    let analytics_acl = analytics_catalog
+        .effective_account_acl_entry("alice")
+        .expect("alice ACL should exist in analytics");
+    assert!(!analytics_acl.grant_acl.contains("SELECT"));
+
+    let show_main_users = ConnectorRequest {
+        request_id: "show-main-users-after-mixed-grant-option-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_main_orders = ConnectorRequest {
+        request_id: "show-main-orders-after-mixed-grant-option-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+    let show_analytics_users = ConnectorRequest {
+        request_id: "show-analytics-users-after-mixed-grant-option-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_analytics_orders = ConnectorRequest {
+        request_id: "show-analytics-orders-after-mixed-grant-option-chain".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "analytics".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_main_orders, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_users, "alice-session").status,
+        ResponseStatus::Applied
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_analytics_orders, "alice-session").status,
+        ResponseStatus::Rejected
+    );
+
+}
+
+#[test]
+fn mixed_schema_object_grant_option_malformed_batch_has_no_side_effects_then_recovers() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-mixed-grant-option-malformed-batch-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+    assert_eq!(
+        app.handle_connector_request_for_session(&create_main, "root-session").status,
+        ResponseStatus::Applied
+    );
+
+    for table in ["users", "orders"] {
+        let create_table = ConnectorRequest {
+            request_id: format!("create-{table}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: format!("create table {table} (id bigint not null primary key)"),
+                },
+            },
+        };
+        assert_eq!(
+            app.handle_connector_request_for_session(&create_table, "root-session").status,
+            ResponseStatus::Applied
+        );
+    }
+
+    app.init_session("bob-session".to_string(), 1, "bob".to_string());
+
+    let malformed_batch = ConnectorRequest {
+        request_id: "malformed-mixed-grant-option-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to bob with grant option; grant select on analytics. to bob; revoke select on users from bob".to_string(),
+            },
+        },
+    };
+
+    let malformed_response = app.handle_connector_request_for_session(&malformed_batch, "root-session");
+    assert_eq!(malformed_response.status, ResponseStatus::Rejected);
+    let ConnectorResult::Error(_) = malformed_response.result else {
+        panic!("expected malformed mixed grant-option batch rejection error");
+    };
+
+    let main_id = serverlib::DatabaseId::from_database_name("main")
+        .expect("main database id should normalize")
+        .0;
+    if let Some(main_catalog) = app.catalogs.get(&main_id)
+        && let Some(acl) = main_catalog.effective_account_acl_entry("bob")
+    {
+        assert!(!acl.acl.contains("SELECT"));
+        assert!(!acl.grant_acl.contains("SELECT"));
+    }
+
+    let show_users = ConnectorRequest {
+        request_id: "show-users-after-malformed-mixed-grant-option-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+    let show_orders = ConnectorRequest {
+        request_id: "show-orders-after-malformed-mixed-grant-option-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from orders".to_string(),
+            },
+        },
+    };
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+
+    let valid_reconciliation_batch = ConnectorRequest {
+        request_id: "valid-mixed-grant-option-reconciliation-batch".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on schema main to bob with grant option; revoke select on schema main from bob; grant select on orders to bob".to_string(),
+            },
+        },
+    };
+
+    let valid_response = app.handle_connector_request_for_session(&valid_reconciliation_batch, "root-session");
+    assert_eq!(valid_response.status, ResponseStatus::Applied);
+
+    let main_catalog = app
+        .catalogs
+        .get(&main_id)
+        .expect("main catalog should exist");
+    let bob_acl = main_catalog
+        .effective_account_acl_entry("bob")
+        .expect("bob ACL should exist in main after reconciliation");
+    assert!(!bob_acl.grant_acl.contains("SELECT"));
+
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_users, "bob-session").status,
+        ResponseStatus::Rejected
+    );
+    assert_eq!(
+        app.handle_connector_request_for_session(&show_orders, "bob-session").status,
+        ResponseStatus::Applied
+    );
+
+}
+
+#[test]
 fn authorization_interleaving_grant_revoke_cycles_enforce_post_revoke_denial() {
 
     let unique_suffix = std::time::SystemTime::now()
@@ -575,6 +3881,310 @@ fn authorization_interleaving_grant_revoke_cycles_enforce_post_revoke_denial() {
         );
         assert_eq!(deny_b.status, ResponseStatus::Rejected);
 
+    }
+
+}
+
+#[test]
+fn authorization_interleaving_high_contention_multi_session_revokes_stay_effective() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-high-contention-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let create_main = ConnectorRequest {
+        request_id: "create-main".to_string(),
+        command: ConnectorCommand::CreateDatabase {
+            database_name: "main".to_string(),
+        },
+    };
+
+    let create_main_response = app.handle_connector_request_for_session(&create_main, "root-session");
+    assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+    let create_users_table = ConnectorRequest {
+        request_id: "create-users".to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key)".to_string(),
+            },
+        },
+    };
+
+    let create_users_table_response =
+        app.handle_connector_request_for_session(&create_users_table, "root-session");
+    assert_eq!(create_users_table_response.status, ResponseStatus::Applied);
+
+    let session_ids = [
+        "alice-session-01",
+        "alice-session-02",
+        "alice-session-03",
+        "alice-session-04",
+        "alice-session-05",
+        "alice-session-06",
+    ];
+
+    for (idx, session_id) in session_ids.iter().enumerate() {
+        app.init_session((*session_id).to_string(), idx + 1, "alice".to_string());
+    }
+
+    let show_users_columns = |request_id: &str| ConnectorRequest {
+        request_id: request_id.to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show columns from users".to_string(),
+            },
+        },
+    };
+
+    let grant = |request_id: &str| ConnectorRequest {
+        request_id: request_id.to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "grant select on users to alice".to_string(),
+            },
+        },
+    };
+
+    let revoke = |request_id: &str| ConnectorRequest {
+        request_id: request_id.to_string(),
+        command: ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "revoke select on users from alice".to_string(),
+            },
+        },
+    };
+
+    for cycle in 0..8 {
+
+        let grant_response = app.handle_connector_request_for_session(
+            &grant(&format!("grant-users-select-contention-{cycle}")),
+            "root-session",
+        );
+        assert_eq!(grant_response.status, ResponseStatus::Applied);
+
+        for burst in 0..2 {
+            for session_id in session_ids.iter() {
+                let allow = app.handle_connector_request_for_session(
+                    &show_users_columns(&format!("show-users-allow-{cycle}-{burst}-{session_id}")),
+                    session_id,
+                );
+                assert_eq!(allow.status, ResponseStatus::Applied);
+            }
+        }
+
+        let revoke_response = app.handle_connector_request_for_session(
+            &revoke(&format!("revoke-users-select-contention-{cycle}")),
+            "root-session",
+        );
+        assert_eq!(revoke_response.status, ResponseStatus::Applied);
+
+        for burst in 0..3 {
+            for session_id in session_ids.iter() {
+                let deny = app.handle_connector_request_for_session(
+                    &show_users_columns(&format!("show-users-deny-{cycle}-{burst}-{session_id}")),
+                    session_id,
+                );
+                assert_eq!(deny.status, ResponseStatus::Rejected);
+            }
+        }
+
+    }
+
+}
+
+#[test]
+fn authorization_parallel_reader_writer_contention_preserves_revoke_effectiveness() {
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-authz-parallel-contention-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let app = Arc::new(Mutex::new(
+        ServerApp::new(config).expect("server app should initialize"),
+    ));
+
+    {
+        let mut guard = app.lock().expect("app lock should be available");
+
+        let create_main = ConnectorRequest {
+            request_id: "create-main".to_string(),
+            command: ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        };
+
+        let create_main_response = guard.handle_connector_request_for_session(&create_main, "root-session");
+        assert_eq!(create_main_response.status, ResponseStatus::Applied);
+
+        let create_users_table = ConnectorRequest {
+            request_id: "create-users".to_string(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table users (id bigint not null primary key)".to_string(),
+                },
+            },
+        };
+
+        let create_users_table_response =
+            guard.handle_connector_request_for_session(&create_users_table, "root-session");
+        assert_eq!(create_users_table_response.status, ResponseStatus::Applied);
+
+        for idx in 1..=8 {
+            guard.init_session(
+                format!("alice-session-parallel-{idx}"),
+                idx,
+                "alice".to_string(),
+            );
+        }
+    }
+
+    let session_ids: Vec<String> = (1..=8)
+        .map(|idx| format!("alice-session-parallel-{idx}"))
+        .collect();
+
+    let barrier = Arc::new(Barrier::new(session_ids.len() + 1));
+    let applied_total = Arc::new(AtomicUsize::new(0));
+    let rejected_total = Arc::new(AtomicUsize::new(0));
+
+    let mut readers = Vec::new();
+    for session_id in session_ids.clone() {
+        let app_reader = Arc::clone(&app);
+        let barrier_reader = Arc::clone(&barrier);
+        let applied_reader = Arc::clone(&applied_total);
+        let rejected_reader = Arc::clone(&rejected_total);
+
+        readers.push(thread::spawn(move || {
+            barrier_reader.wait();
+            for iteration in 0..120 {
+                let request = ConnectorRequest {
+                    request_id: format!("parallel-read-{session_id}-{iteration}"),
+                    command: ConnectorCommand::Query {
+                        query: connector::DataQuery {
+                            database_id: "main".to_string(),
+                            sql: "show columns from users".to_string(),
+                        },
+                    },
+                };
+
+                let status = {
+                    let mut guard = app_reader.lock().expect("app lock should be available");
+                    guard
+                        .handle_connector_request_for_session(&request, &session_id)
+                        .status
+                };
+
+                match status {
+                    ResponseStatus::Applied => {
+                        applied_reader.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ResponseStatus::Rejected => {
+                        rejected_reader.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+
+                if iteration % 8 == 0 {
+                    thread::yield_now();
+                }
+            }
+        }));
+    }
+
+    let app_writer = Arc::clone(&app);
+    let barrier_writer = Arc::clone(&barrier);
+    let writer = thread::spawn(move || {
+        barrier_writer.wait();
+        for cycle in 0..45 {
+            let grant = ConnectorRequest {
+                request_id: format!("parallel-grant-{cycle}"),
+                command: ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: "grant select on users to alice".to_string(),
+                    },
+                },
+            };
+
+            let revoke = ConnectorRequest {
+                request_id: format!("parallel-revoke-{cycle}"),
+                command: ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id: "main".to_string(),
+                        sql: "revoke select on users from alice".to_string(),
+                    },
+                },
+            };
+
+            let grant_status = {
+                let mut guard = app_writer.lock().expect("app lock should be available");
+                guard.handle_connector_request_for_session(&grant, "root-session").status
+            };
+            assert_eq!(grant_status, ResponseStatus::Applied);
+
+            thread::sleep(Duration::from_millis(1));
+
+            let revoke_status = {
+                let mut guard = app_writer.lock().expect("app lock should be available");
+                guard.handle_connector_request_for_session(&revoke, "root-session").status
+            };
+            assert_eq!(revoke_status, ResponseStatus::Applied);
+
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    writer.join().expect("writer thread should finish");
+    for reader in readers {
+        reader.join().expect("reader thread should finish");
+    }
+
+    assert!(
+        applied_total.load(Ordering::Relaxed) > 0,
+        "at least one read should be allowed during grant windows"
+    );
+    assert!(
+        rejected_total.load(Ordering::Relaxed) > 0,
+        "at least one read should be rejected during revoke windows"
+    );
+
+    let mut guard = app.lock().expect("app lock should be available");
+    for (idx, session_id) in session_ids.iter().enumerate() {
+        let final_check = ConnectorRequest {
+            request_id: format!("parallel-final-deny-{idx}"),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "show columns from users".to_string(),
+                },
+            },
+        };
+
+        let response = guard.handle_connector_request_for_session(&final_check, session_id);
+        assert_eq!(response.status, ResponseStatus::Rejected);
     }
 
 }

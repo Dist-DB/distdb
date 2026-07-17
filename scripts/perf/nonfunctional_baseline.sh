@@ -9,8 +9,13 @@ source "$ROOT_DIR/scripts/e2e/lib.sh"
 require_binaries
 
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
-OUT_DIR="$ROOT_DIR/server/data/perf/nonfunctional-baseline-$RUN_ID"
+ARTIFACTS_ROOT="${DISTDB_ARTIFACTS_ROOT:-$ROOT_DIR/artifacts}"
+PERF_DATA_ROOT="${PERF_DATA_ROOT:-$ARTIFACTS_ROOT/perf}"
+OUT_DIR="$PERF_DATA_ROOT/nonfunctional-baseline-$RUN_ID"
 mkdir -p "$OUT_DIR"
+MANIFEST_FILE="$OUT_DIR/manifest.json"
+RUN_STARTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 NODE_ID="perf-baseline-node"
 PORT="19401"
@@ -28,7 +33,42 @@ READ_CSV="$OUT_DIR/read-heavy.csv"
 MIXED_CSV="$OUT_DIR/mixed.csv"
 SUMMARY_JSON="$OUT_DIR/summary.json"
 
-trap stop_server EXIT
+write_manifest() {
+  local exit_code="$1"
+  local status="fail"
+  if [[ "$exit_code" -eq 0 ]]; then
+    status="pass"
+  fi
+
+  cat >"$MANIFEST_FILE" <<JSON
+{
+  "run_id": "$RUN_ID",
+  "kind": "nonfunctional_baseline",
+  "status": "$status",
+  "exit_code": $exit_code,
+  "started_at_utc": "$RUN_STARTED_UTC",
+  "finished_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "git_sha": "$GIT_SHA",
+  "artifacts_dir": "$OUT_DIR",
+  "summary_json": "$SUMMARY_JSON",
+  "profiles": ["write_heavy", "read_heavy", "mixed", "recovery"],
+  "config": {
+    "write_ops": $WRITE_OPS,
+    "read_ops": $READ_OPS,
+    "mixed_ops": $MIXED_OPS,
+    "seed_rows": $SEED_ROWS
+  }
+}
+JSON
+}
+
+on_exit() {
+  local exit_code="$?"
+  stop_server || true
+  write_manifest "$exit_code"
+}
+
+trap on_exit EXIT
 
 now_ms() {
   perl -MTime::HiRes=time -e 'printf("%.0f\n", time()*1000)'
@@ -241,4 +281,5 @@ $mixed_profile
 JSON
 
 echo "[nonfunctional-baseline] summary=$SUMMARY_JSON"
+echo "[nonfunctional-baseline] manifest=$MANIFEST_FILE"
 cat "$SUMMARY_JSON"

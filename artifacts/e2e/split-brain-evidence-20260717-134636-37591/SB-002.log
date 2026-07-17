@@ -1,0 +1,62 @@
+[split-brain-dual-primary] validating dual-primary conflict safety invariants
+[split-brain-dual-primary] server: concurrent write/write conflict rejection
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/server-c25cad2ab85cb391)
+
+running 1 test
+test core::app::tests::snapshot_isolation_rejects_concurrent_write_write_conflicts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 280 filtered out; finished in 0.08s
+
+     Running unittests src/main.rs (target/debug/deps/server-1801c0ba9576df6a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[split-brain-dual-primary] server: serializable write-skew rejection
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/server-c25cad2ab85cb391)
+
+running 1 test
+test core::app::tests::serializable_rejects_write_skew_across_disjoint_rows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 280 filtered out; finished in 0.06s
+
+     Running unittests src/main.rs (target/debug/deps/server-1801c0ba9576df6a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[split-brain-dual-primary] server: rollback clears staged state for deterministic recovery
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/server-c25cad2ab85cb391)
+
+running 1 test
+test core::app::tests::rollback_discards_staged_queries_for_session ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 280 filtered out; finished in 0.03s
+
+     Running unittests src/main.rs (target/debug/deps/server-1801c0ba9576df6a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[split-brain-dual-primary] server: failed commit validation does not leak partial durability
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/server-c25cad2ab85cb391)
+
+running 1 test
+test core::app::tests::failed_commit_validation_leaves_real_wal_and_indexes_clean ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 280 filtered out; finished in 0.04s
+
+     Running unittests src/main.rs (target/debug/deps/server-1801c0ba9576df6a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[split-brain-dual-primary] suite passed

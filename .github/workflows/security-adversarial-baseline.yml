@@ -23,3 +23,12 @@ jobs:
 
       - name: Run adversarial security baseline
         run: bash scripts/security/security_adversarial_baseline.sh
+
+      - name: Upload security baseline artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-adversarial-baseline-${{ github.run_id }}
+          path: |
+            artifacts/security/security-baseline-*/manifest.json
+            artifacts/security/security-baseline-*/*.log
+          if-no-files-found: error

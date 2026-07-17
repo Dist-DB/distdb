@@ -1,5 +1,8 @@
 {
   "folders": [
+    { "name": "artifacts",
+      "path": "./artifacts"
+    },
     { "name": "papers",
       "path": "./../papers"
     },

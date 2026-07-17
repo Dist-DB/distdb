@@ -1,0 +1,13 @@
+{
+  "run_id": "split-brain-evidence-20260717-134636-37591",
+  "kind": "split_brain_evidence_bundle",
+  "status": "pass",
+  "exit_code": 0,
+  "started_at_utc": "2026-07-17T11:46:36Z",
+  "finished_at_utc": "2026-07-17T11:46:42Z",
+  "git_sha": "0211694",
+  "artifacts_dir": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260717-134636-37591",
+  "report_file": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260717-134636-37591/observation-report.md",
+  "summary_file": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260717-134636-37591/summary.txt",
+  "scenarios": ["SB-001", "SB-002", "SB-003", "SB-004"]
+}

@@ -36,7 +36,10 @@ To close this beta gate:
 
 Use this table to record concrete run outcomes for each scenario and keep status changes evidence-based.
 
-Preferred evidence capture command (runs SB-001..SB-004 and emits a timestamped observation report under `server/data/e2e/split-brain-evidence-*`):
+Preferred evidence capture command (runs SB-001..SB-004 and emits a timestamped observation report under `artifacts/e2e/split-brain-evidence-*` by default):
+
+Legacy report discovery still checks `server/data/e2e/split-brain-evidence-*` for backward compatibility.
+Override paths with `DISTDB_ARTIFACTS_ROOT` or `SPLIT_BRAIN_DATA_ROOT` when needed.
 
 - `CONSISTENCY_RUN_SPLIT_BRAIN_EVIDENCE_BUNDLE=true bash scripts/run_consistency_failure_validation.sh`
 

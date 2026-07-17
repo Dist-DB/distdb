@@ -1,0 +1,68 @@
+name: nightly-evidence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "40 3 * * *"
+
+concurrency:
+  group: nightly-evidence-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run split-brain evidence bundle
+        run: bash scripts/e2e/split_brain_evidence_bundle.sh
+
+      - name: Run adversarial security baseline
+        run: bash scripts/security/security_adversarial_baseline.sh
+
+      - name: Run non-functional baseline
+        run: bash scripts/perf/nonfunctional_baseline.sh
+
+      - name: Check non-functional regression thresholds
+        run: bash scripts/perf/check_nonfunctional_thresholds.sh
+
+      - name: Check artifact evidence quality
+        run: bash scripts/check_artifact_evidence_quality.sh
+
+      - name: Append artifact trend ledgers
+        run: bash scripts/append_artifact_trends.sh
+
+      - name: Resolve nightly artifact directories
+        id: nightly_artifacts
+        run: |
+          set -euo pipefail
+
+          latest_e2e_dir="$(ls -dt artifacts/e2e/split-brain-evidence-* 2>/dev/null | head -n 1 || true)"
+          latest_security_dir="$(ls -dt artifacts/security/security-baseline-* 2>/dev/null | head -n 1 || true)"
+          latest_perf_dir="$(ls -dt artifacts/perf/nonfunctional-baseline-* 2>/dev/null | head -n 1 || true)"
+
+          [[ -n "$latest_e2e_dir" ]] || { echo "no split-brain artifact directory found"; exit 1; }
+          [[ -n "$latest_security_dir" ]] || { echo "no security artifact directory found"; exit 1; }
+          [[ -n "$latest_perf_dir" ]] || { echo "no non-functional artifact directory found"; exit 1; }
+
+          echo "latest_e2e_dir=$latest_e2e_dir" >> "$GITHUB_OUTPUT"
+          echo "latest_security_dir=$latest_security_dir" >> "$GITHUB_OUTPUT"
+          echo "latest_perf_dir=$latest_perf_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload nightly evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-evidence-${{ github.run_id }}
+          path: |
+            ${{ steps.nightly_artifacts.outputs.latest_e2e_dir }}
+            ${{ steps.nightly_artifacts.outputs.latest_security_dir }}
+            ${{ steps.nightly_artifacts.outputs.latest_perf_dir }}
+            artifacts/trends/*.json
+          if-no-files-found: error

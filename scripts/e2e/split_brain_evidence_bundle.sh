@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DATA_ROOT="$ROOT_DIR/server/data/e2e"
+ARTIFACTS_ROOT="${DISTDB_ARTIFACTS_ROOT:-$ROOT_DIR/artifacts}"
+DATA_ROOT="${SPLIT_BRAIN_DATA_ROOT:-$ARTIFACTS_ROOT/e2e}"
+RUN_STARTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 mkdir -p "$DATA_ROOT"
 
@@ -12,6 +15,7 @@ mkdir -p "$run_dir"
 
 report_file="$run_dir/observation-report.md"
 summary_file="$run_dir/summary.txt"
+manifest_file="$run_dir/manifest.json"
 AUTO_APPEND_OBSERVATIONS="${CONSISTENCY_AUTO_APPEND_SPLIT_BRAIN_OBSERVATIONS:-false}"
 
 cat >"$report_file" <<'MD'
@@ -22,6 +26,30 @@ cat >"$report_file" <<'MD'
 MD
 
 overall_result=0
+
+write_manifest() {
+  local exit_code="$1"
+  local status="fail"
+  if [[ "$exit_code" -eq 0 ]]; then
+    status="pass"
+  fi
+
+  cat >"$manifest_file" <<JSON
+{
+  "run_id": "$(basename "$run_dir")",
+  "kind": "split_brain_evidence_bundle",
+  "status": "$status",
+  "exit_code": $exit_code,
+  "started_at_utc": "$RUN_STARTED_UTC",
+  "finished_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "git_sha": "$GIT_SHA",
+  "artifacts_dir": "$run_dir",
+  "report_file": "$report_file",
+  "summary_file": "$summary_file",
+  "scenarios": ["SB-001", "SB-002", "SB-003", "SB-004"]
+}
+JSON
+}
 
 run_stage() {
   local scenario_id="$1"
@@ -74,6 +102,8 @@ fi
 
 echo "[split-brain-evidence] report=$report_file"
 echo "[split-brain-evidence] summary=$summary_file"
+write_manifest "$overall_result"
+echo "[split-brain-evidence] manifest=$manifest_file"
 
 cat "$report_file"
 

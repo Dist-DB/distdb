@@ -22,15 +22,25 @@ Optional sizing knobs:
 - `PERF_READ_OPS` (default `90`)
 - `PERF_MIXED_OPS` (default `80`)
 - `PERF_SEED_ROWS` (default `200`)
+- `DISTDB_ARTIFACTS_ROOT` (default `artifacts/` under repo root)
+- `PERF_DATA_ROOT` (overrides the non-functional artifact subdirectory)
 
 Output location:
 
-- `server/data/perf/nonfunctional-baseline-<timestamp>-<pid>/summary.json`
+- `artifacts/perf/nonfunctional-baseline-<timestamp>-<pid>/summary.json`
 - same directory contains per-profile latency CSV artifacts.
 
 Threshold check command:
 
 - `bash scripts/perf/check_nonfunctional_thresholds.sh`
+
+Trend ledger append command:
+
+- `bash scripts/append_artifact_trends.sh`
+- writes JSON trend ledgers under `artifacts/trends/`:
+	- `security-trend.json`
+	- `nonfunctional-trend.json`
+	- `split-brain-trend.json`
 
 ## Profile Definitions
 

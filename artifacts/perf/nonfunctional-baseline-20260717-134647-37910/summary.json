@@ -1,0 +1,46 @@
+{
+  "run_id": "20260717-134647-37910",
+  "generated_at_utc": "2026-07-17T11:47:00Z",
+  "config": {
+    "write_ops": 60,
+    "read_ops": 90,
+    "mixed_ops": 80,
+    "seed_rows": 200,
+    "port": 19401
+  },
+  "profiles": {
+    "write_heavy": {
+      "operations": 60,
+      "p50_ms": 41,
+      "p95_ms": 46,
+      "p99_ms": 55,
+      "total_ms": 2479,
+      "throughput_ops_per_sec": 24.20
+    },
+    "read_heavy": {
+      "operations": 90,
+      "p50_ms": 24,
+      "p95_ms": 29,
+      "p99_ms": 57,
+      "total_ms": 2275,
+      "throughput_ops_per_sec": 39.56
+    },
+    "mixed": {
+      "operations": 80,
+      "p50_ms": 34,
+      "p95_ms": 43,
+      "p99_ms": 47,
+      "total_ms": 2694,
+      "throughput_ops_per_sec": 29.70
+    }
+  },
+  "recovery": {
+    "recovery_to_ready_ms": 20
+  },
+  "artifacts": {
+    "write_csv": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-134647-37910/write-heavy.csv",
+    "read_csv": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-134647-37910/read-heavy.csv",
+    "mixed_csv": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-134647-37910/mixed.csv",
+    "server_log": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260717-134647-37910/server.log"
+  }
+}

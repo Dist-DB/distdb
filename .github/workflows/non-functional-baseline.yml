@@ -27,12 +27,23 @@ jobs:
       - name: Check non-functional regression thresholds
         run: bash scripts/perf/check_nonfunctional_thresholds.sh
 
+      - name: Resolve non-functional artifact directory
+        id: perf_artifacts
+        run: |
+          set -euo pipefail
+          latest_perf_dir="$(ls -dt artifacts/perf/nonfunctional-baseline-* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "$latest_perf_dir" ]]; then
+            latest_perf_dir="$(ls -dt server/data/perf/nonfunctional-baseline-* 2>/dev/null | head -n 1 || true)"
+          fi
+          if [[ -z "$latest_perf_dir" ]]; then
+            echo "no non-functional artifact directory found"
+            exit 1
+          fi
+          echo "latest_dir=$latest_perf_dir" >> "$GITHUB_OUTPUT"
+
       - name: Upload non-functional baseline artifacts
         uses: actions/upload-artifact@v4
         with:
           name: non-functional-baseline-${{ github.run_id }}
-          path: |
-            server/data/perf/nonfunctional-baseline-*/summary.json
-            server/data/perf/nonfunctional-baseline-*/*.csv
-            server/data/perf/nonfunctional-baseline-*/*.log
+          path: ${{ steps.perf_artifacts.outputs.latest_dir }}
           if-no-files-found: error
