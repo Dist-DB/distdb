@@ -15,6 +15,15 @@ OPERABILITY_TREND_MIN_ENTRIES="${DISTDB_OPERABILITY_TREND_MIN_ENTRIES:-3}"
 REQUIRE_NONFUNCTIONAL_TREND_HISTORY="${DISTDB_REQUIRE_NONFUNCTIONAL_TREND_HISTORY:-false}"
 NONFUNCTIONAL_TREND_MIN_ENTRIES="${DISTDB_NONFUNCTIONAL_TREND_MIN_ENTRIES:-3}"
 NONFUNCTIONAL_TREND_LEDGER="$ARTIFACTS_ROOT/trends/nonfunctional-trend.json"
+REQUIRE_NONFUNCTIONAL_CRITICAL_FINDINGS_CLOSED="${DISTDB_REQUIRE_NONFUNCTIONAL_CRITICAL_FINDINGS_CLOSED:-false}"
+NONFUNCTIONAL_FINDINGS_LOG="${DISTDB_NONFUNCTIONAL_FINDINGS_LOG:-$ROOT_DIR/docs/nonfunctional-findings-log.md}"
+REQUIRE_SPLIT_BRAIN_MATRIX_CLOSURE="${DISTDB_REQUIRE_SPLIT_BRAIN_MATRIX_CLOSURE:-false}"
+SPLIT_BRAIN_MATRIX_DOC="${DISTDB_SPLIT_BRAIN_MATRIX_DOC:-$ROOT_DIR/docs/partition-split-brain-matrix.md}"
+SPLIT_BRAIN_MATRIX_MIN_OBSERVATIONS="${DISTDB_SPLIT_BRAIN_MATRIX_MIN_OBSERVATIONS:-2}"
+REQUIRE_SECURITY_HIGH_CRITICAL_FINDINGS_CLOSED="${DISTDB_REQUIRE_SECURITY_HIGH_CRITICAL_FINDINGS_CLOSED:-false}"
+SECURITY_FINDINGS_LOG="${DISTDB_SECURITY_FINDINGS_LOG:-$ROOT_DIR/docs/security-findings-log.md}"
+REQUIRE_SECURITY_MATRIX_CLOSURE="${DISTDB_REQUIRE_SECURITY_MATRIX_CLOSURE:-false}"
+SECURITY_MATRIX_DOC="${DISTDB_SECURITY_MATRIX_DOC:-$ROOT_DIR/docs/security-adversarial-matrix.md}"
 OPERABILITY_TREND_LEDGER="$ARTIFACTS_ROOT/trends/operability-trend.json"
 
 fail() {
@@ -59,6 +68,31 @@ assert_file "$security_dir/run.log" "security run log"
 assert_manifest_pass "$security_dir/manifest.json"
 ok "security artifact bundle validated: $security_dir"
 
+if [[ "$REQUIRE_SECURITY_HIGH_CRITICAL_FINDINGS_CLOSED" == "true" ]]; then
+  assert_file "$SECURITY_FINDINGS_LOG" "security findings log"
+
+  if grep -Eq '^\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[[:space:]]*(Critical|High)[[:space:]]*\|[[:space:]]*(Open|In Progress)[[:space:]]*\|' "$SECURITY_FINDINGS_LOG"; then
+    fail "security findings log contains unresolved High/Critical findings: $SECURITY_FINDINGS_LOG"
+  fi
+
+  ok "security findings governance validated: no unresolved High/Critical findings in $SECURITY_FINDINGS_LOG"
+else
+  ok "security high/critical findings gate disabled (set DISTDB_REQUIRE_SECURITY_HIGH_CRITICAL_FINDINGS_CLOSED=true to enforce)"
+fi
+
+if [[ "$REQUIRE_SECURITY_MATRIX_CLOSURE" == "true" ]]; then
+  assert_file "$SECURITY_MATRIX_DOC" "security adversarial matrix"
+
+  for scenario in SEC-001 SEC-002 SEC-003 SEC-004 SEC-005 SEC-006 SEC-007 SEC-008; do
+    grep -Eq "^\|[[:space:]]*$scenario[[:space:]]*\|.*\|[[:space:]]*Implemented/Tested[[:space:]]*\|" "$SECURITY_MATRIX_DOC" \
+      || fail "security matrix row not Implemented/Tested for $scenario in $SECURITY_MATRIX_DOC"
+  done
+
+  ok "security matrix closure validated: SEC-001..SEC-008 are Implemented/Tested"
+else
+  ok "security matrix closure gate disabled (set DISTDB_REQUIRE_SECURITY_MATRIX_CLOSURE=true to enforce)"
+fi
+
 perf_dir="$(latest_dir_by_pattern "$PERF_ROOT" "nonfunctional-baseline-*")"
 [[ -n "$perf_dir" ]] || fail "no non-functional artifact directory found under $PERF_ROOT"
 assert_file "$perf_dir/summary.json" "non-functional summary"
@@ -87,15 +121,49 @@ else
   ok "non-functional trend ledger not found; skipping history gate (set DISTDB_REQUIRE_NONFUNCTIONAL_TREND_HISTORY=true to enforce)"
 fi
 
+if [[ "$REQUIRE_NONFUNCTIONAL_CRITICAL_FINDINGS_CLOSED" == "true" ]]; then
+  assert_file "$NONFUNCTIONAL_FINDINGS_LOG" "non-functional findings log"
+
+  if grep -Eq '^\|[^|]*\|[^|]*\|[^|]*\|[[:space:]]*Critical[[:space:]]*\|[[:space:]]*(Open|In Progress)[[:space:]]*\|' "$NONFUNCTIONAL_FINDINGS_LOG"; then
+    fail "non-functional findings log contains unresolved Critical findings: $NONFUNCTIONAL_FINDINGS_LOG"
+  fi
+
+  ok "non-functional findings governance validated: no unresolved Critical findings in $NONFUNCTIONAL_FINDINGS_LOG"
+else
+  ok "non-functional critical findings gate disabled (set DISTDB_REQUIRE_NONFUNCTIONAL_CRITICAL_FINDINGS_CLOSED=true to enforce)"
+fi
+
 e2e_dir="$(latest_dir_by_pattern "$E2E_ROOT" "split-brain-evidence-*")"
 [[ -n "$e2e_dir" ]] || fail "no split-brain artifact directory found under $E2E_ROOT"
 assert_file "$e2e_dir/observation-report.md" "split-brain observation report"
 assert_file "$e2e_dir/summary.txt" "split-brain summary"
 assert_manifest_pass "$e2e_dir/manifest.json"
+grep -q '^PASS$' "$e2e_dir/summary.txt" || fail "split-brain summary does not indicate PASS: $e2e_dir/summary.txt"
 for scenario in SB-001 SB-002 SB-003 SB-004; do
   assert_file "$e2e_dir/${scenario}.log" "split-brain scenario log $scenario"
 done
 ok "split-brain artifact bundle validated: $e2e_dir"
+
+if [[ "$REQUIRE_SPLIT_BRAIN_MATRIX_CLOSURE" == "true" ]]; then
+  assert_file "$SPLIT_BRAIN_MATRIX_DOC" "split-brain matrix document"
+
+  for scenario in SB-001 SB-002 SB-003 SB-004; do
+    grep -Eq "^\|[[:space:]]*$scenario[[:space:]]*\|.*\|[[:space:]]*Implemented/Tested[[:space:]]*\|" "$SPLIT_BRAIN_MATRIX_DOC" \
+      || fail "split-brain matrix row not Implemented/Tested for $scenario in $SPLIT_BRAIN_MATRIX_DOC"
+
+    observation_count="$({ grep -Ec "^\|[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]*\|[[:space:]]*$scenario[[:space:]]*\|.*\|[[:space:]]*Pass[[:space:]]*\|" "$SPLIT_BRAIN_MATRIX_DOC"; } || true)"
+    if [[ -z "$observation_count" ]]; then
+      observation_count=0
+    fi
+
+    [[ "$observation_count" -ge "$SPLIT_BRAIN_MATRIX_MIN_OBSERVATIONS" ]] \
+      || fail "split-brain matrix observations insufficient for $scenario: entries=$observation_count min_required=$SPLIT_BRAIN_MATRIX_MIN_OBSERVATIONS doc=$SPLIT_BRAIN_MATRIX_DOC"
+  done
+
+  ok "split-brain matrix closure validated: all SB rows Implemented/Tested with >=$SPLIT_BRAIN_MATRIX_MIN_OBSERVATIONS passing observations each"
+else
+  ok "split-brain matrix closure gate disabled (set DISTDB_REQUIRE_SPLIT_BRAIN_MATRIX_CLOSURE=true to enforce)"
+fi
 
 if [[ "$REQUIRE_OPERABILITY_WINDOW_MATRIX" == "true" ]]; then
   required_windows_normalized="$(printf '%s' "$REQUIRED_OPERABILITY_WINDOWS" | tr ',' ' ')"

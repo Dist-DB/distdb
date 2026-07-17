@@ -73,6 +73,11 @@ jobs:
           DISTDB_OPERABILITY_TREND_MIN_ENTRIES: "3"
           DISTDB_REQUIRE_NONFUNCTIONAL_TREND_HISTORY: "true"
           DISTDB_NONFUNCTIONAL_TREND_MIN_ENTRIES: "3"
+          DISTDB_REQUIRE_NONFUNCTIONAL_CRITICAL_FINDINGS_CLOSED: "true"
+          DISTDB_REQUIRE_SPLIT_BRAIN_MATRIX_CLOSURE: "true"
+          DISTDB_SPLIT_BRAIN_MATRIX_MIN_OBSERVATIONS: "2"
+          DISTDB_REQUIRE_SECURITY_HIGH_CRITICAL_FINDINGS_CLOSED: "true"
+          DISTDB_REQUIRE_SECURITY_MATRIX_CLOSURE: "true"
         run: bash scripts/check_artifact_evidence_quality.sh
 
       - name: Resolve nightly artifact directories
