@@ -22,10 +22,16 @@ jobs:
       - name: Run coverage script
         env:
           COVERAGE_MIN_LINES: "50"
+          COVERAGE_MIN_FUNCTIONS: "35"
+          COVERAGE_MIN_REGIONS: "40"
+          COVERAGE_MIN_FILE_LINES: "0"
+          COVERAGE_ENABLE_BRANCH: "false"
         run: bash scripts/coverage.sh
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lcov-reports
-          path: coverage/*.lcov
+          path: |
+            coverage/*.lcov
+            coverage/*-summary.json
