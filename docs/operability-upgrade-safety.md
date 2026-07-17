@@ -23,14 +23,14 @@ This page covers:
 
 ### Bounded
 
-- Multi-node rolling restart evidence validates a configurable cross-version transition path (old binary -> new binary -> old binary) when both binaries are supplied.
+- Multi-node rolling restart evidence validates a maintained cross-version transition matrix (old binary -> new binary -> old binary) for declared windows.
 - Compatibility confidence remains bounded to the tested version window and evidence cadence.
 - Operational confidence for upgrades remains bounded to published artifact runs and explicit compatibility assertions.
 
 ### Not Yet Guaranteed
 
-- Frozen semver compatibility commitments for every WAL/catalog payload type.
-- Published compatibility window assertions that extend beyond the tested adjacent-version transition.
+- Full semver compatibility commitments for every historical WAL/catalog payload version.
+- Upgrade guarantees outside the declared supported window matrix.
 
 ## WAL and Catalog Compatibility Expectations (Alpha)
 
@@ -45,6 +45,23 @@ Current operator expectations:
    - evidence links in release documentation.
 
 Until beta, treat format compatibility as explicitly versioned-by-evidence rather than globally guaranteed.
+
+## Frozen Compatibility Window Assertions
+
+The following compatibility windows are currently declared as supported for rolling upgrade and rollback drills, and are enforced by scheduled evidence runs.
+
+| Window Label | Old Ref | New Ref | Upgrade Path | Rollback Path | Status |
+| --- | --- | --- | --- | --- | --- |
+| head-1 | `HEAD~1` | `HEAD` | Supported | Supported | Active |
+| head-2 | `HEAD~2` | `HEAD` | Supported | Supported | Active |
+| head-3 | `HEAD~3` | `HEAD` | Supported | Supported | Active |
+
+Assertions:
+
+1. WAL replay compatibility is guaranteed only for the declared windows above.
+2. Catalog replay compatibility is guaranteed only for the declared windows above.
+3. Upgrade or rollback attempts outside declared windows are unsupported until a window is added and evidenced.
+4. Any format-affecting change must either preserve current windows or explicitly revise this table with new evidence links.
 
 ## Rolling Restart and Upgrade-Safety Drill
 
@@ -68,7 +85,7 @@ Generated evidence (default):
 CI workflow:
 
 - `.github/workflows/operability-upgrade-safety.yml`
-- Workflow builds both current and previous server binaries and runs the drill as an adjacent-version transition (`HEAD~1` -> `HEAD` -> `HEAD~1`).
+- Workflow builds the current server binary and a matrix of old refs (`HEAD~1`, `HEAD~2`, `HEAD~3`) and runs the drill per window.
 
 ## Observability Minimums (Alpha)
 
@@ -84,6 +101,6 @@ The following minimum signals are required for operability drills and incident t
 To mark Domain 4 as green in [beta-confidence-scorecard.md](beta-confidence-scorecard.md):
 
 1. expand cross-version rolling upgrade evidence into a maintained matrix (multiple adjacent and declared-supported version windows),
-2. publish frozen WAL/catalog compatibility contract with explicit supported version windows,
+2. keep the frozen WAL/catalog compatibility table current with evidence-backed window updates,
 3. demonstrate runbook drill execution history over multiple scheduled runs,
 4. ensure no unresolved high-severity operability regressions remain open.

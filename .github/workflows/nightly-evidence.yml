@@ -29,15 +29,26 @@ jobs:
           (cd server && cargo build --quiet)
           (cd console && cargo build --quiet)
 
-      - name: Build previous server binary for cross-version operability drill
+      - name: Run operability rolling restart and upgrade-safety matrix
         run: |
           set -euo pipefail
-          previous_ref="${OPERABILITY_OLD_REF:-HEAD~1}"
-          prev_tree="$RUNNER_TEMP/distdb-prev"
-          git worktree add --detach "$prev_tree" "$previous_ref"
-          (cd "$prev_tree/server" && cargo build --quiet)
-          cp "$prev_tree/server/target/debug/server" "$RUNNER_TEMP/server-old"
-          git worktree remove --force "$prev_tree"
+          for window_spec in "head-1:HEAD~1" "head-2:HEAD~2" "head-3:HEAD~3"; do
+            window_label="${window_spec%%:*}"
+            previous_ref="${window_spec#*:}"
+            prev_tree="$RUNNER_TEMP/distdb-prev-$window_label"
+            old_bin="$RUNNER_TEMP/server-old-$window_label"
+
+            git worktree add --detach "$prev_tree" "$previous_ref"
+            (cd "$prev_tree/server" && cargo build --quiet)
+            cp "$prev_tree/server/target/debug/server" "$old_bin"
+            git worktree remove --force "$prev_tree"
+
+            DISTDB_SERVER_BIN_OLD="$old_bin" \
+            DISTDB_SERVER_BIN_NEW="${GITHUB_WORKSPACE}/server/target/debug/server" \
+            OPERABILITY_WINDOW_LABEL="$window_label" \
+            OPERABILITY_OLD_REF="$previous_ref" \
+            bash scripts/e2e/rolling_restart_upgrade_safety.sh
+          done
 
       - name: Run split-brain evidence bundle
         run: bash scripts/e2e/split_brain_evidence_bundle.sh
@@ -48,12 +59,6 @@ jobs:
       - name: Run non-functional baseline
         run: bash scripts/perf/nonfunctional_baseline.sh
 
-      - name: Run operability rolling restart and upgrade-safety drill
-        env:
-          DISTDB_SERVER_BIN_OLD: ${{ runner.temp }}/server-old
-          DISTDB_SERVER_BIN_NEW: ${{ github.workspace }}/server/target/debug/server
-        run: bash scripts/e2e/rolling_restart_upgrade_safety.sh
-
       - name: Check non-functional regression thresholds
         run: bash scripts/perf/check_nonfunctional_thresholds.sh
 
@@ -62,7 +67,10 @@ jobs:
 
       - name: Check artifact evidence quality
         env:
-          DISTDB_REQUIRE_OPERABILITY_EVIDENCE: "true"
+          DISTDB_REQUIRE_OPERABILITY_WINDOW_MATRIX: "true"
+          DISTDB_REQUIRED_OPERABILITY_WINDOWS: "head-1,head-2,head-3"
+          DISTDB_REQUIRE_OPERABILITY_TREND_HISTORY: "true"
+          DISTDB_OPERABILITY_TREND_MIN_ENTRIES: "3"
           DISTDB_REQUIRE_NONFUNCTIONAL_TREND_HISTORY: "true"
           DISTDB_NONFUNCTIONAL_TREND_MIN_ENTRIES: "3"
         run: bash scripts/check_artifact_evidence_quality.sh
@@ -75,17 +83,23 @@ jobs:
           latest_e2e_dir="$(ls -dt artifacts/e2e/split-brain-evidence-* 2>/dev/null | head -n 1 || true)"
           latest_security_dir="$(ls -dt artifacts/security/security-baseline-* 2>/dev/null | head -n 1 || true)"
           latest_perf_dir="$(ls -dt artifacts/perf/nonfunctional-baseline-* 2>/dev/null | head -n 1 || true)"
-          latest_operability_dir="$(ls -dt artifacts/e2e/rolling-upgrade-safety-* 2>/dev/null | head -n 1 || true)"
+          latest_operability_head1="$(ls -dt artifacts/e2e/rolling-upgrade-safety-head-1-* 2>/dev/null | head -n 1 || true)"
+          latest_operability_head2="$(ls -dt artifacts/e2e/rolling-upgrade-safety-head-2-* 2>/dev/null | head -n 1 || true)"
+          latest_operability_head3="$(ls -dt artifacts/e2e/rolling-upgrade-safety-head-3-* 2>/dev/null | head -n 1 || true)"
 
           [[ -n "$latest_e2e_dir" ]] || { echo "no split-brain artifact directory found"; exit 1; }
           [[ -n "$latest_security_dir" ]] || { echo "no security artifact directory found"; exit 1; }
           [[ -n "$latest_perf_dir" ]] || { echo "no non-functional artifact directory found"; exit 1; }
-          [[ -n "$latest_operability_dir" ]] || { echo "no operability artifact directory found"; exit 1; }
+          [[ -n "$latest_operability_head1" ]] || { echo "no operability head-1 artifact directory found"; exit 1; }
+          [[ -n "$latest_operability_head2" ]] || { echo "no operability head-2 artifact directory found"; exit 1; }
+          [[ -n "$latest_operability_head3" ]] || { echo "no operability head-3 artifact directory found"; exit 1; }
 
           echo "latest_e2e_dir=$latest_e2e_dir" >> "$GITHUB_OUTPUT"
           echo "latest_security_dir=$latest_security_dir" >> "$GITHUB_OUTPUT"
           echo "latest_perf_dir=$latest_perf_dir" >> "$GITHUB_OUTPUT"
-          echo "latest_operability_dir=$latest_operability_dir" >> "$GITHUB_OUTPUT"
+          echo "latest_operability_head1=$latest_operability_head1" >> "$GITHUB_OUTPUT"
+          echo "latest_operability_head2=$latest_operability_head2" >> "$GITHUB_OUTPUT"
+          echo "latest_operability_head3=$latest_operability_head3" >> "$GITHUB_OUTPUT"
 
       - name: Upload nightly evidence artifacts
         uses: actions/upload-artifact@v4
@@ -95,6 +109,8 @@ jobs:
             ${{ steps.nightly_artifacts.outputs.latest_e2e_dir }}
             ${{ steps.nightly_artifacts.outputs.latest_security_dir }}
             ${{ steps.nightly_artifacts.outputs.latest_perf_dir }}
-            ${{ steps.nightly_artifacts.outputs.latest_operability_dir }}
+            ${{ steps.nightly_artifacts.outputs.latest_operability_head1 }}
+            ${{ steps.nightly_artifacts.outputs.latest_operability_head2 }}
+            ${{ steps.nightly_artifacts.outputs.latest_operability_head3 }}
             artifacts/trends/*.json
           if-no-files-found: error

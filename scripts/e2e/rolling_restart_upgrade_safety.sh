@@ -10,7 +10,13 @@ require_binaries
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 ARTIFACTS_ROOT="${DISTDB_ARTIFACTS_ROOT:-$ROOT_DIR/artifacts}"
 OPERABILITY_DATA_ROOT="${OPERABILITY_DATA_ROOT:-$ARTIFACTS_ROOT/e2e}"
-OUT_DIR="$OPERABILITY_DATA_ROOT/rolling-upgrade-safety-$RUN_ID"
+OPERABILITY_OLD_REF="${OPERABILITY_OLD_REF:-unknown}"
+OPERABILITY_WINDOW_LABEL="${OPERABILITY_WINDOW_LABEL:-$OPERABILITY_OLD_REF}"
+SAFE_WINDOW_LABEL="$(printf '%s' "$OPERABILITY_WINDOW_LABEL" | tr '/: ' '-' | tr -cd '[:alnum:]_.-')"
+if [[ -z "$SAFE_WINDOW_LABEL" ]]; then
+  SAFE_WINDOW_LABEL="window"
+fi
+OUT_DIR="$OPERABILITY_DATA_ROOT/rolling-upgrade-safety-$SAFE_WINDOW_LABEL-$RUN_ID"
 mkdir -p "$OUT_DIR"
 
 MANIFEST_FILE="$OUT_DIR/manifest.json"
@@ -173,6 +179,10 @@ write_manifest() {
   "started_at_utc": "$RUN_STARTED_UTC",
   "finished_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_sha": "$GIT_SHA",
+  "compatibility_window": {
+    "old_ref": "$OPERABILITY_OLD_REF",
+    "window_label": "$OPERABILITY_WINDOW_LABEL"
+  },
   "server_sha256_old": "$OLD_SERVER_SHA256",
   "server_sha256_new": "$NEW_SERVER_SHA256",
   "server_bin_old": "$OLD_SERVER_BIN",
@@ -274,6 +284,10 @@ cat >"$SUMMARY_JSON" <<JSON
 {
   "run_id": "$RUN_ID",
   "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "compatibility_window": {
+    "old_ref": "$OPERABILITY_OLD_REF",
+    "window_label": "$OPERABILITY_WINDOW_LABEL"
+  },
   "server": {
     "old_binary": "$OLD_SERVER_BIN",
     "new_binary": "$NEW_SERVER_BIN",

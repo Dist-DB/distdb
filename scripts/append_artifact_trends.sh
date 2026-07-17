@@ -8,14 +8,18 @@ TRENDS_ROOT="${DISTDB_TRENDS_ROOT:-$ARTIFACTS_ROOT/trends}"
 SECURITY_ROOT="$ARTIFACTS_ROOT/security"
 PERF_ROOT="${PERF_DATA_ROOT:-$ARTIFACTS_ROOT/perf}"
 E2E_ROOT="${SPLIT_BRAIN_DATA_ROOT:-$ARTIFACTS_ROOT/e2e}"
+OPERABILITY_ROOT="${OPERABILITY_DATA_ROOT:-$ARTIFACTS_ROOT/e2e}"
+REQUIRED_OPERABILITY_WINDOWS="${DISTDB_REQUIRED_OPERABILITY_WINDOWS:-head-1,head-2,head-3}"
 
 SECURITY_LEDGER="$TRENDS_ROOT/security-trend.json"
 PERF_LEDGER="$TRENDS_ROOT/nonfunctional-trend.json"
 E2E_LEDGER="$TRENDS_ROOT/split-brain-trend.json"
+OPERABILITY_LEDGER="$TRENDS_ROOT/operability-trend.json"
 
 SECURITY_LEDGER_JSONL_LEGACY="$TRENDS_ROOT/security-trend.jsonl"
 PERF_LEDGER_JSONL_LEGACY="$TRENDS_ROOT/nonfunctional-trend.jsonl"
 E2E_LEDGER_JSONL_LEGACY="$TRENDS_ROOT/split-brain-trend.jsonl"
+OPERABILITY_LEDGER_JSONL_LEGACY="$TRENDS_ROOT/operability-trend.jsonl"
 
 mkdir -p "$TRENDS_ROOT"
 
@@ -25,6 +29,14 @@ latest_dir_by_pattern() {
   find "$root_dir" -maxdepth 1 -type d -name "$name_pattern" -print0 2>/dev/null \
     | xargs -0 ls -dt 2>/dev/null \
     | head -n 1 \
+    || true
+}
+
+all_dirs_by_pattern() {
+  local root_dir="$1"
+  local name_pattern="$2"
+  find "$root_dir" -maxdepth 1 -type d -name "$name_pattern" -print0 2>/dev/null \
+    | xargs -0 ls -dt 2>/dev/null \
     || true
 }
 
@@ -181,10 +193,12 @@ append_manifest_if_new() {
 migrate_legacy_jsonl_if_needed "$SECURITY_LEDGER_JSONL_LEGACY" "$SECURITY_LEDGER"
 migrate_legacy_jsonl_if_needed "$PERF_LEDGER_JSONL_LEGACY" "$PERF_LEDGER"
 migrate_legacy_jsonl_if_needed "$E2E_LEDGER_JSONL_LEGACY" "$E2E_LEDGER"
+migrate_legacy_jsonl_if_needed "$OPERABILITY_LEDGER_JSONL_LEGACY" "$OPERABILITY_LEDGER"
 
 dedupe_ledger_by_run_id "$SECURITY_LEDGER"
 dedupe_ledger_by_run_id "$PERF_LEDGER"
 dedupe_ledger_by_run_id "$E2E_LEDGER"
+dedupe_ledger_by_run_id "$OPERABILITY_LEDGER"
 
 security_dir="$(latest_dir_by_pattern "$SECURITY_ROOT" "security-baseline-*")"
 if [[ -n "$security_dir" ]]; then
@@ -205,6 +219,23 @@ if [[ -n "$e2e_dir" ]]; then
   append_manifest_if_new "$e2e_dir/manifest.json" "$E2E_LEDGER"
 else
   echo "[artifact-trends][warn] no split-brain artifact directory found under $E2E_ROOT"
+fi
+
+required_windows_normalized="$(printf '%s' "$REQUIRED_OPERABILITY_WINDOWS" | tr ',' ' ')"
+if [[ -n "$required_windows_normalized" ]]; then
+  for window_label in $required_windows_normalized; do
+    operability_dirs="$(all_dirs_by_pattern "$OPERABILITY_ROOT" "rolling-upgrade-safety-${window_label}-*")"
+    if [[ -n "$operability_dirs" ]]; then
+      while IFS= read -r operability_dir; do
+        [[ -n "$operability_dir" ]] || continue
+        append_manifest_if_new "$operability_dir/manifest.json" "$OPERABILITY_LEDGER"
+      done <<< "$operability_dirs"
+    else
+      echo "[artifact-trends][warn] no operability artifact directory found for window=$window_label under $OPERABILITY_ROOT"
+    fi
+  done
+else
+  echo "[artifact-trends][warn] required operability window list is empty; skipping operability ledger append"
 fi
 
 echo "[artifact-trends][ok] trend append completed"

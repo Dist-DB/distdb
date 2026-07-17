@@ -2,6 +2,11 @@ name: operability-upgrade-safety
 
 on:
   workflow_dispatch:
+    inputs:
+      old_ref_override:
+        description: "Optional old server git ref override (applies to every matrix window in this run)"
+        required: false
+        type: string
   schedule:
     - cron: "20 5 * * 1"
 
@@ -12,7 +17,17 @@ concurrency:
 jobs:
   drill:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - window_label: head-1
+            old_ref: HEAD~1
+          - window_label: head-2
+            old_ref: HEAD~2
+          - window_label: head-3
+            old_ref: HEAD~3
 
     steps:
       - name: Checkout
@@ -30,9 +45,12 @@ jobs:
           (cd console && cargo build --quiet)
 
       - name: Build previous server binary
+        env:
+          OPERABILITY_MATRIX_OLD_REF: ${{ matrix.old_ref }}
+          OPERABILITY_OLD_REF_OVERRIDE: ${{ inputs.old_ref_override }}
         run: |
           set -euo pipefail
-          previous_ref="${OPERABILITY_OLD_REF:-HEAD~1}"
+          previous_ref="${OPERABILITY_OLD_REF_OVERRIDE:-$OPERABILITY_MATRIX_OLD_REF}"
           prev_tree="$RUNNER_TEMP/distdb-prev"
           git worktree add --detach "$prev_tree" "$previous_ref"
           (cd "$prev_tree/server" && cargo build --quiet)
@@ -43,6 +61,8 @@ jobs:
         env:
           DISTDB_SERVER_BIN_OLD: ${{ runner.temp }}/server-old
           DISTDB_SERVER_BIN_NEW: ${{ github.workspace }}/server/target/debug/server
+          OPERABILITY_WINDOW_LABEL: ${{ matrix.window_label }}
+          OPERABILITY_OLD_REF: ${{ inputs.old_ref_override || matrix.old_ref }}
         run: bash scripts/e2e/rolling_restart_upgrade_safety.sh
 
       - name: Resolve operability artifact directory
@@ -59,6 +79,6 @@ jobs:
       - name: Upload operability drill artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: operability-upgrade-safety-${{ github.run_id }}
+          name: operability-upgrade-safety-${{ matrix.window_label }}-${{ github.run_id }}
           path: ${{ steps.operability_artifacts.outputs.latest_dir }}
           if-no-files-found: error
