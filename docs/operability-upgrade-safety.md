@@ -104,3 +104,22 @@ To mark Domain 4 as green in [beta-confidence-scorecard.md](beta-confidence-scor
 2. keep the frozen WAL/catalog compatibility table current with evidence-backed window updates,
 3. demonstrate runbook drill execution history over multiple scheduled runs,
 4. ensure no unresolved high-severity operability regressions remain open.
+
+## Domain 4 Closure Status (2026-07-17)
+
+Current status against Domain 4 beta gates in `docs/beta-confidence-scorecard.md`:
+
+1. Rolling restart and rolling upgrade scenarios are documented and validated: satisfied.
+2. Backward/forward WAL/catalog compatibility expectations are published with declared windows: satisfied.
+3. Runbook coverage for crash/restart, lag investigation, degraded peers, and rollback strategy is published: satisfied.
+4. Observability minimums and operational drill evidence collection are defined and enforced: satisfied.
+
+Current evidence posture:
+
+- Compatibility-window drill matrix is automated for `head-1`, `head-2`, and `head-3` in `.github/workflows/operability-upgrade-safety.yml` and `.github/workflows/nightly-evidence.yml`.
+- Window labels and refs are embedded in drill outputs (`summary.json` and `manifest.json`) by `scripts/e2e/rolling_restart_upgrade_safety.sh`.
+- Per-window history depth is tracked in `artifacts/trends/operability-trend.json` and enforced by `scripts/check_artifact_evidence_quality.sh`.
+
+Maintenance condition for keeping Domain 4 Green:
+
+- Keep declared compatibility-window evidence depth at or above enforcement thresholds and keep high-severity operability regressions at zero unresolved.
