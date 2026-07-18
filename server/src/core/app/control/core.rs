@@ -10,8 +10,8 @@ use serverlib::{
 };
 
 use crate::core::app::helpers::{
-    CommandKind, SessionTxMarkerType, command_info, is_staged_dml_query,
-    is_staged_dml_requests, is_transactional_read_query, is_transactional_read_requests,
+    CommandKind, SessionTxMarkerType, command_info, is_staged_dml_requests,
+    is_transactional_read_requests,
 };
 use crate::core::app::state::{QuerySessionContext, SessionSnapshot};
 use crate::core::app::ServerApp;
@@ -23,6 +23,20 @@ use crate::core::mappings::query::{
 use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
+
+    fn parse_query_requests(query: &connector::DataQuery) -> Result<Vec<SqlRequest>, String> {
+        parse_mysql8_sql_requests(&query.sql, &query.database_id)
+            .map_err(|err| err.to_string())
+    }
+
+    fn parse_query_requests_with_timing(
+        query: &connector::DataQuery,
+    ) -> Result<(Vec<SqlRequest>, u64), String> {
+        let parse_start = Instant::now();
+        let parsed = Self::parse_query_requests(query)?;
+        let parse_ms = parse_start.elapsed().as_millis() as u64;
+        Ok((parsed, parse_ms))
+    }
 
     fn quoted_sql_identifier(name: &str) -> String {
         format!("`{}`", name.replace('`', "``"))
@@ -475,25 +489,25 @@ impl ServerApp {
 
     fn execute_parsed_query_with_session_context(
         request_id: &str,
-        query: &connector::DataQuery,
+        database_id: &str,
+        parsed: Vec<SqlRequest>,
+        parse_ms: u64,
         catalogs: &mut HashMap<String, DatabaseCatalog>,
         wal: &ConcurrentWalManager,
         node_data_dir: &Path,
         runtime_indexes: &mut RuntimeIndexStore,
-        parsed: Vec<SqlRequest>,
-        parse_ms: u64,
         session_ctx: &QuerySessionContext,
         session_variable_overrides: &mut SessionVariableOverrides,
     ) -> ConnectorResponse {
         handle_query_command_with_parsed_and_session_variables(
             request_id,
-            query,
+            database_id,
+            parsed,
+            parse_ms,
             catalogs,
             wal,
             node_data_dir,
             runtime_indexes,
-            parsed,
-            parse_ms,
             &session_ctx.session_id,
             session_ctx.connection_id,
             Some(session_ctx.session_user.clone()),
@@ -887,18 +901,20 @@ impl ServerApp {
             return None;
         }
 
-        let parse_start = Instant::now();
-        let parsed = parse_mysql8_sql_requests(&query.sql, &query.database_id).ok()?;
-        let parse_ms = parse_start.elapsed().as_millis() as u64;
-        if parsed.is_empty() {
+        let (parsed_requests, parse_ms) = Self::parse_query_requests_with_timing(query).ok()?;
+        if parsed_requests.is_empty() {
             return None;
         }
 
-        if let Err(message) = self.authorize_sql_requests_for_session(session_id, &query.database_id, &parsed) {
+        if let Err(message) = self.authorize_sql_requests_for_session(
+            session_id,
+            query.database_id.as_str(),
+            &parsed_requests,
+        ) {
             return Some(ConnectorResponse::rejected(request.request_id.clone(), message));
         }
 
-        let read_only = parsed.iter().all(|statement| {
+        let read_only = parsed_requests.iter().all(|statement| {
             matches!(statement.operation, SqlOperation::Select | SqlOperation::UnionQuery)
         });
 
@@ -920,13 +936,13 @@ impl ServerApp {
 
         let response = Self::execute_parsed_query_with_session_context(
             &request.request_id,
-            query,
+            query.database_id.as_str(),
+            parsed_requests,
+            parse_ms,
             &mut catalogs,
             &self.wal,
             &self.node_data_dir,
             &mut runtime_indexes,
-            parsed,
-            parse_ms,
             &session_ctx,
             &mut session_variable_overrides,
         );
@@ -1059,7 +1075,8 @@ impl ServerApp {
         let mut insert_only = true;
 
         for query in staged_queries {
-            let parsed = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id).ok()?;
+
+            let parsed = Self::parse_query_requests(query).ok()?;
             if parsed.is_empty() {
                 return None;
             }
@@ -1157,37 +1174,41 @@ impl ServerApp {
                 {
                     response
                 } else {
-                    let parse_start = Instant::now();
-                    let parsed_requests = parse_mysql8_sql_requests(&query.sql, &query.database_id).ok();
-                    let parsed_requests_parse_ms = parse_start.elapsed().as_millis() as u64;
+                    
+                    let (parsed_requests, parse_ms) = match Self::parse_query_requests_with_timing(query) {
+                            Ok(result) => result,
+                            Err(err) => {
+                                return ConnectorResponse::rejected(
+                                    request.request_id.clone(),
+                                    format!("sql parse failed: {err}"),
+                                );
+                            }
+                        };
 
-                    if let Some(parsed_requests) = parsed_requests.as_ref() {
-                        if let Err(message) = self.authorize_sql_requests_for_session(
-                            session_id,
-                            &query.database_id,
-                            parsed_requests,
-                        ) {
-                            return ConnectorResponse::rejected(request.request_id.clone(), message);
-                        }
+                    if let Err(message) = self.authorize_sql_requests_for_session(
+                        session_id,
+                        query.database_id.as_str(),
+                        &parsed_requests,
+                    ) {
+                        return ConnectorResponse::rejected(request.request_id.clone(), message);
+                    }
 
-                        if let Some(response) = self.apply_acl_mutation_requests(
-                            &request.request_id,
-                            session_id,
-                            &query.database_id,
-                            parsed_requests,
-                        ) {
-                            return response;
-                        }
+                    if let Some(response) = self.apply_acl_mutation_requests(
+                        &request.request_id,
+                        session_id,
+                        query.database_id.as_str(),
+                        &parsed_requests,
+                    ) {
+                        return response;
+                    }
 
-                        if let Some(response) = self.apply_create_user_requests(
-                            &request.request_id,
-                            session_id,
-                            &query.database_id,
-                            parsed_requests,
-                        ) {
-                            return response;
-                        }
-
+                    if let Some(response) = self.apply_create_user_requests(
+                        &request.request_id,
+                        session_id,
+                        query.database_id.as_str(),
+                        &parsed_requests,
+                    ) {
+                        return response;
                     }
 
                     let transaction_active = self
@@ -1195,15 +1216,9 @@ impl ServerApp {
                         .is_active(session_id)
                         .unwrap_or(false);
 
-                    let transactional_read = parsed_requests
-                        .as_ref()
-                        .map(|parsed| is_transactional_read_requests(parsed))
-                        .unwrap_or_else(|| is_transactional_read_query(query));
+                    let transactional_read = is_transactional_read_requests(&parsed_requests);
 
-                    let staged_dml = parsed_requests
-                        .as_ref()
-                        .map(|parsed| is_staged_dml_requests(parsed))
-                        .unwrap_or_else(|| is_staged_dml_query(query));
+                    let staged_dml = is_staged_dml_requests(&parsed_requests);
 
                     if transaction_active && transactional_read {
                         
@@ -1225,38 +1240,22 @@ impl ServerApp {
                                         format!("invalid session '{}'", session_id),
                                     );
                                 };
-                                let connection_id = session_ctx.connection_id;
 
                                 let mut session_variable_overrides =
                                     self.take_session_variable_overrides(session_id);
 
-                                let response = if let Some(parsed_requests) = parsed_requests.clone() {
-                                    Self::execute_parsed_query_with_session_context(
-                                        &request.request_id,
-                                        query,
-                                        &mut self.catalogs,
-                                        &self.wal,
-                                        &self.node_data_dir,
-                                        &mut self.runtime_indexes,
-                                        parsed_requests,
-                                        parsed_requests_parse_ms as u64,
-                                        &session_ctx,
-                                        &mut session_variable_overrides,
-                                    )
-                                } else {
-                                    handle_query_command_with_session_variables(
-                                        &request.request_id,
-                                        query,
-                                        &mut self.catalogs,
-                                        &self.wal,
-                                        &self.node_data_dir,
-                                        &mut self.runtime_indexes,
-                                        session_id,
-                                        connection_id,
-                                        Some(session_ctx.session_user.clone()),
-                                        &mut session_variable_overrides,
-                                    )
-                                };
+                                let response = Self::execute_parsed_query_with_session_context(
+                                    &request.request_id,
+                                    query.database_id.as_str(),
+                                    parsed_requests,
+                                    parse_ms,
+                                    &mut self.catalogs,
+                                    &self.wal,
+                                    &self.node_data_dir,
+                                    &mut self.runtime_indexes,
+                                    &session_ctx,
+                                    &mut session_variable_overrides,
+                                );
 
                                 self.put_session_variable_overrides(session_id, session_variable_overrides);
 

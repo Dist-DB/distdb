@@ -21,7 +21,6 @@ pub fn parse_sql_requests(
 ) -> Result<Vec<SqlRequest>, SqlParseError> {
 
     let database_id = database_id.into();
-    let trimmed_sql = sql.trim().to_string();
 
     let statements = match parse_or_fallback(sql)? {
 
@@ -51,6 +50,8 @@ pub fn parse_sql_requests(
     }
 
     if statements.len() == 1 {
+
+        let trimmed_sql = sql.trim().to_string();
 
         let statement = statements
             .into_iter()

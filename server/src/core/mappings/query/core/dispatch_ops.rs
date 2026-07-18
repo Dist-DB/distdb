@@ -72,13 +72,13 @@ impl QueryExecutionContext<'_> {
 type QueryOperationHandler = fn(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse;
 
 pub(super) fn execute_parsed_query(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -101,7 +101,7 @@ pub(super) fn execute_parsed_query(
 
     let response = execute_parsed_query_with_session_parts(
         request_id,
-        query,
+        database_id,
         catalogs,
         wal,
         node_data_dir,
@@ -121,7 +121,7 @@ pub(super) fn execute_parsed_query(
 
 fn execute_parsed_query_with_session_parts(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -151,23 +151,25 @@ fn execute_parsed_query_with_session_parts(
     );
 
     for statement in parsed {
+        
         log::debug!(
             "query directive dispatch request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
             request_id,
-            query.database_id,
+            database_id,
             statement.directive,
             statement.operation,
             statement.object_name
         );
 
         let response = match query_operation_handler(statement.operation) {
-            Some(handler) => handler(&mut ctx, request_id, query, &statement),
+
+            Some(handler) => handler(&mut ctx, request_id, database_id, &statement),
 
             None => {
                 log::debug!(
                     "query directive missing handler request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
                     request_id,
-                    query.database_id,
+                    database_id,
                     statement.directive,
                     statement.operation,
                     statement.object_name
@@ -181,6 +183,7 @@ fn execute_parsed_query_with_session_parts(
                     ),
                 )
             }
+
         };
 
         if matches!(response.status, connector::ResponseStatus::Rejected) {
@@ -188,6 +191,7 @@ fn execute_parsed_query_with_session_parts(
         }
 
         last_response = response;
+        
     }
 
     last_response
@@ -248,7 +252,7 @@ fn query_operation_handler(operation: SqlOperation) -> Option<QueryOperationHand
 fn execute_alter_other(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -279,12 +283,12 @@ fn execute_alter_other(
 
         let mut session_variable_overrides = ctx.session_state.take_session_variable_overrides();
 
-        let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
+        let Some(catalog) = resolve_catalog_mut(ctx.catalogs, database_id) else {
             ctx.session_state
                 .replace_session_variable_overrides(session_variable_overrides);
             return ConnectorResponse::rejected(
                 request_id.to_string(),
-                format!("database '{}' not found", query.database_id),
+                format!("database '{}' not found", database_id),
             );
         };
 
@@ -496,13 +500,13 @@ fn apply_set_variables_with_session(
 fn execute_alter_table(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_alter_table_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -514,13 +518,13 @@ fn execute_alter_table(
 fn execute_alter_view(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_alter_view_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -532,13 +536,13 @@ fn execute_alter_view(
 fn execute_truncate_table(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_truncate_table_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.runtime_indexes,
@@ -550,13 +554,13 @@ fn execute_truncate_table(
 fn execute_create_database(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_create_database_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -568,13 +572,13 @@ fn execute_create_database(
 fn execute_create_table(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_create_table_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -586,13 +590,13 @@ fn execute_create_table(
 fn execute_create_olap_view(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_create_olap_view_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -604,13 +608,13 @@ fn execute_create_olap_view(
 fn execute_create_other(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_create_other_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.runtime_indexes,
@@ -622,13 +626,13 @@ fn execute_create_other(
 fn execute_drop_directive(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_drop_directive_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -641,13 +645,13 @@ fn execute_drop_directive(
 fn execute_insert(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_insert_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -662,13 +666,13 @@ fn execute_insert(
 fn execute_update(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
     
     execute_update_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -683,13 +687,13 @@ fn execute_update(
 fn execute_delete(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_delete_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -704,13 +708,13 @@ fn execute_delete(
 fn execute_select(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_select_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -724,13 +728,13 @@ fn execute_select(
 fn execute_union_query(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_union_query_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.runtime_indexes,
@@ -743,13 +747,13 @@ fn execute_union_query(
 fn execute_create_view(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_create_view_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -761,13 +765,13 @@ fn execute_create_view(
 fn execute_create_trigger(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_create_trigger_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -779,13 +783,13 @@ fn execute_create_trigger(
 fn execute_create_stored_procedure(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
     execute_create_stored_procedure_impl(
         request_id,
-        query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -797,7 +801,7 @@ fn execute_create_stored_procedure(
 fn execute_call_stored_procedure(
     ctx: &mut QueryExecutionContext<'_>,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
@@ -808,10 +812,10 @@ fn execute_call_stored_procedure(
         );
     };
 
-    let Some(catalog) = resolve_catalog(ctx.catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog(ctx.catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -886,7 +890,7 @@ fn execute_call_stored_procedure(
             let control = execute_call_action_sql(
                 action_sql,
                 request_id,
-                query,
+                database_id,
                 ctx,
                 &mut local_entities,
                 &mut last_response,
@@ -915,9 +919,9 @@ fn execute_call_stored_procedure(
         Err(_) => Ok(None),
     };
 
-    let cleanup_result = match resolve_catalog_mut(ctx.catalogs, &query.database_id) {
+    let cleanup_result = match resolve_catalog_mut(ctx.catalogs, database_id) {
         Some(catalog) => local_entities.cleanup(catalog, ctx.wal),
-        None => Err(format!("database '{}' not found", query.database_id)),
+        None => Err(format!("database '{}' not found", database_id)),
     };
 
     match (invocation_result, output_result, cleanup_result) {
@@ -1489,7 +1493,7 @@ fn parse_local_begin_block(action_sql: &str) -> Result<(Option<String>, String),
 fn execute_call_action_sql(
     action_sql: &str,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     ctx: &mut QueryExecutionContext<'_>,
     local_entities: &mut serverlib::ProcedureLocalEntityScope,
     last_response: &mut Option<ConnectorResponse>,
@@ -1507,7 +1511,7 @@ fn execute_call_action_sql(
         let statement_result = execute_call_action_statement(
             raw_statement.as_str(),
             request_id,
-            query,
+            database_id,
             ctx,
             local_entities,
             last_response,
@@ -1534,7 +1538,7 @@ fn execute_call_action_sql(
                 let handler_control = execute_call_action_sql(
                     handler.action_sql.as_str(),
                     request_id,
-                    query,
+                    database_id,
                     ctx,
                     local_entities,
                     last_response,
@@ -1580,7 +1584,7 @@ fn execute_call_action_sql(
 fn execute_call_action_statement(
     raw_statement: &str,
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     ctx: &mut QueryExecutionContext<'_>,
     local_entities: &mut serverlib::ProcedureLocalEntityScope,
     last_response: &mut Option<ConnectorResponse>,
@@ -1648,7 +1652,7 @@ fn execute_call_action_statement(
 
         execute_local_cursor_open_statement(
             raw_statement,
-            query,
+            database_id,
             ctx,
             local_entities,
             cursor_runtime,
@@ -1748,7 +1752,7 @@ fn execute_call_action_statement(
                     execute_call_action_sql(
                         body_sql,
                         request_id,
-                        query,
+                        database_id,
                         ctx,
                         scope,
                         last_response,
@@ -1785,7 +1789,7 @@ fn execute_call_action_statement(
                 execute_call_action_sql(
                     body_sql,
                     request_id,
-                    query,
+                    database_id,
                     ctx,
                     scope,
                     last_response,
@@ -1822,7 +1826,7 @@ fn execute_call_action_statement(
                 execute_call_action_sql(
                     body_sql,
                     request_id,
-                    query,
+                    database_id,
                     ctx,
                     scope,
                     last_response,
@@ -1853,7 +1857,7 @@ fn execute_call_action_statement(
         let block_control = execute_call_action_sql(
             body_sql.as_str(),
             request_id,
-            query,
+            database_id,
             ctx,
             local_entities,
             last_response,
@@ -1878,7 +1882,7 @@ fn execute_call_action_statement(
         }
     }
 
-    let parsed_action_sql = serverlib::parse_mysql8_sql_requests(raw_statement, &query.database_id)
+    let parsed_action_sql = serverlib::parse_mysql8_sql_requests(raw_statement, database_id)
         .map_err(|err| format!("call action parse failed: {err}"))?;
 
     if parsed_action_sql.len() != 1 {
@@ -1897,8 +1901,8 @@ fn execute_call_action_statement(
 
         if plan.temporary {
 
-            let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
-                return Err(format!("database '{}' not found", query.database_id));
+            let Some(catalog) = resolve_catalog_mut(ctx.catalogs, database_id) else {
+                return Err(format!("database '{}' not found", database_id));
             };
 
             local_entities.create_temporary_table(catalog, ctx.wal, plan.table_id, plan.schema)?;
@@ -1915,21 +1919,16 @@ fn execute_call_action_statement(
     }
 
     let rewritten_sql = rewrite_sql_with_call_aliases(&parsed_statement.sql, local_entities)?;
-    let rewritten_parsed = serverlib::parse_mysql8_sql_requests(&rewritten_sql, &query.database_id)
+    let rewritten_parsed = serverlib::parse_mysql8_sql_requests(&rewritten_sql, database_id)
         .map_err(|err| format!("call action parse failed after alias rewrite: {err}"))?;
 
     if rewritten_parsed.len() != 1 {
         return Err("call action rewrite produced unsupported multi-statement execution".to_string());
     }
 
-    let action_query = DataQuery {
-        database_id: query.database_id.clone(),
-        sql: rewritten_sql,
-    };
-
     let response = execute_parsed_query_with_session_parts(
         request_id,
-        &action_query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,
@@ -2131,7 +2130,7 @@ fn parse_local_cursor_declare_statement(sql: &str) -> Result<Option<LocalDeclare
 
 fn execute_local_cursor_open_statement(
     sql: &str,
-    query: &DataQuery,
+    database_id: &str,
     ctx: &mut QueryExecutionContext<'_>,
     local_entities: &serverlib::ProcedureLocalEntityScope,
     cursor_runtime: &mut LocalCursorRuntime,
@@ -2151,7 +2150,7 @@ fn execute_local_cursor_open_statement(
         .ok_or_else(|| format!("cursor open failed: cursor '{}' was not declared", cursor_name))?;
 
     let rewritten_sql = rewrite_sql_with_call_aliases(cursor.select_sql.as_str(), local_entities)?;
-    let parsed = serverlib::parse_mysql8_sql_requests(&rewritten_sql, &query.database_id)
+    let parsed = serverlib::parse_mysql8_sql_requests(&rewritten_sql, database_id)
         .map_err(|err| format!("cursor open parse failed: {err}"))?;
 
     if parsed.len() != 1 {
@@ -2166,14 +2165,9 @@ fn execute_local_cursor_open_statement(
         return Err("cursor open parse failed: cursor FOR statement must be a SELECT query".to_string());
     }
 
-    let action_query = DataQuery {
-        database_id: query.database_id.clone(),
-        sql: rewritten_sql,
-    };
-
     let response = execute_parsed_query_with_session_parts(
         "cursor-open",
-        &action_query,
+        database_id,
         ctx.catalogs,
         ctx.wal,
         ctx.node_data_dir,

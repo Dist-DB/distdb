@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 pub(super) fn execute_union_query_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -36,11 +36,11 @@ pub(super) fn execute_union_query_impl(
 
         };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
 
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
 
     };

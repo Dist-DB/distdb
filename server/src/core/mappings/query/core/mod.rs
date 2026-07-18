@@ -3,6 +3,7 @@
 mod dispatch_ops;
 mod ddl_ops;
 mod mutation_ops;
+
 mod select_ops;
 mod set_ops;
 mod variables;
@@ -21,7 +22,7 @@ use std::cell::RefCell;
 
 use common::helpers::format::{FileKind, HEADER_SIZE, make_header};
 use common::helpers::write_bytes;
-use connector::{ConnectorResponse, ConnectorResult, DataQuery, MutationResult, QueryResult};
+use connector::{ConnectorResponse, ConnectorResult, MutationResult, QueryResult};
 use serverlib::engine::database::inbuilt::{
     with_inbuilt_sql_runtime_context,
     InbuiltSqlRuntimeContext,
@@ -148,7 +149,8 @@ impl QueryExecutionSessionContext {
 
 pub(crate) fn handle_query_command(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
+    sql: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -161,7 +163,8 @@ pub(crate) fn handle_query_command(
 
     handle_query_command_with_session_variables(
         request_id,
-        query,
+        database_id,
+        sql,
         catalogs,
         wal,
         node_data_dir,
@@ -176,7 +179,8 @@ pub(crate) fn handle_query_command(
 
 pub(crate) fn handle_query_command_with_session_variables(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
+    sql: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -187,6 +191,15 @@ pub(crate) fn handle_query_command_with_session_variables(
     session_variable_overrides: &mut SessionVariableOverrides,
 ) -> ConnectorResponse {
 
+    let (parsed, parse_ms) = match parse_query_requests_with_timing(
+        request_id,
+        database_id,
+        sql,
+    ) {
+        Ok(parsed_query) => parsed_query,
+        Err(response) => return response,
+    };
+
     let mut session_context = QueryExecutionSessionContext::new(
         session_id,
         connection_id,
@@ -196,20 +209,22 @@ pub(crate) fn handle_query_command_with_session_variables(
 
     let runtime_context = inbuilt_runtime_context_for_query(
         request_id,
-        query,
+        database_id,
         &session_context,
         catalogs,
         session_context.session_variable_overrides(),
     );
 
     let response = with_inbuilt_sql_runtime_context(&runtime_context, || {
-        handle_query_command_internal(
+        handle_query_command_internal_with_parsed(
             request_id,
-            query,
+            database_id,
             catalogs,
             wal,
             node_data_dir,
             runtime_indexes,
+            parsed,
+            parse_ms,
             None,
             None,
             &mut session_context,
@@ -226,13 +241,13 @@ pub(crate) fn handle_query_command_with_session_variables(
 
 pub(crate) fn handle_query_command_with_parsed(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
+    parsed: Vec<SqlRequest>,
+    parse_ms: u64,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
-    parsed: Vec<SqlRequest>,
-    parse_ms: u64,
     session_id: &str,
     connection_id: usize,
     session_user: Option<String>,
@@ -241,13 +256,13 @@ pub(crate) fn handle_query_command_with_parsed(
 
     handle_query_command_with_parsed_and_session_variables(
         request_id,
-        query,
+        database_id,
+        parsed,
+        parse_ms,
         catalogs,
         wal,
         node_data_dir,
         runtime_indexes,
-        parsed,
-        parse_ms,
         session_id,
         connection_id,
         session_user,
@@ -258,13 +273,13 @@ pub(crate) fn handle_query_command_with_parsed(
 
 pub(crate) fn handle_query_command_with_parsed_and_session_variables(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
+    parsed: Vec<SqlRequest>,
+    parse_ms: u64,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
     runtime_indexes: &mut RuntimeIndexStore,
-    parsed: Vec<SqlRequest>,
-    parse_ms: u64,
     session_id: &str,
     connection_id: usize,
     session_user: Option<String>,
@@ -280,16 +295,16 @@ pub(crate) fn handle_query_command_with_parsed_and_session_variables(
 
     let runtime_context = inbuilt_runtime_context_for_query(
         request_id,
-        query,
+        database_id,
         &session_context,
         catalogs,
         session_context.session_variable_overrides(),
     );
 
-    with_inbuilt_sql_runtime_context(&runtime_context, || {
+    let response = with_inbuilt_sql_runtime_context(&runtime_context, || {
         handle_query_command_internal_with_parsed(
             request_id,
-            query,
+            database_id,
             catalogs,
             wal,
             node_data_dir,
@@ -300,13 +315,20 @@ pub(crate) fn handle_query_command_with_parsed_and_session_variables(
             None,
             &mut session_context,
         )
-    })
+    });
+
+    *session_variable_overrides = session_context
+        .take_session_variable_overrides()
+        .unwrap_or_default();
+
+    response
 
 }
 
 pub(crate) fn handle_query_command_in_write_group(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
+    sql: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -321,7 +343,8 @@ pub(crate) fn handle_query_command_in_write_group(
 
     handle_query_command_in_write_group_with_session_variables(
         request_id,
-        query,
+        database_id,
+        sql,
         catalogs,
         wal,
         node_data_dir,
@@ -338,7 +361,53 @@ pub(crate) fn handle_query_command_in_write_group(
 
 pub(crate) fn handle_query_command_in_write_group_with_session_variables(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
+    sql: &str,
+    catalogs: &mut HashMap<String, DatabaseCatalog>,
+    wal: &ConcurrentWalManager,
+    node_data_dir: &Path,
+    runtime_indexes: &mut RuntimeIndexStore,
+    write_group_id: TransactionId,
+    touched_tables: &mut HashSet<String>,
+    session_id: &str,
+    connection_id: usize,
+    session_user: Option<String>,
+    session_variable_overrides: &mut SessionVariableOverrides,
+) -> ConnectorResponse {
+
+    let (parsed, parse_ms) = match parse_query_requests_with_timing(
+        request_id,
+        database_id,
+        sql,
+    ) {
+        Ok(parsed_query) => parsed_query,
+        Err(response) => return response,
+    };
+
+    handle_query_command_in_write_group_with_parsed_and_session_variables(
+        request_id,
+        database_id,
+        parsed,
+        parse_ms,
+        catalogs,
+        wal,
+        node_data_dir,
+        runtime_indexes,
+        write_group_id,
+        touched_tables,
+        session_id,
+        connection_id,
+        session_user,
+        session_variable_overrides,
+    )
+
+}
+
+pub(crate) fn handle_query_command_in_write_group_with_parsed_and_session_variables(
+    request_id: &str,
+    database_id: &str,
+    parsed: Vec<SqlRequest>,
+    parse_ms: u64,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -360,20 +429,22 @@ pub(crate) fn handle_query_command_in_write_group_with_session_variables(
 
     let runtime_context = inbuilt_runtime_context_for_query(
         request_id,
-        query,
+        database_id,
         &session_context,
         catalogs,
         session_context.session_variable_overrides(),
     );
 
     let response = with_inbuilt_sql_runtime_context(&runtime_context, || {
-        handle_query_command_internal(
+        handle_query_command_internal_with_parsed(
             request_id,
-            query,
+            database_id,
             catalogs,
             wal,
             node_data_dir,
             runtime_indexes,
+            parsed,
+            parse_ms,
             Some(write_group_id),
             Some(touched_tables),
             &mut session_context,
@@ -390,7 +461,7 @@ pub(crate) fn handle_query_command_in_write_group_with_session_variables(
 
 fn inbuilt_runtime_context_for_query(
     _request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     session_context: &QueryExecutionSessionContext,
     catalogs: &HashMap<String, DatabaseCatalog>,
     session_variable_overrides: Option<&SessionVariableOverrides>,
@@ -411,7 +482,7 @@ fn inbuilt_runtime_context_for_query(
         .clone()
         .unwrap_or_else(|| "root@localhost".to_string());
 
-    let argument_bindings = resolve_catalog(catalogs, &query.database_id)
+    let argument_bindings = resolve_catalog(catalogs, database_id)
         .map(|catalog| {
             variables::runtime_variable_bindings(
                 catalog,
@@ -422,7 +493,7 @@ fn inbuilt_runtime_context_for_query(
         .unwrap_or_default();
 
     InbuiltSqlRuntimeContext {
-        current_database: Some(query.database_id.clone()),
+        current_database: Some(database_id.to_string()),
         current_user: Some(current_user),
         session_user: Some(session_user),
         system_user: Some(system_user),
@@ -434,50 +505,30 @@ fn inbuilt_runtime_context_for_query(
     
 }
 
-fn handle_query_command_internal(
+fn parse_query_requests_with_timing(
     request_id: &str,
-    query: &DataQuery,
-    catalogs: &mut HashMap<String, DatabaseCatalog>,
-    wal: &ConcurrentWalManager,
-    node_data_dir: &Path,
-    runtime_indexes: &mut RuntimeIndexStore,
-    external_write_group_id: Option<TransactionId>,
-    touched_tables: Option<&mut HashSet<String>>,
-    session_context: &mut QueryExecutionSessionContext,
-) -> ConnectorResponse {
+    database_id: &str,
+    sql: &str,
+) -> Result<(Vec<SqlRequest>, u64), ConnectorResponse> {
 
     let parse_start = Instant::now();
 
-    match serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) {
-
+    match serverlib::parse_mysql8_sql_requests(sql, database_id) {
         Ok(parsed) => {
             let parse_ms = parse_start.elapsed().as_millis() as u64;
-            handle_query_command_internal_with_parsed(
-                request_id,
-                query,
-                catalogs,
-                wal,
-                node_data_dir,
-                runtime_indexes,
-                parsed,
-                parse_ms,
-                external_write_group_id,
-                touched_tables,
-                session_context,
-            )
-        },
-
-        Err(err) => {
-            ConnectorResponse::rejected(request_id.to_string(), format!("sql parse failed: {err}"))
+            Ok((parsed, parse_ms))
         }
-
+        Err(err) => Err(ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("sql parse failed: {err}"),
+        )),
     }
 
 }
 
 fn handle_query_command_internal_with_parsed(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -495,7 +546,7 @@ fn handle_query_command_internal_with_parsed(
         log::debug!(
             "query directive parsed request_id={} database_id={} directive={:?} operation={:?} object_name={:?}",
             request_id,
-            query.database_id,
+            database_id,
             statement.directive,
             statement.operation,
             statement.object_name
@@ -504,7 +555,7 @@ fn handle_query_command_internal_with_parsed(
 
     let response = execute_parsed_query(
         request_id,
-        query,
+        database_id,
         catalogs,
         wal,
         node_data_dir,

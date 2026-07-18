@@ -4,17 +4,17 @@ use serverlib::SchemaMigrationExecutor;
 
 pub(super) fn execute_alter_table_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -236,7 +236,7 @@ pub(super) fn execute_alter_table_impl(
 
 pub(super) fn execute_create_database_impl(
     request_id: &str,
-    _query: &DataQuery,
+    _database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     _wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -334,17 +334,17 @@ fn default_create_database_encryption_key_ref(database_name: &str) -> String {
 
 pub(super) fn execute_create_table_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -538,7 +538,7 @@ pub(super) fn execute_create_table_impl(
 
 pub(super) fn execute_drop_directive_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -555,7 +555,7 @@ pub(super) fn execute_drop_directive_impl(
         _ if drop_entity_operation_metadata(statement.operation).is_some() => {
             execute_drop_entity_object(
                 request_id,
-                query,
+                database_id,
                 catalogs,
                 wal,
                 node_data_dir,
@@ -565,7 +565,7 @@ pub(super) fn execute_drop_directive_impl(
         },
 
         SqlOperation::DropOther => {
-            execute_drop_other_object(request_id, query, catalogs, wal, runtime_indexes, statement)
+            execute_drop_other_object(request_id, database_id, catalogs, wal, runtime_indexes, statement)
         },
 
         _ => ConnectorResponse::rejected(
@@ -582,17 +582,17 @@ pub(super) fn execute_drop_directive_impl(
 
 pub(super) fn execute_create_other_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -717,7 +717,7 @@ pub(super) fn execute_create_other_impl(
 
 pub(super) fn execute_alter_view_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -731,10 +731,10 @@ pub(super) fn execute_alter_view_impl(
         );
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -806,7 +806,7 @@ pub(super) fn execute_alter_view_impl(
 
 pub(super) fn execute_truncate_table_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -820,10 +820,10 @@ pub(super) fn execute_truncate_table_impl(
         );
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -959,7 +959,7 @@ fn execute_drop_database(
 
 fn execute_drop_entity_object(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -979,10 +979,10 @@ fn execute_drop_entity_object(
         );
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -1147,7 +1147,7 @@ fn execute_drop_entity_object(
 
 fn execute_drop_other_object(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -1163,10 +1163,10 @@ fn execute_drop_other_object(
         );
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -1434,7 +1434,7 @@ fn drop_statement_has_if_exists(sql: &str) -> bool {
 
 pub(crate) fn execute_create_view_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -1448,10 +1448,10 @@ pub(crate) fn execute_create_view_impl(
         );
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -1546,7 +1546,7 @@ pub(crate) fn execute_create_view_impl(
 
 pub(super) fn execute_create_olap_view_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -1563,10 +1563,10 @@ pub(super) fn execute_create_olap_view_impl(
         }
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -1655,7 +1655,7 @@ pub(super) fn execute_create_olap_view_impl(
 
 pub(super) fn execute_create_trigger_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -1669,10 +1669,10 @@ pub(super) fn execute_create_trigger_impl(
         );
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 
@@ -1750,7 +1750,7 @@ pub(super) fn execute_create_trigger_impl(
 
 pub(super) fn execute_create_stored_procedure_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     node_data_dir: &Path,
@@ -1772,10 +1772,10 @@ pub(super) fn execute_create_stored_procedure_impl(
         );
     };
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, &query.database_id) else {
+    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
-            format!("database '{}' not found", query.database_id),
+            format!("database '{}' not found", database_id),
         );
     };
 

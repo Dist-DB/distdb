@@ -285,7 +285,7 @@ fn create_view_persists_dependencies_from_view_body() {
 
     let response = super::core::execute_create_view_impl(
         "req-create-view",
-        &data_query,
+        data_query.database_id.as_str(),
         &mut catalogs,
         &wal,
         &test_node_data_dir(),

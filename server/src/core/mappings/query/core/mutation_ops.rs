@@ -16,7 +16,7 @@ const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = serverlib::ORDER_EXPR_ROUND_SCALE_PR
 
 pub(super) fn execute_insert_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
@@ -119,13 +119,13 @@ pub(super) fn execute_insert_impl(
     with_table_write_guard(
         request_id,
         catalogs,
-        &query.database_id,
+        database_id,
         &plan.table_id,
         external_write_group_id.is_some(),
         |catalog| {
         execute_insert_locked(
             request_id,
-            query,
+            database_id,
             catalog,
             wal,
             runtime_indexes,
@@ -140,7 +140,7 @@ pub(super) fn execute_insert_impl(
 
 fn execute_insert_locked(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -154,7 +154,7 @@ fn execute_insert_locked(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                plan.table_id, query.database_id
+                plan.table_id, database_id
             ),
         );
     };
@@ -164,7 +164,7 @@ fn execute_insert_locked(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                plan.table_id, query.database_id
+                plan.table_id, database_id
             ),
         );
     };
@@ -1319,7 +1319,7 @@ fn materialize_insert_source_rows<'a>(
 
 pub(super) fn execute_update_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
@@ -1357,13 +1357,13 @@ pub(super) fn execute_update_impl(
     with_table_write_guard(
         request_id,
         catalogs,
-        &query.database_id,
+        database_id,
         &plan.table_id,
         external_write_group_id.is_some(),
         |catalog| {
         execute_update_locked(
             request_id,
-            query,
+            database_id,
             catalog,
             wal,
             runtime_indexes,
@@ -1378,7 +1378,7 @@ pub(super) fn execute_update_impl(
 
 fn execute_update_locked(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -1392,7 +1392,7 @@ fn execute_update_locked(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                plan.table_id, query.database_id
+                plan.table_id, database_id
             ),
         );
     };
@@ -1402,7 +1402,7 @@ fn execute_update_locked(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                plan.table_id, query.database_id
+                plan.table_id, database_id
             ),
         );
     };
@@ -1699,7 +1699,7 @@ fn execute_update_locked(
 
 pub(super) fn execute_delete_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
@@ -1737,13 +1737,13 @@ pub(super) fn execute_delete_impl(
     with_table_write_guard(
         request_id,
         catalogs,
-        &query.database_id,
+        database_id,
         &plan.table_id,
         external_write_group_id.is_some(),
         |catalog| {
         execute_delete_locked(
             request_id,
-            query,
+            database_id,
             catalog,
             wal,
             runtime_indexes,
@@ -1758,7 +1758,7 @@ pub(super) fn execute_delete_impl(
 
 fn execute_delete_locked(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -1772,7 +1772,7 @@ fn execute_delete_locked(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                plan.table_id, query.database_id
+                plan.table_id, database_id
             ),
         );
     };
@@ -1782,7 +1782,7 @@ fn execute_delete_locked(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                plan.table_id, query.database_id
+                plan.table_id, database_id
             ),
         );
     };

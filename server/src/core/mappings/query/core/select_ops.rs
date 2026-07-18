@@ -156,7 +156,7 @@ fn extract_view_select_sql(view_sql: &str) -> Result<String, String> {
 
 pub(super) fn execute_select_impl(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     _node_data_dir: &Path,
@@ -169,7 +169,7 @@ pub(super) fn execute_select_impl(
 
     if let Some(response) = handle_select_introspection_request(
         request_id,
-        query,
+        database_id,
         catalogs,
         wal,
         statement,
@@ -200,7 +200,7 @@ pub(super) fn execute_select_impl(
 
     let (catalog, read_plan) = match resolve_catalog_and_read_plan_for_select(
         catalogs,
-        &query.database_id,
+        database_id,
         &resolved_object_name,
         read_plan,
     ) {
@@ -215,7 +215,7 @@ pub(super) fn execute_select_impl(
 
     execute_select_read_plan(
         request_id,
-        query,
+        database_id,
         catalog,
         wal,
         runtime_indexes,
@@ -227,7 +227,7 @@ pub(super) fn execute_select_impl(
 
 fn handle_select_introspection_request(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalogs: &mut HashMap<String, DatabaseCatalog>,
     wal: &ConcurrentWalManager,
     statement: &SqlRequest,
@@ -288,7 +288,7 @@ fn handle_select_introspection_request(
         let target_db = statement
             .object_name
             .as_deref()
-            .unwrap_or(&query.database_id);
+            .unwrap_or(database_id);
 
         let Some(catalog) = resolve_catalog(catalogs, target_db) else {
             return Some(ConnectorResponse::rejected(
@@ -322,7 +322,7 @@ fn handle_select_introspection_request(
         let target_db = show_tables_target_db
             .as_deref()
             .or_else(|| statement.object_name.as_deref())
-            .unwrap_or(&query.database_id);
+            .unwrap_or(database_id);
 
         let Some(catalog) = resolve_catalog(catalogs, target_db) else {
             return Some(ConnectorResponse::rejected(
@@ -353,12 +353,12 @@ fn handle_select_introspection_request(
         let is_show_variable = !is_show_variables && statement_sql_lower.starts_with("show variable");
 
         let target_db = if is_show_variable {
-            query.database_id.as_str()
+            database_id
         } else {
             statement
                 .object_name
                 .as_deref()
-                .unwrap_or(&query.database_id)
+                .unwrap_or(database_id)
         };
 
         let Some(catalog) = resolve_catalog(catalogs, target_db) else {
@@ -411,7 +411,7 @@ fn handle_select_introspection_request(
             ));
         };
 
-        let (catalog, normalized_table_id) = if query.database_id.trim().is_empty() {
+        let (catalog, normalized_table_id) = if database_id.trim().is_empty() {
 
             if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
 
@@ -446,10 +446,10 @@ fn handle_select_introspection_request(
 
         } else {
 
-            let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+            let Some(catalog) = resolve_catalog(catalogs, database_id) else {
                 return Some(ConnectorResponse::rejected(
                     request_id.to_string(),
-                    format!("database '{}' not found", query.database_id),
+                    format!("database '{}' not found", database_id),
                 ));
             };
 
@@ -504,7 +504,7 @@ fn handle_select_introspection_request(
         };
 
         let (catalog, normalized_object_id, resolved_database_id) =
-            match resolve_catalog_and_object_for_lookup(catalogs, &query.database_id, &object_name)
+            match resolve_catalog_and_object_for_lookup(catalogs, database_id, &object_name)
             {
                 Ok(resolved) => resolved,
                 Err(message) => {
@@ -542,7 +542,7 @@ fn handle_select_introspection_request(
         };
 
         let (catalog, normalized_object_id, resolved_database_id) =
-            match resolve_catalog_and_object_for_lookup(catalogs, &query.database_id, &entity_name)
+            match resolve_catalog_and_object_for_lookup(catalogs, database_id, &entity_name)
             {
                 Ok(resolved) => resolved,
                 Err(message) => {
@@ -580,7 +580,7 @@ fn handle_select_introspection_request(
             ));
         };
 
-        let (catalog, normalized_object_id) = if query.database_id.trim().is_empty() {
+        let (catalog, normalized_object_id) = if database_id.trim().is_empty() {
 
             if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
 
@@ -599,10 +599,10 @@ fn handle_select_introspection_request(
                     request_id.to_string(),
                     format!(
                         "database '{}' not found",
-                        if query.database_id.is_empty() {
+                        if database_id.is_empty() {
                             object_name
                         } else {
-                            &query.database_id
+                            database_id
                         }
                     ),
                 ));
@@ -622,10 +622,10 @@ fn handle_select_introspection_request(
 
         } else {
 
-            let Some(catalog) = resolve_catalog(catalogs, &query.database_id) else {
+            let Some(catalog) = resolve_catalog(catalogs, database_id) else {
                 return Some(ConnectorResponse::rejected(
                     request_id.to_string(),
-                    format!("database '{}' not found", query.database_id),
+                    format!("database '{}' not found", database_id),
                 ));
             };
 
@@ -660,10 +660,10 @@ fn handle_select_introspection_request(
                 format!(
                     "object '{}' not found in database '{}'",
                     normalized_object_id,
-                    if query.database_id.trim().is_empty() {
+                    if database_id.trim().is_empty() {
                         catalog.database_id.0.as_str()
                     } else {
-                        query.database_id.as_str()
+                        database_id
                     }
                 ),
             ));
@@ -1623,7 +1623,7 @@ fn resolve_catalog_and_read_plan_for_select<'a>(
 
 fn execute_select_read_plan(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -1664,7 +1664,7 @@ fn execute_select_read_plan(
 
         let response = execute_select_read_plan_without_lock(
             request_id,
-            query,
+            database_id,
             catalog,
             wal,
             runtime_indexes,
@@ -1681,7 +1681,7 @@ fn execute_select_read_plan(
 
     execute_select_read_plan_without_lock(
         request_id,
-        query,
+        database_id,
         catalog,
         wal,
         runtime_indexes,
@@ -1693,7 +1693,7 @@ fn execute_select_read_plan(
 
 fn execute_select_read_plan_without_lock(
     request_id: &str,
-    query: &DataQuery,
+    database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
@@ -1724,7 +1724,7 @@ fn execute_select_read_plan_without_lock(
     }
 
     if !read_plan.joins.is_empty() {
-        return execute_joined_select(request_id, query, catalog, wal, runtime_indexes, read_plan);
+        return execute_joined_select(request_id, database_id, catalog, wal, runtime_indexes, read_plan);
     }
 
     let table_id = read_plan.table_id.as_str();
@@ -1849,7 +1849,7 @@ fn execute_select_read_plan_without_lock(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                table_id, query.database_id
+                table_id, database_id
             ),
         );
     };
@@ -1859,7 +1859,7 @@ fn execute_select_read_plan_without_lock(
             request_id.to_string(),
             format!(
                 "table '{}' not found in database '{}'",
-                table_id, query.database_id
+                table_id, database_id
             ),
         );
     };
@@ -2893,7 +2893,7 @@ fn remap_select_read_plan_table(
 
 fn execute_joined_select(
     request_id: &str,
-    _query: &DataQuery,
+    _database_id: &str,
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &RuntimeIndexStore,
