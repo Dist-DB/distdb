@@ -1,0 +1,30 @@
+run_id=20260718-083813-37050
+captured_at_utc=2026-07-18T06:38:13Z
+hostname=Sams-MS.fritz.box
+uname=Darwin Sams-MS.fritz.box 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:18:58 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6000 arm64
+cpu_count=10
+loadavg=unknown
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    25343.
+Pages active:                                 747246.
+Pages inactive:                               706077.
+Pages speculative:                             40495.
+Pages throttled:                                   0.
+Pages wired down:                             297103.
+Pages purgeable:                               48240.
+"Translation faults":                     1152398287.
+Pages copy-on-write:                        57840517.
+Pages zero filled:                        1101489685.
+Pages reactivated:                          34469262.
+Pages purged:                               26971138.
+File-backed pages:                            491768.
+Anonymous pages:                             1002050.
+Pages stored in compressor:                   677351.
+Pages occupied by compressor:                 244773.
+Decompressions:                             28864419.
+Compressions:                               42386559.
+Pageins:                                    38441683.
+Pageouts:                                     403081.
+Swapins:                                           0.
+Swapouts:                                          0.
+disk_usage=/dev/disk3s1   460Gi   277Gi   162Gi    64%    2.3M  1.7G    0%   /System/Volumes/Data 

@@ -1,0 +1,22 @@
+[2026-07-18T06:38:56Z INFO  console] console bootstrap peers: /ip4/127.0.0.1/tcp/19401
+[2026-07-18T06:38:56Z INFO  peerlib::connector::transport] connector transport active peer set to /ip4/127.0.0.1/tcp/19401
+[2026-07-18T06:38:56Z INFO  peerlib::connector::transport] connector transport established persistent stream peer=/ip4/127.0.0.1/tcp/19401 addr=127.0.0.1:19401
+[2026-07-18T06:38:56Z INFO  peerlib::connector::transport] connector transport active peer set to perf-baseline-node
+[2026-07-18T06:38:56Z INFO  peerlib::connector::transport] connector transport established persistent stream peer=perf-baseline-node addr=127.0.0.1:19401
+[2026-07-18T06:38:56Z INFO  console] notification: connection to perf-baseline-node is successful (session root@perf-baseline-node)
+[2026-07-18T06:38:56Z INFO  console] session_id=f820086222332be12b438f2ecb9f3b64
+notification: startup peer connection established
+Distdb console (www.distdb.com)
+Copyright (c) 2026 Sam Colak. All rights reserved.
+Type help for commands, or \q to quit
+Default delimiter is ';' (use delimiter <token> to change)
+ok: 0 row(s) affected
+[2026-07-18T06:38:56Z INFO  console] database switched to perfdb
+┌──────────────┐
+│ payload:TEXT │
+├──────────────┤
+│ seed:72      │
+└──────────────┘
+1 row(s)
+timing: server_total=1ms parse=0ms execute=1ms network_rtt=10ms
+[2026-07-18T06:38:56Z INFO  peerlib::connector::transport] connector transport disconnected peer=perf-baseline-node reason=disconnect directive

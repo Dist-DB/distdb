@@ -28,7 +28,7 @@ count_trend_entries() {
 log "starting non-functional governance cycle"
 (
   cd "$ROOT_DIR"
-  bash scripts/perf/nonfunctional_baseline.sh
+  bash scripts/perf/run_nonfunctional_baseline_with_retry.sh
 )
 
 log "checking non-functional thresholds"

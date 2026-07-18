@@ -26,10 +26,10 @@ struct DispatchSessionState {
 
 impl DispatchSessionState {
 
-    fn from_query_context(session_context: &QueryExecutionSessionContext<'_>) -> Self {
+    fn from_query_context(session_context: &mut QueryExecutionSessionContext) -> Self {
         Self {
             session_id: session_context.session_id().to_string(),
-            session_variable_overrides: session_context.session_variable_overrides().cloned(),
+            session_variable_overrides: session_context.take_session_variable_overrides(),
         }
     }
 
@@ -40,7 +40,6 @@ impl DispatchSessionState {
     fn session_variable_overrides(&self) -> Option<&SessionVariableOverrides> {
         self.session_variable_overrides.as_ref()
     }
-
     fn session_variable_overrides_snapshot(&self) -> Option<SessionVariableOverrides> {
         self.session_variable_overrides.clone()
     }
@@ -56,7 +55,7 @@ impl DispatchSessionState {
         self.session_variable_overrides = overrides;
     }
 
-    fn commit_into_query_context(self, session_context: &mut QueryExecutionSessionContext<'_>) {
+    fn commit_into_query_context(self, session_context: &mut QueryExecutionSessionContext) {
         session_context.replace_session_variable_overrides(self.session_variable_overrides);
     }
 
@@ -87,7 +86,7 @@ pub(super) fn execute_parsed_query(
     parsed: Vec<SqlRequest>,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
-    session_context: &mut QueryExecutionSessionContext<'_>,
+    session_context: &mut QueryExecutionSessionContext,
 ) -> ConnectorResponse {
 
     if parsed.is_empty() {
@@ -98,6 +97,7 @@ pub(super) fn execute_parsed_query(
     }
 
     let mut session_state = DispatchSessionState::from_query_context(session_context);
+    let session_variable_overrides = session_state.session_variable_overrides_snapshot();
 
     let response = execute_parsed_query_with_session_parts(
         request_id,
@@ -110,7 +110,7 @@ pub(super) fn execute_parsed_query(
         external_write_group_id,
         touched_tables,
         &mut session_state,
-        session_context.session_variable_overrides().cloned(),
+        session_variable_overrides,
     );
 
     session_state.commit_into_query_context(session_context);
@@ -276,6 +276,7 @@ fn execute_alter_other(
     }
 
     if lowered.starts_with("set ") {
+
         let mut session_variable_overrides = ctx.session_state.take_session_variable_overrides();
 
         let Some(catalog) = resolve_catalog_mut(ctx.catalogs, &query.database_id) else {
@@ -306,6 +307,7 @@ fn execute_alter_other(
             .replace_session_variable_overrides(session_variable_overrides);
 
         return response;
+
     }
 
     if lowered.starts_with("set names") ||
@@ -339,6 +341,7 @@ fn apply_set_variables_with_session(
     sql: &str,
     session_variable_overrides: Option<&mut SessionVariableOverrides>,
 ) -> Result<(), String> {
+
     let normalized_sql = sql.trim().trim_end_matches(';').trim();
 
     if normalized_sql.len() < 3 || !normalized_sql[..3].eq_ignore_ascii_case("set") {
@@ -346,8 +349,8 @@ fn apply_set_variables_with_session(
     }
 
     let mut assignments_sql = normalized_sql[3..].trim();
-
     let mut statement_scope = None;
+
     if let Some((scope, consumed_len)) = parse_statement_scope_prefix(assignments_sql) {
         statement_scope = Some(scope);
         assignments_sql = assignments_sql[consumed_len..].trim_start();
@@ -358,85 +361,136 @@ fn apply_set_variables_with_session(
     }
 
     let mut next_system_settings = catalog.recursive_cte_execution_settings().clone();
-    let mut next_session_overrides = session_variable_overrides
-        .as_deref()
-        .cloned()
-        .unwrap_or_default();
-    let session_overrides_available = session_variable_overrides.is_some();
     let mut system_settings_changed = false;
-    let mut seen_variables = HashSet::<String>::new();
 
-    for assignment in assignments_sql
-        .split(',')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-    {
+    let result = if let Some(overrides) = session_variable_overrides {
 
-        let Some((raw_name, raw_value)) = assignment.split_once('=') else {
-            return Err(format!("invalid assignment '{assignment}'"));
-        };
+        let mut next_session_overrides = overrides.clone();
+        let mut seen_variables = HashSet::<String>::new();
 
-        let (assignment_scope, variable_name) = parse_scoped_variable_target(raw_name);
-        let variable_value = raw_value.trim();
+        let result = (|| {
 
-        let effective_scope = assignment_scope
-            .or(statement_scope)
-            .unwrap_or(VariableScope::Session);
+            for assignment in assignments_sql
+                .split(',')
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+            {
 
-        if assignment_scope.is_some()
-            && statement_scope.is_some()
-            && assignment_scope != statement_scope
+                let Some((raw_name, raw_value)) = assignment.split_once('=') else {
+                    return Err(format!("invalid assignment '{assignment}'"));
+                };
+
+                let (assignment_scope, variable_name) = parse_scoped_variable_target(raw_name);
+                let variable_value = raw_value.trim();
+
+                let effective_scope = assignment_scope
+                    .or(statement_scope)
+                    .unwrap_or(VariableScope::Session);
+
+                if assignment_scope.is_some()
+                    && statement_scope.is_some()
+                    && assignment_scope != statement_scope
+                {
+                    return Err(format!(
+                        "conflicting scope for variable '{}': statement scope and assignment scope differ",
+                        raw_name.trim()
+                    ));
+                }
+
+                if !seen_variables.insert(variable_name.clone()) {
+                    return Err(format!(
+                        "duplicate variable assignment '{}'",
+                        raw_name.trim()
+                    ));
+                }
+
+                if effective_scope == VariableScope::Global {
+                    apply_variable_assignment(
+                        &mut next_system_settings,
+                        &variable_name,
+                        variable_value,
+                        effective_scope,
+                    )?;
+                    system_settings_changed = true;
+                } else {
+                    apply_session_variable_assignment(
+                        &mut next_session_overrides,
+                        &variable_name,
+                        variable_value,
+                        effective_scope,
+                    )?;
+                }
+                
+            }
+
+            Ok(())
+
+        })();
+
+        if result.is_ok() {
+            *overrides = next_session_overrides;
+        }
+        
+        result
+
+    } else {
+
+        let mut seen_variables = HashSet::<String>::new();
+
+        for assignment in assignments_sql
+            .split(',')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
         {
-            return Err(format!(
-                "conflicting scope for variable '{}': statement scope and assignment scope differ",
-                raw_name.trim()
-            ));
-        }
+            let Some((raw_name, raw_value)) = assignment.split_once('=') else {
+                return Err(format!("invalid assignment '{assignment}'"));
+            };
 
-        if !seen_variables.insert(variable_name.clone()) {
-            return Err(format!(
-                "duplicate variable assignment '{}'",
-                raw_name.trim()
-            ));
-        }
+            let (assignment_scope, variable_name) = parse_scoped_variable_target(raw_name);
+            let variable_value = raw_value.trim();
 
-        if effective_scope == VariableScope::Global {
+            let effective_scope = assignment_scope
+                .or(statement_scope)
+                .unwrap_or(VariableScope::Session);
+
+            if assignment_scope.is_some()
+                && statement_scope.is_some()
+                && assignment_scope != statement_scope
+            {
+                return Err(format!(
+                    "conflicting scope for variable '{}': statement scope and assignment scope differ",
+                    raw_name.trim()
+                ));
+            }
+
+            if !seen_variables.insert(variable_name.clone()) {
+                return Err(format!(
+                    "duplicate variable assignment '{}'",
+                    raw_name.trim()
+                ));
+            }
+
             apply_variable_assignment(
                 &mut next_system_settings,
                 &variable_name,
                 variable_value,
                 effective_scope,
             )?;
+            
             system_settings_changed = true;
-        } else if session_overrides_available {
-            apply_session_variable_assignment(
-                &mut next_session_overrides,
-                &variable_name,
-                variable_value,
-                effective_scope,
-            )?;
-        } else {
-            // Legacy path used by direct query-core helpers that do not pass session state.
-            apply_variable_assignment(
-                &mut next_system_settings,
-                &variable_name,
-                variable_value,
-                effective_scope,
-            )?;
-            system_settings_changed = true;
+
         }
 
-    }
+        Ok(())
+        
+    };
 
-    if system_settings_changed {
+    if result.is_ok() && system_settings_changed {
         catalog.configure_recursive_cte_execution_settings(next_system_settings);
     }
 
-    if let Some(overrides) = session_variable_overrides {
-        *overrides = next_session_overrides;
-    }
+    result
 
-    Ok(())
 }
 
 fn execute_alter_table(
@@ -654,8 +708,6 @@ fn execute_select(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    let session_variable_overrides = ctx.session_state.session_variable_overrides_snapshot();
-
     execute_select_impl(
         request_id,
         query,
@@ -664,7 +716,7 @@ fn execute_select(
         ctx.node_data_dir,
         ctx.runtime_indexes,
         statement,
-        session_variable_overrides.as_ref(),
+        ctx.session_state.session_variable_overrides(),
     )
 
 }
@@ -676,8 +728,6 @@ fn execute_union_query(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    let session_variable_overrides = ctx.session_state.session_variable_overrides_snapshot();
-
     execute_union_query_impl(
         request_id,
         query,
@@ -685,7 +735,7 @@ fn execute_union_query(
         ctx.wal,
         ctx.runtime_indexes,
         statement,
-        session_variable_overrides.as_ref(),
+        ctx.session_state.session_variable_overrides(),
     )
     
 }
@@ -807,6 +857,7 @@ fn execute_call_stored_procedure(
             };
 
         for binding in argument_bindings {
+
             let parameter_name = binding.name;
 
             if let Some(output_target) = binding.output_target {
@@ -814,6 +865,7 @@ fn execute_call_stored_procedure(
             }
 
             local_entities.set_argument(parameter_name, binding.value);
+
         }
 
     }

@@ -32,6 +32,7 @@ WRITE_CSV="$OUT_DIR/write-heavy.csv"
 READ_CSV="$OUT_DIR/read-heavy.csv"
 MIXED_CSV="$OUT_DIR/mixed.csv"
 SUMMARY_JSON="$OUT_DIR/summary.json"
+ENVIRONMENT_SNAPSHOT="$OUT_DIR/environment.txt"
 
 write_manifest() {
   local exit_code="$1"
@@ -72,6 +73,49 @@ trap on_exit EXIT
 
 now_ms() {
   perl -MTime::HiRes=time -e 'printf("%.0f\n", time()*1000)'
+}
+
+capture_environment_snapshot() {
+  {
+    echo "run_id=$RUN_ID"
+    echo "captured_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "hostname=$(hostname 2>/dev/null || echo unknown)"
+    echo "uname=$(uname -a 2>/dev/null || echo unknown)"
+
+    if command -v getconf >/dev/null 2>&1; then
+      echo "cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+    elif command -v nproc >/dev/null 2>&1; then
+      echo "cpu_count=$(nproc 2>/dev/null || echo unknown)"
+    elif command -v sysctl >/dev/null 2>&1; then
+      echo "cpu_count=$(sysctl -n hw.ncpu 2>/dev/null || echo unknown)"
+    else
+      echo "cpu_count=unknown"
+    fi
+
+    if [[ -r /proc/loadavg ]]; then
+      echo "loadavg=$(tr -d '\n' </proc/loadavg)"
+    elif command -v sysctl >/dev/null 2>&1; then
+      echo "loadavg=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+    else
+      echo "loadavg=unknown"
+    fi
+
+    if [[ -r /proc/meminfo ]]; then
+      awk '
+        /^MemTotal:|^MemFree:|^MemAvailable:|^SwapTotal:|^SwapFree:/ {
+          print tolower($1) "=" $2 " " $3
+        }
+      ' /proc/meminfo
+    elif command -v vm_stat >/dev/null 2>&1; then
+      vm_stat 2>/dev/null || true
+    else
+      echo "memory=unknown"
+    fi
+
+    if command -v df >/dev/null 2>&1; then
+      echo "disk_usage=$(df -h "$OUT_DIR" 2>/dev/null | tail -n +2 | tr '\n' ' ' || true)"
+    fi
+  } >"$ENVIRONMENT_SNAPSHOT"
 }
 
 calc_percentile_from_csv() {
@@ -238,6 +282,8 @@ JSON
 
 echo "[nonfunctional-baseline] run_id=$RUN_ID out_dir=$OUT_DIR"
 
+capture_environment_snapshot
+
 start_server "$NODE_ID" "$OUT_DIR" "$PORT" "$LOG_FILE"
 wait_for_server "$PORT" "$NODE_ID"
 
@@ -275,7 +321,8 @@ $mixed_profile
     "write_csv": "$WRITE_CSV",
     "read_csv": "$READ_CSV",
     "mixed_csv": "$MIXED_CSV",
-    "server_log": "$LOG_FILE"
+    "server_log": "$LOG_FILE",
+    "environment_snapshot": "$ENVIRONMENT_SNAPSHOT"
   }
 }
 JSON

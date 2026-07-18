@@ -75,6 +75,8 @@ One-command governance accumulation cycle:
 - `throughput_ops_per_sec`,
 - `recovery_to_ready_ms`.
 
+Each baseline run also emits `environment.txt` in the same artifact directory with host snapshot data such as CPU count, load average, memory summary, and disk usage. Use that file when deciding whether a failing run is likely a platform contention issue versus a product regression.
+
 ## Promotion Guidance
 
 To move Non-functional from `Red` to `Yellow` in the scorecard:

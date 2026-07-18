@@ -30,6 +30,9 @@ if [[ -z "$SUMMARY_JSON" ]] || [[ ! -f "$SUMMARY_JSON" ]]; then
   exit 1
 fi
 
+SUMMARY_DIR="$(cd "$(dirname "$SUMMARY_JSON")" && pwd)"
+ENVIRONMENT_SNAPSHOT="$SUMMARY_DIR/environment.txt"
+
 MAX_WRITE_P95_MS="${PERF_MAX_WRITE_P95_MS:-120}"
 MAX_WRITE_P99_MS="${PERF_MAX_WRITE_P99_MS:-180}"
 MAX_READ_P95_MS="${PERF_MAX_READ_P95_MS:-90}"
@@ -165,6 +168,10 @@ assert_min "mixed_throughput_ops_per_sec" "$MIXED_THROUGHPUT" "$MIN_MIXED_THROUG
 
 if [[ "$failures" -gt 0 ]]; then
   echo "[nonfunctional-thresholds][fail] threshold violations=$failures summary=$SUMMARY_JSON"
+  if [[ -f "$ENVIRONMENT_SNAPSHOT" ]]; then
+    echo "[nonfunctional-thresholds][info] environment snapshot=$ENVIRONMENT_SNAPSHOT"
+    cat "$ENVIRONMENT_SNAPSHOT"
+  fi
   exit 1
 fi
 

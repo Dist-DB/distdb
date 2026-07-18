@@ -100,23 +100,23 @@ pub(crate) fn get_and_clear_last_insert_id() -> Option<i64> {
     })
 }
 
-pub(super) struct QueryExecutionSessionContext<'a> {
-    session_id: &'a str,
+pub(super) struct QueryExecutionSessionContext {
+    session_id: String,
     connection_id: usize,
     session_user: Option<String>,
-    session_variable_overrides: Option<&'a mut SessionVariableOverrides>,
+    session_variable_overrides: Option<SessionVariableOverrides>,
 }
 
-impl<'a> QueryExecutionSessionContext<'a> {
+impl QueryExecutionSessionContext {
 
     pub(super) fn new(
-        session_id: &'a str,
+        session_id: impl Into<String>,
         connection_id: usize,
         session_user: Option<String>,
-        session_variable_overrides: Option<&'a mut SessionVariableOverrides>,
+        session_variable_overrides: Option<SessionVariableOverrides>,
     ) -> Self {
         Self {
-            session_id,
+            session_id: session_id.into(),
             connection_id,
             session_user,
             session_variable_overrides,
@@ -124,25 +124,24 @@ impl<'a> QueryExecutionSessionContext<'a> {
     }
 
     pub(super) fn session_id(&self) -> &str {
-        self.session_id
+        self.session_id.as_str()
     }
 
     pub(super) fn session_variable_overrides(
         &self,
     ) -> Option<&SessionVariableOverrides> {
-        self.session_variable_overrides.as_deref()
+        self.session_variable_overrides.as_ref()
+    }
+
+    pub(super) fn take_session_variable_overrides(&mut self) -> Option<SessionVariableOverrides> {
+        self.session_variable_overrides.take()
     }
 
     pub(super) fn replace_session_variable_overrides(
         &mut self,
         overrides: Option<SessionVariableOverrides>,
     ) {
-        if let (Some(overrides), Some(target)) = (
-            overrides,
-            self.session_variable_overrides.as_deref_mut(),
-        ) {
-            *target = overrides;
-        }
+        self.session_variable_overrides = overrides;
     }
 
 }
@@ -192,7 +191,7 @@ pub(crate) fn handle_query_command_with_session_variables(
         session_id,
         connection_id,
         session_user,
-        Some(session_variable_overrides),
+        Some(std::mem::take(session_variable_overrides)),
     );
 
     let runtime_context = inbuilt_runtime_context_for_query(
@@ -200,10 +199,10 @@ pub(crate) fn handle_query_command_with_session_variables(
         query,
         &session_context,
         catalogs,
-        session_context.session_variable_overrides.as_deref(),
+        session_context.session_variable_overrides(),
     );
 
-    with_inbuilt_sql_runtime_context(&runtime_context, || {
+    let response = with_inbuilt_sql_runtime_context(&runtime_context, || {
         handle_query_command_internal(
             request_id,
             query,
@@ -215,7 +214,13 @@ pub(crate) fn handle_query_command_with_session_variables(
             None,
             &mut session_context,
         )
-    })
+    });
+
+    *session_variable_overrides = session_context
+        .take_session_variable_overrides()
+        .unwrap_or_default();
+
+    response
 
 }
 
@@ -270,7 +275,7 @@ pub(crate) fn handle_query_command_with_parsed_and_session_variables(
         session_id,
         connection_id,
         session_user,
-        Some(session_variable_overrides),
+        Some(std::mem::take(session_variable_overrides)),
     );
 
     let runtime_context = inbuilt_runtime_context_for_query(
@@ -278,7 +283,7 @@ pub(crate) fn handle_query_command_with_parsed_and_session_variables(
         query,
         &session_context,
         catalogs,
-        session_context.session_variable_overrides.as_deref(),
+        session_context.session_variable_overrides(),
     );
 
     with_inbuilt_sql_runtime_context(&runtime_context, || {
@@ -350,7 +355,7 @@ pub(crate) fn handle_query_command_in_write_group_with_session_variables(
         session_id,
         connection_id,
         session_user,
-        Some(session_variable_overrides),
+        Some(std::mem::take(session_variable_overrides)),
     );
 
     let runtime_context = inbuilt_runtime_context_for_query(
@@ -358,10 +363,10 @@ pub(crate) fn handle_query_command_in_write_group_with_session_variables(
         query,
         &session_context,
         catalogs,
-        session_context.session_variable_overrides.as_deref(),
+        session_context.session_variable_overrides(),
     );
 
-    with_inbuilt_sql_runtime_context(&runtime_context, || {
+    let response = with_inbuilt_sql_runtime_context(&runtime_context, || {
         handle_query_command_internal(
             request_id,
             query,
@@ -373,14 +378,20 @@ pub(crate) fn handle_query_command_in_write_group_with_session_variables(
             Some(touched_tables),
             &mut session_context,
         )
-    })
+    });
+
+    *session_variable_overrides = session_context
+        .take_session_variable_overrides()
+        .unwrap_or_default();
+
+    response
 
 }
 
 fn inbuilt_runtime_context_for_query(
     _request_id: &str,
     query: &DataQuery,
-    session_context: &QueryExecutionSessionContext<'_>,
+    session_context: &QueryExecutionSessionContext,
     catalogs: &HashMap<String, DatabaseCatalog>,
     session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> InbuiltSqlRuntimeContext {
@@ -432,7 +443,7 @@ fn handle_query_command_internal(
     runtime_indexes: &mut RuntimeIndexStore,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
-    session_context: &mut QueryExecutionSessionContext<'_>,
+    session_context: &mut QueryExecutionSessionContext,
 ) -> ConnectorResponse {
 
     let parse_start = Instant::now();
@@ -475,7 +486,7 @@ fn handle_query_command_internal_with_parsed(
     parse_ms: u64,
     external_write_group_id: Option<TransactionId>,
     touched_tables: Option<&mut HashSet<String>>,
-    session_context: &mut QueryExecutionSessionContext<'_>,
+    session_context: &mut QueryExecutionSessionContext,
 ) -> ConnectorResponse {
 
     let request_start = Instant::now();

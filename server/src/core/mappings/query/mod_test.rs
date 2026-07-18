@@ -5456,6 +5456,86 @@ fn set_variable_rejects_conflicting_statement_and_assignment_scopes() {
 }
 
 #[test]
+fn set_variable_rolls_back_session_overrides_on_failure() {
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+    let mut session_overrides = SessionVariableOverrides::new();
+
+    let initial_set = handle_query_command_with_session_variables(
+        "req-set-variable-rollback-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.max_rows = 333".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_overrides,
+    );
+    
+    assert!(matches!(initial_set.status, connector::ResponseStatus::Applied));
+
+    let failing_set = handle_query_command_with_session_variables(
+        "req-set-variable-rollback-failure",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "set cte.max_rows = 444, cte.timeout_ms = 3600001".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_overrides,
+    );
+
+    assert!(matches!(failing_set.status, connector::ResponseStatus::Rejected));
+    let ConnectorResult::Error(message) = failing_set.result else {
+        panic!("expected error result")
+    };
+    assert!(
+        message.contains("cte.timeout_ms is out of allowed range"),
+        "unexpected rejection message: {message}"
+    );
+
+    let show_response = handle_query_command_with_session_variables(
+        "req-show-variable-rollback-check",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "show variable cte.max_rows".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+        &mut session_overrides,
+    );
+
+    assert!(matches!(show_response.status, connector::ResponseStatus::Applied));
+    assert_eq!(
+        query_result_rows(show_response),
+        vec![vec!["cte.max_rows".to_string(), "333".to_string()]]
+    );
+}
+
+#[test]
 fn show_variables_like_filters_recursive_cte_controls() {
     let mut catalogs = HashMap::new();
     catalogs.insert(
