@@ -77,3 +77,24 @@ fn compare_row_value_supports_native_numeric_storage() {
     assert!(compare_row_value(&actual, b"42", &SelectComparisonOp::Eq));
     assert!(compare_row_value(&actual, b"7", &SelectComparisonOp::Gt));
 }
+
+#[test]
+fn compare_row_value_supports_uuid_binary_storage() {
+    let actual = convert_value_to_field_type(
+        b"550e8400-e29b-41d4-a716-446655440000",
+        &FieldType::Uuid,
+        TypeConversionPolicy::Safe,
+    )
+    .expect("uuid field should encode");
+
+    assert!(compare_row_value(
+        &actual,
+        b"550e8400-e29b-41d4-a716-446655440000",
+        &SelectComparisonOp::Eq,
+    ));
+    assert!(compare_row_value(
+        &actual,
+        b"550e8400-e29b-41d4-a716-446655440001",
+        &SelectComparisonOp::Lt,
+    ));
+}

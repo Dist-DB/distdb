@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::engine::database::core::DatabaseError;
 use crate::engine::database::row_payload::{decode_row_payload, encode_row_payload};
@@ -18,6 +19,7 @@ const STORED_U64_TAG: u8 = 0x14;
 const STORED_U128_TAG: u8 = 0x15;
 const STORED_F32_TAG: u8 = 0x21;
 const STORED_F64_TAG: u8 = 0x22;
+const STORED_UUID_TAG: u8 = 0x31;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StoredNumericValue {
@@ -139,11 +141,33 @@ pub fn convert_value_to_field_type(
 
         FieldType::Blob | FieldType::Spatial => Ok(value.to_vec()),
 
+        FieldType::Uuid => {
+            if let Some(uuid_bytes) = decode_uuid_binary_for_conversion(value) {
+                return Ok(tagged_bytes(STORED_UUID_TAG, &uuid_bytes));
+            }
+
+            let rendered = render_stored_field_value(value);
+            if let Ok(as_text) = std::str::from_utf8(&rendered) {
+                if let Ok(uuid) = Uuid::parse_str(as_text.trim()) {
+                    return Ok(tagged_bytes(STORED_UUID_TAG, uuid.as_bytes()));
+                }
+            }
+
+            match policy {
+                TypeConversionPolicy::Force => Ok(tagged_bytes(STORED_UUID_TAG, Uuid::nil().as_bytes())),
+                TypeConversionPolicy::Safe => Err(()),
+            }
+        },
+
     }
 
 }
 
 pub fn render_stored_field_value(value: &[u8]) -> Vec<u8> {
+
+    if let Some(uuid_bytes) = decode_tagged_uuid_binary(value) {
+        return Uuid::from_bytes(uuid_bytes).to_string().into_bytes();
+    }
     
     match decode_numeric_value(value) {
         
@@ -165,6 +189,13 @@ pub fn display_stored_field_value(value: &[u8]) -> String {
 
 pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
 
+    if let (Some(left_uuid), Some(right_uuid)) = (
+        decode_uuid_binary_for_compare(left),
+        decode_uuid_binary_for_compare(right),
+    ) {
+        return left_uuid.cmp(&right_uuid);
+    }
+
     let left_numeric = decode_numeric_value(left);
     let right_numeric = decode_numeric_value(right);
 
@@ -173,18 +204,55 @@ pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Order
         (Some(StoredNumericValue::Signed(lhs)), Some(StoredNumericValue::Signed(rhs))) => lhs.cmp(&rhs),
         
         (Some(StoredNumericValue::Unsigned(lhs)), Some(StoredNumericValue::Unsigned(rhs))) => lhs.cmp(&rhs),
-        
+
         (Some(lhs), Some(rhs)) => compare_mixed_numeric_values(lhs, rhs),
         
         _ => {
             let left_rendered = render_stored_field_value(left);
             let right_rendered = render_stored_field_value(right);
-            let left_text = String::from_utf8_lossy(&left_rendered);
-            let right_text = String::from_utf8_lossy(&right_rendered);
-            left_text.cmp(&right_text)
+            left_rendered.cmp(&right_rendered)
         }
         
     }
+
+}
+
+fn decode_tagged_uuid_binary(value: &[u8]) -> Option<[u8; 16]> {
+
+    match value {
+        [STORED_UUID_TAG, bytes @ ..] if bytes.len() == 16 => bytes.try_into().ok(),
+        _ => None,
+    }
+
+}
+
+fn decode_uuid_binary_for_conversion(value: &[u8]) -> Option<[u8; 16]> {
+
+    if let Some(existing) = decode_tagged_uuid_binary(value) {
+        return Some(existing);
+    }
+
+    if value.len() == 16 {
+        return value.try_into().ok();
+    }
+
+    None
+
+}
+
+fn decode_uuid_binary_for_compare(value: &[u8]) -> Option<[u8; 16]> {
+
+    if let Some(existing) = decode_tagged_uuid_binary(value) {
+        return Some(existing);
+    }
+
+    if value.len() == 16 {
+        return value.try_into().ok();
+    }
+
+    let text = std::str::from_utf8(value).ok()?.trim();
+    let parsed = Uuid::parse_str(text).ok()?;
+    Some(*parsed.as_bytes())
 
 }
 

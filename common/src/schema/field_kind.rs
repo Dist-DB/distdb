@@ -7,6 +7,7 @@ pub enum FieldKind {
     Date,
     DateTime,
     Timestamp,
+    Uuid,
     StringFixed(usize),
     Text,
     Enum(Vec<String>),
@@ -31,6 +32,8 @@ impl FieldKind {
             Self::DateTime => "DATETIME".to_string(),
 
             Self::Timestamp => "TIMESTAMP".to_string(),
+
+            Self::Uuid => "UUID".to_string(),
 
             Self::StringFixed(len) => format!("VARCHAR({len})"),
 

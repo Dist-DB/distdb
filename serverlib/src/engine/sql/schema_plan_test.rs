@@ -116,6 +116,27 @@ fn create_table_schema_maps_temporal_types_and_preserves_original_sql_type() {
 }
 
 #[test]
+fn create_table_schema_maps_uuid_type_and_preserves_original_sql_type() {
+    let (_, schema) =
+        create_table_schema_from_statement("create table users (id uuid not null primary key)")
+            .expect("uuid type should parse");
+
+    assert_eq!(schema.fields.len(), 1);
+    assert_eq!(schema.fields[0].field_name, "id");
+    assert_eq!(schema.fields[0].field_type, FieldType::Uuid);
+    assert!(!schema.fields[0].nullable);
+    assert_eq!(schema.fields[0].indexed, FieldIndex::PrimaryKey);
+
+    assert_eq!(
+        schema.fields[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.original_sql_type.as_deref()),
+        Some("UUID")
+    );
+}
+
+#[test]
 fn create_table_schema_tracks_table_level_keys_defaults_and_enum() {
     let sql = "CREATE TABLE `__account` (
           `uid` varchar(34) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci NOT NULL DEFAULT '',

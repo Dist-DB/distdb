@@ -354,6 +354,10 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
         return FieldType::Date;
     }
 
+    if lowered == "uuid" || lowered.starts_with("uuid(") {
+        return FieldType::Uuid;
+    }
+
     if lowered.contains("unsigned") {
 
         if lowered.contains("bigint") {

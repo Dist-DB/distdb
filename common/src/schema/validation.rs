@@ -69,6 +69,7 @@ pub fn validate_field_kind(kind: &FieldKind) -> Result<(), SchemaValidationError
         FieldKind::Date |
         FieldKind::DateTime |
         FieldKind::Timestamp |
+        FieldKind::Uuid |
         FieldKind::Text |
         FieldKind::Spatial |
         FieldKind::Blob => {}

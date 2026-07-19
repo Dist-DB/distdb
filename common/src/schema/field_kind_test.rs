@@ -13,6 +13,7 @@
         assert_eq!(FieldKind::Date.sql_variant_display_name(), "DATE");
         assert_eq!(FieldKind::DateTime.sql_variant_display_name(), "DATETIME");
         assert_eq!(FieldKind::Timestamp.sql_variant_display_name(), "TIMESTAMP");
+        assert_eq!(FieldKind::Uuid.sql_variant_display_name(), "UUID");
         assert_eq!(FieldKind::StringFixed(255).sql_variant_display_name(), "VARCHAR(255)");
         assert_eq!(FieldKind::Text.sql_variant_display_name(), "TEXT");
         assert_eq!(FieldKind::Spatial.sql_variant_display_name(), "SPATIAL");
