@@ -262,6 +262,19 @@ fn import_transport_error_retry_classifier_matches_expected_errors() {
 }
 
 #[test]
+fn import_duplicate_key_error_classifier_matches_unique_key_validation_errors() {
+    assert!(import_duplicate_key_error_is_skippable(
+        "transaction validation failed at staged statement 1: insert failed: duplicate unique key (form=GNS)"
+    ));
+    assert!(import_duplicate_key_error_is_skippable(
+        "insert failed: duplicate primary key (id=1)"
+    ));
+    assert!(!import_duplicate_key_error_is_skippable(
+        "insert failed: unknown column 'form'"
+    ));
+}
+
+#[test]
 fn import_batchable_dml_classifier_matches_expected_statements() {
     assert!(statement_is_import_batchable_dml("insert into x values (1)"));
     assert!(statement_is_import_batchable_dml(" update users set a=1"));

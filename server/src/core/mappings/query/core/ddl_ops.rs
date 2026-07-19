@@ -361,6 +361,7 @@ pub(super) fn execute_create_table_impl(
     let table_id = create_table_plan.table_id;
     let schema = create_table_plan.schema;
     let is_temporary = create_table_plan.temporary;
+    let composite_unique_indexes = create_table_plan.composite_unique_indexes;
 
     let normalized_table_id = common::normalize_identifier!(table_id);
 
@@ -406,6 +407,71 @@ pub(super) fn execute_create_table_impl(
             format!("create table failed: {err}"),
         );
 
+    }
+
+    for field_names in &composite_unique_indexes {
+
+        let created_index_id = match catalog.create_index_with_kind_and_origin(
+            &normalized_table_id,
+            None,
+            field_names.clone(),
+            serverlib::DatabaseIndexKind::Unique,
+            serverlib::DatabaseIndexOrigin::Derived,
+        ) {
+            Ok(index_id) => index_id,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create table failed: composite unique index create failed: {err}"),
+                );
+            }
+        };
+
+        if !is_temporary {
+            let created_index = match catalog
+                .index_in_table(&normalized_table_id, &created_index_id)
+                .cloned()
+            {
+                Some(index) => index,
+                None => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        "create table failed: composite unique index metadata missing".to_string(),
+                    );
+                }
+            };
+
+            let index_payload = serverlib::IndexLifecyclePayload {
+                table_id: normalized_table_id.clone(),
+                index_id: created_index_id,
+                action: serverlib::IndexLifecycleAction::Create,
+                schema_epoch: catalog.schema_epoch(),
+                index: Some(created_index),
+            };
+
+            let encoded_index_payload = match index_payload.encode() {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("create table index payload encode failed: {err}"),
+                    );
+                }
+            };
+
+            if let Err(err) = append_payload_record(
+                wal,
+                &catalog.database_id.0,
+                TransactionKind::IndexLifecycle,
+                encoded_index_payload,
+                common::epoch_nanos!(),
+            ) {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("create table index WAL append failed: {err}"),
+                );
+            }
+        }
     }
 
     if !is_temporary {

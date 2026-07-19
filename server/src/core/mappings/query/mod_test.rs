@@ -1002,6 +1002,97 @@ fn insert_rejects_duplicate_non_primary_unique_key() {
 }
 
 #[test]
+fn insert_composite_unique_key_enforces_tuple_not_individual_column() {
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    let create_table = query_as_session(
+        "req-create-places-composite-unique",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "create table places (uid int primary key, uni_id int not null, form varchar(3) not null, unique key uq_uni_id_form (uni_id, form))".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+    );
+    assert!(matches!(create_table.status, connector::ResponseStatus::Applied));
+
+    let seed_distinct_tuples = query_as_session(
+        "req-insert-places-composite-unique-seed",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into places (uid, uni_id, form) values (1, 100, 'GNS'), (2, 200, 'GNS')"
+                .to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+    );
+    assert!(matches!(
+        seed_distinct_tuples.status,
+        connector::ResponseStatus::Applied
+    ));
+
+    let duplicate_tuple = query_as_session(
+        "req-insert-places-composite-unique-duplicate",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "insert into places (uid, uni_id, form) values (3, 100, 'GNS')".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+    );
+
+    assert!(matches!(
+        duplicate_tuple.status,
+        connector::ResponseStatus::Rejected
+    ));
+    let connector::ConnectorResult::Error(message) = duplicate_tuple.result else {
+        panic!("expected error result")
+    };
+    assert!(message.contains("duplicate unique key"));
+
+    let rows = query_result_rows(query_as_session(
+        "req-select-places-composite-unique",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select uid, uni_id, form from places order by uid".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+    ));
+
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "100".to_string(), "GNS".to_string()],
+            vec!["2".to_string(), "200".to_string(), "GNS".to_string()],
+        ]
+    );
+}
+
+#[test]
 fn insert_ignore_skips_duplicate_non_primary_unique_key() {
     let mut catalogs = HashMap::new();
     catalogs.insert(

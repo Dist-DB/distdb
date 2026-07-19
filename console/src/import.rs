@@ -243,7 +243,9 @@ where
 
 pub(crate) fn import_duplicate_key_error_is_skippable(error: &str) -> bool {
     let normalized_error = error.to_ascii_lowercase();
-    normalized_error.contains("duplicate primary key") || normalized_error.contains("duplicate key")
+    normalized_error.contains("duplicate primary key")
+        || normalized_error.contains("duplicate unique key")
+        || normalized_error.contains("duplicate key")
 }
 
 pub(crate) fn statement_is_import_batchable_dml(statement: &str) -> bool {

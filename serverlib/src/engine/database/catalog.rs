@@ -420,6 +420,25 @@ impl DatabaseCatalog {
         field_names: Vec<String>,
     ) -> DatabaseResult<String> {
 
+        self.create_index_with_kind_and_origin(
+            table_id,
+            index_name,
+            field_names,
+            DatabaseIndexKind::Indexed,
+            DatabaseIndexOrigin::UserDefined,
+        )
+
+    }
+
+    pub fn create_index_with_kind_and_origin(
+        &mut self,
+        table_id: &str,
+        index_name: Option<&str>,
+        field_names: Vec<String>,
+        index_kind: DatabaseIndexKind,
+        index_origin: DatabaseIndexOrigin,
+    ) -> DatabaseResult<String> {
+
         let normalized_table_id = common::normalize_identifier!(table_id);
 
         let table = self
@@ -448,8 +467,8 @@ impl DatabaseCatalog {
 
         let mut index = DatabaseIndex::from_table_fields_with_origin(
             &normalized_table_id,
-            DatabaseIndexKind::Indexed,
-            DatabaseIndexOrigin::UserDefined,
+            index_kind,
+            index_origin,
             None,
             normalized_fields,
         );

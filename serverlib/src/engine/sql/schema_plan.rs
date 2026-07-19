@@ -13,6 +13,7 @@ pub struct CreateTablePlan {
     pub table_id: String,
     pub schema: TableSchema,
     pub temporary: bool,
+    pub composite_unique_indexes: Vec<Vec<String>>,
 }
 
 pub fn create_table_schema_from_statement(
@@ -39,7 +40,7 @@ pub fn create_table_plan_from_statement(
 
     let table_id = common::normalize_identifier!(create_table.name.to_string());
     
-    let (primary_key_fields, indexed_fields, unique_fields) =
+    let (primary_key_fields, indexed_fields, unique_fields, composite_unique_indexes) =
         derive_indexed_fields_from_constraints(&create_table.constraints);
 
     let mut fields = Vec::with_capacity(create_table.columns.len());
@@ -110,6 +111,7 @@ pub fn create_table_plan_from_statement(
         table_id,
         schema,
         temporary: create_table.temporary,
+        composite_unique_indexes,
     })
 
 }
@@ -260,11 +262,12 @@ fn parse_modify_column_change_op(
 
 fn derive_indexed_fields_from_constraints(
     constraints: &[TableConstraint],
-) -> (Vec<String>, HashSet<String>, HashSet<String>) {
+) -> (Vec<String>, HashSet<String>, HashSet<String>, Vec<Vec<String>>) {
 
     let mut primary = Vec::new();
     let mut indexed = HashSet::new();
     let mut unique = HashSet::new();
+    let mut composite_unique_indexes = Vec::new();
 
     for constraint in constraints {
 
@@ -285,7 +288,14 @@ fn derive_indexed_fields_from_constraints(
         }
 
         if lowered.starts_with("unique") {
-            unique.extend(columns.iter().cloned());
+            // Only single-column UNIQUE constraints imply a per-field unique marker.
+            // Composite UNIQUE constraints should be represented at index level, not
+            // as each individual column being unique on its own.
+            if columns.len() == 1 {
+                unique.extend(columns.iter().cloned());
+            } else {
+                composite_unique_indexes.push(columns.clone());
+            }
             indexed.extend(columns);
             continue;
         }
@@ -298,7 +308,7 @@ fn derive_indexed_fields_from_constraints(
 
     }
 
-    (primary, indexed, unique)
+    (primary, indexed, unique, composite_unique_indexes)
 
 }
 

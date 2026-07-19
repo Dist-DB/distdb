@@ -215,6 +215,30 @@ fn create_table_schema_marks_unique_columns_in_metadata() {
 }
 
 #[test]
+fn create_table_schema_does_not_mark_composite_unique_columns_as_individually_unique() {
+    let (_, schema) = create_table_schema_from_statement(
+        "create table places (uid bigint primary key, uni_id bigint not null, form varchar(3) not null default '', unique key uq_uni_id_form (uni_id, form))",
+    )
+    .expect("schema should parse");
+
+    let uni_id = schema.field("uni_id").expect("uni_id field should exist");
+    assert_eq!(uni_id.indexed, FieldIndex::Indexed);
+    assert!(!uni_id
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.unique)
+        .unwrap_or(false));
+
+    let form = schema.field("form").expect("form field should exist");
+    assert_eq!(form.indexed, FieldIndex::Indexed);
+    assert!(!form
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.unique)
+        .unwrap_or(false));
+}
+
+#[test]
 fn alter_table_change_plan_parses_add_drop_and_rename() {
     let plan = parse_alter_table_change_plan_from_statement(
             "alter table users add column status varchar(20) not null default 'active', drop column legacy, rename column email to login_email",

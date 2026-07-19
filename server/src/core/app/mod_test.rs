@@ -8627,6 +8627,76 @@ fn describe_sql_backed_objects_returns_original_sql_and_object_type() {
 }
 
 #[test]
+fn describe_table_marks_composite_unique_columns_as_mul() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-describe-composite-unique-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_request = ConnectorRequest::new(
+        "req-create-places-composite-unique",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table places (uid bigint not null primary key, uni_id bigint not null, form varchar(3) not null default '', unique key uq_uni_id_form (uni_id, form))".to_string(),
+            },
+        },
+    );
+
+    let create_response = app.handle_connector_request(&create_request);
+    assert_eq!(create_response.status, ResponseStatus::Applied);
+
+    let describe_request = ConnectorRequest::new(
+        "req-describe-places-composite-unique",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "describe places".to_string(),
+            },
+        },
+    );
+
+    let describe_response = app.handle_connector_request(&describe_request);
+    assert_eq!(describe_response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = describe_response.result else {
+        panic!("expected query result");
+    };
+
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| String::from_utf8_lossy(&cell).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let uni_id_row = rows
+        .iter()
+        .find(|row| row.get(1).map(|field| field.as_str()) == Some("uni_id"))
+        .expect("describe should include uni_id field");
+    assert_eq!(uni_id_row[4], "MUL");
+
+    let form_row = rows
+        .iter()
+        .find(|row| row.get(1).map(|field| field.as_str()) == Some("form"))
+        .expect("describe should include form field");
+    assert_eq!(form_row[4], "MUL");
+}
+
+#[test]
 fn debug_procedure_returns_cached_artifact_details() {
     let unique_suffix = common::epoch_nanos!();
 
