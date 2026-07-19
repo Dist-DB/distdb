@@ -36,35 +36,48 @@ use server::core::control::affinity::{
     execute_affinity_join_sequence, initialize_affinity_with_persistence,
     parse_affinity_startup_config, parse_server_list_from_args,
 };
-use server::core::control::connector_handler::{CatalogDispatcher, handle_connector_stream};
-use server::core::control::outbound_transport::{
+use server::core::control::connector_handler::{
+    CatalogDispatcher, handle_connector_stream, maybe_bootstrap_status_response,
+    maybe_server_peer_discovery_response, maybe_show_catalog_workers_response,
+    maybe_show_entities_response,
+};
+use server::core::comms::outbound_transport::{
     configure_outbound_tls_state, send_service_request_to_addr,
 };
-use server::core::control::p2p_wire::{
+use server::core::comms::p2p_wire::{
     advertised_listen_addr_from_args, multiaddr_to_socket_addr,
     node_descriptor_to_peer_node,
 };
 use server::core::control::replication_sync::spawn_affinity_replication_task;
-use server::core::control::tcp_transport::{
+use server::core::comms::p2p::{
     TcpServerTransport, initialize_server_p2p_runtime, spawn_p2p_heartbeat_task,
     spawn_service_announce_task,
 };
-use server::core::control::tls_support::{
+use server::core::comms::tls_support::{
     build_tls_acceptor, build_tls_client_config, negotiate_connector_stream,
     parse_tls_config_from_args, parse_tls_mode_from_args,
 };
+use server::core::comms::wss::{
+    handle_wss_inbound_stream, validate_wss_tls_policy,
+};
+use server::core::control::session::{ServerConnectionSession, extract_auth_token};
 use serverlib::core::cluster::NodeDescriptor;
 use serverlib::core::identity::NodeId;
 use serverlib::AffinityProcessor;
+use connector::{ConnectorCommand, ConnectorResponse, ConnectorResult, MutationResult};
+use futures_util::SinkExt;
 use peerlib::{ServiceMessage, ServerP2pRuntime};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_rustls::TlsAcceptor;
 
 fn parse_tls_subject_alt_names_from_args(args: &[String]) -> Vec<String> {
 
@@ -126,6 +139,203 @@ fn parse_advertised_services_from_args(args: &[String], ca_root_enabled: bool) -
     services.dedup();
     services
 
+}
+
+fn parse_wss_enabled_from_args(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "wss"
+            || arg == "wss=on"
+            || arg == "wss=true"
+            || arg == "wss=1"
+            || arg.starts_with("wss_port=")
+    })
+}
+
+fn parse_wss_port_from_args(args: &[String], connector_port: u16) -> u16 {
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("wss_port=").and_then(|v| v.parse::<u16>().ok()))
+        .unwrap_or_else(|| connector_port.saturating_add(1))
+}
+
+async fn handle_wss_connection(
+    stream: tokio::net::TcpStream,
+    tls_acceptor: TlsAcceptor,
+    app: Arc<RwLock<ServerApp>>,
+    bootstrap_ready: Arc<AtomicBool>,
+    catalog_dispatcher: Arc<CatalogDispatcher>,
+    node_data_dir: std::path::PathBuf,
+    p2p_runtime: Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    service_registry: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    local_node: NodeDescriptor,
+    peer_addr: String,
+    connection_id: usize,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let tls_stream = tls_acceptor.accept(stream).await.map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            format!("wss tls handshake failed for {}: {}", peer_addr, err),
+        )
+    })?;
+
+    let mut ws_stream = accept_async(tls_stream)
+    .await
+    .map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("wss handshake failed for {}: {}", peer_addr, err),
+        )
+    })?;
+
+    let session = Arc::new(Mutex::new(ServerConnectionSession::new(
+        peer_addr.clone(),
+        connection_id,
+    )));
+
+    let challenge_message = {
+        let guard = session.lock().await;
+        guard.challenge_message()
+    };
+
+    let challenge = ConnectorResponse::rejected("__p2p_password_challenge__", challenge_message);
+    let challenge_payload = bincode::serialize(&challenge)?;
+    ws_stream
+        .send(Message::Binary(challenge_payload))
+        .await
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                format!("failed sending wss challenge to {}: {}", peer_addr, err),
+            )
+        })?;
+
+    let session_for_handler = Arc::clone(&session);
+    let app_for_handler = Arc::clone(&app);
+    let bootstrap_for_handler = Arc::clone(&bootstrap_ready);
+    let catalog_dispatcher_for_handler = Arc::clone(&catalog_dispatcher);
+    let node_data_dir_for_handler = node_data_dir.clone();
+    let p2p_runtime_for_handler = Arc::clone(&p2p_runtime);
+    let service_registry_for_handler = Arc::clone(&service_registry);
+    let local_node_for_handler = local_node.clone();
+
+    let executor = move |request: connector::ConnectorRequest| {
+        let session = Arc::clone(&session_for_handler);
+        let app = Arc::clone(&app_for_handler);
+        let bootstrap_ready = Arc::clone(&bootstrap_for_handler);
+        let catalog_dispatcher = Arc::clone(&catalog_dispatcher_for_handler);
+        let node_data_dir = node_data_dir_for_handler.clone();
+        let p2p_runtime = Arc::clone(&p2p_runtime_for_handler);
+        let service_registry = Arc::clone(&service_registry_for_handler);
+        let local_node = local_node_for_handler.clone();
+
+        async move {
+            let mut session = session.lock().await;
+
+            if let Some(response) = maybe_server_peer_discovery_response(
+                &request,
+                &p2p_runtime,
+                &local_node,
+                &service_registry,
+            )
+            .await
+            {
+                return Ok(response);
+            }
+
+            if let Some(response) = maybe_bootstrap_status_response(
+                &request,
+                bootstrap_ready.load(Ordering::SeqCst),
+            ) {
+                return Ok(response);
+            }
+
+            if let Some(response) = maybe_show_entities_response(
+                &request,
+                &app,
+                &node_data_dir,
+                bootstrap_ready.load(Ordering::SeqCst),
+            )
+            .await
+            {
+                return Ok(response);
+            }
+
+            if !bootstrap_ready.load(Ordering::SeqCst) {
+                let allowed = match &request.command {
+                    ConnectorCommand::Query { query } => extract_auth_token(&query.sql).is_some(),
+                    _ => false,
+                };
+
+                if !allowed {
+                    return Ok(ConnectorResponse::rejected(
+                        request.request_id.clone(),
+                        "server is bootstrapping; limited session mode allows authentication and status/discovery commands only"
+                            .to_string(),
+                    ));
+                }
+            }
+
+            if let Some(response) = maybe_show_catalog_workers_response(
+                &request,
+                &catalog_dispatcher,
+                bootstrap_ready.load(Ordering::SeqCst),
+            )
+            .await
+            {
+                return Ok(response);
+            }
+
+            if !session.authenticated {
+                let auth_outcome = match &request.command {
+                    ConnectorCommand::Query { query } => {
+                        extract_auth_token(&query.sql)
+                            .map(|token| session.authenticate_if_valid_token(token))
+                    }
+                    _ => None,
+                };
+
+                let response = match auth_outcome {
+                    Some(true) => ConnectorResponse::applied(
+                        request.request_id,
+                        ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+                    ),
+                    Some(false) => ConnectorResponse::rejected(request.request_id, "invalid password"),
+                    None => ConnectorResponse::rejected(
+                        request.request_id,
+                        "authentication required; run `password <password>;` first",
+                    ),
+                };
+
+                return Ok(response);
+            }
+
+            session.record_request(&request);
+
+            let mut app_guard = app.write().await;
+            if app_guard.get_session(&session.session_id).is_none() {
+                app_guard.init_session(
+                    session.session_id.clone(),
+                    connection_id,
+                    session.user_id().to_string(),
+                );
+            }
+
+            Ok(app_guard.handle_connector_request_for_session(
+                &request,
+                &session.session_id,
+            ))
+        }
+    };
+
+    let result = handle_wss_inbound_stream(ws_stream, executor)
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()));
+
+    {
+        let mut guard = session.lock().await;
+        guard.mark_disconnect();
+    }
+
+    result.map_err(Into::into)
 }
 
 fn try_enroll_tls_from_peers(
@@ -490,6 +700,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_data_dir_for_listener = node_data_dir.clone();
     let tls_acceptor_for_listener = tls_acceptor.clone();
     let ca_root_enabled_for_listener = ca_root_enabled;
+    let wss_enabled = parse_wss_enabled_from_args(&args);
+    let wss_port = parse_wss_port_from_args(&args, port);
+
+    if wss_enabled {
+        validate_wss_tls_policy(tls_mode, tls_acceptor_for_listener.is_some())
+            .map_err(|err| format!("wss configuration rejected: {err}"))?;
+    }
 
     tokio::spawn(async move {
 
@@ -593,6 +810,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
     });
+
+    if wss_enabled {
+        let wss_bind_addr = format!("{}:{}", listen_addr, wss_port);
+        let wss_listener = TcpListener::bind(&wss_bind_addr).await?;
+        log::info!("wss listener bound at {}", wss_bind_addr);
+
+        let app_for_wss_listener = Arc::clone(&app);
+        let catalog_dispatcher_for_wss_listener = Arc::new(CatalogDispatcher::new(Arc::clone(&app)));
+        let bootstrap_ready_for_wss_listener = Arc::clone(&bootstrap_ready);
+        let node_data_dir_for_wss_listener = node_data_dir.clone();
+        let p2p_runtime_for_wss_listener = Arc::clone(&p2p_runtime);
+        let service_registry_for_wss_listener = Arc::clone(&service_registry);
+        let active_connections_for_wss_listener = Arc::clone(&active_connections);
+        let local_node_for_wss_listener = local_node.clone();
+        let tls_acceptor_for_wss_listener = tls_acceptor.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match wss_listener.accept().await {
+                    Ok((stream, peer_addr)) => {
+                        let connection_id =
+                            active_connections_for_wss_listener.fetch_add(1, Ordering::SeqCst) + 1;
+
+                        let app = Arc::clone(&app_for_wss_listener);
+                        let bootstrap_ready = Arc::clone(&bootstrap_ready_for_wss_listener);
+                        let catalog_dispatcher = Arc::clone(&catalog_dispatcher_for_wss_listener);
+                        let node_data_dir = node_data_dir_for_wss_listener.clone();
+                        let p2p_runtime = Arc::clone(&p2p_runtime_for_wss_listener);
+                        let service_registry = Arc::clone(&service_registry_for_wss_listener);
+                        let active_connections = Arc::clone(&active_connections_for_wss_listener);
+                        let local_node = local_node_for_wss_listener.clone();
+                        let tls_acceptor = tls_acceptor_for_wss_listener.clone();
+
+                        tokio::spawn(async move {
+                            let Some(tls_acceptor) = tls_acceptor else {
+                                log::warn!(
+                                    "wss connection rejected for {}: tls acceptor missing",
+                                    peer_addr
+                                );
+                                let remaining = active_connections.fetch_sub(1, Ordering::SeqCst) - 1;
+                                log::info!(
+                                    "wss peer disconnected from {} (active_connections={})",
+                                    peer_addr,
+                                    remaining
+                                );
+                                return;
+                            };
+
+                            if let Err(err) = handle_wss_connection(
+                                stream,
+                                tls_acceptor,
+                                app,
+                                bootstrap_ready,
+                                catalog_dispatcher,
+                                node_data_dir,
+                                p2p_runtime,
+                                service_registry,
+                                local_node,
+                                peer_addr.to_string(),
+                                connection_id,
+                            )
+                            .await
+                            {
+                                log::warn!(
+                                    "wss connection handling failed for {}: {}",
+                                    peer_addr,
+                                    err
+                                );
+                            }
+
+                            let remaining = active_connections.fetch_sub(1, Ordering::SeqCst) - 1;
+                            log::info!(
+                                "wss peer disconnected from {} (active_connections={})",
+                                peer_addr,
+                                remaining
+                            );
+                        });
+                    }
+                    Err(err) => {
+                        log::warn!("wss listener accept failed: {}", err);
+                    }
+                }
+            }
+        });
+    }
 
     let app_for_bootstrap = Arc::clone(&app);
     let bootstrap_result = tokio::task::spawn_blocking(move || {

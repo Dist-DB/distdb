@@ -97,4 +97,29 @@ ensure_pattern_present "serverlib::create_table_plan_from_statement" "server/src
 ensure_no_pattern_in_server_file "fn parse_local_while_block" "server/src/core/mappings/query/core/dispatch_ops.rs" "dispatch defines local WHILE parser"
 ensure_no_pattern_in_server_file "fn parse_local_repeat_block" "server/src/core/mappings/query/core/dispatch_ops.rs" "dispatch defines local REPEAT parser"
 
+# Keep transport/protocol communication ownership inside server/core/comms.
+ensure_absent_path "server/src/core/control/tcp_transport.rs"
+ensure_absent_path "server/src/core/control/outbound_transport.rs"
+ensure_absent_path "server/src/core/control/p2p_wire.rs"
+ensure_absent_path "server/src/core/control/wire_io.rs"
+ensure_absent_path "server/src/core/control/tls_support.rs"
+
+ensure_pattern_present "pub mod comms;" "server/src/core/mod.rs" "server core exports comms namespace"
+ensure_pattern_present "pub mod p2p;" "server/src/core/comms/mod.rs" "comms owns p2p provider module"
+ensure_pattern_present "pub mod wss;" "server/src/core/comms/mod.rs" "comms owns wss provider module"
+ensure_pattern_present "pub mod p2p_wire;" "server/src/core/comms/mod.rs" "comms owns p2p wire protocol module"
+ensure_pattern_present "pub mod outbound_transport;" "server/src/core/comms/mod.rs" "comms owns outbound transport module"
+ensure_pattern_present "pub mod tls_support;" "server/src/core/comms/mod.rs" "comms owns tls support module"
+ensure_pattern_present "pub mod wire_io;" "server/src/core/comms/mod.rs" "comms owns wire framing module"
+
+ensure_no_pattern_in_server_file "pub mod outbound_transport;" "server/src/core/control/mod.rs" "control exports outbound transport module"
+ensure_no_pattern_in_server_file "pub mod p2p_wire;" "server/src/core/control/mod.rs" "control exports p2p wire module"
+ensure_no_pattern_in_server_file "pub mod tls_support;" "server/src/core/control/mod.rs" "control exports tls support module"
+ensure_no_pattern_in_server_file "pub mod wire_io;" "server/src/core/control/mod.rs" "control exports wire framing module"
+
+ensure_no_pattern_in_server_src "core::control::outbound_transport::" "legacy control outbound transport imports"
+ensure_no_pattern_in_server_src "core::control::p2p_wire::" "legacy control p2p wire imports"
+ensure_no_pattern_in_server_src "core::control::tls_support::" "legacy control tls support imports"
+ensure_no_pattern_in_server_src "core::control::wire_io::" "legacy control wire io imports"
+
 pass "architecture boundary checks passed"

@@ -1,5 +1,5 @@
-use crate::core::control::outbound_transport::send_service_message_to_addr;
-use crate::core::control::p2p_wire::{
+use crate::core::comms::outbound_transport::send_service_message_to_addr;
+use crate::core::comms::p2p_wire::{
     bootstrap_nodes_from_server_list, multiaddr_to_socket_addr, node_descriptor_to_peer_node,
 };
 use peerlib::p2p::transport::Transport;
@@ -99,6 +99,7 @@ pub fn initialize_server_p2p_runtime(
         addrs: vec![format!("/ip4/{advertise_addr}/tcp/{port}")],
         is_local: true,
     };
+    
     runtime.network_mut().broadcast_announce(local_node)?;
 
     Ok(runtime)

@@ -1,1 +1,1 @@
-RUST_LOG="debug" RUST_BACKTRACE=1 cargo run datadir=./data
+RUST_LOG="debug" RUST_BACKTRACE=1 cargo run datadir=./data -- wss=on

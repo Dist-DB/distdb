@@ -2,10 +2,10 @@ use crate::core::app::ServerApp;
 use crate::core::control::affinity::{
     AffinityStartupConfig, merge_affinity_documents_from_responses, send_affinity_join_requests,
 };
-use crate::core::control::outbound_transport::send_service_request_to_addr;
-use crate::core::control::p2p_wire::{multiaddr_to_socket_addr, transaction_id_to_wire};
+use crate::core::comms::p2p::TcpServerTransport;
+use crate::core::comms::outbound_transport::send_service_request_to_addr;
+use crate::core::comms::p2p_wire::{multiaddr_to_socket_addr, transaction_id_to_wire};
 use crate::core::control::schema_catalog::apply_schema_definitions_to_local_database;
-use crate::core::control::tcp_transport::TcpServerTransport;
 use common::epoch_ms;
 use peerlib::{
     AffinityReplicationAction, PeerNode, ServiceMessage, ServerP2pRuntime,

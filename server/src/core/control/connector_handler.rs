@@ -1,10 +1,16 @@
 use crate::core::app::ServerApp;
-use crate::core::control::affinity::build_database_schema_summaries_from_app;
-use crate::core::control::p2p_wire::{
-    affinity_document_to_wire, decode_service_message, multiaddr_to_socket_addr,
+use crate::core::comms::outbound_transport::send_service_message_to_addr;
+use crate::core::comms::p2p::TcpServerTransport;
+use crate::core::comms::p2p_wire::{
+    affinity_document_to_wire, multiaddr_to_socket_addr,
     node_descriptor_to_peer_node, wire_transaction_id_to_transaction_id,
 };
-use crate::core::control::outbound_transport::send_service_message_to_addr;
+use crate::core::comms::surface::{
+    InboundChannelMessage, InboundChannelSurface, RustP2pInboundSurface,
+};
+use crate::core::comms::tls_support::BoxedConnectorStream;
+use crate::core::comms::wire_io::{write_response_frame, write_service_message_to_stream};
+use crate::core::control::affinity::build_database_schema_summaries_from_app;
 use crate::core::control::schema_catalog::{
     build_schema_definitions_for_database, resolve_schema_catalog, schema_catalog_signature,
 };
@@ -16,9 +22,6 @@ use crate::core::control::session::{
     extract_set_password_directive,
     ServerConnectionSession,
 };
-use crate::core::control::tcp_transport::TcpServerTransport;
-use crate::core::control::tls_support::BoxedConnectorStream;
-use crate::core::control::wire_io::{write_response_frame, write_service_message_to_stream};
 use connector::{
     ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, FieldDef, FieldIndex,
     FieldType, MutationResult, QueryResult, QueryTimings,
@@ -1666,6 +1669,7 @@ pub async fn handle_connector_stream(
     }
 
     let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
+    let inbound_surface = RustP2pInboundSurface;
 
     if let Err(err) = write_response_frame(
         &mut stream,
@@ -1769,7 +1773,15 @@ pub async fn handle_connector_stream(
 
         }
 
-        if let Some(message) = decode_service_message(&payload) {
+        let inbound_message = match inbound_surface.decode_inbound_payload(&payload) {
+            Ok(message) => message,
+            Err(_) => {
+                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+                return Err("invalid connector or p2p frame payload".into());
+            }
+        };
+
+        if let InboundChannelMessage::Service(message) = inbound_message {
             
             if let ServiceMessage::NodeAnnounce(node) = &message && !is_valid_server_node(node) {
                 log::debug!(
@@ -2353,12 +2365,8 @@ pub async fn handle_connector_stream(
 
         }
 
-        let request = match bincode::deserialize::<ConnectorRequest>(&payload) {
-            Ok(request) => request,
-            Err(_) => {
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Err("invalid connector or p2p frame payload".into());
-            }
+        let InboundChannelMessage::Connector(request) = inbound_message else {
+            continue;
         };
 
         log::debug!(

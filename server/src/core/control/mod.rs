@@ -1,10 +1,5 @@
 pub mod affinity;
 pub mod connector_handler;
-pub mod outbound_transport;
-pub mod p2p_wire;
 pub mod replication_sync;
 pub mod schema_catalog;
 pub mod session;
-pub mod tcp_transport;
-pub mod tls_support;
-pub mod wire_io;

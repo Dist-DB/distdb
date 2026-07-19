@@ -13,8 +13,8 @@ use serverlib::{
 use tokio::sync::Mutex;
 
 use crate::core::app::ServerApp;
-use crate::core::control::outbound_transport::send_service_request_to_addr;
-use crate::core::control::p2p_wire::{
+use crate::core::comms::outbound_transport::send_service_request_to_addr;
+use crate::core::comms::p2p_wire::{
     multiaddr_to_socket_addr, normalize_bootstrap_addr, wire_affinity_document_to_domain,
 };
 

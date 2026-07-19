@@ -42,6 +42,18 @@ Logic in this layer should be deterministic and testable with isolated inputs.
 
 `server` should consume functional APIs from `serverlib` rather than re-implementing dialect or execution semantics locally.
 
+### `server/core/comms` owns transport and wire protocols
+
+Within `server`, all communication provider and protocol concerns are isolated under `core/comms`, including:
+
+- provider implementations (for example `rust/p2p` and `rust/wss`),
+- transport negotiation and TLS handshake support,
+- framed request/response wire helpers,
+- protocol encode/decode utilities and service message wiring,
+- outbound transport helpers and provider surface contracts.
+
+`server/core/control` and query orchestration modules should consume these communication APIs, not own transport or wire protocol modules directly.
+
 ## Placement Rule
 
 Use this rule when deciding where a change belongs:
@@ -71,6 +83,7 @@ Current checks verify that:
 - server query dispatch routes through `serverlib` APIs,
 - direct `sqlparser` usage does not appear in `server/src`,
 - key parser and planner entry points in `server` continue to call `serverlib`.
+- communication transport/protocol modules remain under `server/src/core/comms` rather than `server/src/core/control`.
 
 ## What To Update When The Boundary Changes
 

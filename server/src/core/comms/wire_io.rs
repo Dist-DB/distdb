@@ -2,7 +2,7 @@ use connector::ConnectorResponse;
 use peerlib::ServiceMessage;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use crate::core::control::p2p_wire::encode_service_message;
+use crate::core::comms::p2p_wire::encode_service_message;
 
 pub async fn write_response_frame(
     stream: &mut (impl AsyncWrite + Unpin + ?Sized),

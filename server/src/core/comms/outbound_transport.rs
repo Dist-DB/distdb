@@ -5,7 +5,7 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use peerlib::ServiceMessage;
 
-use crate::core::control::p2p_wire::{decode_service_message, encode_service_message};
+use crate::core::comms::p2p_wire::{decode_service_message, encode_service_message};
 
 #[derive(Clone)]
 struct OutboundTlsState {
