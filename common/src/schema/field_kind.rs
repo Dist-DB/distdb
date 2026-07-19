@@ -7,6 +7,7 @@ pub enum FieldKind {
     Date,
     DateTime,
     Timestamp,
+    // Database UUID datatype stored as fixed-width 16-byte binary.
     Uuid,
     StringFixed(usize),
     Text,

@@ -211,6 +211,26 @@ fn execute_projection_only_select_plan_returns_inbuilt_row() {
 }
 
 #[test]
+fn execute_projection_only_select_plan_returns_newuuid_value() {
+    let read_plan = parse_select_read_plan_from_statement("select newuuid()")
+        .expect("projection-only plan should parse");
+
+    let result =
+        execute_projection_only_select_plan(&read_plan, &mut evaluate_inbuilt_for_test)
+            .expect("projection-only select should succeed");
+
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].len(), 1);
+
+    let value = String::from_utf8(result.rows[0][0].clone())
+        .expect("newuuid output should be utf8");
+    let parsed = common::Uuid::parse_str(&value)
+        .expect("newuuid output should be a valid UUID");
+    assert_eq!(parsed.to_string(), value);
+}
+
+#[test]
 fn execute_projection_only_select_plan_accepts_order_by_ordinal() {
     let read_plan = parse_select_read_plan_from_statement("select concat('sa', 'm') as value order by 1 desc")
         .expect("projection-only order by plan should parse");

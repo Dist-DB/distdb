@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use uuid::Uuid;
+use common::Uuid;
 
 use crate::engine::database::core::DatabaseError;
 use crate::engine::database::row_payload::{decode_row_payload, encode_row_payload};
@@ -142,7 +142,7 @@ pub fn convert_value_to_field_type(
         FieldType::Blob | FieldType::Spatial => Ok(value.to_vec()),
 
         FieldType::Uuid => {
-            if let Some(uuid_bytes) = decode_uuid_binary_for_conversion(value) {
+            if let Some(uuid_bytes) = decode_db_uuid_binary_for_conversion(value) {
                 return Ok(tagged_bytes(STORED_UUID_TAG, &uuid_bytes));
             }
 
@@ -165,7 +165,7 @@ pub fn convert_value_to_field_type(
 
 pub fn render_stored_field_value(value: &[u8]) -> Vec<u8> {
 
-    if let Some(uuid_bytes) = decode_tagged_uuid_binary(value) {
+    if let Some(uuid_bytes) = decode_tagged_db_uuid_binary(value) {
         return Uuid::from_bytes(uuid_bytes).to_string().into_bytes();
     }
     
@@ -190,8 +190,8 @@ pub fn display_stored_field_value(value: &[u8]) -> String {
 pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
 
     if let (Some(left_uuid), Some(right_uuid)) = (
-        decode_uuid_binary_for_compare(left),
-        decode_uuid_binary_for_compare(right),
+        decode_db_uuid_binary_for_compare(left),
+        decode_db_uuid_binary_for_compare(right),
     ) {
         return left_uuid.cmp(&right_uuid);
     }
@@ -217,7 +217,7 @@ pub fn compare_stored_field_values(left: &[u8], right: &[u8]) -> std::cmp::Order
 
 }
 
-fn decode_tagged_uuid_binary(value: &[u8]) -> Option<[u8; 16]> {
+fn decode_tagged_db_uuid_binary(value: &[u8]) -> Option<[u8; 16]> {
 
     match value {
         [STORED_UUID_TAG, bytes @ ..] if bytes.len() == 16 => bytes.try_into().ok(),
@@ -226,9 +226,9 @@ fn decode_tagged_uuid_binary(value: &[u8]) -> Option<[u8; 16]> {
 
 }
 
-fn decode_uuid_binary_for_conversion(value: &[u8]) -> Option<[u8; 16]> {
+fn decode_db_uuid_binary_for_conversion(value: &[u8]) -> Option<[u8; 16]> {
 
-    if let Some(existing) = decode_tagged_uuid_binary(value) {
+    if let Some(existing) = decode_tagged_db_uuid_binary(value) {
         return Some(existing);
     }
 
@@ -240,9 +240,9 @@ fn decode_uuid_binary_for_conversion(value: &[u8]) -> Option<[u8; 16]> {
 
 }
 
-fn decode_uuid_binary_for_compare(value: &[u8]) -> Option<[u8; 16]> {
+fn decode_db_uuid_binary_for_compare(value: &[u8]) -> Option<[u8; 16]> {
 
-    if let Some(existing) = decode_tagged_uuid_binary(value) {
+    if let Some(existing) = decode_tagged_db_uuid_binary(value) {
         return Some(existing);
     }
 

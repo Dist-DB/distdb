@@ -37,7 +37,7 @@ use serverlib::{
     AffinityProcessor,
     ConcurrentWalManager, DatabaseCatalog, DatabaseEntity,
     DatabaseEntityAspect, DatabaseId,
-    SqlOperation, encode_wal_frame, import_p2p_ca_pem_if_missing, parse_mysql8_sql_requests,
+    SqlOperation, SqlRequest, encode_wal_frame, import_p2p_ca_pem_if_missing, parse_mysql8_sql_requests,
     sign_tls_enrollment_csr,
 };
 use common::helpers::p2p::{
@@ -50,6 +50,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
@@ -335,6 +336,8 @@ struct CatalogWorkerHandle {
 
 struct CatalogDispatchMessage {
     request: ConnectorRequest,
+    parsed_query_requests: Option<Vec<SqlRequest>>,
+    parsed_query_ms: Option<u64>,
     session_id: String,
     user_id: String,
     connection_id: usize,
@@ -349,6 +352,30 @@ enum CatalogAccessMode {
 }
 
 fn classify_catalog_access_mode(request: &ConnectorRequest) -> CatalogAccessMode {
+
+    classify_catalog_access_mode_with_parsed_requests(request, None)
+
+}
+
+fn classify_catalog_access_mode_with_parsed_requests(
+    request: &ConnectorRequest,
+    parsed_requests: Option<&[SqlRequest]>,
+) -> CatalogAccessMode {
+
+    fn classify_from_sql_requests(requests: &[SqlRequest]) -> CatalogAccessMode {
+        if requests.is_empty() {
+            return CatalogAccessMode::Write;
+        }
+
+        for statement in requests {
+            match statement.operation {
+                SqlOperation::Select | SqlOperation::UnionQuery => {}
+                _ => return CatalogAccessMode::Write,
+            }
+        }
+
+        CatalogAccessMode::Read
+    }
 
     match &request.command {
 
@@ -388,36 +415,16 @@ fn classify_catalog_access_mode(request: &ConnectorRequest) -> CatalogAccessMode
                 return CatalogAccessMode::Write;
             }
 
+            if let Some(statements) = parsed_requests {
+                return classify_from_sql_requests(statements);
+            }
+
             let parsed = parse_mysql8_sql_requests(&query.sql, &query.database_id);
             let Ok(statements) = parsed else {
                 return CatalogAccessMode::Write;
             };
 
-            if statements.is_empty() {
-                return CatalogAccessMode::Write;
-            }
-
-            let mut requires_write = false;
-            for statement in statements {
-
-                match statement.operation {
-
-                    SqlOperation::Select | SqlOperation::UnionQuery => {}
-
-                    _ => {
-                        requires_write = true;
-                        break;
-                    }
-
-                }
-                
-            }
-
-            if requires_write {
-                CatalogAccessMode::Write
-            } else {
-                CatalogAccessMode::Read
-            }
+            classify_from_sql_requests(&statements)
 
         }
 
@@ -473,6 +480,8 @@ impl CatalogDispatcher {
                         execute_app_request_for_session(
                             &app,
                             &message.request,
+                            message.parsed_query_requests.clone(),
+                            message.parsed_query_ms,
                             &message.session_id,
                             &message.user_id,
                             message.connection_id,
@@ -486,6 +495,8 @@ impl CatalogDispatcher {
                         execute_app_request_for_session(
                             &app,
                             &message.request,
+                            message.parsed_query_requests.clone(),
+                            message.parsed_query_ms,
                             &message.session_id,
                             &message.user_id,
                             message.connection_id,
@@ -520,18 +531,20 @@ impl CatalogDispatcher {
 
     }
 
-    pub async fn dispatch(
+    async fn dispatch_with_access_mode(
         &self,
         catalog_id: &str,
         request: ConnectorRequest,
+        parsed_query_requests: Option<Vec<SqlRequest>>,
+        parsed_query_ms: Option<u64>,
         session_id: String,
         user_id: String,
         connection_id: usize,
+        access_mode: CatalogAccessMode,
     ) -> Result<ConnectorResponse, String> {
 
         let worker = self.worker_for_catalog(catalog_id).await;
         let (response_tx, response_rx) = oneshot::channel::<ConnectorResponse>();
-        let access_mode = classify_catalog_access_mode(&request);
 
         {
             let mut routes = self.session_routes.lock().await;
@@ -544,6 +557,8 @@ impl CatalogDispatcher {
             .sender
             .send(CatalogDispatchMessage {
                 request,
+                parsed_query_requests,
+                parsed_query_ms,
                 session_id,
                 user_id,
                 connection_id,
@@ -592,6 +607,15 @@ impl CatalogDispatcher {
 
 fn request_catalog_route_key(request: &ConnectorRequest) -> Option<String> {
 
+    request_catalog_route_key_with_parsed_requests(request, None)
+
+}
+
+fn request_catalog_route_key_with_parsed_requests(
+    request: &ConnectorRequest,
+    parsed_requests: Option<&[SqlRequest]>,
+) -> Option<String> {
+
     match &request.command {
 
         ConnectorCommand::Schema { database_id, .. }
@@ -610,7 +634,7 @@ fn request_catalog_route_key(request: &ConnectorRequest) -> Option<String> {
                 return Some(database_id);
             }
 
-            infer_catalog_id_from_query_sql(&query.sql)
+            infer_catalog_id_from_query_sql_with_parsed_requests(&query.sql, parsed_requests)
         },
 
         ConnectorCommand::CreateDatabase { .. } => None,
@@ -621,7 +645,16 @@ fn request_catalog_route_key(request: &ConnectorRequest) -> Option<String> {
 
 fn infer_catalog_id_from_query_sql(sql: &str) -> Option<String> {
 
-    let explicit_catalogs = explicit_catalog_ids_from_query_sql(sql);
+    infer_catalog_id_from_query_sql_with_parsed_requests(sql, None)
+
+}
+
+fn infer_catalog_id_from_query_sql_with_parsed_requests(
+    sql: &str,
+    parsed_requests: Option<&[SqlRequest]>,
+) -> Option<String> {
+
+    let explicit_catalogs = explicit_catalog_ids_from_query_sql_with_parsed_requests(sql, parsed_requests);
 
     if explicit_catalogs.len() == 1 {
         return explicit_catalogs.into_iter().next();
@@ -633,8 +666,22 @@ fn infer_catalog_id_from_query_sql(sql: &str) -> Option<String> {
 
 fn explicit_catalog_ids_from_query_sql(sql: &str) -> HashSet<String> {
 
-    let Ok(requests) = parse_mysql8_sql_requests(sql, "") else {
-        return relation_catalog_hints_from_sql(sql);
+    explicit_catalog_ids_from_query_sql_with_parsed_requests(sql, None)
+
+}
+
+fn explicit_catalog_ids_from_query_sql_with_parsed_requests(
+    sql: &str,
+    parsed_requests: Option<&[SqlRequest]>,
+) -> HashSet<String> {
+
+    let requests = if let Some(requests) = parsed_requests {
+        requests.to_vec()
+    } else {
+        let Ok(requests) = parse_mysql8_sql_requests(sql, "") else {
+            return relation_catalog_hints_from_sql(sql);
+        };
+        requests
     };
 
     let mut explicit_catalogs = HashSet::<String>::new();
@@ -665,6 +712,33 @@ async fn maybe_dispatch_multi_catalog_query(
     catalog_dispatcher: &Arc<CatalogDispatcher>,
 ) -> Option<ConnectorResponse> {
 
+    let access_mode = classify_catalog_access_mode(request);
+
+    maybe_dispatch_multi_catalog_query_with_access_mode(
+        request,
+        session_id,
+        user_id,
+        connection_id,
+        access_mode,
+        None,
+        None,
+        catalog_dispatcher,
+    )
+    .await
+
+}
+
+async fn maybe_dispatch_multi_catalog_query_with_access_mode(
+    request: &ConnectorRequest,
+    session_id: &str,
+    user_id: &str,
+    connection_id: usize,
+    access_mode: CatalogAccessMode,
+    parsed_requests: Option<&[SqlRequest]>,
+    parsed_query_ms: Option<u64>,
+    catalog_dispatcher: &Arc<CatalogDispatcher>,
+) -> Option<ConnectorResponse> {
+
     let ConnectorCommand::Query { query } = &request.command else {
         return None;
     };
@@ -673,7 +747,7 @@ async fn maybe_dispatch_multi_catalog_query(
         return None;
     }
 
-    let mut catalog_ids = explicit_catalog_ids_from_query_sql(&query.sql)
+    let mut catalog_ids = explicit_catalog_ids_from_query_sql_with_parsed_requests(&query.sql, parsed_requests)
         .into_iter()
         .collect::<Vec<_>>();
 
@@ -684,7 +758,7 @@ async fn maybe_dispatch_multi_catalog_query(
         return None;
     }
 
-    if !matches!(classify_catalog_access_mode(request), CatalogAccessMode::Read) {
+    if !matches!(access_mode, CatalogAccessMode::Read) {
         return Some(ConnectorResponse::rejected(
             request.request_id.clone(),
             "multi-catalog coordination currently supports read-only queries only",
@@ -705,12 +779,15 @@ async fn maybe_dispatch_multi_catalog_query(
         }
 
         let response = match catalog_dispatcher
-            .dispatch(
+            .dispatch_with_access_mode(
                 &catalog_id,
                 routed,
+                parsed_requests.map(|requests| requests.to_vec()),
+                parsed_query_ms,
                 session_id.to_string(),
                 user_id.to_string(),
                 connection_id,
+                access_mode,
             )
             .await
         {
@@ -876,6 +953,8 @@ fn catalog_id_from_relation_token(token: &str) -> Option<String> {
 async fn execute_app_request_for_session(
     app: &Arc<RwLock<ServerApp>>,
     request: &ConnectorRequest,
+    parsed_query_requests: Option<Vec<SqlRequest>>,
+    parsed_query_ms: Option<u64>,
     session_id: &str,
     user_id: &str,
     connection_id: usize,
@@ -886,10 +965,25 @@ async fn execute_app_request_for_session(
         let app_read = app.read().await;
         let session_exists = app_read.get_session(session_id).is_some();
 
-        if session_exists
-            && let Some(response) = app_read.handle_read_only_connector_request_for_session(request, session_id)
-        {
-            return response;
+        if session_exists {
+            if let Some(parsed_requests) = parsed_query_requests.as_ref()
+                && let Some(response) = app_read.handle_read_only_connector_request_for_session_with_parsed(
+                    request,
+                    session_id,
+                    parsed_requests.clone(),
+                    parsed_query_ms.unwrap_or(0),
+                )
+            {
+                return response;
+            }
+
+            // Parsed payload already exists for this request; avoid reparsing via legacy
+            // read-only path and continue through the parsed-aware mutable execution path.
+            if parsed_query_requests.is_none()
+                && let Some(response) = app_read.handle_read_only_connector_request_for_session(request, session_id)
+            {
+                return response;
+            }
         }
     }
 
@@ -903,7 +997,16 @@ async fn execute_app_request_for_session(
         );
     }
 
-    app.handle_connector_request_for_session(request, session_id)
+    if let Some(parsed_requests) = parsed_query_requests {
+        app.handle_connector_request_for_session_with_parsed_query(
+            request,
+            session_id,
+            parsed_requests,
+            parsed_query_ms.unwrap_or(0),
+        )
+    } else {
+        app.handle_connector_request_for_session(request, session_id)
+    }
 
 }
 
@@ -2554,11 +2657,36 @@ pub async fn handle_connector_stream(
 
         session.record_request(&request);
 
-        let response = if let Some(response) = maybe_dispatch_multi_catalog_query(
+        let parsed_requests_for_routing = match &request.command {
+            ConnectorCommand::Query { query } => {
+                let parse_start = Instant::now();
+                parse_mysql8_sql_requests(&query.sql, &query.database_id)
+                    .ok()
+                    .map(|parsed| (parsed, parse_start.elapsed().as_millis() as u64))
+            }
+            _ => None,
+        };
+
+        let parsed_requests_ref = parsed_requests_for_routing
+            .as_ref()
+            .map(|(requests, _)| requests.as_slice());
+        let parsed_query_ms = parsed_requests_for_routing
+            .as_ref()
+            .map(|(_, parse_ms)| *parse_ms);
+
+        let access_mode = classify_catalog_access_mode_with_parsed_requests(
+            &request,
+            parsed_requests_ref,
+        );
+
+        let response = if let Some(response) = maybe_dispatch_multi_catalog_query_with_access_mode(
             &request,
             &session.session_id,
             session.user_id(),
             connection_id,
+            access_mode,
+            parsed_requests_ref,
+            parsed_query_ms,
             &catalog_dispatcher,
         )
         .await
@@ -2566,15 +2694,21 @@ pub async fn handle_connector_stream(
             
             response
 
-        } else if let Some(catalog_id) = request_catalog_route_key(&request) {
+        } else if let Some(catalog_id) = request_catalog_route_key_with_parsed_requests(
+            &request,
+            parsed_requests_ref,
+        ) {
             
             match catalog_dispatcher
-                .dispatch(
+                .dispatch_with_access_mode(
                     &catalog_id,
                     request.clone(),
+                    parsed_requests_ref.map(|requests| requests.to_vec()),
+                    parsed_query_ms,
                     session.session_id.clone(),
                     session.user_id().to_string(),
                     connection_id,
+                    access_mode,
                 )
                 .await
             {
@@ -2590,10 +2724,12 @@ pub async fn handle_connector_stream(
             execute_app_request_for_session(
                 &app,
                 &request,
+                parsed_requests_ref.map(|requests| requests.to_vec()),
+                parsed_query_ms,
                 &session.session_id,
                 session.user_id(),
                 connection_id,
-                classify_catalog_access_mode(&request),
+                access_mode,
             )
             .await
 

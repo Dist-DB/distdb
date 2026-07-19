@@ -179,17 +179,32 @@ pub(super) fn execute_select_impl(
         return response;
     }
 
-    let read_plan = match serverlib::parse_select_read_plan_from_statement(&statement.sql) {
-
-        Ok(plan) => plan,
-        
-        Err(err) => {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("select parse failed: {err}"),
-            );
+    let read_plan = if let Some(parsed_statement) = statement.parsed_statement.as_ref() {
+        match serverlib::parse_select_read_plan_from_parsed_statement(parsed_statement) {
+            Ok(plan) => plan,
+            Err(_) => match serverlib::parse_select_read_plan_from_statement(&statement.sql) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("select parse failed: {err}"),
+                    );
+                }
+            },
         }
+    } else {
+        match serverlib::parse_select_read_plan_from_statement(&statement.sql) {
 
+            Ok(plan) => plan,
+            
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("select parse failed: {err}"),
+                );
+            }
+
+        }
     };
 
     let resolved_object_name = statement

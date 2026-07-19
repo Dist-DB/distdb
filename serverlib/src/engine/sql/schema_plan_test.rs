@@ -118,7 +118,7 @@ fn create_table_schema_maps_temporal_types_and_preserves_original_sql_type() {
 #[test]
 fn create_table_schema_maps_uuid_type_and_preserves_original_sql_type() {
     let (_, schema) =
-        create_table_schema_from_statement("create table users (id uuid not null primary key)")
+        create_table_schema_from_statement("create table users (id UUID not null primary key)")
             .expect("uuid type should parse");
 
     assert_eq!(schema.fields.len(), 1);

@@ -62,6 +62,20 @@ pub fn parse_select_read_plan_from_statement(
 
 }
 
+pub fn parse_select_read_plan_from_parsed_statement(
+    statement: &Statement,
+) -> Result<SelectReadPlan, SqlParseError> {
+
+    let Statement::Query(query) = statement else {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not SELECT".to_string(),
+        ));
+    };
+
+    parse_select_read_plan_from_query(query, false)
+
+}
+
 pub fn parse_create_view_dependencies_from_statement(
     statement: &Statement,
 ) -> Result<Vec<String>, SqlParseError> {

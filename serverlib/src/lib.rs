@@ -194,6 +194,7 @@ pub use engine::sql::{
 	parse_insert_rows_from_statement,
 	parse_update_rows_from_statement,
 	parse_delete_rows_from_statement,
+	parse_select_read_plan_from_parsed_statement,
 	parse_select_read_plan_from_statement,
 	parse_union_select_read_plans_from_statement,
 	parse_if_else_end_plan_from_create_procedure_statement,

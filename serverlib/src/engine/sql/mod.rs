@@ -36,6 +36,7 @@ pub use schema_plan::{
 
 pub use select_plan::{
     parse_select_projection_from_statement, parse_select_read_plan_from_statement,
+    parse_select_read_plan_from_parsed_statement,
     parse_union_select_read_plans_from_statement,
     parse_select_condition_from_expr, parse_relation_bindings_from_table_with_joins,
     parse_joins_from_table_with_joins, derive_relation_pushdown_conditions,

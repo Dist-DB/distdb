@@ -1,53 +1,63 @@
 {
   "folders": [
-    { "name": "artifacts",
-      "path": "./artifacts"
+    { "name": "distdb-web",
+      "path": "./../distdb-web"
     },
-    { "name": "papers",
-      "path": "./../papers"
+    {
+      "name": "connectors",
+      "path": "./../connectors"
+    },
+    {
+      "name": "artifacts",
+      "path": "artifacts"
+    },
+    {
+      "name": "papers",
+      "path": "../papers"
     },
     {
       "name": ".github",
-      "path": "./.github"
+      "path": ".github"
     },
     {
       "name": "scripts",
-      "path": "./scripts"
+      "path": "scripts"
     },
     {
       "name": "docs",
-      "path": "./docs"
+      "path": "docs"
     },
     {
       "name": "common",
-      "path": "./common"
+      "path": "common"
     },
     {
       "name": "peerlib",
-      "path": "./peerlib"
+      "path": "peerlib"
     },
     {
       "name": "serverlib",
-      "path": "./serverlib"
+      "path": "serverlib"
     },
     {
       "name": "server",
-      "path": "./server"
+      "path": "server"
     },
     {
       "name": "connector",
-      "path": "./connector"
+      "path": "connector"
     },
     {
       "name": "clientlib",
-      "path": "./clientlib"
+      "path": "clientlib"
     },
     {
       "name": "client",
-      "path": "./client"
+      "path": "client"
     },
-    { "name": "console",
-      "path": "./console"
+    {
+      "name": "console",
+      "path": "console"
     }
   ],
   "settings": {
@@ -75,7 +85,9 @@
         "approve": true,
         "matchCommandLine": true
       },
-      "cp": true
+      "cp": true,
+      "mvn -q test": true,
+      "dotnet test": true
     }
   }
 }

@@ -180,6 +180,7 @@ const REGISTERED_INBUILT_FUNCTION_NAMES: &[&str] = &[
     "user",
     "version",
     "lookup",
+    "newuuid",
 ];
 
 pub fn with_inbuilt_sql_runtime_context<T>(
@@ -574,6 +575,7 @@ fn resolve_command(function_name: &str) -> Option<&'static dyn InbuiltServerComm
         // custom non-MySQL functions
 
         "lookup"                                => Some(&custom::lookup::LookupCommand),
+        "newuuid"                               => Some(&custom::newuuid::NewUuidCommand),
 
         _ => None,
 

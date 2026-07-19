@@ -16,4 +16,3 @@ regex = "1.13.1"
 ahash = "0.8"
 flate2 = "1"
 openssl = "*"
-uuid = { version = "1.24.0", features = ["v4", "v7", "fast-rng"] }

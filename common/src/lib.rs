@@ -38,5 +38,6 @@ pub mod schema;
 pub use schema::{
 	PeerServiceType, PeerSession, SessionLog, SessionLogEntry, SessionLogEventType, TlsMode,
 };
+pub use uuid::Uuid;
 
 pub const DEFAULT_SERVER_PORT: u16 = 4001;

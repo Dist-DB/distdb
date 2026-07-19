@@ -902,6 +902,43 @@ impl ServerApp {
         }
 
         let (parsed_requests, parse_ms) = Self::parse_query_requests_with_timing(query).ok()?;
+
+        self.handle_read_only_connector_request_for_session_with_parsed(
+            request,
+            session_id,
+            parsed_requests,
+            parse_ms,
+        )
+
+    }
+
+    pub fn handle_read_only_connector_request_for_session_with_parsed(
+        &self,
+        request: &ConnectorRequest,
+        session_id: &str,
+        parsed_requests: Vec<SqlRequest>,
+        parse_ms: u64,
+    ) -> Option<ConnectorResponse> {
+
+        if self.get_session(session_id).is_none() {
+            return Some(ConnectorResponse::rejected(
+                request.request_id.clone(),
+                format!("invalid session '{}'", session_id),
+            ));
+        }
+
+        let ConnectorCommand::Query { query } = &request.command else {
+            return None;
+        };
+
+        if self
+            .transaction_coordinator
+            .is_active(session_id)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+
         if parsed_requests.is_empty() {
             return None;
         }
@@ -948,6 +985,155 @@ impl ServerApp {
         );
 
         Some(response)
+
+    }
+
+    fn handle_query_command_for_session_with_preparsed(
+        &mut self,
+        request_id: &str,
+        session_id: &str,
+        query: &connector::DataQuery,
+        parsed_requests: Vec<SqlRequest>,
+        parse_ms: u64,
+    ) -> ConnectorResponse {
+
+        if let Err(message) = self.authorize_sql_requests_for_session(
+            session_id,
+            query.database_id.as_str(),
+            &parsed_requests,
+        ) {
+            return ConnectorResponse::rejected(request_id.to_string(), message);
+        }
+
+        if let Some(response) = self.apply_acl_mutation_requests(
+            request_id,
+            session_id,
+            query.database_id.as_str(),
+            &parsed_requests,
+        ) {
+            return response;
+        }
+
+        if let Some(response) = self.apply_create_user_requests(
+            request_id,
+            session_id,
+            query.database_id.as_str(),
+            &parsed_requests,
+        ) {
+            return response;
+        }
+
+        let transaction_active = self
+            .transaction_coordinator
+            .is_active(session_id)
+            .unwrap_or(false);
+
+        let transactional_read = is_transactional_read_requests(&parsed_requests);
+
+        let staged_dml = is_staged_dml_requests(&parsed_requests);
+
+        if transaction_active && transactional_read {
+            return self.execute_transactional_read(request_id, session_id, query);
+        }
+
+        match self.transaction_coordinator.route_query(
+            session_id,
+            query.clone(),
+            staged_dml,
+        ) {
+
+            Ok(QueryRoutingDecision::ExecuteImmediately) => {
+
+                let Some(session_ctx) = self.query_session_context(session_id) else {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("invalid session '{}'", session_id),
+                    );
+                };
+
+                let mut session_variable_overrides =
+                    self.take_session_variable_overrides(session_id);
+
+                let response = Self::execute_parsed_query_with_session_context(
+                    request_id,
+                    query.database_id.as_str(),
+                    parsed_requests,
+                    parse_ms,
+                    &mut self.catalogs,
+                    &self.wal,
+                    &self.node_data_dir,
+                    &mut self.runtime_indexes,
+                    &session_ctx,
+                    &mut session_variable_overrides,
+                );
+
+                self.put_session_variable_overrides(session_id, session_variable_overrides);
+
+                // Update session last_insert_id if INSERT just happened
+                use crate::core::mappings::query::get_and_clear_last_insert_id;
+                if let Some(last_insert_id) = get_and_clear_last_insert_id() {
+                    self.set_last_insert_id(session_id, last_insert_id);
+                }
+
+                response
+
+            },
+
+            Ok(QueryRoutingDecision::Staged) => ConnectorResponse::applied(
+                request_id.to_string(),
+                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
+            ),
+
+            Ok(QueryRoutingDecision::Rejected(message)) => {
+                ConnectorResponse::rejected(request_id.to_string(), message)
+            },
+
+            Err(err) => ConnectorResponse::rejected(request_id.to_string(), err),
+
+        }
+
+    }
+
+    pub fn handle_connector_request_for_session_with_parsed_query(
+        &mut self,
+        request: &ConnectorRequest,
+        session_id: &str,
+        parsed_requests: Vec<SqlRequest>,
+        parse_ms: u64,
+    ) -> ConnectorResponse {
+
+        if self.get_session(session_id).is_none() {
+            #[cfg(test)]
+            {
+                self.init_session(session_id.to_string(), 0, "root".to_string());
+            }
+
+            #[cfg(not(test))]
+            {
+                return ConnectorResponse::rejected(
+                    request.request_id.clone(),
+                    format!("invalid session '{}'", session_id),
+                );
+            }
+        }
+
+        let ConnectorCommand::Query { query } = &request.command else {
+            return self.handle_connector_request_for_session(request, session_id);
+        };
+
+        if let Some(response) =
+            self.handle_transaction_control_query(&request.request_id, session_id, query)
+        {
+            return response;
+        }
+
+        self.handle_query_command_for_session_with_preparsed(
+            &request.request_id,
+            session_id,
+            query,
+            parsed_requests,
+            parse_ms,
+        )
 
     }
 
@@ -1174,7 +1360,7 @@ impl ServerApp {
                 {
                     response
                 } else {
-                    
+
                     let (parsed_requests, parse_ms) = match Self::parse_query_requests_with_timing(query) {
                             Ok(result) => result,
                             Err(err) => {
@@ -1185,108 +1371,15 @@ impl ServerApp {
                             }
                         };
 
-                    if let Err(message) = self.authorize_sql_requests_for_session(
-                        session_id,
-                        query.database_id.as_str(),
-                        &parsed_requests,
-                    ) {
-                        return ConnectorResponse::rejected(request.request_id.clone(), message);
-                    }
-
-                    if let Some(response) = self.apply_acl_mutation_requests(
+                    self.handle_query_command_for_session_with_preparsed(
                         &request.request_id,
                         session_id,
-                        query.database_id.as_str(),
-                        &parsed_requests,
-                    ) {
-                        return response;
-                    }
-
-                    if let Some(response) = self.apply_create_user_requests(
-                        &request.request_id,
-                        session_id,
-                        query.database_id.as_str(),
-                        &parsed_requests,
-                    ) {
-                        return response;
-                    }
-
-                    let transaction_active = self
-                        .transaction_coordinator
-                        .is_active(session_id)
-                        .unwrap_or(false);
-
-                    let transactional_read = is_transactional_read_requests(&parsed_requests);
-
-                    let staged_dml = is_staged_dml_requests(&parsed_requests);
-
-                    if transaction_active && transactional_read {
-                        
-                        self.execute_transactional_read(&request.request_id, session_id, query)
-
-                    } else {
-
-                        match self.transaction_coordinator.route_query(
-                            session_id,
-                            query.clone(),
-                            staged_dml,
-                        ) {
-                            
-                            Ok(QueryRoutingDecision::ExecuteImmediately) => {
-
-                                let Some(session_ctx) = self.query_session_context(session_id) else {
-                                    return ConnectorResponse::rejected(
-                                        request.request_id.clone(),
-                                        format!("invalid session '{}'", session_id),
-                                    );
-                                };
-
-                                let mut session_variable_overrides =
-                                    self.take_session_variable_overrides(session_id);
-
-                                let response = Self::execute_parsed_query_with_session_context(
-                                    &request.request_id,
-                                    query.database_id.as_str(),
-                                    parsed_requests,
-                                    parse_ms,
-                                    &mut self.catalogs,
-                                    &self.wal,
-                                    &self.node_data_dir,
-                                    &mut self.runtime_indexes,
-                                    &session_ctx,
-                                    &mut session_variable_overrides,
-                                );
-
-                                self.put_session_variable_overrides(session_id, session_variable_overrides);
-
-                                // Update session last_insert_id if INSERT just happened
-                                use crate::core::mappings::query::get_and_clear_last_insert_id;
-                                if let Some(last_insert_id) = get_and_clear_last_insert_id() {
-                                    self.set_last_insert_id(session_id, last_insert_id);
-                                }
-
-                                response
-                                
-                            },
-                            
-                            Ok(QueryRoutingDecision::Staged) => ConnectorResponse::applied(
-                                request.request_id.clone(),
-                                ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
-                            ),
-                            
-                            Ok(QueryRoutingDecision::Rejected(message)) => {
-                                ConnectorResponse::rejected(request.request_id.clone(), message)
-                            },
-                            
-                            Err(err) => ConnectorResponse::rejected(request.request_id.clone(), err),
-                            
-                        }
-
-
-                    }
-
+                        query,
+                        parsed_requests,
+                        parse_ms,
+                    )
                 }
-            
+
             },
 
             CommandKind::Schema => {
