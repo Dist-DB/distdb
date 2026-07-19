@@ -1,6 +1,6 @@
-# Node Failure and Recovery Matrix (Alpha)
+# Node Failure and Recovery Matrix (Beta-Ready Scope)
 
-This document tracks expected behavior for node and network failure scenarios in DistDB Developer Alpha.
+This document tracks expected behavior for node and network failure scenarios in DistDB Beta Ready scope.
 
 ## Purpose
 
@@ -38,11 +38,11 @@ The matrix provides a single operational reference for:
 3. Recovery timing and convergence metrics publication.
 4. Cross-version rolling upgrade matrix expansion with explicit backward/forward compatibility window assertions.
 
-## Operator Guidance (Alpha)
+## Operator Guidance (Beta-Ready Scope)
 
 - Treat this matrix as the source of truth for what has and has not been proven.
 - Do not infer production-grade guarantees from untested scenarios.
-- Prefer documented supported paths and validated topologies for alpha deployments.
+- Prefer documented supported paths and validated topologies for beta-scoped deployments.
 
 ## Ownership and Update Cadence
 

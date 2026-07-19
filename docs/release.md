@@ -1,6 +1,6 @@
 # DistDB Release State
 
-This page tracks current release posture, what is in scope for alpha, and what operators and integrators should expect.
+This page tracks current release posture, what is in scope for Beta Ready, and what operators and integrators should expect.
 
 ## Current Recommendation
 
@@ -25,8 +25,8 @@ Beta Ready scope is:
 - `SHOW INDEX` / `SHOW INDEXES` / `SHOW KEYS` table-scoped introspection is available.
 - Table/index invalidation paths now reconcile associated runtime index state.
 - Latest local validation baseline is green in this repository state:
-	- `serverlib`: 517 passed
-	- `server`: 176 passed
+	- `serverlib`: 646 passed
+	- `server`: 330 passed
 
 ## Explicit Scope Limits
 
@@ -52,7 +52,7 @@ For beta-ready users:
 - use the documented statement surface only,
 - treat unsupported syntax rejection as expected behavior,
 - validate behavior against compliance docs before filing compatibility bugs,
-- assume interface and behavior may evolve between alpha milestones.
+- assume interface and behavior may evolve between beta milestones.
 
 ## Suggested Beta Messaging
 

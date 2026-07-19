@@ -135,7 +135,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 ### Platform operation
 
 - [using.md](using.md): running the server, console, and local multi-node setups.
-- [release.md](release.md): current release posture, alpha scope, and expectations.
+- [release.md](release.md): current release posture, Beta Ready scope, and expectations.
 - [security.md](security.md): TLS modes, CA flow, and runtime security tradeoffs.
 - [replication.md](replication.md): affinity model, sync sequence, and failure handling.
 
@@ -144,7 +144,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - [architecture-boundaries.md](architecture-boundaries.md): ownership rules between `serverlib` and `server`.
 - [select-architecture.md](select-architecture.md): SELECT planning and execution decisions.
 - [at-rest-encryption.md](at-rest-encryption.md): current at-rest encryption direction and constraints.
-- [consistency-isolation.md](consistency-isolation.md): current alpha consistency and isolation contract.
+- [consistency-isolation.md](consistency-isolation.md): current beta-ready consistency and isolation contract.
 - [node-failure-matrix.md](node-failure-matrix.md): node/network failure expectations and evidence status.
 - [beta-confidence-scorecard.md](beta-confidence-scorecard.md): four-domain beta confidence gates and status tracking.
 - [partition-split-brain-matrix.md](partition-split-brain-matrix.md): executable partition/split-brain scenario gate matrix.

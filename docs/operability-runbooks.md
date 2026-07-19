@@ -1,4 +1,4 @@
-# Operability Runbooks (Alpha)
+# Operability Runbooks (Beta-Ready Scope)
 
 This page provides the minimum operator runbook set required by the beta confidence scorecard.
 
@@ -75,7 +75,7 @@ Evidence references:
 
 ## Drill Cadence
 
-Minimum cadence for alpha-to-beta progression:
+Minimum cadence for beta-ready maintenance:
 
 - weekly rolling restart/upgrade-safety drill,
 - after any WAL/catalog format-affecting change,

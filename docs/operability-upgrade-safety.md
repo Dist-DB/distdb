@@ -1,6 +1,6 @@
-# Operability and Upgrade Safety Contract (Alpha)
+# Operability and Upgrade Safety Contract (Beta-Ready Scope)
 
-This document defines the current operability and upgrade-safety contract for DistDB Developer Alpha.
+This document defines the current operability and upgrade-safety contract for DistDB Beta Ready scope.
 
 ## Purpose
 
@@ -27,12 +27,12 @@ This page covers:
 - Compatibility confidence remains bounded to the tested version window and evidence cadence.
 - Operational confidence for upgrades remains bounded to published artifact runs and explicit compatibility assertions.
 
-### Not Yet Guaranteed
+### Hardening Gap
 
 - Full semver compatibility commitments for every historical WAL/catalog payload version.
 - Upgrade guarantees outside the declared supported window matrix.
 
-## WAL and Catalog Compatibility Expectations (Alpha)
+## WAL and Catalog Compatibility Expectations (Beta-Ready Scope)
 
 Current operator expectations:
 
@@ -44,7 +44,7 @@ Current operator expectations:
    - rollback behavior notes,
    - evidence links in release documentation.
 
-Until beta, treat format compatibility as explicitly versioned-by-evidence rather than globally guaranteed.
+In beta-ready scope, treat format compatibility as explicitly versioned-by-evidence rather than globally guaranteed.
 
 ## Frozen Compatibility Window Assertions
 
@@ -87,7 +87,7 @@ CI workflow:
 - `.github/workflows/operability-upgrade-safety.yml`
 - Workflow builds the current server binary and a matrix of old refs (`HEAD~1`, `HEAD~2`, `HEAD~3`) and runs the drill per window.
 
-## Observability Minimums (Alpha)
+## Observability Minimums (Beta-Ready Scope)
 
 The following minimum signals are required for operability drills and incident triage:
 

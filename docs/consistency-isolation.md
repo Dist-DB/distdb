@@ -1,6 +1,6 @@
-# Consistency and Isolation Contract (Alpha)
+# Consistency and Isolation Contract (Beta-Ready Scope)
 
-This document defines DistDB's current consistency and isolation guarantees for the Developer Alpha release.
+This document defines DistDB's current consistency and isolation guarantees for the Beta Ready release posture.
 
 ## Purpose
 
@@ -8,7 +8,7 @@ This contract exists to:
 
 - define what behavior is guaranteed now,
 - distinguish bounded or best-effort behavior,
-- identify what requires beta-grade proof,
+- identify what requires continued beta evidence or GA-hardening,
 - give test authors a concrete conformance target.
 
 ## Scope
@@ -23,11 +23,11 @@ This document does not claim broad MySQL parity beyond documented support in `sq
 
 ## Guarantee Levels
 
-DistDB uses three guarantee levels in alpha:
+DistDB uses three guarantee levels in beta-ready scope:
 
 1. Guaranteed (Implemented and expected stable in documented scope)
 2. Bounded (Implemented with documented limits, still maturing)
-3. Not Yet Guaranteed (Target behavior requiring beta-grade proof)
+3. Hardening Gap (Target behavior requiring additional beta evidence and GA hardening)
 
 ## Contract: Mutation Ordering and Visibility
 
@@ -44,7 +44,7 @@ DistDB uses three guarantee levels in alpha:
 - Multi-object contention behavior depends on current lock/state and isolation checks.
 - Replication convergence depends on phased sync and stream progress handling.
 
-### Not Yet Guaranteed
+### Hardening Gap
 
 - Full adversarial behavior proof across partition + concurrent-writer conditions.
 - End-to-end deterministic outcomes for all failure permutations under load.
@@ -60,9 +60,9 @@ DistDB uses three guarantee levels in alpha:
 ### Bounded
 
 - Isolation behavior should be interpreted within currently documented and tested scenarios.
-- Behavior outside documented scenarios is alpha-bounded and may evolve.
+- Behavior outside documented scenarios is beta-scoped and may evolve.
 
-### Not Yet Guaranteed
+### Hardening Gap
 
 - Publication of a frozen isolation/consistency contract with full adversarial test matrix evidence.
 
@@ -76,10 +76,10 @@ DistDB uses three guarantee levels in alpha:
 
 ### Bounded
 
-- Some replication phases are intentionally conservative in current alpha implementation depth.
+- Some replication phases are intentionally conservative in current beta implementation depth.
 - Operational confidence depends on current tested scenarios and checkpoint behavior.
 
-### Not Yet Guaranteed
+### Hardening Gap
 
 - Full beta-grade partition/failure validation with published expected/observed outcomes.
 
@@ -96,7 +96,7 @@ Current baseline mapping:
 | Failed commit validation leaves real WAL/index state clean | Guaranteed | `server/src/core/app/mod_test.rs::failed_commit_validation_leaves_real_wal_and_indexes_clean` | green | 2026-07-17 | server |
 | Stream-aware catch-up does not skip unseen streams | Bounded | deterministic: `server/src/core/app/mod_test.rs::wal_export_with_stream_cursors_does_not_skip_unseen_streams`; `server/src/core/app/mod_test.rs::affinity_wal_import_ignores_stale_schema_revision_and_returns_database_to_ready`; adversarial variant: `server/src/core/app/mod_test.rs::affinity_schema_sync_failure_returns_database_to_ready` | green (deterministic + adversarial baseline) | 2026-07-17 | server |
 | Restart replay restores latest schema/metadata/security state | Guaranteed | `server/src/core/app/mod_test.rs::bootstrap_replays_latest_schema_from_wal`; `server/src/core/app/mod_test.rs::bootstrap_replays_sql_definition_and_metadata_from_wal`; `server/src/core/app/mod_test.rs::bootstrap_replays_security_change_password_from_wal`; `server/src/core/app/mod_test.rs::bootstrap_acl_replay_prefers_latest_wal_snapshot_for_user` | green | 2026-07-17 | server |
-| Partition + adversarial concurrent-writer proof matrix | Not Yet Guaranteed | (no complete automated matrix yet) | missing | 2026-07-17 | server/serverlib |
+| Partition + adversarial concurrent-writer proof matrix | Hardening Gap | (no complete automated matrix yet) | missing | 2026-07-17 | server/serverlib |
 
 ## Change Control
 
@@ -143,14 +143,14 @@ CI workflow:
 
 This subset is intentionally focused on high-signal consistency/failure invariants and now includes deterministic plus adversarial variants for currently bounded contract items.
 
-Current caveat: full bidirectional split-brain partition automation remains a planned beta-evidence item; the current reconvergence suite validates deterministic affinity recovery invariants.
+Current caveat: full bidirectional split-brain partition automation remains a planned hardening item; the current reconvergence suite validates deterministic affinity recovery invariants.
 
-## Beta-Grade Pass Criteria
+## Beta-Ready Maintenance Pass Criteria
 
-To graduate this contract from alpha-bounded to beta-grade confidence:
+To maintain this contract at beta-ready confidence:
 
 1. all contract items classified `Guaranteed` must map to at least one deterministic automated test,
 2. all contract items classified `Bounded` must map to deterministic tests plus at least one adversarial variant,
 3. no `Implemented/Tested` scenario in `node-failure-matrix.md` may lack concrete evidence references,
 4. the consistency/failure validation workflow must pass on every PR that changes server/serverlib behavior,
-5. partition and concurrent-writer matrix rows currently marked `Planned` must be upgraded with executable evidence before beta declaration.
+5. partition and concurrent-writer matrix rows currently marked `Planned` must be upgraded with executable evidence to preserve beta-ready declaration.
