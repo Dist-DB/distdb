@@ -72,10 +72,10 @@ impl TransactionPayloadTransform for WalCompressionPayloadTransform {
 
 }
 
-fn resolve_wal_storage_payload(
-    raw_payload: Option<&[u8]>,
+fn resolve_wal_storage_payload<'a>(
+    raw_payload: Option<&'a [u8]>,
     context: &TransactionPayloadContext,
-) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+) -> Result<Option<Cow<'a, [u8]>>, PayloadTransformError> {
 
     let Some(payload) = raw_payload else {
         return Ok(None);
@@ -99,10 +99,7 @@ fn resolve_wal_storage_payload(
         current = Cow::Owned(decoded);
     }
 
-    match current {
-        Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
-        Cow::Owned(bytes) => Ok(Some(bytes)),
-    }
+    Ok(Some(current))
 
 }
 
@@ -141,11 +138,11 @@ impl TransactionPayloadWriteTransform for WalCompressionPayloadWriteTransform {
 
 }
 
-fn write_wal_storage_payload(
+fn write_wal_storage_payload<'a>(
     record: &TransactionRecord,
-    raw_payload: Option<&[u8]>,
+    raw_payload: Option<&'a [u8]>,
     context: &TransactionPayloadContext,
-) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+) -> Result<Option<Cow<'a, [u8]>>, PayloadTransformError> {
 
     let Some(payload) = raw_payload else {
         return Ok(None);
@@ -175,10 +172,7 @@ fn write_wal_storage_payload(
         current = Cow::Owned(transformed);
     }
 
-    match current {
-        Cow::Borrowed(_) => Ok(Some(payload.to_vec())),
-        Cow::Owned(bytes) => Ok(Some(bytes)),
-    }
+    Ok(Some(current))
 
 }
 
@@ -683,7 +677,9 @@ impl ConcurrentWalManager {
         for record in &mut records {
             let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), context)
                 .map_err(map_payload_transform_error)?;
-            record.set_payload(resolved_payload);
+            if let Some(Cow::Owned(payload)) = resolved_payload {
+                record.set_payload(Some(payload));
+            }
         }
 
         Ok(records)
@@ -728,6 +724,30 @@ impl TransactionLog for ConcurrentWalManager {
                 }
             })
             .unwrap_or_default()
+
+    }
+
+    fn with_all_records<T, F>(&self, wal_id: &str, func: F) -> T
+    where
+        F: FnOnce(&[TransactionRecord]) -> T,
+    {
+
+        let stream_key = match obfuscated_stream_key(wal_id) {
+            Ok(k) => k,
+            Err(_) => return func(&[]),
+        };
+
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
+
+        let store = match self.storage.lock() {
+            Ok(store) => store,
+            Err(_) => return func(&[]),
+        };
+
+        match store.get(&stream_key) {
+            Some(entries) => func(entries),
+            None => func(&[]),
+        }
 
     }
 
@@ -856,7 +876,9 @@ pub(crate) fn encode_record_for_storage_with_context(
     let stored_payload = write_wal_storage_payload(record, record_for_storage.payload_raw(), context)
         .map_err(map_payload_write_transform_error)?;
 
-    record_for_storage.set_payload(stored_payload);
+    if let Some(Cow::Owned(payload)) = stored_payload {
+        record_for_storage.set_payload(Some(payload));
+    }
 
     bincode::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record")
 
@@ -874,7 +896,9 @@ pub(crate) fn decode_record_from_storage(
     let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), &context)
         .map_err(map_payload_transform_error)?;
 
-    record.set_payload(resolved_payload);
+    if let Some(Cow::Owned(payload)) = resolved_payload {
+        record.set_payload(Some(payload));
+    }
 
     Ok(record)
 
@@ -891,7 +915,9 @@ pub(crate) fn decode_record_from_storage_with_context(
     let resolved_payload =
         resolve_wal_storage_payload(record.payload_raw(), context).map_err(map_payload_transform_error)?;
 
-    record.set_payload(resolved_payload);
+    if let Some(Cow::Owned(payload)) = resolved_payload {
+        record.set_payload(Some(payload));
+    }
 
     Ok(record)
 

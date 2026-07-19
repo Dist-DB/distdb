@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::{
     ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, SelectCondition, SelectJoin,
@@ -93,7 +94,10 @@ where
         if row_matches(&row_map, primary_condition)? {
             acc.push(JoinedRowTuple::from_relation_row(
                 primary_relation,
-                MaterializedRelationRow { row_id, row_map },
+                MaterializedRelationRow {
+                    row_id,
+                    row_map: Arc::new(row_map),
+                },
             ));
         }
 
@@ -163,7 +167,10 @@ where
         .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
 
             if row_matches(&row_map, right_condition)? {
-                acc.push(MaterializedRelationRow { row_id, row_map });
+                acc.push(MaterializedRelationRow {
+                    row_id,
+                    row_map: Arc::new(row_map),
+                });
             }
 
             Ok::<_, String>(acc)

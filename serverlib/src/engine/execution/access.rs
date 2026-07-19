@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -21,9 +23,35 @@ use crate::{
 
 use super::MaterializedRelationRow;
 
+type LiveRowCountTableMap = HashMap<String, (u64, usize)>;
+type LiveRowCountScopeMap = HashMap<usize, LiveRowCountTableMap>;
+
 #[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
-static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<HashMap<(usize, String), (u64, usize)>>> =
+static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<LiveRowCountScopeMap>> =
     OnceLock::new();
+
+fn cached_live_row_count<'a>(
+    cache_guard: &'a LiveRowCountScopeMap,
+    cache_scope_id: usize,
+    table_id: &str,
+) -> Option<&'a (u64, usize)> {
+    cache_guard
+        .get(&cache_scope_id)
+        .and_then(|tables| tables.get(table_id))
+}
+
+fn cache_live_row_count(
+    cache_guard: &mut LiveRowCountScopeMap,
+    cache_scope_id: usize,
+    table_id: &str,
+    latest_tx_id: u64,
+    count: usize,
+) {
+    cache_guard
+        .entry(cache_scope_id)
+        .or_default()
+        .insert(table_id.to_string(), (latest_tx_id, count));
+}
 
 const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_ROWS: usize = 250_000;
 const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_POSTINGS: usize = 50_000;
@@ -48,8 +76,49 @@ pub struct EqualityTableCacheSnapshot {
     pub string_index_ci_by_field: Vec<(String, Vec<(String, Vec<u64>)>)>,
 }
 
-static EQUALITY_TABLE_CACHE: OnceLock<Mutex<AHashMap<(usize, String), EqualityTableCacheEntry>>> =
+static EQUALITY_TABLE_CACHE: OnceLock<Mutex<EqualityCacheScopeMap>> =
     OnceLock::new();
+
+type EqualityCacheTableMap = AHashMap<String, EqualityTableCacheEntry>;
+type EqualityCacheScopeMap = AHashMap<usize, EqualityCacheTableMap>;
+
+fn equality_cache_table_map_mut(
+    cache_guard: &mut EqualityCacheScopeMap,
+    cache_scope_id: usize,
+) -> Option<&mut EqualityCacheTableMap> {
+    cache_guard.get_mut(&cache_scope_id)
+}
+
+fn equality_cache_entry_mut<'a>(
+    cache_guard: &'a mut EqualityCacheScopeMap,
+    cache_scope_id: usize,
+    table_id: &str,
+) -> Option<&'a mut EqualityTableCacheEntry> {
+    equality_cache_table_map_mut(cache_guard, cache_scope_id)
+        .and_then(|tables| tables.get_mut(table_id))
+}
+
+fn equality_cache_entry<'a>(
+    cache_guard: &'a EqualityCacheScopeMap,
+    cache_scope_id: usize,
+    table_id: &str,
+) -> Option<&'a EqualityTableCacheEntry> {
+    cache_guard
+        .get(&cache_scope_id)
+        .and_then(|tables| tables.get(table_id))
+}
+
+fn insert_equality_cache_entry(
+    cache_guard: &mut EqualityCacheScopeMap,
+    cache_scope_id: usize,
+    table_id: &str,
+    entry: EqualityTableCacheEntry,
+) {
+    cache_guard
+        .entry(cache_scope_id)
+        .or_default()
+        .insert(table_id.to_string(), entry);
+}
 
 fn accessor_snapshot_restore_string_indexes() -> bool {
     
@@ -373,7 +442,7 @@ pub fn snapshot_equality_cache(
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     let cache_guard = cache.lock().ok()?;
-    let entry = cache_guard.get(&(cache_scope_id, table_id.to_string()))?;
+    let entry = equality_cache_entry(&cache_guard, cache_scope_id, table_id)?;
     
     Some(cache_snapshot_from_entry(entry))
 
@@ -388,8 +457,10 @@ pub fn restore_equality_cache_from_snapshot(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert(
-            (cache_scope_id, table_id.to_string()),
+        insert_equality_cache_entry(
+            &mut cache_guard,
+            cache_scope_id,
+            table_id,
             cache_entry_from_snapshot(snapshot),
         );
     }
@@ -410,7 +481,7 @@ pub fn warm_string_like_cache_for_fields(
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
     {
         warm_string_like_accessors(entry, &fields, schema);
     }
@@ -583,12 +654,14 @@ fn normalize_distinct_field_names(field_names: &[String]) -> Vec<String> {
 
     for field_name in field_names {
 
+        let field_name = field_name.as_str();
+
         if field_name.is_empty() {
             continue;
         }
 
-        if seen.insert(field_name.clone()) {
-            fields.push(field_name.clone());
+        if seen.insert(field_name) {
+            fields.push(field_name.to_string());
         }
 
     }
@@ -960,10 +1033,7 @@ pub fn warm_equality_cache_from_live_rows(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert(
-            (cache_scope_id, table_id.to_string()),
-            entry,
-        );
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
     }
 
 }
@@ -985,17 +1055,15 @@ fn remove_row_id_from_postings(postings: &mut AHashMap<Vec<u8>, Vec<u64>>, value
 
 fn remove_row_id_from_string_index(index: &mut TPHashSet<Vec<u64>>, key: &str, row_id: u64) {
 
-    let Some(existing_row_ids) = index.get(key).cloned() else {
+    let Some(existing_row_ids) = index.get_mut(key) else {
         return;
     };
 
-    let mut updated = existing_row_ids;
-    updated.retain(|existing| *existing != row_id);
+    existing_row_ids.retain(|existing| *existing != row_id);
+    let should_remove = existing_row_ids.is_empty();
 
-    if updated.is_empty() {
+    if should_remove {
         index.remove(key);
-    } else {
-        index.insert(key.to_string(), updated);
     }
 
 }
@@ -1008,34 +1076,28 @@ fn apply_cached_row_insert(
 
     entry.rows_by_id.insert(row_id, row_map.clone());
 
-    let tracked_fields = entry
-        .row_ids_by_field_value
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    for (field_name, value) in row_map {
 
-    for field_name in tracked_fields {
-
-        let Some(value) = row_map.get(&field_name).cloned() else {
-            continue;
-        };
-
-        if let Some(postings) = entry.row_ids_by_field_value.get_mut(&field_name) {
+        if let Some(postings) = entry.row_ids_by_field_value.get_mut(field_name) {
             postings.entry(value.clone()).or_default().push(row_id);
         }
 
-        if let Some(index) = entry.string_index_by_field.get_mut(&field_name) {
+        if let Some(index) = entry.string_index_by_field.get_mut(field_name) {
             let key = string_key_from_value(&value, false);
-            let mut updated = index.get(&key).cloned().unwrap_or_default();
-            updated.push(row_id);
-            index.insert(key, updated);
+            if let Some(updated) = index.get_mut(&key) {
+                updated.push(row_id);
+            } else {
+                index.insert(key, vec![row_id]);
+            }
         }
 
-        if let Some(index) = entry.string_index_ci_by_field.get_mut(&field_name) {
+        if let Some(index) = entry.string_index_ci_by_field.get_mut(field_name) {
             let key = string_key_from_value(&value, true);
-            let mut updated = index.get(&key).cloned().unwrap_or_default();
-            updated.push(row_id);
-            index.insert(key, updated);
+            if let Some(updated) = index.get_mut(&key) {
+                updated.push(row_id);
+            } else {
+                index.insert(key, vec![row_id]);
+            }
         }
 
     }
@@ -1050,28 +1112,18 @@ fn apply_cached_row_delete(
 
     entry.rows_by_id.remove(&row_id);
 
-    let tracked_fields = entry
-        .row_ids_by_field_value
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    for (field_name, value) in row_map {
 
-    for field_name in tracked_fields {
-
-        let Some(value) = row_map.get(&field_name) else {
-            continue;
-        };
-
-        if let Some(postings) = entry.row_ids_by_field_value.get_mut(&field_name) {
+        if let Some(postings) = entry.row_ids_by_field_value.get_mut(field_name) {
             remove_row_id_from_postings(postings, value, row_id);
         }
 
-        if let Some(index) = entry.string_index_by_field.get_mut(&field_name) {
+        if let Some(index) = entry.string_index_by_field.get_mut(field_name) {
             let key = string_key_from_value(value, false);
             remove_row_id_from_string_index(index, &key, row_id);
         }
 
-        if let Some(index) = entry.string_index_ci_by_field.get_mut(&field_name) {
+        if let Some(index) = entry.string_index_ci_by_field.get_mut(field_name) {
             let key = string_key_from_value(value, true);
             remove_row_id_from_string_index(index, &key, row_id);
         }
@@ -1092,7 +1144,7 @@ pub fn apply_equality_cache_row_mutation(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
     {
 
         entry.latest_tx_id = latest_tx_id;
@@ -1115,14 +1167,17 @@ pub fn apply_equality_cache_row_mutation(
     
 }
 
-pub fn apply_equality_cache_row_mutation_batch(
+pub fn apply_equality_cache_row_mutation_batch<R>(
     cache_scope_id: usize,
     table_id: &str,
     latest_tx_id: u64,
     kind: TransactionKind,
     first_row_id: u64,
-    row_maps: &[HashMap<String, Vec<u8>>],
-) {
+    row_maps: &[R],
+)
+where
+    R: Borrow<HashMap<String, Vec<u8>>>,
+{
 
     if row_maps.is_empty() {
         return;
@@ -1131,7 +1186,7 @@ pub fn apply_equality_cache_row_mutation_batch(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
     {
         entry.latest_tx_id = latest_tx_id;
 
@@ -1141,14 +1196,14 @@ pub fn apply_equality_cache_row_mutation_batch(
             TransactionKind::Update => {
                 for (offset, row_map) in row_maps.iter().enumerate() {
                     let row_id = first_row_id.saturating_add(offset as u64);
-                    apply_cached_row_insert(entry, row_id, row_map);
+                    apply_cached_row_insert(entry, row_id, row_map.borrow());
                 }
             },
 
             TransactionKind::Delete => {
                 for (offset, row_map) in row_maps.iter().enumerate() {
                     let row_id = first_row_id.saturating_add(offset as u64);
-                    apply_cached_row_delete(entry, row_id, row_map);
+                    apply_cached_row_delete(entry, row_id, row_map.borrow());
                 }
             },
 
@@ -1260,18 +1315,18 @@ pub fn collect_indexable_equality_filters_for_schema(
             value,
         }) => {
             let resolved_field_name = if schema.field(field_name).is_some() {
-                field_name.clone()
+                Cow::Borrowed(field_name.as_str())
             } else {
                 field_name
                     .rsplit('.')
                     .next()
                     .filter(|candidate| schema.field(candidate).is_some())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| field_name.clone())
+                    .map(Cow::Borrowed)
+                    .unwrap_or_else(|| Cow::Borrowed(field_name.as_str()))
             };
 
             let normalized_value = schema
-                .field(&resolved_field_name)
+                .field(resolved_field_name.as_ref())
                 .and_then(|field| {
                     convert_value_to_field_type(
                         value,
@@ -1282,7 +1337,7 @@ pub fn collect_indexable_equality_filters_for_schema(
                 })
                 .unwrap_or_else(|| value.clone());
 
-            filters.insert(resolved_field_name, normalized_value);
+            filters.insert(resolved_field_name.into_owned(), normalized_value);
             true
         },
 
@@ -1809,7 +1864,7 @@ pub fn load_live_rows_by_equality(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
         && cache_entry_matches_loaded_wal_head(wal, table_id, entry.latest_tx_id)
     {
         if !entry.row_ids_by_field_value.contains_key(field_name) {
@@ -1832,7 +1887,7 @@ pub fn load_live_rows_by_equality(
         let result = rows_for_field_value(&entry, field_name, lookup_value);
 
         if let Ok(mut cache_guard) = cache.lock() {
-            cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
         }
 
         return result;
@@ -1847,7 +1902,7 @@ pub fn load_live_rows_by_equality(
     let result = rows_for_field_value(&entry, field_name, lookup_value);
 
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
     }
 
     result
@@ -1868,7 +1923,7 @@ pub fn load_live_rows_by_prefix(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
         && cache_entry_matches_loaded_wal_head(wal, table_id, entry.latest_tx_id)
     {
         if !entry.row_ids_by_field_value.contains_key(field_name) {
@@ -1894,7 +1949,7 @@ pub fn load_live_rows_by_prefix(
         let result = rows_for_field_prefix(&entry, field_name, prefix, case_insensitive);
 
         if let Ok(mut cache_guard) = cache.lock() {
-            cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
         }
 
         return result;
@@ -1911,7 +1966,7 @@ pub fn load_live_rows_by_prefix(
     let result = rows_for_field_prefix(&entry, field_name, prefix, case_insensitive);
 
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
     }
 
     result
@@ -1944,7 +1999,7 @@ pub fn load_live_rows_by_string_like(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = cache_guard.get_mut(&(cache_scope_id, table_id.to_string()))
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
         && cache_entry_matches_loaded_wal_head(wal, table_id, entry.latest_tx_id)
     {
         ensure_string_like_index(entry, field_name, false);
@@ -1995,7 +2050,7 @@ pub fn load_live_rows_by_string_like(
             .unwrap_or_default();
 
         if let Ok(mut cache_guard) = cache.lock() {
-            cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
         }
 
         return result;
@@ -2031,7 +2086,7 @@ pub fn load_live_rows_by_string_like(
         .unwrap_or_default();
 
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert((cache_scope_id, table_id.to_string()), entry);
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
     }
 
     result
@@ -2264,7 +2319,7 @@ pub fn load_live_row_count(
     let cache = LIVE_ROW_COUNT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(cache_guard) = cache.lock()
         && let Some((cached_latest_tx_id, cached_count)) =
-            cache_guard.get(&(cache_scope_id, table_id.to_string()))
+            cached_live_row_count(&cache_guard, cache_scope_id, table_id)
         && wal
             .latest_transaction_id_if_loaded(table_id)
             .map(|tx| tx.0 == *cached_latest_tx_id)
@@ -2278,75 +2333,77 @@ pub fn load_live_row_count(
         .map(|tx| tx.0)
         .unwrap_or(0);
 
-    let wal_records = wal.since(table_id, None);
+    let count = wal
+        .with_records(table_id, |wal_records| {
+            let mut live_row_ids = AHashSet::with_capacity(wal_records.len());
+            let mut committed_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
+            let mut aborted_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
 
-    let mut live_row_ids = AHashSet::with_capacity(wal_records.len());
-    let mut committed_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
-    let mut aborted_groups = AHashSet::with_capacity(wal_records.len() / 8 + 1);
+            for record in wal_records {
 
-    for record in &wal_records {
+                match record.kind {
 
-        match record.kind {
+                    TransactionKind::WriteCommit => {
+                        if let Some(group_id) = record.groupid {
+                            committed_groups.insert(group_id.0);
+                        }
+                    },
 
-            TransactionKind::WriteCommit => {
-                if let Some(group_id) = record.groupid {
-                    committed_groups.insert(group_id.0);
+                    TransactionKind::WriteAbort => {
+                        if let Some(group_id) = record.groupid {
+                            aborted_groups.insert(group_id.0);
+                        }
+                    },
+
+                    _ => {}
+
                 }
-            },
 
-            TransactionKind::WriteAbort => {
-                if let Some(group_id) = record.groupid {
-                    aborted_groups.insert(group_id.0);
-                }
-            },
-
-            _ => {}
-
-        }
-
-    }
-
-    for record in &wal_records {
-
-        if let Some(group_id) = record.groupid {
-
-            let group_id = group_id.0;
-
-            if aborted_groups.contains(&group_id) {
-                continue;
             }
 
-            if !committed_groups.contains(&group_id)
-                && !matches!(record.kind, TransactionKind::WriteCommit | TransactionKind::WriteAbort)
-            {
-                continue;
+            for record in wal_records {
+
+                if let Some(group_id) = record.groupid {
+
+                    let group_id = group_id.0;
+
+                    if aborted_groups.contains(&group_id) {
+                        continue;
+                    }
+
+                    if !committed_groups.contains(&group_id)
+                        && !matches!(record.kind, TransactionKind::WriteCommit | TransactionKind::WriteAbort)
+                    {
+                        continue;
+                    }
+
+                }
+
+                match record.kind {
+
+                    TransactionKind::Insert |
+                    TransactionKind::Update => {
+                        live_row_ids.insert(record.id.0);
+                    },
+
+                    TransactionKind::Delete => {
+                        if let Some(refid) = record.refid {
+                            live_row_ids.remove(&refid.0);
+                        }
+                    },
+
+                    _ => {},
+
+                }
+
             }
 
-        }
-
-        match record.kind {
-
-            TransactionKind::Insert | 
-            TransactionKind::Update => {
-                live_row_ids.insert(record.id.0);
-            },
-
-            TransactionKind::Delete => {
-                if let Some(refid) = record.refid {
-                    live_row_ids.remove(&refid.0);
-                }
-            },
-
-            _ => {},
-        
-        }
-
-    }
-
-    let count = live_row_ids.len();
+            live_row_ids.len()
+        })
+        .unwrap_or(0);
 
     if let Ok(mut cache_guard) = cache.lock() {
-        cache_guard.insert((cache_scope_id, table_id.to_string()), (latest_tx_id, count));
+        cache_live_row_count(&mut cache_guard, cache_scope_id, table_id, latest_tx_id, count);
     }
 
     count

@@ -10,6 +10,14 @@ pub trait TransactionLog {
     // When from is None, return all records for the WAL stream.
     fn since(&self, wal_id: &str, from: Option<TransactionId>) -> Vec<TransactionRecord>;
 
+    fn with_all_records<T, F>(&self, wal_id: &str, func: F) -> T
+    where
+        F: FnOnce(&[TransactionRecord]) -> T,
+    {
+        let records = self.since(wal_id, None);
+        func(&records)
+    }
+
     // Returns records filtered by transaction kind. Default implementation uses
     // `since` and filters in-memory; implementations may override for efficiency.
     fn since_kinds(

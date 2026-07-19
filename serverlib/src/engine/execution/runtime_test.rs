@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use crate::{SelectComparisonOp, SelectCondition, SelectJoin, SelectJoinKind, SelectPredicate};
 
 fn relation(table_id: &str, alias: &str) -> SelectRelation {
@@ -19,7 +20,7 @@ fn joined_tuple_field_comparison_matches() {
         &left_relation,
         MaterializedRelationRow {
             row_id: 1,
-            row_map: left_map,
+            row_map: Arc::new(left_map),
         },
     );
 
@@ -30,7 +31,7 @@ fn joined_tuple_field_comparison_matches() {
         right_relation: &right_relation,
         right_row: &MaterializedRelationRow {
             row_id: 2,
-            row_map: right_map,
+            row_map: Arc::new(right_map),
         },
     };
 
@@ -70,7 +71,7 @@ fn compare_provider_fields_reads_from_tuple_and_candidate_provider() {
         &left_relation,
         MaterializedRelationRow {
             row_id: 1,
-            row_map: left_map,
+            row_map: Arc::new(left_map),
         },
     );
 
@@ -81,7 +82,7 @@ fn compare_provider_fields_reads_from_tuple_and_candidate_provider() {
         right_relation: &right_relation,
         right_row: &MaterializedRelationRow {
             row_id: 2,
-            row_map: right_map,
+            row_map: Arc::new(right_map),
         },
     };
 
@@ -112,7 +113,10 @@ fn joined_row_tuple_missing_relation_helpers_preserve_available_rows() {
     row_map.insert("id".to_string(), b"1".to_vec());
     let tuple = JoinedRowTuple::from_relation_row(
         &relation,
-        MaterializedRelationRow { row_id: 1, row_map },
+        MaterializedRelationRow {
+            row_id: 1,
+            row_map: Arc::new(row_map),
+        },
     );
 
     assert_eq!(tuple.first_relation_row().map(|row| row.row_id), Some(1));

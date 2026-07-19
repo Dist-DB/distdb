@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::{
     SelectComparisonOp, SelectCondition, SelectJoin, SelectPredicate, SelectReadPlan,
@@ -10,14 +11,14 @@ use super::super::sql::{compare_like_value, compare_regex_value, compare_row_val
 #[derive(Debug, Clone)]
 pub struct MaterializedRelationRow {
     pub row_id: u64,
-    pub row_map: HashMap<String, Vec<u8>>,
+    pub row_map: Arc<HashMap<String, Vec<u8>>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct JoinedRowMember {
     pub qualifier: String,
     pub row_id: Option<u64>,
-    pub row_map: Option<HashMap<String, Vec<u8>>>,
+    pub row_map: Option<Arc<HashMap<String, Vec<u8>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +148,7 @@ impl JoinedRowTuple {
         members.push(JoinedRowMember {
             qualifier: relation_qualifier(relation).to_string(),
             row_id: Some(row.row_id),
-            row_map: Some(row.row_map.clone()),
+            row_map: Some(Arc::clone(&row.row_map)),
         });
         
         Self { members }
@@ -172,7 +173,7 @@ impl JoinedRowTuple {
         let member = self.members.first()?;
         Some(MaterializedRelationRow {
             row_id: member.row_id?,
-            row_map: member.row_map.as_ref()?.clone(),
+            row_map: Arc::clone(member.row_map.as_ref()?),
         })
 
     }

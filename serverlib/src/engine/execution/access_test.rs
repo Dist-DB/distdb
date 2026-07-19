@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 
 use super::*;
 use crate::engine::database::transaction::TransactionLog;
@@ -149,12 +151,12 @@ fn build_relation_probe_index_groups_duplicate_keys() {
 
         MaterializedRelationRow {
             row_id: 1,
-            row_map: HashMap::from([("id".to_string(), b"1".to_vec())]),
+            row_map: Arc::new(HashMap::from([("id".to_string(), b"1".to_vec())])),
         },
 
         MaterializedRelationRow {
             row_id: 2,
-            row_map: HashMap::from([("id".to_string(), b"1".to_vec())]),
+            row_map: Arc::new(HashMap::from([("id".to_string(), b"1".to_vec())])),
         },
 
     ];

@@ -44,6 +44,10 @@ impl<T> TPHashSet<T> {
         self.items_by_key.get(key)
     }
 
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut T> {
+        self.items_by_key.get_mut(key)
+    }
+
     pub fn get_by_reverse_key(&self, reverse_key: &str) -> Option<&T> {
         self.reverse_key_to_key
             .get(reverse_key)

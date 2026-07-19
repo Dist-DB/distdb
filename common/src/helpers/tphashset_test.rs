@@ -94,3 +94,14 @@
         assert!(set.get_by_reverse_key("mad").is_none());
         assert!(set.is_empty());
     }
+
+    #[test]
+    fn get_mut_updates_value_in_place() {
+        let mut set = TPHashSet::new();
+        set.insert("sam".to_string(), vec![1u64]);
+
+        let values = set.get_mut("sam").expect("value should exist");
+        values.push(2);
+
+        assert_eq!(set.get("sam"), Some(&vec![1, 2]));
+    }

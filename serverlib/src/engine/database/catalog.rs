@@ -1289,23 +1289,27 @@ impl DatabaseCatalog {
         log: &L,
     ) -> DatabaseResult<usize> {
 
-        let mut applied = 0usize;
+        log.with_all_records(wal_id, |records| {
+            let mut applied = 0usize;
 
-        for record in log.since_kinds(wal_id, None, &[TransactionKind::SchemaChange]) {
+            for record in records {
+                if !matches!(record.kind, TransactionKind::SchemaChange) {
+                    continue;
+                }
 
-            let payload = SchemaChangePayload::decode(
-                record
-                    .payload_logical()
-                    .ok_or(DatabaseError::SchemaPayloadDeserialize)?,
-            )
-                .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
-            
-            self.apply_schema_change(payload)?;
-            applied += 1;
+                let payload = SchemaChangePayload::decode(
+                    record
+                        .payload_logical()
+                        .ok_or(DatabaseError::SchemaPayloadDeserialize)?,
+                )
+                    .map_err(|_| DatabaseError::SchemaPayloadDeserialize)?;
 
-        }
+                self.apply_schema_change(payload)?;
+                applied += 1;
+            }
 
-        Ok(applied)
+            Ok(applied)
+        })
 
     }
 
@@ -1314,124 +1318,106 @@ impl DatabaseCatalog {
         wal_id: &str,
         log: &L,
     ) -> DatabaseResult<usize> {
-        
-        let mut applied = 0usize;
+        log.with_all_records(wal_id, |records| {
+            let mut applied = 0usize;
 
-        for record in log.since_kinds(
-            wal_id,
-            None,
-            &[
-                TransactionKind::SchemaChange,
-                TransactionKind::TableLifecycle,
-                TransactionKind::IndexLifecycle,
-                TransactionKind::MetadataChange,
-                TransactionKind::SecurityChange,
-                TransactionKind::SqlDefinitionChange,
-            ],
-        ) {
+            for record in records {
+                match record.kind {
+                    TransactionKind::SchemaChange
+                    | TransactionKind::TableLifecycle
+                    | TransactionKind::IndexLifecycle
+                    | TransactionKind::MetadataChange
+                    | TransactionKind::SecurityChange
+                    | TransactionKind::SqlDefinitionChange => {
+                        if matches!(record.kind, TransactionKind::SecurityChange)
+                            && crate::engine::database::entity::payload::EntityMetadataPayload::decode(
+                                record.payload_logical().unwrap_or_default(),
+                            )
+                            .is_err()
+                        {
+                            // Security WAL can carry non-catalog payloads (for example
+                            // server bootstrap auth changes). Those are replayed by
+                            // server control flow, not catalog reconstruction.
+                            continue;
+                        }
 
-            match record.kind {
-                TransactionKind::SchemaChange |
-                TransactionKind::TableLifecycle |
-                TransactionKind::IndexLifecycle |
-                TransactionKind::MetadataChange |
-                TransactionKind::SecurityChange |
-                TransactionKind::SqlDefinitionChange => {
+                        let decoded = DecodedTransactionPayload::decode(
+                            record.kind,
+                            record
+                                .payload_logical()
+                                .ok_or_else(|| match record.kind {
+                                    TransactionKind::SchemaChange
+                                    | TransactionKind::TableLifecycle => {
+                                        DatabaseError::SchemaPayloadDeserialize
+                                    }
 
-                    if matches!(record.kind, TransactionKind::SecurityChange)
-                        && crate::engine::database::entity::payload::EntityMetadataPayload::decode(
-                            record.payload_logical().unwrap_or_default(),
+                                    TransactionKind::IndexLifecycle => {
+                                        DatabaseError::IndexPayloadDeserialize
+                                    }
+
+                                    TransactionKind::MetadataChange
+                                    | TransactionKind::SecurityChange => {
+                                        DatabaseError::MetadataPayloadDeserialize
+                                    }
+
+                                    TransactionKind::SqlDefinitionChange => {
+                                        DatabaseError::SqlDefinitionPayloadDeserialize
+                                    }
+
+                                    _ => unreachable!("payload decode dispatch should only map structured transaction kinds"),
+                                })?,
                         )
-                        .is_err()
-                    {
-                        // Security WAL can carry non-catalog payloads (for example
-                        // server bootstrap auth changes). Those are replayed by
-                        // server control flow, not catalog reconstruction.
-                        continue;
-                    }
-
-                    let decoded = DecodedTransactionPayload::decode(
-                        record.kind,
-                        record
-                            .payload_logical()
-                            .ok_or_else(|| match record.kind {
-                                
-                                TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
-                                    DatabaseError::SchemaPayloadDeserialize
-                                },
-
-                                TransactionKind::IndexLifecycle => {
-                                    DatabaseError::IndexPayloadDeserialize
-                                },
-
-                                TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
-                                    DatabaseError::MetadataPayloadDeserialize
-                                },
-                                
-                                TransactionKind::SqlDefinitionChange => {
-                                    DatabaseError::SqlDefinitionPayloadDeserialize
-                                },
-
-                                _ => unreachable!("payload decode dispatch should only map structured transaction kinds"),
-                            
-                            })?,
-
-                    )
                         .map_err(|_| match record.kind {
-
                             TransactionKind::SchemaChange | TransactionKind::TableLifecycle => {
                                 DatabaseError::SchemaPayloadDeserialize
-                            },
+                            }
 
                             TransactionKind::IndexLifecycle => {
                                 DatabaseError::IndexPayloadDeserialize
-                            },
+                            }
 
                             TransactionKind::MetadataChange | TransactionKind::SecurityChange => {
                                 DatabaseError::MetadataPayloadDeserialize
-                            },
+                            }
 
                             TransactionKind::SqlDefinitionChange => {
                                 DatabaseError::SqlDefinitionPayloadDeserialize
-                            },
+                            }
 
                             _ => unreachable!("payload decode dispatch should only map structured transaction kinds"),
-
                         })?;
 
-                    match decoded {
+                        match decoded {
+                            DecodedTransactionPayload::SchemaChange(payload) => {
+                                self.apply_schema_change(payload)?;
+                            }
 
-                        DecodedTransactionPayload::SchemaChange(payload) => {
-                            self.apply_schema_change(payload)?;
-                        },
+                            DecodedTransactionPayload::TableLifecycle(payload) => {
+                                self.apply_table_lifecycle(payload)?;
+                            }
 
-                        DecodedTransactionPayload::TableLifecycle(payload) => {
-                            self.apply_table_lifecycle(payload)?;
-                        },
+                            DecodedTransactionPayload::IndexLifecycle(payload) => {
+                                self.apply_index_lifecycle(payload)?;
+                            }
 
-                        DecodedTransactionPayload::IndexLifecycle(payload) => {
-                            self.apply_index_lifecycle(payload)?;
-                        },
+                            DecodedTransactionPayload::EntityMetadata(payload) => {
+                                self.apply_entity_metadata(payload)?;
+                            }
 
-                        DecodedTransactionPayload::EntityMetadata(payload) => {
-                            self.apply_entity_metadata(payload)?;
-                        },
+                            DecodedTransactionPayload::SqlDefinition(payload) => {
+                                self.apply_sql_definition(payload)?;
+                            }
+                        }
 
-                        DecodedTransactionPayload::SqlDefinition(payload) => {
-                            self.apply_sql_definition(payload)?;
-                        },
-
+                        applied += 1;
                     }
 
-                    applied += 1;
+                    _ => {}
                 }
-                _ => {}
-            
             }
 
-        }
-
-        Ok(applied)
+            Ok(applied)
+        })
 
     }
 

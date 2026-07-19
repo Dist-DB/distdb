@@ -1,5 +1,6 @@
 use ahash::{AHashMap, AHashSet};
 use common::epoch_ms;
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
 use std::fs;
@@ -526,12 +527,15 @@ impl RuntimeIndexStore {
         }
     }
 
-    pub fn record_table_rows_batch(
+    pub fn record_table_rows_batch<R>(
         &mut self,
         table_scope_id: &str,
         indexes: &[&DatabaseIndex],
-        row_maps: &[HashMap<String, Vec<u8>>],
-    ) {
+        row_maps: &[R],
+    )
+    where
+        R: Borrow<HashMap<String, Vec<u8>>>,
+    {
 
         if row_maps.is_empty() {
             return;
@@ -548,7 +552,7 @@ impl RuntimeIndexStore {
             state.reserve_entries(row_maps.len());
 
             for row_map in row_maps {
-                let key = index_value_tuple(index, row_map);
+                let key = index_value_tuple(index, row_map.borrow());
                 state.insert(key);
             }
         
@@ -556,12 +560,15 @@ impl RuntimeIndexStore {
 
     }
 
-    pub fn remove_table_rows_batch(
+    pub fn remove_table_rows_batch<R>(
         &mut self,
         table_scope_id: &str,
         indexes: &[&DatabaseIndex],
-        row_maps: &[HashMap<String, Vec<u8>>],
-    ) {
+        row_maps: &[R],
+    )
+    where
+        R: Borrow<HashMap<String, Vec<u8>>>,
+    {
 
         if row_maps.is_empty() {
             return;
@@ -576,7 +583,7 @@ impl RuntimeIndexStore {
             let state = self.index_mut_for_table(table_scope_id, &index.index_id.0);
 
             for row_map in row_maps {
-                let key = index_value_tuple(index, row_map);
+                let key = index_value_tuple(index, row_map.borrow());
                 state.remove(&key);
             }
 

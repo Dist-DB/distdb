@@ -2867,7 +2867,7 @@ fn materialize_select_result_into_scoped_table(
         let encoded = encode_row_payload(&scoped_schema, &row_map)
             .map_err(|err| format!("view execution failed: scoped row encode failed: {err}"))?;
 
-        append_row_payload_record(
+        append_row_payload_record_with_prepared_row_map(
             catalog,
             wal,
             scoped_table_id,
@@ -2875,6 +2875,7 @@ fn materialize_select_result_into_scoped_table(
             runtime_indexes,
             TransactionKind::Insert,
             encoded,
+            Some(&row_map),
             common::epoch_nanos!(),
             None,
             None,
