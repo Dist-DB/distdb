@@ -57,9 +57,13 @@ jobs:
         run: bash scripts/security/security_adversarial_baseline.sh
 
       - name: Run non-functional baseline
+        env:
+          PERF_THRESHOLD_PROFILE: ci-gha-ubuntu
         run: bash scripts/perf/run_nonfunctional_baseline_with_retry.sh
 
       - name: Check non-functional regression thresholds
+        env:
+          PERF_THRESHOLD_PROFILE: ci-gha-ubuntu
         run: bash scripts/perf/check_nonfunctional_thresholds.sh
 
       - name: Append artifact trend ledgers

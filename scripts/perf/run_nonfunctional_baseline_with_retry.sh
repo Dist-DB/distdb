@@ -4,9 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MAX_ATTEMPTS="${DISTDB_NONFUNCTIONAL_RUN_ATTEMPTS:-2}"
 
+# Default to the calibrated GitHub-hosted runner profile in CI unless explicitly overridden.
+if [[ -z "${PERF_THRESHOLD_PROFILE:-}" ]] && [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  export PERF_THRESHOLD_PROFILE="ci-gha-ubuntu"
+fi
+
 log() {
   echo "[nonfunctional-baseline-retry] $*"
 }
+
+log "threshold_profile=${PERF_THRESHOLD_PROFILE:-default}"
 
 run_once() {
   (
