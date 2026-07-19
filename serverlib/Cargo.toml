@@ -7,7 +7,7 @@ authors = ["Sam Colak <sam@samcolak.com>"]
 [dependencies]
 common = { path = "../common" }
 serde = { version = "1.0.229", features = ["derive"] }
-bincode = "1.3"
+bincode = "1.3.2"
 log = "0.4.33"
 sqlparser = "0.51"
 rcgen = { version = "0.13", features = ["x509-parser"] }
