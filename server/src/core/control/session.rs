@@ -60,7 +60,9 @@ pub fn configure_bootstrap_crypto_context(
 }
 
 impl ServerConnectionSession {
+
     pub fn new(peer_addr: String, connection_id: usize) -> Self {
+        
         let challenge_id = format!("challenge-{}-{connection_id}", now_millis());
 
         let session_id = md5_hash(
