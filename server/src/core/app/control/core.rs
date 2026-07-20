@@ -1723,6 +1723,25 @@ impl ServerApp {
             );
 
             if matches!(response.status, connector::ResponseStatus::Rejected) {
+                let sql_summary = staged_query.sql.split_whitespace().collect::<Vec<_>>().join(" ");
+                let sql_summary = if sql_summary.len() > 240 {
+                    format!("{}...", &sql_summary[..240])
+                } else {
+                    sql_summary
+                };
+                let error = match &response.result {
+                    ConnectorResult::Error(message) => message.as_str(),
+                    _ => "staged query apply failed",
+                };
+
+                log::warn!(
+                    "runtime index rebuild triggered write_group={} request_id={} staged_statement={} reason=transaction_apply_failed error={} sql=\"{}\"",
+                    write_group_id.0,
+                    apply_request_id,
+                    idx + 1,
+                    error,
+                    sql_summary,
+                );
                 
                 abort_external_write_group(
                     &self.wal,

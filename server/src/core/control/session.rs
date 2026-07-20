@@ -62,7 +62,7 @@ pub fn configure_bootstrap_crypto_context(
 impl ServerConnectionSession {
 
     pub fn new(peer_addr: String, connection_id: usize) -> Self {
-        
+
         let challenge_id = format!("challenge-{}-{connection_id}", now_millis());
 
         let session_id = md5_hash(
@@ -107,6 +107,7 @@ impl ServerConnectionSession {
             authenticated: false,
             encrypted_password_md5_token,
         }
+        
     }
 
     pub fn challenge_message(&self) -> String {
@@ -117,23 +118,29 @@ impl ServerConnectionSession {
     }
 
     pub fn record_request(&mut self, request: &ConnectorRequest) {
+
         let event_type = match &request.command {
+
             ConnectorCommand::Query { query } => {
                 self.session.current_database = Some(query.database_id.clone());
                 SessionLogEventType::QueryExecute
-            }
+            },
+
             ConnectorCommand::Schema { database_id, .. } => {
                 self.session.current_database = Some(database_id.clone());
                 SessionLogEventType::SchemaChange
-            }
+            },
+
             ConnectorCommand::Mutation { database_id, .. } => {
                 self.session.current_database = Some(database_id.clone());
                 SessionLogEventType::Other
-            }
+            },
+
             ConnectorCommand::CreateDatabase { database_name } => {
                 self.session.current_database = Some(database_name.clone());
                 SessionLogEventType::Other
             }
+
         };
 
         self.log.add_entry(
@@ -145,9 +152,11 @@ impl ServerConnectionSession {
             ),
             true,
         );
+
     }
 
     pub fn mark_disconnect(&mut self) {
+
         self.session.clear_connection_state();
 
         self.log.add_entry(
@@ -155,9 +164,11 @@ impl ServerConnectionSession {
             "connector peer disconnected",
             true,
         );
+
     }
 
     pub fn authenticate_if_valid_token(&mut self, candidate_password_md5_token: &str) -> bool {
+
         let security_secret = security_context_secret(SERVER_TEMP_USER, "bootstrap");
         let expected_password_md5_token =
             aes_decrypt(&self.encrypted_password_md5_token, &security_secret);
@@ -185,29 +196,37 @@ impl ServerConnectionSession {
 
             false
         }
+
     }
 
     pub fn user_id(&self) -> &str {
+
         self.session
             .user_id
             .as_deref()
             .unwrap_or(SERVER_TEMP_USER)
+
     }
 }
 
 pub fn extract_auth_token(sql: &str) -> Option<&str> {
+
     let trimmed = sql.trim().trim_end_matches(';').trim();
 
     let mut parts = trimmed.split_whitespace();
     let command = parts.next()?;
     let token = parts.next()?;
+    
     if parts.next().is_some() {
         return None;
     }
+    
     if command.eq_ignore_ascii_case("password_token") || command.eq_ignore_ascii_case("password") {
         return Some(token);
     }
+    
     None
+
 }
 
 pub fn extract_set_password_directive(sql: &str) -> Option<SetPasswordDirective<'_>> {
@@ -221,6 +240,7 @@ pub fn set_bootstrap_password(user_id: &str, password: &str) -> Result<(), Strin
 }
 
 pub fn encode_set_password_wal_payload(user_id: &str, password: &str) -> Result<Vec<u8>, String> {
+
     validate_set_password_input(user_id, password)?;
 
     let state = encrypt_bootstrap_password(password);
@@ -238,19 +258,24 @@ pub fn encode_set_password_wal_payload(user_id: &str, password: &str) -> Result<
         payload.encrypted_password,
     )
     .into_bytes())
+
 }
 
 pub fn apply_bootstrap_password_wal_payload(payload: &[u8]) -> Result<(), String> {
+
     let text = String::from_utf8(payload.to_vec())
         .map_err(|_| "set password failed: cannot decode wal payload".to_string())?;
 
     let mut parts = text.splitn(3, '\n');
+    
     let Some(user_id) = parts.next() else {
         return Err("set password failed: wal payload is malformed".to_string());
     };
+    
     let Some(password_nonce) = parts.next() else {
         return Err("set password failed: wal payload is malformed".to_string());
     };
+    
     let Some(encrypted_password) = parts.next() else {
         return Err("set password failed: wal payload is malformed".to_string());
     };
@@ -268,9 +293,11 @@ pub fn apply_bootstrap_password_wal_payload(payload: &[u8]) -> Result<(), String
             encrypted_password: decoded.encrypted_password,
         },
     )
+
 }
 
 fn validate_set_password_input(user_id: &str, password: &str) -> Result<(), String> {
+
     if !user_id.eq_ignore_ascii_case(SERVER_TEMP_USER) {
         return Err(format!(
             "set password failed: only '{}' is supported currently",
@@ -283,12 +310,14 @@ fn validate_set_password_input(user_id: &str, password: &str) -> Result<(), Stri
     }
 
     Ok(())
+
 }
 
 fn set_bootstrap_password_state(
     user_id: &str,
     state: BootstrapPasswordState,
 ) -> Result<(), String> {
+
     if !user_id.eq_ignore_ascii_case(SERVER_TEMP_USER) {
         return Err(format!(
             "set password failed: only '{}' is supported currently",
@@ -311,6 +340,7 @@ fn set_bootstrap_password_state(
     *guard = state;
 
     Ok(())
+
 }
 
 fn extract_set_password_literals(sql: &str) -> Option<(&str, &str)> {
@@ -369,6 +399,7 @@ fn current_bootstrap_password_plaintext() -> String {
 }
 
 fn encrypt_bootstrap_password(password: &str) -> BootstrapPasswordState {
+
     let context = current_bootstrap_crypto_context();
     let nonce = build_bootstrap_password_nonce(
         SERVER_TEMP_USER,
@@ -382,9 +413,11 @@ fn encrypt_bootstrap_password(password: &str) -> BootstrapPasswordState {
         password_nonce: nonce,
         encrypted_password: aes_encrypt(password, &secret, &salt),
     }
+
 }
 
 fn decrypt_bootstrap_password(state: &BootstrapPasswordState) -> Result<String, String> {
+
     let context = current_bootstrap_crypto_context();
     let secret = build_bootstrap_password_secret(&state.password_nonce, &context.server_identifier);
     let plaintext = std::panic::catch_unwind(|| aes_decrypt(&state.encrypted_password, &secret))
@@ -395,21 +428,26 @@ fn decrypt_bootstrap_password(state: &BootstrapPasswordState) -> Result<String, 
     } else {
         Ok(plaintext)
     }
+
 }
 
 fn bootstrap_crypto_context_store() -> &'static RwLock<BootstrapCryptoContext> {
+
     BOOTSTRAP_CRYPTO_CONTEXT.get_or_init(|| {
         RwLock::new(BootstrapCryptoContext {
             server_identifier: "distdb-bootstrap".to_string(),
             first_schema_wal_timestamp_ms: None,
         })
     })
+
 }
 
 fn current_bootstrap_crypto_context() -> BootstrapCryptoContext {
+
     let store = bootstrap_crypto_context_store();
     let guard = store.read().unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.clone()
+
 }
 
 fn build_bootstrap_password_nonce(
@@ -417,6 +455,7 @@ fn build_bootstrap_password_nonce(
     server_identifier: &str,
     first_schema_wal_timestamp_ms: Option<u64>,
 ) -> String {
+
     let wal_seed = first_schema_wal_timestamp_ms
         .map(|value| value.to_string())
         .unwrap_or_else(|| "wal-ts-unset".to_string());
@@ -428,23 +467,30 @@ fn build_bootstrap_password_nonce(
         server_identifier,
         &wal_seed,
     ])
+
 }
 
 fn build_bootstrap_password_secret(password_nonce: &str, server_identifier: &str) -> String {
+
     stable_id(&[
         "distdb-password-secret",
         password_nonce,
         server_identifier,
     ])
+
 }
 
 fn salt_from_nonce(password_nonce: &str) -> [u8; 8] {
+
     let mut salt = [0u8; 8];
     let bytes = password_nonce.as_bytes();
+    
     for idx in 0..8 {
         salt[idx] = if idx < bytes.len() { bytes[idx] } else { b'0' };
     }
+    
     salt
+
 }
 
 #[cfg(test)]

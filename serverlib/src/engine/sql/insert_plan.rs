@@ -59,6 +59,7 @@ pub fn parse_insert_rows_from_parsed_statement(
                 let mut rows = Vec::with_capacity(values.rows.len());
 
                 for row in &values.rows {
+
                     if !columns.is_empty() && row.len() != columns.len() {
                         return Err(SqlParseError::UnsupportedStatement(
                             "INSERT values count must match provided columns".to_string(),
@@ -71,6 +72,7 @@ pub fn parse_insert_rows_from_parsed_statement(
                     }
 
                     rows.push(parsed_row);
+                    
                 }
 
                 InsertRowsSource::Values(rows)

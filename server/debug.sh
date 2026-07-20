@@ -1,1 +1,1 @@
-RUST_LOG="debug" RUST_BACKTRACE=1 cargo run datadir=./data -- wss=on
+DISTDB_RUNTIME_INDEX_MATERIALIZE_NON_PRIMARY=0 RUST_LOG="info" RUST_BACKTRACE=1 cargo run datadir=./data -- wss=on

@@ -1,6 +1,25 @@
 use super::*;
 use std::borrow::Borrow;
 
+fn summarize_sql_for_error_log(sql: &str) -> String {
+    const MAX_CHARS: usize = 240;
+
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if normalized.len() <= MAX_CHARS {
+        return normalized;
+    }
+
+    format!("{}...", &normalized[..MAX_CHARS])
+}
+
+fn response_error_message(response: &ConnectorResponse) -> &str {
+    match &response.result {
+        ConnectorResult::Error(message) => message.as_str(),
+        _ => "<no error payload>",
+    }
+}
+
 pub(super) fn append_payload_record(
     wal: &ConcurrentWalManager,
     wal_id: &str,
@@ -63,6 +82,7 @@ pub(in super::super) fn append_row_payload_record(
     refid: Option<TransactionId>,
     group_id: Option<TransactionId>,
 ) -> Result<(), String> {
+
     append_row_payload_record_with_live_row_ids_and_prepared_row_map(
         catalog,
         wal,
@@ -77,6 +97,7 @@ pub(in super::super) fn append_row_payload_record(
         None,
         group_id,
     )
+
 }
 
 pub(in super::super) fn append_row_payload_record_with_prepared_row_map(
@@ -92,6 +113,7 @@ pub(in super::super) fn append_row_payload_record_with_prepared_row_map(
     refid: Option<TransactionId>,
     group_id: Option<TransactionId>,
 ) -> Result<(), String> {
+
     append_row_payload_record_with_live_row_ids_and_prepared_row_map(
         catalog,
         wal,
@@ -106,6 +128,7 @@ pub(in super::super) fn append_row_payload_record_with_prepared_row_map(
         prepared_row_map,
         group_id,
     )
+
 }
 
 pub(super) fn append_row_payload_record_with_live_row_ids(
@@ -121,6 +144,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
     expected_live_row_ids: Option<&HashSet<u64>>,
     group_id: Option<TransactionId>,
 ) -> Result<(), String> {
+
     append_row_payload_record_with_live_row_ids_and_prepared_row_map(
         catalog,
         wal,
@@ -135,6 +159,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids(
         None,
         group_id,
     )
+
 }
 
 pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
@@ -151,11 +176,13 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
     prepared_row_map: Option<&HashMap<String, Vec<u8>>>,
     group_id: Option<TransactionId>,
 ) -> Result<(), String> {
+
     let mutation_start = Instant::now();
     let stream_id = table_stream_id(catalog, &table.table_id);
     let payload_context = payload_context_for_table(catalog, &table.table_id);
 
     if let Some(expected_refid) = refid {
+
         let live_row_check_start = Instant::now();
         let live_row_exists = if let Some(live_row_ids) = expected_live_row_ids {
             live_row_ids.contains(&expected_refid.0)
@@ -167,6 +194,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
                 .collect::<HashSet<_>>();
             live_row_ids.contains(&expected_refid.0)
         };
+
         let live_row_check_ms = live_row_check_start.elapsed().as_millis() as u64;
 
         if !live_row_exists {
@@ -184,6 +212,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
                 live_row_check_ms,
             );
         }
+
     }
 
     let last_id = wal.latest_transaction_id(&stream_id);
@@ -216,14 +245,17 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
     );
 
     let wal_append_start = Instant::now();
+
     wal.append_with_context(&stream_id, record, &payload_context)
         .map_err(|e| e.to_string())?;
+
     let wal_append_ms = wal_append_start.elapsed().as_millis() as u64;
     let latest_tx_id = next_id.0;
 
     let index_apply_start = Instant::now();
 
     if track_runtime_indexes {
+
         let row_map = prepared_row_map
             .or(decoded_row_map.as_ref())
             .ok_or_else(|| "row payload decode failed: missing row map for index mutation".to_string())?;
@@ -237,6 +269,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
             next_id.0,
             row_map,
         );
+
     }
 
     let index_apply_ms = index_apply_start.elapsed().as_millis() as u64;
@@ -302,6 +335,7 @@ where
     let materialize_start = Instant::now();
 
     for payload in payloads {
+
         if track_runtime_indexes && !use_prepared_row_maps {
             let row_map = decode_row_payload(table.schema(), &payload)
                 .map_err(|err| format!("row payload decode failed: {err}"))?;
@@ -322,6 +356,7 @@ where
         ));
 
         refid = Some(tx_id);
+
     }
 
     let materialize_us = materialize_start.elapsed().as_micros() as u64;
@@ -333,21 +368,30 @@ where
     let latest_tx_id = next_id.saturating_sub(1);
 
     let index_apply_start = Instant::now();
+    let pre_index_stats = track_runtime_indexes.then(|| {
+        derived_indexes
+            .iter()
+            .map(|index| runtime_indexes.stats_for_table(&stream_id, &index.index_id.0))
+            .collect::<Vec<_>>()
+    });
 
     if track_runtime_indexes {
+        
         if !use_prepared_row_maps && decoded_row_maps.len() != payload_count {
             return Err("row map preparation mismatch for batch mutation".to_string());
         }
 
         if use_prepared_row_maps {
+            
             match kind {
+
                 TransactionKind::Delete => {
                     runtime_indexes.remove_table_rows_batch(
                         &stream_id,
                         &derived_indexes,
                         &prepared_row_maps,
                     );
-                }
+                },
 
                 TransactionKind::Insert | TransactionKind::Update => {
                     runtime_indexes.record_table_rows_batch(
@@ -355,9 +399,10 @@ where
                         &derived_indexes,
                         &prepared_row_maps,
                     );
-                }
+                },
 
                 _ => {}
+
             }
 
             serverlib::apply_equality_cache_row_mutation_batch(
@@ -368,15 +413,18 @@ where
                 first_row_id,
                 &prepared_row_maps,
             );
+
         } else {
+
             match kind {
+
                 TransactionKind::Delete => {
                     runtime_indexes.remove_table_rows_batch(
                         &stream_id,
                         &derived_indexes,
                         &decoded_row_maps,
                     );
-                }
+                },
 
                 TransactionKind::Insert | TransactionKind::Update => {
                     runtime_indexes.record_table_rows_batch(
@@ -384,9 +432,10 @@ where
                         &derived_indexes,
                         &decoded_row_maps,
                     );
-                }
+                },
 
                 _ => {}
+
             }
 
             serverlib::apply_equality_cache_row_mutation_batch(
@@ -397,32 +446,99 @@ where
                 first_row_id,
                 &decoded_row_maps,
             );
+
         }
+        
     }
 
     let index_apply_us = index_apply_start.elapsed().as_micros() as u64;
     let total_us = batch_start.elapsed().as_micros() as u64;
 
     if track_runtime_indexes && index_apply_us >= 5_000 {
-        let mut index_stats = Vec::with_capacity(derived_indexes.len());
+        let mut index_stats_before = Vec::with_capacity(derived_indexes.len());
+        let mut index_stats_after = Vec::with_capacity(derived_indexes.len());
+        let mut index_stats_delta = Vec::with_capacity(derived_indexes.len());
+        let mut reset_candidates = Vec::new();
 
-        for index in &derived_indexes {
+        let before_stats = pre_index_stats
+            .as_ref()
+            .expect("pre index stats should be present when runtime indexes are tracked");
+
+        for (position, index) in derived_indexes.iter().enumerate() {
+
             let index_id = &index.index_id.0;
-            let stats = runtime_indexes
+            let before = before_stats.get(position).copied().flatten();
+            let after = runtime_indexes
                 .stats_for_table(&stream_id, index_id)
-                .map(|(cardinality, capacity)| format!("{}:{}/{}", index_id, cardinality, capacity))
-                .unwrap_or_else(|| format!("{}:missing", index_id));
-            index_stats.push(stats);
+                .map(Some)
+                .unwrap_or(None);
+
+            let before_display = before
+                .map(|(cardinality, capacity)| format!("{cardinality}/{capacity}"))
+                .unwrap_or_else(|| "missing".to_string());
+
+            let after_display = after
+                .map(|(cardinality, capacity)| format!("{cardinality}/{capacity}"))
+                .unwrap_or_else(|| "missing".to_string());
+
+            index_stats_before.push(format!("{}:{}", index_id, before_display));
+            index_stats_after.push(format!("{}:{}", index_id, after_display));
+
+            let delta_display = match (before, after) {
+
+                (Some((before_cardinality, before_capacity)), Some((after_cardinality, after_capacity))) => {
+                    let cardinality_drop = before_cardinality.saturating_sub(after_cardinality);
+                    let capacity_drop = before_capacity.saturating_sub(after_capacity);
+                    let steep_cardinality_drop = before_cardinality >= 100_000
+                        && (after_cardinality <= 2_048 || cardinality_drop * 10 >= before_cardinality * 9);
+                    let steep_capacity_drop = before_capacity >= 100_000
+                        && (after_capacity <= 16_384 || capacity_drop * 10 >= before_capacity * 9);
+
+                    if steep_cardinality_drop && steep_capacity_drop {
+                        reset_candidates.push(index_id.clone());
+                    }
+
+                    format!(
+                        "{}:{:+}/{:+}",
+                        index_id,
+                        after_cardinality as i64 - before_cardinality as i64,
+                        after_capacity as i64 - before_capacity as i64,
+                    )
+                },
+
+                (None, Some(_)) => format!("{}:+new", index_id),
+
+                (Some(_), None) => format!("{}:-missing", index_id),
+
+                (None, None) => format!("{}:0/0", index_id),
+
+            };
+
+            index_stats_delta.push(delta_display);
+
         }
 
+        let reset_hint = !reset_candidates.is_empty();
+        let reset_candidates_display = if reset_hint {
+            reset_candidates.join(",")
+        } else {
+            "none".to_string()
+        };
+
         log::warn!(
-            "batch mutation index spike table={} kind={:?} rows={} index_apply_us={} index_stats=[{}]",
+            "batch mutation index spike table={} stream={} kind={:?} rows={} index_apply_us={} reset_hint={} reset_candidates={} before=[{}] after=[{}] delta=[{}]",
             table.table_id,
+            stream_id,
             kind,
             payload_count,
             index_apply_us,
-            index_stats.join(", "),
+            reset_hint,
+            reset_candidates_display,
+            index_stats_before.join(", "),
+            index_stats_after.join(", "),
+            index_stats_delta.join(", "),
         );
+
     }
 
     log::debug!(
@@ -443,6 +559,7 @@ where
 
 pub(super) fn with_statement_write_batch<F>(
     request_id: &str,
+    statement_sql: &str,
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
     table: &serverlib::DatabaseTable,
@@ -454,6 +571,8 @@ pub(super) fn with_statement_write_batch<F>(
 where
     F: FnOnce(TransactionId, &mut RuntimeIndexStore) -> ConnectorResponse,
 {
+
+    let sql_summary = summarize_sql_for_error_log(statement_sql);
 
     let table_stream_id = table_stream_id(catalog, &table.table_id);
 
@@ -485,13 +604,16 @@ where
         common::epoch_nanos!(),
         None,
     ) {
+
         Ok(group_id) => group_id,
+
         Err(err) => {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("statement write begin failed: {err}"),
             )
         }
+
     };
 
     let response = execute(write_group_id, runtime_indexes);
@@ -506,11 +628,15 @@ where
             common::epoch_nanos!(),
             Some(write_group_id),
         ) {
+
             log::warn!(
-                "runtime index rebuild triggered table={} reason=write_commit_failed error={}",
+                "runtime index rebuild triggered table={} request_id={} reason=write_commit_failed error={} sql=\"{}\"",
                 table.table_id,
-                err
+                request_id,
+                err,
+                sql_summary,
             );
+
             let _ = append_payload_record_with_group(
                 wal,
                 &table_stream_id,
@@ -519,11 +645,13 @@ where
                 common::epoch_nanos!(),
                 Some(write_group_id),
             );
+
             rebuild_runtime_indexes_for_table(catalog, table, wal, runtime_indexes);
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("statement write commit failed: {err}"),
             );
+
         }
 
         if let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, &table_stream_id, wal) {
@@ -540,8 +668,11 @@ where
     } else {
 
         log::warn!(
-            "runtime index rebuild triggered table={} reason=statement_response_rejected",
-            table.table_id
+            "runtime index rebuild triggered table={} request_id={} reason=statement_response_rejected error={} sql=\"{}\"",
+            table.table_id,
+            request_id,
+            response_error_message(&response),
+            sql_summary,
         );
         
         let _ = append_payload_record_with_group(
@@ -569,6 +700,7 @@ pub(crate) fn commit_external_write_group(
 ) -> Result<(), String> {
 
     for table_id in table_ids {
+
         append_payload_record_with_group(
             wal,
             table_id,
@@ -601,6 +733,7 @@ pub(crate) fn commit_external_write_group(
                 err,
             );
         }
+
     }
 
     Ok(())
@@ -614,6 +747,7 @@ pub(crate) fn abort_external_write_group(
     table_ids: &HashSet<String>,
     group_id: TransactionId,
 ) {
+
     for table_id in table_ids {
 
         let _ = append_payload_record_with_group(
@@ -648,6 +782,7 @@ pub(crate) fn abort_external_write_group(
         }
 
     }
+
 }
 
 fn rebuild_runtime_indexes_for_table(
@@ -656,10 +791,14 @@ fn rebuild_runtime_indexes_for_table(
     wal: &ConcurrentWalManager,
     runtime_indexes: &mut RuntimeIndexStore,
 ) {
+    
     let payload_context = payload_context_for_table(catalog, &table.table_id);
     let stream_id = table_stream_id(catalog, &table.table_id);
+    
     let live_rows = match load_live_rows_with_context(wal, &stream_id, table.schema(), &payload_context) {
+
         Ok(rows) => rows,
+
         Err(err) => {
             log::warn!(
                 "runtime index rebuild skipped table={} reason=payload_context_resolution_failed error={}",
@@ -668,6 +807,7 @@ fn rebuild_runtime_indexes_for_table(
             );
             return;
         }
+
     };
 
     for index in derived_indexes_for_table(table) {
@@ -683,6 +823,7 @@ fn rebuild_runtime_indexes_for_table(
         );
 
     }
+
 }
 
 pub(super) fn table_stream_id(catalog: &DatabaseCatalog, table_id: &str) -> String {
@@ -695,6 +836,7 @@ pub(super) fn payload_context_for_table(
     catalog: &DatabaseCatalog,
     table_id: &str,
 ) -> serverlib::TransactionPayloadContext {
+
     let mut context = serverlib::TransactionPayloadContext::new()
         .with_database_id(catalog.database_id.0.clone())
         .with_table_id(table_id.to_string());
@@ -707,4 +849,5 @@ pub(super) fn payload_context_for_table(
     }
 
     context
+
 }

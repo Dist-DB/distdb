@@ -196,6 +196,7 @@ pub fn send_affinity_join_requests(
             );
 
             match send_service_request_to_addr(&socket_addr, &message) {
+
                 Ok(Some(ServiceMessage::AffinityJoinResponse(resp))) => {
                     responses.push(resp);
                     delivered = true;
@@ -205,7 +206,8 @@ pub fn send_affinity_join_requests(
                         socket_addr
                     );
                     break;
-                }
+                },
+
                 Ok(Some(other)) => {
                     log::warn!(
                         "unexpected message while awaiting join response from peer_id={} addr={}: {:?}",
@@ -213,14 +215,16 @@ pub fn send_affinity_join_requests(
                         socket_addr,
                         other
                     );
-                }
+                },
+
                 Ok(None) => {
                     log::debug!(
                         "no join response received from peer_id={} addr={}",
                         peer.id,
                         socket_addr
                     );
-                }
+                },
+
                 Err(err) => {
                     log::warn!(
                         "failed to send affinity join request to peer_id={} addr={}: {}",
@@ -229,6 +233,7 @@ pub fn send_affinity_join_requests(
                         err
                     );
                 }
+
             }
 
         }
@@ -315,10 +320,12 @@ pub async fn execute_affinity_join_sequence(
 
         if let Some(proc) = processor.as_mut()
             && let Some(base_doc) = proc.document() {
-                let mut updated_doc = base_doc.clone();
-                merge_affinity_documents_from_responses(&mut updated_doc, responses);
-                proc.apply_affinity_document(updated_doc.clone());
 
+                let mut updated_doc = base_doc.clone();
+                
+                merge_affinity_documents_from_responses(&mut updated_doc, responses);
+                
+                proc.apply_affinity_document(updated_doc.clone());
                 proc.mark_sync_step_completed(0);
 
                 if let Err(err) = affinity_storage.save(&updated_doc) {

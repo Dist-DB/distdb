@@ -31,6 +31,17 @@ pub(crate) fn classify_import_statement(statement: &str) -> ImportStatementKind 
     ImportStatementKind::Query
 }
 
+pub(crate) fn statement_preview(statement: &str) -> String {
+    let normalized = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview = normalized.chars().take(160).collect::<String>();
+
+    if normalized.chars().count() > 160 {
+        format!("{}...", preview)
+    } else {
+        preview
+    }
+}
+
 pub(crate) fn record_import_statement_timing(
     transaction_state: &mut super::ImportTransactionState,
     kind: ImportStatementKind,
@@ -146,7 +157,14 @@ where
 
                 Err(err) if err.error_len().is_none() => err.valid_up_to(),
 
-                Err(err) => return Err(err.to_string()),
+                Err(err) => {
+                    log::warn!(
+                        "import parsing failed: utf8 decode error={} buffered_bytes={}",
+                        err,
+                        pending_bytes.len(),
+                    );
+                    return Err(err.to_string());
+                },
             };
 
             if chunk_len == 0 {
@@ -330,7 +348,27 @@ fn normalize_import_statement(statement: &str) -> String {
         normalized = remove_case_insensitive_word_outside_quotes(&normalized, "unsigned");
     }
 
+    normalized = remove_mysql_create_definer_clause(&normalized);
+
     normalized
+}
+
+fn remove_mysql_create_definer_clause(statement: &str) -> String {
+    let trimmed = statement.trim_start();
+
+    if !starts_with_ascii_case_insensitive(trimmed, "create definer=")
+        && !starts_with_ascii_case_insensitive(trimmed, "create definer =")
+    {
+        return statement.to_string();
+    }
+
+    for keyword in [" function ", " procedure ", " trigger "] {
+        if let Some(index) = find_ascii_case_insensitive(trimmed, keyword) {
+            return format!("create{}", &trimmed[index..]);
+        }
+    }
+
+    statement.to_string()
 }
 
 fn statement_head_token(statement: &str) -> String {
@@ -618,9 +656,9 @@ fn is_identifier_byte(ch: u8) -> bool {
     ch.is_ascii_alphanumeric() || ch == b'_'
 }
 
-#[derive(Default)]
 struct SqlStatementParser {
     buffer: String,
+    delimiter: String,
     in_single_quote: bool,
     in_double_quote: bool,
     in_backtick_quote: bool,
@@ -629,6 +667,23 @@ struct SqlStatementParser {
     pending_dash: bool,
     pending_slash: bool,
     pending_block_comment_star: bool,
+}
+
+impl Default for SqlStatementParser {
+    fn default() -> Self {
+        Self {
+            buffer: String::new(),
+            delimiter: ";".to_string(),
+            in_single_quote: false,
+            in_double_quote: false,
+            in_backtick_quote: false,
+            in_block_comment: false,
+            in_line_comment: false,
+            pending_dash: false,
+            pending_slash: false,
+            pending_block_comment_star: false,
+        }
+    }
 }
 
 impl SqlStatementParser {
@@ -733,16 +788,37 @@ impl SqlStatementParser {
                 continue;
             }
 
-            if ch == ';' && !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote {
+            if ch == '\n' && !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote {
+                if self.try_apply_delimiter_directive()? {
+                    continue;
+                }
+            }
+
+            self.buffer.push(ch);
+
+            if !self.in_single_quote
+                && !self.in_double_quote
+                && !self.in_backtick_quote
+                && !delimiter_directive_uses_line_termination(self.buffer.trim_start())
+                && self.buffer.ends_with(&self.delimiter)
+            {
+                if let Some(next_delimiter) = parse_import_delimiter_directive(
+                    self.buffer.trim(),
+                    Some(self.delimiter.as_str()),
+                )? {
+                    self.delimiter = next_delimiter;
+                    self.buffer.clear();
+                    continue;
+                }
+
+                let statement_len = self.buffer.len() - self.delimiter.len();
+                self.buffer.truncate(statement_len);
                 let statement = self.buffer.trim();
                 if !statement.is_empty() {
                     on_statement(statement)?;
                 }
                 self.buffer.clear();
-                continue;
             }
-
-            self.buffer.push(ch);
         }
 
         Ok(())
@@ -762,6 +838,8 @@ impl SqlStatementParser {
             self.pending_slash = false;
         }
 
+        self.try_apply_delimiter_directive()?;
+
         let statement = self.buffer.trim();
         if !statement.is_empty() {
             on_statement(statement)?;
@@ -772,6 +850,56 @@ impl SqlStatementParser {
         self.pending_block_comment_star = false;
         Ok(())
     }
+
+    fn try_apply_delimiter_directive(&mut self) -> Result<bool, String> {
+        let Some(next_delimiter) = parse_import_delimiter_directive(self.buffer.trim(), None)? else {
+            return Ok(false);
+        };
+
+        self.delimiter = next_delimiter;
+        self.buffer.clear();
+
+        Ok(true)
+    }
+}
+
+fn parse_import_delimiter_directive(
+    statement: &str,
+    trailing_delimiter: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut directive = statement.trim();
+
+    if let Some(delimiter) = trailing_delimiter {
+        if !delimiter.is_empty() && directive.ends_with(delimiter) {
+            directive = directive[..directive.len() - delimiter.len()].trim_end();
+        }
+    }
+
+    if !starts_with_keyword_ascii_case_insensitive(directive, "delimiter") {
+        return Ok(None);
+    }
+
+    let remainder = directive["delimiter".len()..].trim_start();
+    if remainder.is_empty() {
+        return Err("delimiter requires a token".to_string());
+    }
+
+    if remainder.contains(char::is_whitespace) {
+        return Err("delimiter accepts exactly one token".to_string());
+    }
+
+    Ok(Some(remainder.to_string()))
+}
+
+fn delimiter_directive_uses_line_termination(statement: &str) -> bool {
+    if !starts_with_keyword_ascii_case_insensitive(statement, "delimiter") {
+        return false;
+    }
+
+    statement
+        .as_bytes()
+        .get("delimiter".len())
+        .is_some_and(u8::is_ascii_whitespace)
 }
 
 #[cfg(test)]
