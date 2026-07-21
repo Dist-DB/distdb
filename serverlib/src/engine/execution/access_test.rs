@@ -515,16 +515,10 @@ fn runtime_index_bootstrap_uses_latest_live_row_keys() {
         .index_for_table(&table_stream_id, &pk_index.index_id.0)
         .expect("pk runtime index should exist")
         .contains(&[stored_pk]));
-    
+
     assert!(runtime_indexes
         .index_for_table(&table_stream_id, &email_index.index_id.0)
-        .expect("email runtime index should exist")
-        .contains(&[b"sam+updated@example.com".to_vec()]));
-    
-    assert!(!runtime_indexes
-        .index_for_table(&table_stream_id, &email_index.index_id.0)
-        .expect("email runtime index should exist")
-        .contains(&[b"sam@example.com".to_vec()]));
+        .is_none());
 
 }
 

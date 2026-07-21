@@ -135,7 +135,13 @@ fn derived_indexes_for_table_and_primary_key_index_prefer_expected_entries() {
 
 #[test]
 fn runtime_index_store_can_remove_scoped_index_and_table_indexes() {
-    let mut store = RuntimeIndexStore::new();
+    let mut store = RuntimeIndexStore {
+        indexes: AHashMap::new(),
+        materialize_non_primary: true,
+        non_primary_field_allowlist: AHashSet::new(),
+        non_primary_index_allowlist: AHashSet::new(),
+        incremental_persist_last_saved_ms: AHashMap::new(),
+    };
 
     let users_email = DatabaseIndex::from_table_fields(
         "users",
@@ -186,4 +192,35 @@ fn runtime_index_store_can_remove_scoped_index_and_table_indexes() {
     assert!(store
         .index_for_table("orders_stream", &orders_ref.index_id.0)
         .is_some());
+}
+
+#[test]
+fn runtime_index_policy_keeps_unique_indexes_and_skips_non_unique_by_default() {
+    let store = RuntimeIndexStore {
+        indexes: AHashMap::new(),
+        materialize_non_primary: false,
+        non_primary_field_allowlist: AHashSet::new(),
+        non_primary_index_allowlist: AHashSet::new(),
+        incremental_persist_last_saved_ms: AHashMap::new(),
+    };
+
+    let primary = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::PrimaryKey,
+        vec!["id".to_string()],
+    );
+    let unique = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Unique,
+        vec!["email".to_string()],
+    );
+    let indexed = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["created_at".to_string()],
+    );
+
+    assert!(store.should_track_index(&primary));
+    assert!(store.should_track_index(&unique));
+    assert!(!store.should_track_index(&indexed));
 }

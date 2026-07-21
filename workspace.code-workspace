@@ -87,7 +87,8 @@
       },
       "cp": true,
       "mvn -q test": true,
-      "dotnet test": true
+      "dotnet test": true,
+      "./debug.sh": true
     }
   }
 }

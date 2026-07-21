@@ -292,33 +292,7 @@ fn resolve_table_stream_id_for_bootstrap(
 
 impl RuntimeIndexStore {
 
-    pub fn new() -> Self {
-
-        Self {
-            indexes: AHashMap::new(),
-            materialize_non_primary: runtime_index_materialize_non_primary(),
-            non_primary_field_allowlist: runtime_index_non_primary_field_allowlist(),
-            non_primary_index_allowlist: runtime_index_non_primary_index_allowlist(),
-            incremental_persist_last_saved_ms: AHashMap::new(),
-        }
-
-    }
-
-    pub fn should_track_index(&self, index: &DatabaseIndex) -> bool {
-        
-        if index.is_temporary() {
-            return false;
-        }
-
-        true
-        
-    }
-
-    fn should_materialize_index_for_bootstrap(&self, index: &DatabaseIndex) -> bool {
-
-        if index.is_primary_key() {
-            return true;
-        }
+    fn should_track_non_primary_index(&self, index: &DatabaseIndex) -> bool {
 
         if self.materialize_non_primary {
             return true;
@@ -345,6 +319,42 @@ impl RuntimeIndexStore {
                 self.non_primary_field_allowlist
                     .contains(&common::normalize_identifier!(field_name))
             })
+
+    }
+
+    pub fn new() -> Self {
+
+        Self {
+            indexes: AHashMap::new(),
+            materialize_non_primary: runtime_index_materialize_non_primary(),
+            non_primary_field_allowlist: runtime_index_non_primary_field_allowlist(),
+            non_primary_index_allowlist: runtime_index_non_primary_index_allowlist(),
+            incremental_persist_last_saved_ms: AHashMap::new(),
+        }
+
+    }
+
+    pub fn should_track_index(&self, index: &DatabaseIndex) -> bool {
+        
+        if index.is_temporary() {
+            return false;
+        }
+
+        if index.is_unique_key() {
+            return true;
+        }
+
+        self.should_track_non_primary_index(index)
+        
+    }
+
+    fn should_materialize_index_for_bootstrap(&self, index: &DatabaseIndex) -> bool {
+
+        if index.is_unique_key() {
+            return true;
+        }
+
+        self.should_track_non_primary_index(index)
 
     }
 
@@ -792,6 +802,7 @@ impl RuntimeIndexStore {
                             data_dir,
                             table,
                             &table_stream_id,
+                            &table_stream_id,
                             snapshot.latest_tx_id,
                             snapshot.live_row_count,
                             wal_fingerprint,
@@ -1079,6 +1090,7 @@ impl RuntimeIndexStore {
                         data_dir,
                         table,
                         &table_stream_id,
+                        &table_stream_id,
                         latest_tx_id,
                         live_row_count,
                         wal_fingerprint,
@@ -1227,7 +1239,11 @@ impl RuntimeIndexStore {
             .map(|tx| tx.0)
             .unwrap_or(0);
 
-        let table_scope_id = table_scope_id(table);
+        let table_scope_id = table_stream_id;
+        for index in &tracked_indexes {
+            self.register_index_for_table(table_scope_id, index.clone());
+        }
+
         let live_row_count = primary_key_index(table)
             .and_then(|index| self.cardinality_for_table(table_scope_id, &index.index_id.0))
             .unwrap_or_else(|| {
@@ -1241,6 +1257,7 @@ impl RuntimeIndexStore {
         save_runtime_index_snapshot(
             &data_dir,
             table,
+            table_stream_id,
             table_stream_id,
             latest_tx_id,
             live_row_count,
@@ -1516,6 +1533,7 @@ fn save_runtime_index_snapshot(
     data_dir: &Path,
     table: &DatabaseTable,
     table_stream_id: &str,
+    table_scope_id: &str,
     latest_tx_id: u64,
     live_row_count: usize,
     wal_fingerprint: Option<(u64, u64)>,
@@ -1539,8 +1557,16 @@ fn save_runtime_index_snapshot(
 
     for index in tracked_indexes {
         let state = store
-            .index(&index.index_id.0)
-            .ok_or_else(|| format!("missing runtime index state '{}'", index.index_id.0))?;
+            .index_for_table(table_scope_id, &index.index_id.0)
+            // Backward compatibility: allow unscoped legacy state if present.
+            .or_else(|| store.index(&index.index_id.0))
+            .ok_or_else(|| {
+                format!(
+                    "missing runtime index state '{}' (scope '{}')",
+                    index.index_id.0,
+                    table_scope_id,
+                )
+            })?;
 
         indexes.push(RuntimeIndexSnapshotIndex {
             index_id: index.index_id.0.clone(),
@@ -1891,7 +1917,7 @@ fn runtime_index_materialize_non_primary() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 
 }
 

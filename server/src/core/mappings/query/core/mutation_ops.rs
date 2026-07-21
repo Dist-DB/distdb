@@ -47,49 +47,17 @@ pub(super) fn execute_insert_impl(
 
     let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
 
-    let cached_plan = (!is_explain)
-        .then_some(statement.parsed_insert_plan.as_ref())
-        .flatten();
-
-    let parsed_plan = if cached_plan.is_none() {
-
-        Some(match (!is_explain).then_some(statement.parsed_statement.as_ref()).flatten() {
-
-            Some(parsed_statement) => match serverlib::parse_insert_rows_from_parsed_statement(parsed_statement) {
-                Ok(plan) => plan,
-                Err(err) => {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("insert parse failed: {err}"),
-                    );
-                }
-            },
-
-            None => match serverlib::parse_insert_rows_from_statement(statement_sql) {
-                Ok(plan) => plan,
-                Err(err) => {
-                    return ConnectorResponse::rejected(
-                        request_id.to_string(),
-                        format!("insert parse failed: {err}"),
-                    );
-                }
-            },
-            
-        })
-
-    } else {
-
-        None
-
-    };
-
-    let plan = cached_plan.unwrap_or_else(|| {
-        parsed_plan
-            .as_ref()
-            .expect("parsed plan should exist when cached insert plan is absent")
-    });
-
     if is_explain {
+
+        let plan = match serverlib::parse_insert_rows_from_statement(statement_sql) {
+            Ok(plan) => plan,
+            Err(err) => {
+                return ConnectorResponse::rejected(
+                    request_id.to_string(),
+                    format!("insert parse failed: {err}"),
+                );
+            }
+        };
 
         let mut rows = vec![
             vec!["operation".to_string(), "insert".to_string()],
@@ -135,6 +103,44 @@ pub(super) fn execute_insert_impl(
 
     }
 
+    let parsed_plan;
+    
+    let plan = if let Some(cached_plan) = statement.parsed_insert_plan.as_ref() {
+
+        cached_plan
+    
+    } else {
+
+        parsed_plan = match statement.parsed_statement.as_ref() {
+
+            Some(parsed_statement) => {
+                match serverlib::parse_insert_rows_from_parsed_statement(parsed_statement) {
+                    Ok(plan) => plan,
+                    Err(err) => {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("insert parse failed: {err}"),
+                        );
+                    }
+                }
+            },
+
+            None => match serverlib::parse_insert_rows_from_statement(statement_sql) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert parse failed: {err}"),
+                    );
+                }
+            },
+            
+        };
+
+        &parsed_plan
+
+    };
+
     with_table_write_guard(
         request_id,
         catalogs,
@@ -144,6 +150,7 @@ pub(super) fn execute_insert_impl(
         |catalog| {
         execute_insert_locked(
             request_id,
+            &statement.sql,
             database_id,
             catalog,
             wal,
@@ -159,6 +166,7 @@ pub(super) fn execute_insert_impl(
 
 fn execute_insert_locked(
     request_id: &str,
+    statement_sql: &str,
     database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -265,6 +273,7 @@ fn execute_insert_locked(
 
     with_statement_write_batch(
         request_id,
+        statement_sql,
         catalog,
         wal,
         table,
@@ -285,38 +294,12 @@ fn execute_insert_locked(
             let track_runtime_indexes_for_insert = derived_indexes_for_table(table).next().is_some();
             let mut staged_pk_keys = HashSet::<Vec<Vec<u8>>>::with_capacity(insert_rows.len());
             let mut staged_pk_positions = HashMap::<Vec<Vec<u8>>, usize>::with_capacity(insert_rows.len());
-            let mut existing_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
-            let mut existing_pk_rows = HashMap::<Vec<Vec<u8>>, (u64, MutationRowMap)>::new();
-            let payload_context = payload_context_for_table(catalog, &plan.table_id);
-            let current_live_rows = load_live_rows_with_context(
-                wal,
-                &table_stream_id,
-                schema,
-                &payload_context,
-            )
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(row_id, row_map)| (row_id, Arc::new(row_map)))
-            .collect::<Vec<_>>();
-            let current_live_row_ids = current_live_rows
-                .iter()
-                .map(|(row_id, _)| *row_id)
-                .collect::<HashSet<_>>();
-
-            existing_pk_keys.reserve(current_live_rows.len());
-            existing_pk_rows.reserve(current_live_rows.len());
             let primary_key_details = primary_key_index(table).map(|pk_index| {
                 let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
                     vec![pk_index.field_name.as_str()]
                 } else {
                     pk_index.field_names.iter().map(|name| name.as_str()).collect()
                 };
-
-                for (row_id, row_map) in current_live_rows.iter().cloned() {
-                    let key = index_value_tuple(pk_index, row_map.as_ref());
-                    existing_pk_keys.insert(key.clone());
-                    existing_pk_rows.insert(key, (row_id, row_map));
-                }
 
                 (pk_index.index_id.0.as_str(), pk_fields)
             });
@@ -332,36 +315,6 @@ fn execute_insert_locked(
                 .copied()
                 .filter(|index| !index.is_primary_key())
                 .collect::<Vec<_>>();
-
-            let mut existing_unique_rows = HashMap::<
-                &str,
-                HashMap<Vec<Vec<u8>>, (u64, MutationRowMap)>,
-            >::with_capacity(unique_indexes.len());
-
-            for index in &unique_indexes {
-                let mut index_rows = HashMap::with_capacity(current_live_rows.len());
-                for (row_id, row_map) in current_live_rows.iter().cloned() {
-                    index_rows.insert(index_value_tuple(index, row_map.as_ref()), (row_id, row_map));
-                }
-                existing_unique_rows.insert(index.index_id.0.as_str(), index_rows);
-            }
-
-            let mut staged_unique_positions = unique_indexes
-                .iter()
-                .map(|index| {
-                    (
-                        index.index_id.0.as_str(),
-                        HashMap::with_capacity(insert_rows.len()),
-                    )
-                })
-                .collect::<HashMap<&str, HashMap<Vec<Vec<u8>>, usize>>>();
-
-            let insert_requires_row_map = plan.returning.is_some()
-                || track_runtime_indexes_for_insert
-                || plan.replace_into
-                || !plan.on_duplicate_update.is_empty()
-                || primary_key_details.is_some()
-                || !non_primary_unique_indexes.is_empty();
 
             if !plan.on_duplicate_update.is_empty()
                 && unique_indexes.is_empty()
@@ -391,6 +344,604 @@ fn execute_insert_locked(
                     "insert failed: ON DUPLICATE KEY UPDATE cannot modify primary key fields in current implementation".to_string(),
                 );
             }
+
+            let fast_path_simple_values_insert = !plan.ignore
+                && !plan.replace_into
+                && plan.on_duplicate_update.is_empty()
+                && plan.returning.is_none()
+                && matches!(plan.source, serverlib::InsertRowsSource::Values(_));
+
+            let fast_path_append_only = fast_path_simple_values_insert
+                && unique_indexes.is_empty();
+
+            if fast_path_append_only {
+
+                for row in insert_rows.iter() {
+
+                    if row.len() != columns.len() {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!(
+                                "insert failed: row has {} values but {} columns were specified",
+                                row.len(),
+                                columns.len()
+                            ),
+                        );
+                    }
+
+                    let mut payload_row = HashMap::with_capacity(schema.fields.len());
+
+                    for ((column, field), value) in insert_column_fields.iter().zip(row.iter().cloned()) {
+
+                        match value {
+
+                            Some(value_bytes) => {
+                                payload_row.insert((*column).to_string(), value_bytes);
+                            },
+
+                            None => {
+
+                                if let Some(default) = &field.default_value {
+                                    payload_row.insert((*column).to_string(), default.clone());
+                                } else if !field.nullable {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("insert failed: column '{}' cannot be null", column),
+                                    );
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                    for (field_name, default_value, nullable) in &missing_field_defaults {
+
+                        if let Some(default) = default_value {
+                            payload_row.insert((*field_name).to_string(), (*default).clone());
+                            continue;
+                        }
+
+                        if !nullable {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!(
+                                    "insert failed: missing required column '{}'",
+                                    field_name
+                                ),
+                            );
+                        }
+
+                    }
+
+                    let encoded = match encode_row_payload(schema, &payload_row) {
+
+                        Ok(encoded) => encoded,
+
+                        Err(err) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert payload encode failed: {err}"),
+                            );
+                        }
+
+                    };
+
+                    staged_payloads.push(encoded);
+                    affected_rows = affected_rows.saturating_add(1);
+
+                }
+
+                if let Err(err) = append_row_payload_records_batch(
+                    catalog,
+                    wal,
+                    &table_stream_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    staged_payloads,
+                    Option::<Vec<MutationRowMap>>::None,
+                    common::epoch_nanos!(),
+                    Some(group_id),
+                ) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert WAL append failed: {err}"),
+                    );
+                }
+
+                log::debug!(
+                    "insert append-only fast-path execution table={} rows={} runtime_indexes={}",
+                    table.table_id,
+                    affected_rows,
+                    table.indexes.len(),
+                );
+
+                if affected_rows > 0 {
+                    LAST_INSERT_ID_CONTEXT.with(|ctx| {
+                        *ctx.borrow_mut() = 1;
+                    });
+                }
+
+                return mutation_response_for_result(
+                    request_id,
+                    "insert",
+                    schema,
+                    affected_rows,
+                    None,
+                    &returning_rows,
+                );
+
+            }
+
+            let wal_has_existing_records = wal.latest_transaction_id(&table_stream_id).is_some();
+
+            let unique_fast_path_context = fast_path_simple_values_insert
+                .then(|| {
+                    let mut runtime_indexes_for_unique = Vec::with_capacity(unique_indexes.len());
+
+                    for index in &unique_indexes {
+                        let Some(runtime_index) = runtime_indexes
+                            .index_for_table(&table_stream_id, index.index_id.0.as_str())
+                        else {
+                            return None;
+                        };
+
+                        runtime_indexes_for_unique.push((*index, runtime_index));
+                    }
+
+                    if wal_has_existing_records
+                        && runtime_indexes_for_unique
+                            .iter()
+                            .any(|(_, runtime_index)| runtime_index.cardinality() == 0)
+                    {
+                        return None;
+                    }
+
+                    Some(runtime_indexes_for_unique)
+                })
+                .flatten();
+
+            if let Some(unique_runtime_indexes) = unique_fast_path_context {
+
+                let mut staged_unique_keys = unique_indexes
+                    .iter()
+                    .map(|index| {
+                        (
+                            index.index_id.0.as_str(),
+                            HashSet::<Vec<Vec<u8>>>::with_capacity(insert_rows.len()),
+                        )
+                    })
+                    .collect::<HashMap<&str, HashSet<Vec<Vec<u8>>>>>();
+
+                for row in insert_rows.iter() {
+
+                    if row.len() != columns.len() {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!(
+                                "insert failed: row has {} values but {} columns were specified",
+                                row.len(),
+                                columns.len()
+                            ),
+                        );
+                    }
+
+                    let mut payload_row = HashMap::with_capacity(schema.fields.len());
+
+                    for ((column, field), value) in insert_column_fields.iter().zip(row.iter().cloned()) {
+
+                        match value {
+
+                            Some(value_bytes) => {
+                                payload_row.insert((*column).to_string(), value_bytes);
+                            },
+
+                            None => {
+
+                                if let Some(default) = &field.default_value {
+                                    payload_row.insert((*column).to_string(), default.clone());
+                                } else if !field.nullable {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("insert failed: column '{}' cannot be null", column),
+                                    );
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                    for (field_name, default_value, nullable) in &missing_field_defaults {
+
+                        if let Some(default) = default_value {
+                            payload_row.insert((*field_name).to_string(), (*default).clone());
+                            continue;
+                        }
+
+                        if !nullable {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!(
+                                    "insert failed: missing required column '{}'",
+                                    field_name
+                                ),
+                            );
+                        }
+
+                    }
+
+                    let encoded = match encode_row_payload(schema, &payload_row) {
+
+                        Ok(encoded) => encoded,
+
+                        Err(err) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert payload encode failed: {err}"),
+                            );
+                        }
+
+                    };
+
+                    let canonical_row = match decode_row_payload(schema, &encoded) {
+
+                        Ok(row) => row,
+
+                        Err(err) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert payload decode failed: {err}"),
+                            );
+                        }
+
+                    };
+
+                    for (index, runtime_index) in &unique_runtime_indexes {
+
+                        let key = index_value_tuple(index, &canonical_row);
+                        let index_id = index.index_id.0.as_str();
+
+                        let has_persisted_conflict = runtime_index.contains(&key);
+                        let has_staged_conflict = staged_unique_keys
+                            .get(index_id)
+                            .is_some_and(|keys| keys.contains(&key));
+
+                        if !has_persisted_conflict && !has_staged_conflict {
+                            continue;
+                        }
+
+                        let display_fields: Vec<&str> = if index.field_names.is_empty()
+                            && !index.field_name.is_empty()
+                        {
+                            vec![index.field_name.as_str()]
+                        } else {
+                            index.field_names.iter().map(|name| name.as_str()).collect()
+                        };
+
+                        let key_display = display_fields
+                            .iter()
+                            .zip(key.iter())
+                            .map(|(name, val)| {
+                                format!(
+                                    "{}={}",
+                                    name,
+                                    serverlib::display_stored_field_value(val)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        let reason = if index.is_primary_key() {
+                            format!("insert failed: duplicate primary key ({})", key_display)
+                        } else {
+                            format!("insert failed: duplicate unique key ({})", key_display)
+                        };
+
+                        return ConnectorResponse::rejected(request_id.to_string(), reason);
+
+                    }
+
+                    for (index, _) in &unique_runtime_indexes {
+                        let key = index_value_tuple(index, &canonical_row);
+                        let index_id = index.index_id.0.as_str();
+                        if let Some(staged) = staged_unique_keys.get_mut(index_id) {
+                            staged.insert(key);
+                        }
+                    }
+
+                    staged_payloads.push(encoded);
+                    affected_rows = affected_rows.saturating_add(1);
+
+                }
+
+                if let Err(err) = append_row_payload_records_batch(
+                    catalog,
+                    wal,
+                    &table_stream_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    staged_payloads,
+                    Option::<Vec<MutationRowMap>>::None,
+                    common::epoch_nanos!(),
+                    Some(group_id),
+                ) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert WAL append failed: {err}"),
+                    );
+                }
+
+                log::debug!(
+                    "insert unique-runtime fast-path execution table={} rows={} runtime_indexes={}",
+                    table.table_id,
+                    affected_rows,
+                    table.indexes.len(),
+                );
+
+                if affected_rows > 0 {
+                    LAST_INSERT_ID_CONTEXT.with(|ctx| {
+                        *ctx.borrow_mut() = 1;
+                    });
+                }
+
+                return mutation_response_for_result(
+                    request_id,
+                    "insert",
+                    schema,
+                    affected_rows,
+                    None,
+                    &returning_rows,
+                );
+
+            }
+
+            let fast_path_context = fast_path_simple_values_insert
+                .then(|| {
+                    primary_key_details
+                        .as_ref()
+                        .and_then(|(pk_index_id, pk_fields)| {
+                            runtime_indexes
+                                .index_for_table(&table_stream_id, pk_index_id)
+                                .map(|pk_runtime| (pk_fields, pk_runtime))
+                        })
+                })
+                .flatten()
+                .filter(|(_, pk_runtime)| {
+                    !wal_has_existing_records || pk_runtime.cardinality() > 0
+                })
+                .filter(|_| non_primary_unique_indexes.is_empty());
+
+            if let Some((pk_fields, pk_runtime)) = fast_path_context {
+
+                for row in insert_rows.iter() {
+
+                    if row.len() != columns.len() {
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!(
+                                "insert failed: row has {} values but {} columns were specified",
+                                row.len(),
+                                columns.len()
+                            ),
+                        );
+                    }
+
+                    let mut payload_row = HashMap::with_capacity(schema.fields.len());
+
+                    for ((column, field), value) in insert_column_fields.iter().zip(row.iter().cloned()) {
+
+                        match value {
+
+                            Some(value_bytes) => {
+                                payload_row.insert((*column).to_string(), value_bytes);
+                            },
+
+                            None => {
+
+                                if let Some(default) = &field.default_value {
+                                    payload_row.insert((*column).to_string(), default.clone());
+                                } else if !field.nullable {
+                                    return ConnectorResponse::rejected(
+                                        request_id.to_string(),
+                                        format!("insert failed: column '{}' cannot be null", column),
+                                    );
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                    for (field_name, default_value, nullable) in &missing_field_defaults {
+
+                        if let Some(default) = default_value {
+                            payload_row.insert((*field_name).to_string(), (*default).clone());
+                            continue;
+                        }
+
+                        if !nullable {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!(
+                                    "insert failed: missing required column '{}'",
+                                    field_name
+                                ),
+                            );
+                        }
+
+                    }
+
+                    let encoded = match encode_row_payload(schema, &payload_row) {
+
+                        Ok(encoded) => encoded,
+
+                        Err(err) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert payload encode failed: {err}"),
+                            );
+                        }
+
+                    };
+
+                    let canonical_row = match decode_row_payload(schema, &encoded) {
+                        
+                        Ok(row) => row,
+
+                        Err(err) => {
+                            return ConnectorResponse::rejected(
+                                request_id.to_string(),
+                                format!("insert payload decode failed: {err}"),
+                            );
+                        }
+
+                    };
+
+                    let incoming_pk = pk_fields
+                        .iter()
+                        .map(|pk| canonical_row.get(*pk).cloned().unwrap_or_default())
+                        .collect::<Vec<_>>();
+
+                    if pk_runtime.contains(&incoming_pk)
+                        || staged_pk_keys.contains(&incoming_pk)
+                    {
+                        let pk_display = pk_fields
+                            .iter()
+                            .zip(incoming_pk.iter())
+                            .map(|(name, val)| {
+                                format!("{}={}", name, serverlib::display_stored_field_value(val))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        return ConnectorResponse::rejected(
+                            request_id.to_string(),
+                            format!("insert failed: duplicate primary key ({})", pk_display),
+                        );
+                    }
+
+                    staged_pk_keys.insert(incoming_pk);
+                    staged_payloads.push(encoded);
+                    affected_rows = affected_rows.saturating_add(1);
+
+                }
+
+                if let Err(err) = append_row_payload_records_batch(
+                    catalog,
+                    wal,
+                    &table_stream_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    staged_payloads,
+                    Option::<Vec<MutationRowMap>>::None,
+                    common::epoch_nanos!(),
+                    Some(group_id),
+                ) {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("insert WAL append failed: {err}"),
+                    );
+                }
+
+                log::debug!(
+                    "insert fast-path execution table={} rows={} runtime_indexes={}",
+                    table.table_id,
+                    affected_rows,
+                    table.indexes.len(),
+                );
+
+                if affected_rows > 0 {
+                    LAST_INSERT_ID_CONTEXT.with(|ctx| {
+                        *ctx.borrow_mut() = 1;
+                    });
+                }
+
+                return mutation_response_for_result(
+                    request_id,
+                    "insert",
+                    schema,
+                    affected_rows,
+                    None,
+                    &returning_rows,
+                );
+
+            }
+
+            let mut existing_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
+            let mut existing_pk_rows = HashMap::<Vec<Vec<u8>>, (u64, MutationRowMap)>::new();
+            let payload_context = payload_context_for_table(catalog, &plan.table_id);
+            let current_live_rows = load_live_rows_with_context(
+                wal,
+                &table_stream_id,
+                schema,
+                &payload_context,
+            )
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(row_id, row_map)| (row_id, Arc::new(row_map)))
+                .collect::<Vec<_>>();
+            
+            let current_live_row_ids = current_live_rows
+                .iter()
+                .map(|(row_id, _)| *row_id)
+                .collect::<HashSet<_>>();
+
+            existing_pk_keys.reserve(current_live_rows.len());
+            existing_pk_rows.reserve(current_live_rows.len());
+
+            if let Some((pk_index_id, _)) = primary_key_details.as_ref()
+                && let Some(pk_index) = table
+                    .indexes
+                    .values()
+                    .find(|index| index.index_id.0.as_str() == *pk_index_id)
+            {
+                for (row_id, row_map) in current_live_rows.iter().cloned() {
+                    let key = index_value_tuple(pk_index, row_map.as_ref());
+                    existing_pk_keys.insert(key.clone());
+                    existing_pk_rows.insert(key, (row_id, row_map));
+                }
+            }
+
+            let mut existing_unique_rows = HashMap::<
+                &str,
+                HashMap<Vec<Vec<u8>>, (u64, MutationRowMap)>,
+            >::with_capacity(unique_indexes.len());
+
+            for index in &unique_indexes {
+
+                let mut index_rows = HashMap::with_capacity(current_live_rows.len());
+
+                for (row_id, row_map) in current_live_rows.iter().cloned() {
+                    index_rows.insert(index_value_tuple(index, row_map.as_ref()), (row_id, row_map));
+                }
+
+                existing_unique_rows.insert(index.index_id.0.as_str(), index_rows);
+
+            }
+
+            let mut staged_unique_positions = unique_indexes
+                .iter()
+                .map(|index| {
+                    (
+                        index.index_id.0.as_str(),
+                        HashMap::with_capacity(insert_rows.len()),
+                    )
+                })
+                .collect::<HashMap<&str, HashMap<Vec<Vec<u8>>, usize>>>();
+
+            let insert_requires_row_map = plan.returning.is_some()
+                || track_runtime_indexes_for_insert
+                || plan.replace_into
+                || !plan.on_duplicate_update.is_empty()
+                || primary_key_details.is_some()
+                || !non_primary_unique_indexes.is_empty();
 
             for row in insert_rows.iter() {
 
@@ -471,20 +1022,25 @@ fn execute_insert_locked(
                 }
 
                 let canonical_row = match decode_row_payload(schema, &encoded) {
+                    
                     Ok(row) => row,
+
                     Err(err) => {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
                             format!("insert payload decode failed: {err}"),
                         );
                     }
+
                 };
 
                 if plan.replace_into {
+
                     let mut persisted_conflict = None;
                     let mut staged_conflict_position = None;
 
                     for index in &unique_indexes {
+
                         let index_id = index.index_id.0.as_str();
                         let key = index_value_tuple(index, &canonical_row);
 
@@ -505,17 +1061,22 @@ fn execute_insert_locked(
                             persisted_conflict = Some((row_id, row));
                             break;
                         }
+
                     }
 
                     if let Some((row_id, existing_row)) = persisted_conflict {
+
                         let delete_payload = match encode_row_payload(schema, existing_row.as_ref()) {
+
                             Ok(encoded) => encoded,
+
                             Err(err) => {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
                                     format!("insert replace payload encode failed: {err}"),
                                 );
                             }
+
                         };
 
                         if let Err(err) = append_row_payload_record_with_live_row_ids_and_prepared_row_map(
@@ -560,12 +1121,15 @@ fn execute_insert_locked(
                         let canonical_row = Arc::new(canonical_row);
 
                         for index in &unique_indexes {
+
                             let old_key = index_value_tuple(index, existing_row.as_ref());
                             let new_key = index_value_tuple(index, canonical_row.as_ref());
+
                             if let Some(rows) = existing_unique_rows.get_mut(index.index_id.0.as_str()) {
                                 rows.remove(&old_key);
                                 rows.insert(new_key, (row_id, Arc::clone(&canonical_row)));
                             }
+
                         }
 
                         if plan.returning.is_some() {
@@ -573,25 +1137,31 @@ fn execute_insert_locked(
                         }
 
                         affected_rows = affected_rows.saturating_add(1);
+                        
                         continue;
+
                     }
 
                     if let Some(position) = staged_conflict_position {
-                        let previous_row = Arc::clone(&staged_rows[position]);
 
+                        let previous_row = Arc::clone(&staged_rows[position]);
                         let canonical_row = Arc::new(canonical_row);
 
                         staged_payloads[position] = encoded;
                         staged_rows[position] = Arc::clone(&canonical_row);
 
                         for index in &unique_indexes {
+
                             let old_key = index_value_tuple(index, previous_row.as_ref());
                             let new_key = index_value_tuple(index, canonical_row.as_ref());
+
                             let positions = staged_unique_positions
                                 .get_mut(index.index_id.0.as_str())
                                 .expect("staged unique index positions should be initialized");
+
                             positions.remove(&old_key);
                             positions.insert(new_key, position);
+
                         }
 
                         if plan.returning.is_some() {
@@ -600,14 +1170,18 @@ fn execute_insert_locked(
 
                         affected_rows = affected_rows.saturating_add(1);
                         continue;
+
                     }
+
                 }
 
                 if !plan.on_duplicate_update.is_empty() {
+
                     let mut persisted_conflict = None;
                     let mut staged_conflict_position = None;
 
                     for index in &unique_indexes {
+
                         let index_id = index.index_id.0.as_str();
                         let key = index_value_tuple(index, &canonical_row);
 
@@ -628,17 +1202,22 @@ fn execute_insert_locked(
                             persisted_conflict = Some((row_id, row));
                             break;
                         }
+
                     }
 
                     if let Some((row_id, existing_row)) = persisted_conflict {
+
                         let delete_payload = match encode_row_payload(schema, existing_row.as_ref()) {
+
                             Ok(encoded) => encoded,
+
                             Err(err) => {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
                                     format!("insert duplicate update payload encode failed: {err}"),
                                 );
                             }
+
                         };
 
                         let mut updated_row = existing_row.as_ref().clone();
@@ -655,7 +1234,9 @@ fn execute_insert_locked(
                         }
 
                         for field in &schema.fields {
+
                             if !updated_row.contains_key(&field.field_name) && !field.nullable {
+
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
                                     format!(
@@ -663,27 +1244,35 @@ fn execute_insert_locked(
                                         field.field_name
                                     ),
                                 );
+
                             }
+
                         }
 
                         let insert_payload = match encode_row_payload(schema, &updated_row) {
+
                             Ok(encoded) => encoded,
+
                             Err(err) => {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
                                     format!("insert duplicate update payload encode failed: {err}"),
                                 );
                             }
+
                         };
 
                         let updated_row = match decode_row_payload(schema, &insert_payload) {
+
                             Ok(row) => row,
+
                             Err(err) => {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
                                     format!("insert duplicate update payload decode failed: {err}"),
                                 );
                             }
+
                         };
 
                         let updated_row = Arc::new(updated_row);
@@ -728,19 +1317,24 @@ fn execute_insert_locked(
                         }
 
                         for index in &unique_indexes {
+                            
                             let old_key = index_value_tuple(index, existing_row.as_ref());
                             let new_key = index_value_tuple(index, updated_row.as_ref());
+                            
                             if let Some(rows) = existing_unique_rows.get_mut(index.index_id.0.as_str()) {
                                 rows.remove(&old_key);
                                 rows.insert(new_key, (row_id, Arc::clone(&updated_row)));
                             }
+
                         }
 
                         if let Some((_, pk_fields)) = primary_key_details.as_ref() {
+
                             let old_pk = pk_fields
                                 .iter()
                                 .map(|pk| existing_row.get(*pk).cloned().unwrap_or_default())
                                 .collect::<Vec<_>>();
+
                             let new_pk = pk_fields
                                 .iter()
                                 .map(|pk| updated_row.get(*pk).cloned().unwrap_or_default())
@@ -750,6 +1344,7 @@ fn execute_insert_locked(
                             existing_pk_keys.insert(new_pk.clone());
                             existing_pk_rows.remove(&old_pk);
                             existing_pk_rows.insert(new_pk, (row_id, Arc::clone(&updated_row)));
+
                         }
 
                         if plan.returning.is_some() {
@@ -758,9 +1353,11 @@ fn execute_insert_locked(
 
                         affected_rows = affected_rows.saturating_add(1);
                         continue;
+
                     }
 
                     if let Some(position) = staged_conflict_position {
+
                         let previous_row = Arc::clone(&staged_rows[position]);
                         let mut updated_row = previous_row.as_ref().clone();
 
@@ -776,6 +1373,7 @@ fn execute_insert_locked(
                         }
 
                         for field in &schema.fields {
+
                             if !updated_row.contains_key(&field.field_name) && !field.nullable {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
@@ -785,26 +1383,33 @@ fn execute_insert_locked(
                                     ),
                                 );
                             }
+
                         }
 
                         let insert_payload = match encode_row_payload(schema, &updated_row) {
+
                             Ok(encoded) => encoded,
+
                             Err(err) => {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
                                     format!("insert duplicate update payload encode failed: {err}"),
                                 );
                             }
+
                         };
 
                         let updated_row = match decode_row_payload(schema, &insert_payload) {
+
                             Ok(row) => row,
+
                             Err(err) => {
                                 return ConnectorResponse::rejected(
                                     request_id.to_string(),
                                     format!("insert duplicate update payload decode failed: {err}"),
                                 );
                             }
+
                         };
 
                         let updated_row = Arc::new(updated_row);
@@ -813,20 +1418,26 @@ fn execute_insert_locked(
                         staged_rows[position] = Arc::clone(&updated_row);
 
                         for index in &unique_indexes {
+
                             let old_key = index_value_tuple(index, previous_row.as_ref());
                             let new_key = index_value_tuple(index, updated_row.as_ref());
+
                             let positions = staged_unique_positions
                                 .get_mut(index.index_id.0.as_str())
                                 .expect("staged unique index positions should be initialized");
+
                             positions.remove(&old_key);
                             positions.insert(new_key, position);
+
                         }
 
                         if let Some((_, pk_fields)) = primary_key_details.as_ref() {
+
                             let old_pk = pk_fields
                                 .iter()
                                 .map(|pk| previous_row.get(*pk).cloned().unwrap_or_default())
                                 .collect::<Vec<_>>();
+
                             let new_pk = pk_fields
                                 .iter()
                                 .map(|pk| updated_row.get(*pk).cloned().unwrap_or_default())
@@ -836,6 +1447,7 @@ fn execute_insert_locked(
                             staged_pk_keys.insert(new_pk.clone());
                             staged_pk_positions.remove(&old_pk);
                             staged_pk_positions.insert(new_pk, position);
+
                         }
 
                         if plan.returning.is_some() {
@@ -844,7 +1456,9 @@ fn execute_insert_locked(
 
                         affected_rows = affected_rows.saturating_add(1);
                         continue;
+
                     }
+
                 }
 
                 if !plan.replace_into && plan.on_duplicate_update.is_empty() {
@@ -914,6 +1528,7 @@ fn execute_insert_locked(
                 }
 
                 if let Some((pk_index_id, pk_fields)) = primary_key_details.as_ref() {
+                    
                     pk_checks = pk_checks.saturating_add(1);
 
                     let incoming_pk = pk_fields
@@ -957,7 +1572,9 @@ fn execute_insert_locked(
                                 }
 
                                 for field in &schema.fields {
+                                    
                                     if !updated_row.contains_key(&field.field_name) && !field.nullable {
+
                                         return ConnectorResponse::rejected(
                                             request_id.to_string(),
                                             format!(
@@ -965,27 +1582,35 @@ fn execute_insert_locked(
                                                 field.field_name
                                             ),
                                         );
+
                                     }
+
                                 }
 
                                 let insert_payload = match encode_row_payload(schema, &updated_row) {
+
                                     Ok(encoded) => encoded,
+
                                     Err(err) => {
                                         return ConnectorResponse::rejected(
                                             request_id.to_string(),
                                             format!("insert duplicate update payload encode failed: {err}"),
                                         );
                                     }
+
                                 };
 
                                 let updated_row = match decode_row_payload(schema, &insert_payload) {
+
                                     Ok(row) => row,
+
                                     Err(err) => {
                                         return ConnectorResponse::rejected(
                                             request_id.to_string(),
                                             format!("insert duplicate update payload decode failed: {err}"),
                                         );
                                     }
+
                                 };
 
                                 let updated_row = Arc::new(updated_row);
@@ -1036,11 +1661,13 @@ fn execute_insert_locked(
                                 existing_pk_rows.insert(incoming_pk.clone(), (row_id, updated_row));
                                 affected_rows = affected_rows.saturating_add(1);
                                 continue;
+
                             }
 
                             if let Some(position) = staged_pk_positions.get(&incoming_pk).copied() {
 
                                 let mut updated_row = staged_rows[position].as_ref().clone();
+
                                 if let Err(message) = apply_insert_on_duplicate_assignments(
                                     &mut updated_row,
                                     &plan.on_duplicate_update,
@@ -1053,6 +1680,7 @@ fn execute_insert_locked(
                                 }
 
                                 for field in &schema.fields {
+
                                     if !updated_row.contains_key(&field.field_name) && !field.nullable {
                                         return ConnectorResponse::rejected(
                                             request_id.to_string(),
@@ -1062,26 +1690,33 @@ fn execute_insert_locked(
                                             ),
                                         );
                                     }
+
                                 }
 
                                 let insert_payload = match encode_row_payload(schema, &updated_row) {
+
                                     Ok(encoded) => encoded,
+
                                     Err(err) => {
                                         return ConnectorResponse::rejected(
                                             request_id.to_string(),
                                             format!("insert duplicate update payload encode failed: {err}"),
                                         );
                                     }
+
                                 };
 
                                 let updated_row = match decode_row_payload(schema, &insert_payload) {
+
                                     Ok(row) => row,
+
                                     Err(err) => {
                                         return ConnectorResponse::rejected(
                                             request_id.to_string(),
                                             format!("insert duplicate update payload decode failed: {err}"),
                                         );
                                     }
+
                                 };
 
                                 let updated_row = Arc::new(updated_row);
@@ -1095,6 +1730,7 @@ fn execute_insert_locked(
 
                                 affected_rows = affected_rows.saturating_add(1);
                                 continue;
+
                             }
 
                             {
@@ -1103,6 +1739,7 @@ fn execute_insert_locked(
                                     "insert failed: ON DUPLICATE KEY UPDATE could not resolve duplicate key source".to_string(),
                                 );
                             }
+
                         }
 
                         if plan.ignore {
@@ -1120,30 +1757,38 @@ fn execute_insert_locked(
                             request_id.to_string(),
                             format!("insert failed: duplicate primary key ({})", pk_display),
                         );
+
                     }
 
                     staged_pk_keys.insert(incoming_pk.clone());
                     existing_pk_keys.insert(incoming_pk);
+
                 }
 
                 staged_payloads.push(encoded);
 
                 if let Some((_, pk_fields)) = primary_key_details.as_ref() {
+                    
                     let incoming_pk = pk_fields
                         .iter()
                         .map(|pk| canonical_row.get(*pk).cloned().unwrap_or_default())
                         .collect::<Vec<_>>();
+
                     let position = staged_payloads.len().saturating_sub(1);
                     staged_pk_positions.insert(incoming_pk, position);
+
                 }
 
                 let position = staged_payloads.len().saturating_sub(1);
                 for index in &unique_indexes {
+
                     let key = index_value_tuple(index, &canonical_row);
+
                     staged_unique_positions
                         .get_mut(index.index_id.0.as_str())
                         .expect("staged unique index positions should be initialized")
                         .insert(key, position);
+
                 }
 
                 let canonical_row = Arc::new(canonical_row);
@@ -1203,6 +1848,7 @@ fn execute_insert_locked(
             )
             
         },
+
     )
 
 }
@@ -1387,13 +2033,16 @@ pub(super) fn execute_update_impl(
     let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
 
     let plan = match serverlib::parse_update_rows_from_statement(statement_sql) {
+
         Ok(plan) => plan,
+
         Err(err) => {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("update parse failed: {err}"),
             );
         }
+
     };
 
     if is_explain {
@@ -1418,6 +2067,7 @@ pub(super) fn execute_update_impl(
         |catalog| {
         execute_update_locked(
             request_id,
+            &statement.sql,
             database_id,
             catalog,
             wal,
@@ -1433,6 +2083,7 @@ pub(super) fn execute_update_impl(
 
 fn execute_update_locked(
     request_id: &str,
+    statement_sql: &str,
     database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -1503,6 +2154,7 @@ fn execute_update_locked(
 
     let primary_key = primary_key_index(table);
     let primary_key_fields = primary_key.map(|pk_index| {
+
         if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
             vec![pk_index.field_name.as_str()]
         } else {
@@ -1512,6 +2164,7 @@ fn execute_update_locked(
                 .map(|name| name.as_str())
                 .collect::<Vec<_>>()
         }
+
     });
 
     let mut pk_keys = if let Some(pk_index) = primary_key {
@@ -1534,6 +2187,7 @@ fn execute_update_locked(
 
     with_statement_write_batch(
         request_id,
+        statement_sql,
         catalog,
         wal,
         table,
@@ -1564,13 +2218,16 @@ fn execute_update_locked(
                 }
 
                 let delete_payload = match encode_row_payload(schema, row_map.as_ref()) {
+
                     Ok(encoded) => encoded,
+
                     Err(err) => {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
                             format!("update delete payload encode failed: {err}"),
                         );
                     }
+
                 };
 
                 let old_pk = primary_key.map(|pk_index| index_value_tuple(pk_index, row_map.as_ref()));
@@ -1578,7 +2235,9 @@ fn execute_update_locked(
                 let mut updated_row = row_map.as_ref().clone();
 
                 for assignment in &plan.assignments {
+                    
                     let resolved_value = match &assignment.value {
+
                         serverlib::UpdateAssignmentValue::Literal(value) => value.clone(),
 
                         serverlib::UpdateAssignmentValue::FunctionExpression(expression_sql) => {
@@ -1595,7 +2254,7 @@ fn execute_update_locked(
                                     );
                                 }
                             }
-                        }
+                        },
 
                         serverlib::UpdateAssignmentValue::ExistingColumn(column_name) => {
                             match updated_row.get(column_name).cloned() {
@@ -1610,7 +2269,7 @@ fn execute_update_locked(
                                     );
                                 }
                             }
-                        }
+                        },
 
                         serverlib::UpdateAssignmentValue::Arithmetic { left, op, right } => {
                             match evaluate_update_assignment_arithmetic(&updated_row, left, *op, right) {
@@ -1623,23 +2282,29 @@ fn execute_update_locked(
                                 }
                             }
                         }
+
                     };
 
                     match resolved_value {
+
                         Some(value) => {
                             if let Some(slot) = updated_row.get_mut(&assignment.field_name) {
                                 *slot = value;
                             } else {
                                 updated_row.insert(assignment.field_name.clone(), value);
                             }
-                        }
+                        },
+
                         None => {
                             updated_row.remove(&assignment.field_name);
                         }
+
                     }
+
                 }
 
                 for field in &schema.fields {
+
                     if !updated_row.contains_key(&field.field_name) && !field.nullable {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
@@ -1649,6 +2314,7 @@ fn execute_update_locked(
                             ),
                         );
                     }
+
                 }
 
                 let insert_payload = match encode_row_payload(schema, &updated_row) {
@@ -1663,19 +2329,23 @@ fn execute_update_locked(
 
                 let canonical_row = if update_requires_canonical_row {
                     Some(match decode_row_payload(schema, &insert_payload) {
+
                         Ok(row) => row,
+
                         Err(err) => {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
                                 format!("update insert payload decode failed: {err}"),
                             );
                         }
+
                     })
                 } else {
                     None
                 };
 
                 if let Some(pk_index) = primary_key {
+
                     let updated_row = canonical_row.as_ref().expect(
                         "canonical row should be present when primary key validation is required",
                     );
@@ -1782,13 +2452,16 @@ pub(super) fn execute_delete_impl(
     let (statement_sql, is_explain) = explain_inner_statement(&statement.sql);
 
     let plan = match serverlib::parse_delete_rows_from_statement(statement_sql) {
+
         Ok(plan) => plan,
+
         Err(err) => {
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("delete parse failed: {err}"),
             );
         }
+
     };
 
     if is_explain {
@@ -1813,6 +2486,7 @@ pub(super) fn execute_delete_impl(
         |catalog| {
         execute_delete_locked(
             request_id,
+            &statement.sql,
             database_id,
             catalog,
             wal,
@@ -1828,6 +2502,7 @@ pub(super) fn execute_delete_impl(
 
 fn execute_delete_locked(
     request_id: &str,
+    statement_sql: &str,
     database_id: &str,
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -1838,6 +2513,7 @@ fn execute_delete_locked(
 ) -> ConnectorResponse {
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
+
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -1845,9 +2521,11 @@ fn execute_delete_locked(
                 plan.table_id, database_id
             ),
         );
+
     };
 
     let Some(table) = catalog.table(&plan.table_id) else {
+
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -1855,6 +2533,7 @@ fn execute_delete_locked(
                 plan.table_id, database_id
             ),
         );
+
     };
 
     let table_stream_id = table_stream_id(catalog, &plan.table_id);
@@ -1894,6 +2573,7 @@ fn execute_delete_locked(
 
     with_statement_write_batch(
         request_id,
+        statement_sql,
         catalog,
         wal,
         table,
@@ -1985,75 +2665,91 @@ fn evaluate_update_assignment_arithmetic(
     let right_value = resolve_update_assignment_operand(row, right)?;
 
     let result = match op {
+
         serverlib::UpdateArithmeticOp::Add => left_value + right_value,
+
         serverlib::UpdateArithmeticOp::Subtract => left_value - right_value,
+
         serverlib::UpdateArithmeticOp::Multiply => left_value * right_value,
+
         serverlib::UpdateArithmeticOp::Divide => {
             if right_value == 0.0 {
                 return Err("arithmetic division by zero is not supported".to_string());
             }
             left_value / right_value
-        }
+        },
+
         serverlib::UpdateArithmeticOp::Modulo => {
             if right_value == 0.0 {
                 return Err("arithmetic modulo by zero is not supported".to_string());
             }
             left_value % right_value
         }
+
     };
 
     Ok(format_update_arithmetic_result(result).into_bytes())
+
 }
 
 fn resolve_update_assignment_operand(
     row: &HashMap<String, Vec<u8>>,
     operand: &serverlib::UpdateAssignmentOperand,
 ) -> Result<f64, String> {
+    
     match operand {
+
         serverlib::UpdateAssignmentOperand::Unary { op, operand } => {
             let value = resolve_update_assignment_operand(row, operand)?;
             match op {
                 serverlib::UnaryArithmeticOp::Plus => Ok(value),
                 serverlib::UnaryArithmeticOp::Minus => Ok(-value),
             }
-        }
+        },
 
         serverlib::UpdateAssignmentOperand::Arithmetic { left, op, right } => {
             let left_value = resolve_update_assignment_operand(row, left)?;
             let right_value = resolve_update_assignment_operand(row, right)?;
 
             match op {
+
                 serverlib::UpdateArithmeticOp::Add => Ok(left_value + right_value),
+
                 serverlib::UpdateArithmeticOp::Subtract => Ok(left_value - right_value),
+
                 serverlib::UpdateArithmeticOp::Multiply => Ok(left_value * right_value),
+
                 serverlib::UpdateArithmeticOp::Divide => {
                     if right_value == 0.0 {
                         return Err("arithmetic division by zero is not supported".to_string());
                     }
                     Ok(left_value / right_value)
-                }
+                },
+
                 serverlib::UpdateArithmeticOp::Modulo => {
                     if right_value == 0.0 {
                         return Err("arithmetic modulo by zero is not supported".to_string());
                     }
                     Ok(left_value % right_value)
                 }
+
             }
-        }
+
+        },
 
         serverlib::UpdateAssignmentOperand::Literal(value) => {
             let Some(value) = value.as_ref() else {
                 return Err("arithmetic operand cannot be NULL".to_string());
             };
             parse_update_numeric_value(value)
-        }
+        },
 
         serverlib::UpdateAssignmentOperand::FunctionExpression(expression_sql) => {
             let Some(value) = evaluate_mutation_function_expression(expression_sql, row, None)? else {
                 return Err("arithmetic operand cannot be NULL".to_string());
             };
             parse_update_numeric_value(&value)
-        }
+        },
 
         serverlib::UpdateAssignmentOperand::ExistingColumn(column_name) => {
             let Some(value) = row.get(column_name) else {
@@ -2063,8 +2759,10 @@ fn resolve_update_assignment_operand(
                 ));
             };
             parse_update_numeric_value(value)
-        }
+        },
+
     }
+
 }
 
 fn parse_update_numeric_value(value: &[u8]) -> Result<f64, String> {
@@ -2088,7 +2786,9 @@ fn apply_delete_order_by_items(
 ) {
 
     rows.sort_by(|left, right| {
+
         for item in order_by_items {
+
             let left_value = resolve_mutation_order_value(left.1.as_ref(), &item.field_name);
             let right_value = resolve_mutation_order_value(right.1.as_ref(), &item.field_name);
 
@@ -2101,90 +2801,115 @@ fn apply_delete_order_by_items(
                     ordering
                 };
             }
+
         }
 
         std::cmp::Ordering::Equal
+
     });
 
 }
 
 fn resolve_mutation_order_value(row: &HashMap<String, Vec<u8>>, field_name: &str) -> String {
+
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_LOWER_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value).to_ascii_lowercase())
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_UPPER_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value).to_ascii_uppercase())
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_ABS_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value))
             .and_then(|value| value.trim().parse::<f64>().ok().map(|parsed| parsed.abs().to_string()))
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_LENGTH_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value).chars().count().to_string())
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_REVERSE_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value).chars().rev().collect::<String>())
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_TRIM_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value).trim().to_string())
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_LTRIM_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value).trim_start().to_string())
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_RTRIM_PREFIX) {
+
         return row
             .get(column)
             .map(|value| serverlib::display_stored_field_value(value).trim_end().to_string())
             .unwrap_or_else(|| "NULL".to_string());
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_CEIL_PREFIX) {
+
         return resolve_mutation_inbuilt_order_expression(
             row,
             &format!("ceil({column})"),
         );
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_FLOOR_PREFIX) {
+
         return resolve_mutation_inbuilt_order_expression(
             row,
             &format!("floor({column})"),
         );
+
     }
 
     if let Some(column) = field_name.strip_prefix(ORDER_EXPR_ROUND_PREFIX) {
+
         return resolve_mutation_inbuilt_order_expression(
             row,
             &format!("round({column})"),
         );
+
     }
 
     if let Some(encoded) = field_name.strip_prefix(ORDER_EXPR_ROUND_SCALE_PREFIX) {
@@ -2205,12 +2930,14 @@ fn resolve_mutation_order_value(row: &HashMap<String, Vec<u8>>, field_name: &str
     row.get(field_name)
         .map(|value| serverlib::display_stored_field_value(value))
         .unwrap_or_else(|| "NULL".to_string())
+
 }
 
 fn resolve_mutation_inbuilt_order_expression(
     row: &HashMap<String, Vec<u8>>,
     expression_sql: &str,
 ) -> String {
+
     evaluate_mutation_function_expression(expression_sql, row, None)
         .ok()
         .flatten()
@@ -2223,7 +2950,9 @@ fn evaluate_mutation_function_expression(
     primary_row: &HashMap<String, Vec<u8>>,
     secondary_row: Option<&HashMap<String, Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, String> {
+
     let mut lookup = |field_name: &str| -> Option<Vec<u8>> {
+
         let normalized = common::normalize_identifier!(field_name);
 
         primary_row
@@ -2264,6 +2993,7 @@ fn evaluate_mutation_function_expression(
         &mut nested,
     )
     .map(Some)
+
 }
 
 fn compare_delete_order_values(left: &str, right: &str) -> std::cmp::Ordering {
@@ -2309,6 +3039,7 @@ where
         database_id,
         table_id,
     ) else {
+
         let database_name = if database_id.trim().is_empty() {
             table_id
                 .rsplit_once('.')
@@ -2322,6 +3053,7 @@ where
             request_id.to_string(),
             format!("database '{}' not found", database_name),
         );
+
     };
 
     let already_locked = catalog
@@ -2428,6 +3160,7 @@ fn apply_insert_on_duplicate_assignments(
     for assignment in assignments {
 
         let resolved_value = match &assignment.value {
+
             serverlib::InsertOnDuplicateAssignmentValue::Literal(value) => value.clone(),
 
             serverlib::InsertOnDuplicateAssignmentValue::FunctionExpression(expression_sql) => {
@@ -2436,7 +3169,7 @@ fn apply_insert_on_duplicate_assignments(
                     target_row,
                     Some(incoming_row),
                 )?
-            }
+            },
 
             serverlib::InsertOnDuplicateAssignmentValue::IncomingColumn(column_name) => {
                 Some(incoming_row.get(column_name).cloned().ok_or_else(|| {
@@ -2445,7 +3178,7 @@ fn apply_insert_on_duplicate_assignments(
                         column_name
                     )
                 })?)
-            }
+            },
 
             serverlib::InsertOnDuplicateAssignmentValue::ExistingColumn(column_name) => {
                 Some(target_row.get(column_name).cloned().ok_or_else(|| {
@@ -2454,7 +3187,7 @@ fn apply_insert_on_duplicate_assignments(
                         column_name
                     )
                 })?)
-            }
+            },
 
             serverlib::InsertOnDuplicateAssignmentValue::Arithmetic { left, op, right } => {
                 Some(evaluate_insert_on_duplicate_arithmetic(
@@ -2464,21 +3197,26 @@ fn apply_insert_on_duplicate_assignments(
                     *op,
                     right,
                 )?)
-            }
+            },
+
         };
 
         match resolved_value {
+            
             Some(value) => {
                 if let Some(slot) = target_row.get_mut(&assignment.field_name) {
                     *slot = value;
                 } else {
                     target_row.insert(assignment.field_name.clone(), value);
                 }
-            }
+            },
+
             None => {
                 target_row.remove(&assignment.field_name);
             }
+
         }
+
     }
 
     Ok(())
@@ -2492,28 +3230,36 @@ fn evaluate_insert_on_duplicate_arithmetic(
     op: serverlib::InsertOnDuplicateArithmeticOp,
     right: &serverlib::InsertOnDuplicateAssignmentOperand,
 ) -> Result<Vec<u8>, String> {
+
     let left_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, left)?;
     let right_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, right)?;
 
     let result = match op {
+
         serverlib::InsertOnDuplicateArithmeticOp::Add => left_value + right_value,
+        
         serverlib::InsertOnDuplicateArithmeticOp::Subtract => left_value - right_value,
+        
         serverlib::InsertOnDuplicateArithmeticOp::Multiply => left_value * right_value,
+        
         serverlib::InsertOnDuplicateArithmeticOp::Divide => {
             if right_value == 0.0 {
                 return Err("ON DUPLICATE KEY UPDATE arithmetic division by zero is not supported".to_string());
             }
             left_value / right_value
-        }
+        },
+
         serverlib::InsertOnDuplicateArithmeticOp::Modulo => {
             if right_value == 0.0 {
                 return Err("ON DUPLICATE KEY UPDATE arithmetic modulo by zero is not supported".to_string());
             }
             left_value % right_value
         }
+
     };
 
     Ok(format_update_arithmetic_result(result).into_bytes())
+
 }
 
 fn resolve_insert_on_duplicate_operand(
@@ -2521,23 +3267,30 @@ fn resolve_insert_on_duplicate_operand(
     incoming_row: &HashMap<String, Vec<u8>>,
     operand: &serverlib::InsertOnDuplicateAssignmentOperand,
 ) -> Result<f64, String> {
+
     match operand {
+
         serverlib::InsertOnDuplicateAssignmentOperand::Unary { op, operand } => {
             let value = resolve_insert_on_duplicate_operand(target_row, incoming_row, operand)?;
             match op {
                 serverlib::UnaryArithmeticOp::Plus => Ok(value),
                 serverlib::UnaryArithmeticOp::Minus => Ok(-value),
             }
-        }
+        },
 
         serverlib::InsertOnDuplicateAssignmentOperand::Arithmetic { left, op, right } => {
+            
             let left_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, left)?;
             let right_value = resolve_insert_on_duplicate_operand(target_row, incoming_row, right)?;
 
             match op {
+
                 serverlib::InsertOnDuplicateArithmeticOp::Add => Ok(left_value + right_value),
+
                 serverlib::InsertOnDuplicateArithmeticOp::Subtract => Ok(left_value - right_value),
+
                 serverlib::InsertOnDuplicateArithmeticOp::Multiply => Ok(left_value * right_value),
+
                 serverlib::InsertOnDuplicateArithmeticOp::Divide => {
                     if right_value == 0.0 {
                         return Err(
@@ -2546,7 +3299,8 @@ fn resolve_insert_on_duplicate_operand(
                         );
                     }
                     Ok(left_value / right_value)
-                }
+                },
+                
                 serverlib::InsertOnDuplicateArithmeticOp::Modulo => {
                     if right_value == 0.0 {
                         return Err(
@@ -2556,15 +3310,17 @@ fn resolve_insert_on_duplicate_operand(
                     }
                     Ok(left_value % right_value)
                 }
+
             }
-        }
+
+        },
 
         serverlib::InsertOnDuplicateAssignmentOperand::Literal(value) => {
             let Some(value) = value.as_ref() else {
                 return Err("ON DUPLICATE KEY UPDATE arithmetic operand cannot be NULL".to_string());
             };
             parse_update_numeric_value(value)
-        }
+        },
 
         serverlib::InsertOnDuplicateAssignmentOperand::FunctionExpression(expression_sql) => {
             let Some(value) = evaluate_mutation_function_expression(
@@ -2575,7 +3331,7 @@ fn resolve_insert_on_duplicate_operand(
                 return Err("ON DUPLICATE KEY UPDATE arithmetic operand cannot be NULL".to_string());
             };
             parse_update_numeric_value(&value)
-        }
+        },
 
         serverlib::InsertOnDuplicateAssignmentOperand::IncomingColumn(column_name) => {
             let Some(value) = incoming_row.get(column_name) else {
@@ -2585,7 +3341,7 @@ fn resolve_insert_on_duplicate_operand(
                 ));
             };
             parse_update_numeric_value(value)
-        }
+        },
 
         serverlib::InsertOnDuplicateAssignmentOperand::ExistingColumn(column_name) => {
             let Some(value) = target_row.get(column_name) else {
@@ -2596,7 +3352,9 @@ fn resolve_insert_on_duplicate_operand(
             };
             parse_update_numeric_value(value)
         }
+
     }
+
 }
 
 fn mutation_response_for_result<R>(
@@ -2647,7 +3405,9 @@ where
     let mut projected = Vec::<(String, String)>::new();
 
     for item in returning {
+        
         match item {
+
             serverlib::MutationReturningItem::Wildcard => {
                 projected.extend(
                     schema
@@ -2655,18 +3415,21 @@ where
                         .iter()
                         .map(|field| (field.field_name.clone(), field.field_name.clone())),
                 );
-            }
+            },
 
             serverlib::MutationReturningItem::Column {
                 field_name,
                 output_name,
             } => projected.push((field_name.clone(), output_name.clone())),
+        
         }
+
     }
 
     let mut columns = Vec::with_capacity(projected.len());
 
     for (idx, (field_name, output_name)) in projected.iter().enumerate() {
+
         let Some(field) = schema.field(field_name) else {
             return Err(format!("unknown column '{field_name}'"));
         };
@@ -2680,6 +3443,7 @@ where
             default_value: None,
             metadata: field.metadata.clone(),
         });
+        
     }
 
     let rows = rows

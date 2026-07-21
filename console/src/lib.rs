@@ -426,7 +426,16 @@ impl ConsoleSession {
                 self.execute_import_with_batching(database_id, statement, transaction_state)
             },
         )
-        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+        .map_err(|err| {
+            log::warn!(
+                "import failed: file={} target_database={} error={}",
+                path.display(),
+                database_id,
+                err,
+            );
+            let boxed: Box<dyn std::error::Error> = err.into();
+            boxed
+        })?;
 
         self
             .finalize_import_batching(&database_id, &mut transaction_state)
@@ -504,7 +513,17 @@ impl ConsoleSession {
                     );
                     
                     return match response.result {
-                        ConnectorResult::Error(message) => Err(message),
+                        ConnectorResult::Error(message) => {
+                            log::warn!(
+                                "import execution failed: db={} kind={} statement_bytes={} preview='{}' error={}",
+                                database_id,
+                                statement_kind.as_str(),
+                                statement.len(),
+                                import::statement_preview(statement),
+                                message,
+                            );
+                            Err(message)
+                        },
                         _ => Ok(()),
                     };
 
@@ -525,6 +544,14 @@ impl ConsoleSession {
                     let is_retryable = import::import_transport_error_is_retryable(&message);
 
                     if !is_retryable || attempt >= IMPORT_TRANSPORT_RETRY_LIMIT {
+                        log::warn!(
+                            "import transport failed: db={} kind={} statement_bytes={} preview='{}' error={}",
+                            database_id,
+                            statement_kind.as_str(),
+                            statement.len(),
+                            import::statement_preview(statement),
+                            message,
+                        );
                         return Err(message);
                     }
 
@@ -584,6 +611,14 @@ impl ConsoleSession {
                         transaction_state.batch_started_at = None;
                     }
 
+                    log::warn!(
+                        "import batch failed: db={} statement_bytes={} preview='{}' error={}",
+                        database_id,
+                        statement.len(),
+                        import::statement_preview(statement),
+                        err,
+                    );
+
                     return Err(err);
                 }
 
@@ -615,6 +650,13 @@ impl ConsoleSession {
                         },
 
                         Err(err) => {
+                            log::warn!(
+                                "import batch commit failed: db={} queued_dml={} error={}",
+                                database_id,
+                                transaction_state.dml_statements_in_batch,
+                                err,
+                            );
+
                             if import::import_duplicate_key_error_is_skippable(&err) {
                                 let _ = self.execute_import_statement(database_id, "rollback", transaction_state);
                                 transaction_state.active = false;
@@ -644,7 +686,19 @@ impl ConsoleSession {
             transaction_state.batch_started_at = None;
         }
 
-        self.execute_import_statement(database_id, statement, transaction_state)
+        match self.execute_import_statement(database_id, statement, transaction_state) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                log::warn!(
+                    "import statement failed outside batching: db={} statement_bytes={} preview='{}' error={}",
+                    database_id,
+                    statement.len(),
+                    import::statement_preview(statement),
+                    err,
+                );
+                Err(err)
+            }
+        }
 
     }
 
@@ -680,6 +734,12 @@ impl ConsoleSession {
                     );
                     Ok(())
                 } else {
+                    log::warn!(
+                        "import finalize failed: db={} queued_dml={} error={}",
+                        database_id,
+                        transaction_state.dml_statements_in_batch,
+                        err,
+                    );
                     Err(err)
                 }
             }

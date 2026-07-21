@@ -200,6 +200,17 @@ fn normalize_import_statement_keeps_unsigned_in_non_create_text() {
 }
 
 #[test]
+fn normalize_import_statement_removes_mysql_definer_clause_from_routines() {
+    let statement = "CREATE DEFINER=`root`@`%` FUNCTION `fndistance`() RETURNS int RETURN 1";
+    let normalized = normalize_import_statement(statement);
+
+    assert_eq!(
+        normalized,
+        "create FUNCTION `fndistance`() RETURNS int RETURN 1"
+    );
+}
+
+#[test]
 fn import_reader_skips_mysql_dump_directives() {
     let input = "\
         set @old_foreign_key_checks=@@foreign_key_checks;\n\
@@ -245,7 +256,45 @@ fn import_reader_skips_delimiter_directive_without_space() {
     .expect("import reader should skip delimiter directives with or without a trailing space");
 
     assert_eq!(transaction_state.committed_batches, 0);
-    assert_eq!(executed, vec!["insert into ip_lookup values (1)"]);
+    assert_eq!(executed, vec!["insert into ip_lookup values (1);"]);
+}
+
+#[test]
+fn import_reader_skips_mysql_routine_ddl_statements() {
+    let input = "\
+        /*!50003 DROP FUNCTION IF EXISTS `fndistance` */;\n\
+        DELIMITER ;;\n\
+        CREATE DEFINER=`root`@`%` FUNCTION `fndistance`() RETURNS decimal(15,7)\n\
+        BEGIN\n\
+            RETURN 0;\n\
+        END ;;\n\
+        DELIMITER ;\n\
+        insert into ip_lookup values (1);\n\
+        drop procedure if exists `sp_placesnearby`;\n\
+    ";
+
+    let mut executed = Vec::<String>::new();
+    let mut transaction_state = new_transaction_state();
+
+    execute_import_from_reader(
+        BufReader::new(input.as_bytes()),
+        "main",
+        &mut transaction_state,
+        |_db, statement, _transaction_state| {
+            executed.push(statement.trim().to_string());
+            Ok(())
+        },
+    )
+    .expect("import reader should preserve mysql routine ddl as a single statement");
+
+    assert_eq!(transaction_state.committed_batches, 0);
+    assert_eq!(executed.len(), 3);
+    assert!(executed[0].starts_with("create FUNCTION `fndistance`() RETURNS decimal(15,7)"));
+    assert!(executed[0].contains("BEGIN"));
+    assert!(executed[0].contains("RETURN 0;"));
+    assert!(executed[0].ends_with("END"));
+    assert_eq!(executed[1], "insert into ip_lookup values (1)");
+    assert_eq!(executed[2], "drop procedure if exists `sp_placesnearby`");
 }
 
 #[test]
