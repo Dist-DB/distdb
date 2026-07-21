@@ -1,6 +1,7 @@
 
 pub mod metadata;
 pub mod database_entity;
+pub mod handle;
 pub mod payload;
 pub mod aspect;
 pub mod kind;

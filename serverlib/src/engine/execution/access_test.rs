@@ -173,9 +173,9 @@ fn field_has_single_column_index_detects_indexed_columns() {
     let schema = seed_users_table(&mut catalog, &wal);
     let table = catalog.table("users").expect("users table should exist");
 
-    assert!(field_has_single_column_index(table, "id"));
-    assert!(field_has_single_column_index(table, "email"));
-    assert!(!field_has_single_column_index(table, "nickname"));
+    assert!(field_has_single_column_index(&table, "id"));
+    assert!(field_has_single_column_index(&table, "email"));
+    assert!(!field_has_single_column_index(&table, "nickname"));
     assert_eq!(schema.fields.len(), 3);
 }
 
@@ -200,7 +200,7 @@ fn choose_index_lookup_returns_lookup_for_matching_index() {
     ]);
 
     let (index, lookup_key) =
-        choose_index_lookup(table, &filters).expect("an index lookup should be selected");
+        choose_index_lookup(&table, &filters).expect("an index lookup should be selected");
 
     assert_eq!(lookup_key.len(), 1);
     assert!(lookup_key[0] == b"1".to_vec() || lookup_key[0] == b"sam@example.com".to_vec());
@@ -220,19 +220,19 @@ fn plan_relation_access_selects_equality_probe_and_full_scan() {
     let mut filters = HashMap::new();
     filters.insert("email".to_string(), b"sam@example.com".to_vec());
 
-    let equality_plan = plan_relation_access(table, false, filters.clone(), None);
+    let equality_plan = plan_relation_access(&table, false, filters.clone(), None);
     assert!(matches!(
         equality_plan.strategy,
         RelationAccessStrategy::EqualityProbe { .. }
     ));
 
-    let full_scan_plan = plan_relation_access(table, false, HashMap::new(), None);
+    let full_scan_plan = plan_relation_access(&table, false, HashMap::new(), None);
     assert!(matches!(
         full_scan_plan.strategy,
         RelationAccessStrategy::FullScan
     ));
 
-    let short_circuit_plan = plan_relation_access(table, true, filters, None);
+    let short_circuit_plan = plan_relation_access(&table, true, filters, None);
     assert!(matches!(
         short_circuit_plan.strategy,
         RelationAccessStrategy::RuntimeIndexLookup { .. }
@@ -270,7 +270,7 @@ fn plan_relation_access_selects_prefix_like_probe_when_available() {
     let table = catalog.table("users").expect("users table should exist");
 
     let prefix_plan = plan_relation_access(
-        table,
+        &table,
         false,
         HashMap::new(),
         Some(("email".to_string(), b"sam".to_vec(), false)),
@@ -618,7 +618,7 @@ fn materialize_relation_rows_supports_full_scan_and_equality_probe() {
 
     let full_scan = materialize_relation_rows(
         &wal,
-        table,
+        &table,
         &schema,
         &runtime_indexes,
         &RelationAccessPlan {
@@ -629,7 +629,7 @@ fn materialize_relation_rows_supports_full_scan_and_equality_probe() {
 
     let equality_probe = materialize_relation_rows(
         &wal,
-        table,
+        &table,
         &schema,
         &runtime_indexes,
         &RelationAccessPlan {
@@ -655,7 +655,7 @@ fn materialize_relation_rows_returns_empty_when_runtime_lookup_key_misses() {
 
     let filters = HashMap::from([("id".to_string(), b"1".to_vec())]);
     let (index, _) =
-        choose_index_lookup(table, &filters).expect("an index lookup should be selected");
+        choose_index_lookup(&table, &filters).expect("an index lookup should be selected");
 
     let mut runtime_indexes = RuntimeIndexStore::new();
     let table_stream_id = if wal.latest_transaction_id_if_loaded(&table.entity_id).is_some() {
@@ -669,7 +669,7 @@ fn materialize_relation_rows_returns_empty_when_runtime_lookup_key_misses() {
 
     let rows = materialize_relation_rows(
         &wal,
-        table,
+        &table,
         &schema,
         &runtime_indexes,
         &RelationAccessPlan {
@@ -693,13 +693,13 @@ fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_state_missin
 
     let filters = HashMap::from([("id".to_string(), b"1".to_vec())]);
     let (index, _) =
-        choose_index_lookup(table, &filters).expect("an index lookup should be selected");
+        choose_index_lookup(&table, &filters).expect("an index lookup should be selected");
 
     let runtime_indexes = RuntimeIndexStore::new();
 
     let rows = materialize_relation_rows(
         &wal,
-        table,
+        &table,
         &schema,
         &runtime_indexes,
         &RelationAccessPlan {

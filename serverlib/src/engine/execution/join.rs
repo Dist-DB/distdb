@@ -35,19 +35,15 @@ where
         return Ok(Vec::new());
     };
 
-    let Some(primary_schema) = catalog.table_schema(&primary_relation.table_id) else {
+    let Some(primary_table) = catalog
+        .table_handle(&primary_relation.table_id)
+        .and_then(|handle| handle.table_snapshot()) else {
         return Err(format!(
             "select join failed: table '{}' not found",
             primary_relation.table_id
         ));
     };
-
-    let Some(primary_table) = catalog.table(&primary_relation.table_id) else {
-        return Err(format!(
-            "select join failed: table '{}' not found",
-            primary_relation.table_id
-        ));
-    };
+    let primary_schema = primary_table.schema.clone();
 
     let mut scoped_primary_table = primary_table.clone();
     if let Some(stream_id) = catalog.entity_wal_stream_id(&primary_relation.table_id) {
@@ -59,14 +55,14 @@ where
 
     let primary_like_filter = primary_condition
         .as_ref()
-        .and_then(|condition| collect_indexable_like_filter_for_schema(primary_schema, condition));
+        .and_then(|condition| collect_indexable_like_filter_for_schema(&primary_schema, condition));
 
     let primary_allow_index_short_circuit = primary_condition
         .as_ref()
         .map(|condition| {
 
             collect_indexable_equality_filters_for_schema(
-                primary_schema,
+                &primary_schema,
                 condition,
                 &mut primary_filter_map,
             )
@@ -84,7 +80,7 @@ where
     let mut joined_rows = materialize_relation_rows(
         wal,
         &scoped_primary_table,
-        primary_schema,
+        &primary_schema,
         runtime_indexes,
         &primary_access_plan,
     )
@@ -107,19 +103,15 @@ where
 
     for (join_index, join) in joins.iter().enumerate() {
 
-        let Some(right_schema) = catalog.table_schema(&join.relation.table_id) else {
+        let Some(right_table) = catalog
+            .table_handle(&join.relation.table_id)
+            .and_then(|handle| handle.table_snapshot()) else {
             return Err(format!(
                 "select join failed: table '{}' not found",
                 join.relation.table_id
             ));
         };
-
-        let Some(right_table) = catalog.table(&join.relation.table_id) else {
-            return Err(format!(
-                "select join failed: table '{}' not found",
-                join.relation.table_id
-            ));
-        };
+        let right_schema = right_table.schema.clone();
 
         let mut scoped_right_table = right_table.clone();
         if let Some(stream_id) = catalog.entity_wal_stream_id(&join.relation.table_id) {
@@ -134,14 +126,14 @@ where
 
         let right_like_filter = right_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(right_schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(&right_schema, condition));
         
         let right_allow_index_short_circuit = right_condition
             .as_ref()
             .map(|condition| {
 
                 collect_indexable_equality_filters_for_schema(
-                    right_schema,
+                    &right_schema,
                     condition,
                     &mut right_filter_map,
                 )
@@ -159,7 +151,7 @@ where
         let right_rows = materialize_relation_rows(
             wal,
             &scoped_right_table,
-            right_schema,
+            &right_schema,
             runtime_indexes,
             &right_access_plan,
         )
@@ -199,7 +191,7 @@ where
         let probe_source = right_access_plan.equality_probe_source().unwrap_or_else(|| {
             right_field_name
                 .map(|field_name| {
-                    if field_has_single_column_index(right_table, field_name) {
+                    if field_has_single_column_index(&right_table, field_name) {
                         EqualityProbeSource::ExistingIndex
                     } else {
                         EqualityProbeSource::TemporaryIndex

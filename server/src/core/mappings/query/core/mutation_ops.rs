@@ -276,7 +276,7 @@ fn execute_insert_locked(
         statement_sql,
         catalog,
         wal,
-        table,
+        &table,
         runtime_indexes,
         external_write_group_id,
         touched_write_tables,
@@ -291,10 +291,10 @@ fn execute_insert_locked(
             let mut pk_checks = 0u64;
             let mut staged_payloads = Vec::with_capacity(insert_rows.len());
             let mut staged_rows = Vec::<MutationRowMap>::with_capacity(insert_rows.len());
-            let track_runtime_indexes_for_insert = derived_indexes_for_table(table).next().is_some();
+            let track_runtime_indexes_for_insert = derived_indexes_for_table(&table).next().is_some();
             let mut staged_pk_keys = HashSet::<Vec<Vec<u8>>>::with_capacity(insert_rows.len());
             let mut staged_pk_positions = HashMap::<Vec<Vec<u8>>, usize>::with_capacity(insert_rows.len());
-            let primary_key_details = primary_key_index(table).map(|pk_index| {
+            let primary_key_details = primary_key_index(&table).map(|pk_index| {
                 let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
                     vec![pk_index.field_name.as_str()]
                 } else {
@@ -415,7 +415,7 @@ fn execute_insert_locked(
 
                     }
 
-                    let encoded = match encode_row_payload(schema, &payload_row) {
+                    let encoded = match encode_row_payload(&schema, &payload_row) {
 
                         Ok(encoded) => encoded,
 
@@ -437,7 +437,7 @@ fn execute_insert_locked(
                     catalog,
                     wal,
                     &table_stream_id,
-                    table,
+                    &table,
                     runtime_indexes,
                     TransactionKind::Insert,
                     staged_payloads,
@@ -467,7 +467,7 @@ fn execute_insert_locked(
                 return mutation_response_for_result(
                     request_id,
                     "insert",
-                    schema,
+                    &schema,
                     affected_rows,
                     None,
                     &returning_rows,
@@ -482,6 +482,7 @@ fn execute_insert_locked(
                     let mut runtime_indexes_for_unique = Vec::with_capacity(unique_indexes.len());
 
                     for index in &unique_indexes {
+
                         let Some(runtime_index) = runtime_indexes
                             .index_for_table(&table_stream_id, index.index_id.0.as_str())
                         else {
@@ -489,6 +490,7 @@ fn execute_insert_locked(
                         };
 
                         runtime_indexes_for_unique.push((*index, runtime_index));
+                        
                     }
 
                     if wal_has_existing_records
@@ -574,7 +576,7 @@ fn execute_insert_locked(
 
                     }
 
-                    let encoded = match encode_row_payload(schema, &payload_row) {
+                    let encoded = match encode_row_payload(&schema, &payload_row) {
 
                         Ok(encoded) => encoded,
 
@@ -587,7 +589,7 @@ fn execute_insert_locked(
 
                     };
 
-                    let canonical_row = match decode_row_payload(schema, &encoded) {
+                    let canonical_row = match decode_row_payload(&schema, &encoded) {
 
                         Ok(row) => row,
 
@@ -662,7 +664,7 @@ fn execute_insert_locked(
                     catalog,
                     wal,
                     &table_stream_id,
-                    table,
+                    &table,
                     runtime_indexes,
                     TransactionKind::Insert,
                     staged_payloads,
@@ -692,7 +694,7 @@ fn execute_insert_locked(
                 return mutation_response_for_result(
                     request_id,
                     "insert",
-                    schema,
+                    &schema,
                     affected_rows,
                     None,
                     &returning_rows,
@@ -777,7 +779,7 @@ fn execute_insert_locked(
 
                     }
 
-                    let encoded = match encode_row_payload(schema, &payload_row) {
+                    let encoded = match encode_row_payload(&schema, &payload_row) {
 
                         Ok(encoded) => encoded,
 
@@ -790,7 +792,7 @@ fn execute_insert_locked(
 
                     };
 
-                    let canonical_row = match decode_row_payload(schema, &encoded) {
+                    let canonical_row = match decode_row_payload(&schema, &encoded) {
                         
                         Ok(row) => row,
 
@@ -836,7 +838,7 @@ fn execute_insert_locked(
                     catalog,
                     wal,
                     &table_stream_id,
-                    table,
+                    &table,
                     runtime_indexes,
                     TransactionKind::Insert,
                     staged_payloads,
@@ -866,7 +868,7 @@ fn execute_insert_locked(
                 return mutation_response_for_result(
                     request_id,
                     "insert",
-                    schema,
+                    &schema,
                     affected_rows,
                     None,
                     &returning_rows,
@@ -880,7 +882,7 @@ fn execute_insert_locked(
             let current_live_rows = load_live_rows_with_context(
                 wal,
                 &table_stream_id,
-                schema,
+                &schema,
                 &payload_context,
             )
                 .unwrap_or_default()
@@ -1002,7 +1004,7 @@ fn execute_insert_locked(
 
                 }
 
-                let encoded = match encode_row_payload(schema, &payload_row) {
+                let encoded = match encode_row_payload(&schema, &payload_row) {
                     
                     Ok(encoded) => encoded,
                     
@@ -1021,7 +1023,7 @@ fn execute_insert_locked(
                     continue;
                 }
 
-                let canonical_row = match decode_row_payload(schema, &encoded) {
+                let canonical_row = match decode_row_payload(&schema, &encoded) {
                     
                     Ok(row) => row,
 
@@ -1066,7 +1068,7 @@ fn execute_insert_locked(
 
                     if let Some((row_id, existing_row)) = persisted_conflict {
 
-                        let delete_payload = match encode_row_payload(schema, existing_row.as_ref()) {
+                        let delete_payload = match encode_row_payload(&schema, existing_row.as_ref()) {
 
                             Ok(encoded) => encoded,
 
@@ -1083,7 +1085,7 @@ fn execute_insert_locked(
                             catalog,
                             wal,
                             &table_stream_id,
-                            table,
+                            &table,
                             runtime_indexes,
                             TransactionKind::Delete,
                             delete_payload,
@@ -1103,7 +1105,7 @@ fn execute_insert_locked(
                             catalog,
                             wal,
                             &table_stream_id,
-                            table,
+                            &table,
                             runtime_indexes,
                             TransactionKind::Insert,
                             encoded,
@@ -1207,7 +1209,7 @@ fn execute_insert_locked(
 
                     if let Some((row_id, existing_row)) = persisted_conflict {
 
-                        let delete_payload = match encode_row_payload(schema, existing_row.as_ref()) {
+                        let delete_payload = match encode_row_payload(&schema, existing_row.as_ref()) {
 
                             Ok(encoded) => encoded,
 
@@ -1249,7 +1251,7 @@ fn execute_insert_locked(
 
                         }
 
-                        let insert_payload = match encode_row_payload(schema, &updated_row) {
+                        let insert_payload = match encode_row_payload(&schema, &updated_row) {
 
                             Ok(encoded) => encoded,
 
@@ -1262,7 +1264,7 @@ fn execute_insert_locked(
 
                         };
 
-                        let updated_row = match decode_row_payload(schema, &insert_payload) {
+                        let updated_row = match decode_row_payload(&schema, &insert_payload) {
 
                             Ok(row) => row,
 
@@ -1281,7 +1283,7 @@ fn execute_insert_locked(
                             catalog,
                             wal,
                             &table_stream_id,
-                            table,
+                            &table,
                             runtime_indexes,
                             TransactionKind::Delete,
                             delete_payload,
@@ -1301,7 +1303,7 @@ fn execute_insert_locked(
                             catalog,
                             wal,
                             &table_stream_id,
-                            table,
+                            &table,
                             runtime_indexes,
                             TransactionKind::Insert,
                             insert_payload,
@@ -1386,7 +1388,7 @@ fn execute_insert_locked(
 
                         }
 
-                        let insert_payload = match encode_row_payload(schema, &updated_row) {
+                        let insert_payload = match encode_row_payload(&schema, &updated_row) {
 
                             Ok(encoded) => encoded,
 
@@ -1399,7 +1401,7 @@ fn execute_insert_locked(
 
                         };
 
-                        let updated_row = match decode_row_payload(schema, &insert_payload) {
+                        let updated_row = match decode_row_payload(&schema, &insert_payload) {
 
                             Ok(row) => row,
 
@@ -1548,7 +1550,7 @@ fn execute_insert_locked(
 
                             if let Some((row_id, existing_row)) = existing_pk_rows.get(&incoming_pk).cloned() {
 
-                                let delete_payload = match encode_row_payload(schema, existing_row.as_ref()) {
+                                let delete_payload = match encode_row_payload(&schema, existing_row.as_ref()) {
                                     Ok(encoded) => encoded,
                                     Err(err) => {
                                         return ConnectorResponse::rejected(
@@ -1587,7 +1589,7 @@ fn execute_insert_locked(
 
                                 }
 
-                                let insert_payload = match encode_row_payload(schema, &updated_row) {
+                                let insert_payload = match encode_row_payload(&schema, &updated_row) {
 
                                     Ok(encoded) => encoded,
 
@@ -1600,7 +1602,7 @@ fn execute_insert_locked(
 
                                 };
 
-                                let updated_row = match decode_row_payload(schema, &insert_payload) {
+                                let updated_row = match decode_row_payload(&schema, &insert_payload) {
 
                                     Ok(row) => row,
 
@@ -1619,7 +1621,7 @@ fn execute_insert_locked(
                                     catalog,
                                     wal,
                                     &table_stream_id,
-                                    table,
+                                    &table,
                                     runtime_indexes,
                                     TransactionKind::Delete,
                                     delete_payload,
@@ -1639,7 +1641,7 @@ fn execute_insert_locked(
                                     catalog,
                                     wal,
                                     &table_stream_id,
-                                    table,
+                                    &table,
                                     runtime_indexes,
                                     TransactionKind::Insert,
                                     insert_payload,
@@ -1693,7 +1695,7 @@ fn execute_insert_locked(
 
                                 }
 
-                                let insert_payload = match encode_row_payload(schema, &updated_row) {
+                                let insert_payload = match encode_row_payload(&schema, &updated_row) {
 
                                     Ok(encoded) => encoded,
 
@@ -1706,7 +1708,7 @@ fn execute_insert_locked(
 
                                 };
 
-                                let updated_row = match decode_row_payload(schema, &insert_payload) {
+                                let updated_row = match decode_row_payload(&schema, &insert_payload) {
 
                                     Ok(row) => row,
 
@@ -1809,7 +1811,7 @@ fn execute_insert_locked(
                 catalog,
                 wal,
                 &table_stream_id,
-                table,
+                &table,
                 runtime_indexes,
                 TransactionKind::Insert,
                 staged_payloads,
@@ -1841,7 +1843,7 @@ fn execute_insert_locked(
             mutation_response_for_result(
                 request_id,
                 "insert",
-                schema,
+                &schema,
                 affected_rows,
                 plan.returning.as_ref(),
                 &returning_rows,
@@ -1937,7 +1939,7 @@ fn materialize_insert_source_rows<'a>(
                     .where_condition
                     .as_ref()
                     .and_then(|condition| {
-                        collect_indexable_like_filter_for_schema(schema, condition)
+                        collect_indexable_like_filter_for_schema(&schema, condition)
                     });
 
                 let allow_index_short_circuit = read_plan
@@ -1945,7 +1947,7 @@ fn materialize_insert_source_rows<'a>(
                     .as_ref()
                     .map(|condition| {
                         collect_indexable_equality_filters_for_schema(
-                            schema,
+                            &schema,
                             condition,
                             &mut index_filter_map,
                         )
@@ -1963,7 +1965,7 @@ fn materialize_insert_source_rows<'a>(
                 serverlib::execute_relation_select_plan(
                     wal,
                     &scoped_table,
-                    schema,
+                    &schema,
                     runtime_indexes,
                     read_plan,
                     &access_plan,
@@ -2130,7 +2132,7 @@ fn execute_update_locked(
         catalog,
         wal,
         runtime_indexes,
-        schema,
+        &schema,
         &plan.table_id,
         &table_stream_id,
         &plan.relations,
@@ -2152,7 +2154,7 @@ fn execute_update_locked(
         current_live_rows.truncate(limit);
     }
 
-    let primary_key = primary_key_index(table);
+    let primary_key = primary_key_index(&table);
     let primary_key_fields = primary_key.map(|pk_index| {
 
         if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
@@ -2178,7 +2180,7 @@ fn execute_update_locked(
 
     let update_requires_canonical_row = primary_key.is_some()
         || plan.returning.is_some()
-        || derived_indexes_for_table(table).next().is_some();
+        || derived_indexes_for_table(&table).next().is_some();
 
     let current_live_row_ids = current_live_rows
         .iter()
@@ -2190,7 +2192,7 @@ fn execute_update_locked(
         statement_sql,
         catalog,
         wal,
-        table,
+        &table,
         runtime_indexes,
         external_write_group_id,
         touched_write_tables,
@@ -2217,7 +2219,7 @@ fn execute_update_locked(
                     continue;
                 }
 
-                let delete_payload = match encode_row_payload(schema, row_map.as_ref()) {
+                let delete_payload = match encode_row_payload(&schema, row_map.as_ref()) {
 
                     Ok(encoded) => encoded,
 
@@ -2317,7 +2319,7 @@ fn execute_update_locked(
 
                 }
 
-                let insert_payload = match encode_row_payload(schema, &updated_row) {
+                let insert_payload = match encode_row_payload(&schema, &updated_row) {
                     Ok(encoded) => encoded,
                     Err(err) => {
                         return ConnectorResponse::rejected(
@@ -2328,7 +2330,7 @@ fn execute_update_locked(
                 };
 
                 let canonical_row = if update_requires_canonical_row {
-                    Some(match decode_row_payload(schema, &insert_payload) {
+                    Some(match decode_row_payload(&schema, &insert_payload) {
 
                         Ok(row) => row,
 
@@ -2378,7 +2380,7 @@ fn execute_update_locked(
                     catalog,
                     wal,
                     &table_stream_id,
-                    table,
+                    &table,
                     runtime_indexes,
                     TransactionKind::Delete,
                     delete_payload,
@@ -2398,7 +2400,7 @@ fn execute_update_locked(
                     catalog,
                     wal,
                     &table_stream_id,
-                    table,
+                    &table,
                     runtime_indexes,
                     TransactionKind::Insert,
                     insert_payload,
@@ -2426,7 +2428,7 @@ fn execute_update_locked(
             mutation_response_for_result(
                 request_id,
                 "update",
-                schema,
+                &schema,
                 affected_rows,
                 plan.returning.as_ref(),
                 &returning_rows,
@@ -2544,7 +2546,7 @@ fn execute_delete_locked(
         catalog,
         wal,
         runtime_indexes,
-        schema,
+        &schema,
         &plan.table_id,
         &table_stream_id,
         &plan.relations,
@@ -2576,7 +2578,7 @@ fn execute_delete_locked(
         statement_sql,
         catalog,
         wal,
-        table,
+        &table,
         runtime_indexes,
         external_write_group_id,
         touched_write_tables,
@@ -2603,7 +2605,7 @@ fn execute_delete_locked(
                     continue;
                 }
 
-                let delete_payload = match encode_row_payload(schema, row_map.as_ref()) {
+                let delete_payload = match encode_row_payload(&schema, row_map.as_ref()) {
                     Ok(encoded) => encoded,
                     Err(err) => {
                         return ConnectorResponse::rejected(
@@ -2617,7 +2619,7 @@ fn execute_delete_locked(
                     catalog,
                     wal,
                     &table_stream_id,
-                    table,
+                    &table,
                     runtime_indexes,
                     TransactionKind::Delete,
                     delete_payload,
@@ -2644,7 +2646,7 @@ fn execute_delete_locked(
             mutation_response_for_result(
                 request_id,
                 "delete",
-                schema,
+                &schema,
                 affected_rows,
                 plan.returning.as_ref(),
                 &returning_rows,

@@ -27,11 +27,10 @@ where
     E: FnMut(&str) -> Result<R, String>,
 {
 
-    if let Some(ir) = procedure.compiled_ir() {
-        if let Some(plan) = ir.if_else_end_plan() {
+    if let Some(ir) = procedure.compiled_ir()
+        && let Some(plan) = ir.if_else_end_plan() {
             return execute_if_else_end_plan(provider, plan, execute_action);
         }
-    }
 
     if let Some(result) =
         execute_if_else_end_from_create_procedure_sql(provider, &procedure.sql, execute_action)?
@@ -60,7 +59,12 @@ pub fn cleanup_temporary_tables(
     let temporary_tables = catalog
         .table_ids()
         .into_iter()
-        .filter(|table_id| catalog.table(table_id).is_some_and(|table| table.is_temporary()))
+        .filter(|table_id| {
+            catalog
+                .table_handle(table_id)
+                .and_then(|handle| handle.table_snapshot())
+                .is_some_and(|table| table.is_temporary())
+        })
         .collect::<Vec<_>>();
 
     for table_id in temporary_tables {
@@ -135,7 +139,7 @@ where
     let mut scope = ScopedEphemeralTableScope::new(format!(
         "proc_{}_{}",
         common::normalize_identifier!(session_id),
-        &procedure.procedure_id,
+        procedure.procedure_id,
     ));
 
     let invocation_result = execute_stored_procedure_invocation(
@@ -232,6 +236,7 @@ where
 
 }
 
+#[expect(clippy::too_many_arguments, reason = "scoped teardown requires explicit runtime dependencies")]
 pub fn execute_stored_procedure_invocation_over_cursor_with_scoped_teardown<S, R, E>(
     catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -256,7 +261,7 @@ where
     let mut scope = ScopedEphemeralTableScope::new(format!(
         "proc_{}_{}",
         common::normalize_identifier!(session_id),
-        &procedure.procedure_id,
+        procedure.procedure_id,
     ));
 
     let result = execute_stored_procedure_invocation_over_cursor(
@@ -309,7 +314,7 @@ where
 
     for trigger in catalog.triggers_for_event(table_id, timing, event) {
         outcomes.push(execute_trigger_invocation(
-            trigger,
+            &trigger,
             EntityInvocationSource::AutomaticEvent,
             execute_action,
         )?);

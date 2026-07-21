@@ -106,7 +106,8 @@ impl SelectReadPlanCursorSource {
             let table_id = read_plan.table_id.as_str();
 
             let table = catalog
-                .table(table_id)
+                .table_handle(table_id)
+                .and_then(|handle| handle.table_snapshot())
                 .ok_or_else(|| format!("cursor source select failed: table '{}' not found", table_id))?;
 
             let mut scoped_table = table.clone();
@@ -114,16 +115,14 @@ impl SelectReadPlanCursorSource {
                 scoped_table.entity_id = stream_id;
             }
 
-            let schema = catalog
-                .table_schema(table_id)
-                .ok_or_else(|| format!("cursor source select failed: table '{}' not found", table_id))?;
+            let schema = table.schema.clone();
 
             let mut index_filter_map = HashMap::new();
             let like_filter = read_plan
                 .where_condition
                 .as_ref()
                 .and_then(|condition| {
-                    collect_indexable_like_filter_for_schema(schema, condition)
+                    collect_indexable_like_filter_for_schema(&schema, condition)
                 });
 
             let allow_index_short_circuit = read_plan
@@ -131,7 +130,7 @@ impl SelectReadPlanCursorSource {
                 .as_ref()
                 .map(|condition| {
                     collect_indexable_equality_filters_for_schema(
-                        schema,
+                        &schema,
                         condition,
                         &mut index_filter_map,
                     )
@@ -148,7 +147,7 @@ impl SelectReadPlanCursorSource {
             execute_relation_select_plan(
                 wal,
                 &scoped_table,
-                schema,
+                &schema,
                 runtime_indexes,
                 read_plan,
                 &access_plan,

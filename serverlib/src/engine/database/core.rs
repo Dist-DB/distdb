@@ -9,6 +9,7 @@ pub use crate::engine::database::id::DatabaseId;
 pub use crate::engine::database::replica_state::DatabaseReplicaState;
 pub use crate::engine::database::entity::metadata::EntityMetadata;
 pub use crate::engine::database::entity::database_entity::DatabaseEntity;
+pub use crate::engine::database::entity::handle::EntityHandle;
 pub use crate::engine::database::entity::aspect::DatabaseEntityAspect;
 pub use crate::engine::database::entity::kind::DatabaseEntityKind;
 pub use crate::engine::database::entity::object_ref::DatabaseObjectRef;

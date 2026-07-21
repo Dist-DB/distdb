@@ -120,7 +120,9 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
             .cloned();
 
         let schema = _catalog
-            .table_schema(table_id)
+            .table_handle(table_id)
+            .and_then(|handle| handle.table_snapshot())
+            .map(|table| table.schema)
             .ok_or(DatabaseError::TableNotFound)?;
 
         let mut rewritten = Vec::new();
@@ -134,7 +136,7 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
                     let payload = record
                         .payload_logical()
                         .ok_or(DatabaseError::CatalogWrite)?;
-                    record.set_payload(Some(apply_schema_rules_to_payload(payload, rule_set, schema)?));
+                    record.set_payload(Some(apply_schema_rules_to_payload(payload, rule_set, &schema)?));
                 }
             rewritten.push(record);
         }

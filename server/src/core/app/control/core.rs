@@ -670,7 +670,7 @@ impl ServerApp {
                 let mut entry = self
                     .catalogs
                     .get(&catalog_key)
-                    .and_then(|catalog| catalog.effective_account_acl_entry(&plan.grantee).cloned())
+                    .and_then(|catalog| catalog.effective_account_acl_entry(&plan.grantee))
                     .unwrap_or_else(|| {
                         AccountAclEntry::new(UserId(plan.grantee.clone()), database_name.clone())
                     });

@@ -83,7 +83,7 @@ pub(super) fn execute_select_plan_result(
         .where_condition
         .as_ref()
         .and_then(|condition| {
-            collect_indexable_like_filter_for_schema(schema, condition)
+            collect_indexable_like_filter_for_schema(&schema, condition)
         });
         
     let allow_index_short_circuit = read_plan
@@ -91,7 +91,7 @@ pub(super) fn execute_select_plan_result(
         .as_ref()
         .map(|condition| {
             collect_indexable_equality_filters_for_schema(
-                schema,
+                &schema,
                 condition,
                 &mut index_filter_map,
             )
@@ -108,7 +108,7 @@ pub(super) fn execute_select_plan_result(
     serverlib::execute_relation_select_plan(
         wal,
         &scoped_table,
-        schema,
+        &schema,
         runtime_indexes,
         read_plan,
         &access_plan,
@@ -313,7 +313,7 @@ fn handle_select_introspection_request(
         };
 
         let result = serverlib::show_privileges_result(
-            catalog.effective_account_acl_entries().map(|entry| {
+            catalog.effective_account_acl_entries().into_iter().map(|entry| {
                 let mut privileges = entry.acl.iter().cloned().collect::<Vec<_>>();
                 privileges.sort();
 
@@ -650,7 +650,7 @@ fn handle_select_introspection_request(
 
         let result = if let Some(schema) = catalog.table_schema(&normalized_object_id) {
 
-            serverlib::describe_table_result(schema)
+            serverlib::describe_table_result(&schema)
 
         } else if let Some(view) = catalog.view(&normalized_object_id) {
 
@@ -1316,7 +1316,7 @@ fn build_show_slices_result(
 
     let payload_context = payload_context_for_table(catalog, &source_table_id);
 
-    let live_rows = load_live_rows_with_context(wal, &stream_id, schema, &payload_context)
+    let live_rows = load_live_rows_with_context(wal, &stream_id, &schema, &payload_context)
         .map_err(|err| format!("show slices failed: cannot load source rows: {err}"))?;
 
     let dimension_set = olap_view
@@ -1859,7 +1859,7 @@ fn execute_select_read_plan_without_lock(
 
     }
 
-    let Some(schema) = catalog.table_schema(table_id).cloned() else {
+    let Some(schema) = catalog.table_schema(table_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -1869,7 +1869,7 @@ fn execute_select_read_plan_without_lock(
         );
     };
 
-    let Some(mut scoped_table) = catalog.table(table_id).cloned() else {
+    let Some(mut scoped_table) = catalog.table(table_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!(
@@ -2871,7 +2871,7 @@ fn materialize_select_result_into_scoped_table(
             catalog,
             wal,
             scoped_table_id,
-            scoped_table,
+            &scoped_table,
             runtime_indexes,
             TransactionKind::Insert,
             encoded,

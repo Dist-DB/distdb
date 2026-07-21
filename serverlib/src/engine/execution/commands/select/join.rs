@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr, FunctionArguments};
@@ -277,10 +278,10 @@ where
 
 }
 
-pub fn execute_relation_select_plan<E, R>(
+pub fn execute_relation_select_plan<E, R, T, S>(
     wal: &ConcurrentWalManager,
-    table: &DatabaseTable,
-    schema: &TableSchema,
+    table: T,
+    schema: S,
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
     access_plan: &RelationAccessPlan,
@@ -290,7 +291,11 @@ pub fn execute_relation_select_plan<E, R>(
 where
     E: SqlFunctionEvaluationStrategy,
     R: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
+    T: Borrow<DatabaseTable>,
+    S: Borrow<TableSchema>,
 {
+    let table = table.borrow();
+    let schema = schema.borrow();
 
     let count_star_projection = count_star_projection(read_plan);
 
@@ -676,11 +681,11 @@ fn join_field_can_be_null_extended(
 
 }
 
-fn resolve_join_field<'a>(
-    catalog: &'a DatabaseCatalog,
+fn resolve_join_field(
+    catalog: &DatabaseCatalog,
     relations: &[SelectRelation],
     field_name: &str,
-) -> Option<&'a crate::FieldDef> {
+) -> Option<crate::FieldDef> {
 
     let (qualifier, column_name) = field_name.split_once('.')?;
 
@@ -688,7 +693,10 @@ fn resolve_join_field<'a>(
         .iter()
         .find(|relation| relation.table_id == qualifier || relation.alias.as_deref() == Some(qualifier))?;
 
-    catalog.table_schema(&relation.table_id)?.field(column_name)
+    catalog
+        .table_handle(&relation.table_id)
+        .and_then(|handle| handle.table_snapshot())
+        .and_then(|table| table.schema.field(column_name).cloned())
 
 }
 
@@ -864,7 +872,9 @@ fn expand_join_projection_items(
 
                 for target_relation in target_relations {
 
-                    let Some(schema) = catalog.table_schema(&target_relation.table_id) else {
+                    let Some(table) = catalog
+                        .table_handle(&target_relation.table_id)
+                        .and_then(|handle| handle.table_snapshot()) else {
                         return Err(format!(
                             "select join failed: unknown table schema '{}'",
                             target_relation.table_id
@@ -873,7 +883,7 @@ fn expand_join_projection_items(
 
                     let qualifier = relation_qualifier(target_relation).to_string();
 
-                    expanded.extend(schema.fields.iter().map(|field| SelectProjectionItem::Column {
+                    expanded.extend(table.schema.fields.iter().map(|field| SelectProjectionItem::Column {
                         field_name: format!("{qualifier}.{}", field.field_name),
                         output_name: field.field_name.clone(),
                     }));

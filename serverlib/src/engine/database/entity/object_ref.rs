@@ -8,18 +8,18 @@ use crate::engine::database::table::DatabaseTable;
 use crate::engine::database::trigger::DatabaseTrigger;
 use crate::engine::database::view::DatabaseView;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatabaseObjectRef<'a> {
-    Table(&'a DatabaseTable),
-    View(&'a DatabaseView),
-    OlapView(&'a DatabaseOlapView),
-    Relationship(&'a DatabaseRelationship),
-    Trigger(&'a DatabaseTrigger),
-    StoredProcedure(&'a DatabaseStoredProcedure),
-    Index(&'a DatabaseIndex),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatabaseObjectRef {
+    Table(DatabaseTable),
+    View(DatabaseView),
+    OlapView(DatabaseOlapView),
+    Relationship(DatabaseRelationship),
+    Trigger(DatabaseTrigger),
+    StoredProcedure(DatabaseStoredProcedure),
+    Index(DatabaseIndex),
 }
 
-impl<'a> DatabaseObjectRef<'a> {
+impl DatabaseObjectRef {
 
     pub fn object_type(&self) -> DatabaseObjectType {
         match self {

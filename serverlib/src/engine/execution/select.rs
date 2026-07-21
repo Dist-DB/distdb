@@ -144,13 +144,12 @@ fn collect_subquery_exists_with_outer(
 
     if subquery.joins.is_empty() {
 
-        let Some(schema) = catalog.table_schema(&subquery.table_id) else {
+        let Some(table) = catalog
+            .table_handle(&subquery.table_id)
+            .and_then(|handle| handle.table_snapshot()) else {
             return Ok(false);
         };
-
-        let Some(table) = catalog.table(&subquery.table_id) else {
-            return Ok(false);
-        };
+        let schema = table.schema.clone();
 
         let mut scoped_table = table.clone();
         if let Some(stream_id) = catalog.entity_wal_stream_id(&subquery.table_id) {
@@ -161,13 +160,13 @@ fn collect_subquery_exists_with_outer(
         let like_filter = subquery
             .where_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
             .map(|condition| {
                 collect_indexable_equality_filters_for_schema(
-                    schema,
+                    &schema,
                     condition,
                     &mut index_filter_map,
                 )
@@ -191,7 +190,7 @@ fn collect_subquery_exists_with_outer(
         let result = execute_relation_select_plan(
             wal,
             &scoped_table,
-            schema,
+            &schema,
             runtime_indexes,
             subquery,
             &access_plan,
@@ -289,13 +288,12 @@ fn collect_subquery_projection_values_with_outer(
 
     if subquery.joins.is_empty() {
 
-        let Some(schema) = catalog.table_schema(&subquery.table_id) else {
+        let Some(table) = catalog
+            .table_handle(&subquery.table_id)
+            .and_then(|handle| handle.table_snapshot()) else {
             return Ok(HashSet::new());
         };
-
-        let Some(table) = catalog.table(&subquery.table_id) else {
-            return Ok(HashSet::new());
-        };
+        let schema = table.schema.clone();
 
         let mut scoped_table = table.clone();
         if let Some(stream_id) = catalog.entity_wal_stream_id(&subquery.table_id) {
@@ -307,14 +305,14 @@ fn collect_subquery_projection_values_with_outer(
         let like_filter = subquery
             .where_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
         
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
             .map(|condition| {
                 collect_indexable_equality_filters_for_schema(
-                    schema,
+                    &schema,
                     condition,
                     &mut index_filter_map,
                 )
@@ -331,7 +329,7 @@ fn collect_subquery_projection_values_with_outer(
         return execute_relation_select_plan(
             wal,
             &scoped_table,
-            schema,
+            &schema,
             runtime_indexes,
             subquery,
             &access_plan,
@@ -420,25 +418,24 @@ fn collect_subquery_scalar_value_with_outer(
 
     if subquery.joins.is_empty() {
 
-        let Some(schema) = catalog.table_schema(&subquery.table_id) else {
+        let Some(table) = catalog
+            .table_handle(&subquery.table_id)
+            .and_then(|handle| handle.table_snapshot()) else {
             return Ok(None);
         };
-
-        let Some(table) = catalog.table(&subquery.table_id) else {
-            return Ok(None);
-        };
+        let schema = table.schema.clone();
 
         let mut index_filter_map = HashMap::new();
         let like_filter = subquery
             .where_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
             .map(|condition| {
                 collect_indexable_equality_filters_for_schema(
-                    schema,
+                    &schema,
                     condition,
                     &mut index_filter_map,
                 )
@@ -446,7 +443,7 @@ fn collect_subquery_scalar_value_with_outer(
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(
-            table,
+            &table,
             allow_index_short_circuit,
             index_filter_map,
             like_filter,
@@ -454,8 +451,8 @@ fn collect_subquery_scalar_value_with_outer(
 
         return execute_relation_select_plan(
             wal,
-            table,
-            schema,
+            &table,
+            &schema,
             runtime_indexes,
             subquery,
             &access_plan,
@@ -594,13 +591,11 @@ where
     }
 
     let table_id = read_plan.table_id.as_str();
-    let schema = catalog
-        .table_schema(table_id)
-        .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
-
     let table = catalog
-        .table(table_id)
+        .table_handle(table_id)
+        .and_then(|handle| handle.table_snapshot())
         .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
+    let schema = table.schema.clone();
 
     let mut scoped_table = table.clone();
     if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
@@ -611,13 +606,13 @@ where
     let like_filter = read_plan
         .where_condition
         .as_ref()
-        .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+        .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
     let allow_index_short_circuit = read_plan
         .where_condition
         .as_ref()
         .map(|condition| {
             collect_indexable_equality_filters_for_schema(
-                schema,
+                &schema,
                 condition,
                 &mut index_filter_map,
             )
@@ -634,7 +629,7 @@ where
     execute_relation_select_plan(
         wal,
         &scoped_table,
-        schema,
+        &schema,
         runtime_indexes,
         read_plan,
         &access_plan,
@@ -668,7 +663,7 @@ pub fn execute_sql_function_with_lookup(
             catalog,
             wal,
             runtime_indexes,
-            local_function,
+            &local_function,
             function,
             lookup,
         );

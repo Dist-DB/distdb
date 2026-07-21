@@ -92,7 +92,7 @@ pub fn convert_value_to_field_type(
 
             match policy {
                 TypeConversionPolicy::Force => encode_signed_numeric(target_type.clone(), 0),
-                TypeConversionPolicy::Safe => Err(()),
+                TypeConversionPolicy::Safe  => Err(()),
             }
 
         },
@@ -105,7 +105,7 @@ pub fn convert_value_to_field_type(
 
             match policy {
                 TypeConversionPolicy::Force => encode_unsigned_numeric(target_type.clone(), 0),
-                TypeConversionPolicy::Safe => Err(()),
+                TypeConversionPolicy::Safe  => Err(()),
             }
 
         },
@@ -118,7 +118,7 @@ pub fn convert_value_to_field_type(
 
             match policy {
                 TypeConversionPolicy::Force => encode_float_numeric(target_type.clone(), 0.0),
-                TypeConversionPolicy::Safe => Err(()),
+                TypeConversionPolicy::Safe  => Err(()),
             }
 
         },
@@ -134,7 +134,7 @@ pub fn convert_value_to_field_type(
 
             Err(_) => match policy {
                 TypeConversionPolicy::Force => Ok(String::from_utf8_lossy(&render_stored_field_value(value)).into_owned().into_bytes()),
-                TypeConversionPolicy::Safe => Err(()),
+                TypeConversionPolicy::Safe  => Err(()),
             },
 
         },
@@ -147,15 +147,14 @@ pub fn convert_value_to_field_type(
             }
 
             let rendered = render_stored_field_value(value);
-            if let Ok(as_text) = std::str::from_utf8(&rendered) {
-                if let Ok(uuid) = Uuid::parse_str(as_text.trim()) {
+            if let Ok(as_text) = std::str::from_utf8(&rendered)
+                && let Ok(uuid) = Uuid::parse_str(as_text.trim()) {
                     return Ok(tagged_bytes(STORED_UUID_TAG, uuid.as_bytes()));
                 }
-            }
 
             match policy {
                 TypeConversionPolicy::Force => Ok(tagged_bytes(STORED_UUID_TAG, Uuid::nil().as_bytes())),
-                TypeConversionPolicy::Safe => Err(()),
+                TypeConversionPolicy::Safe  => Err(()),
             }
         },
 
@@ -292,12 +291,19 @@ fn compare_mixed_numeric_values(
 fn encode_signed_numeric(target_type: FieldType, value: i128) -> Result<Vec<u8>, ()> {
 
     match target_type {
-        FieldType::Int(8) => i8::try_from(value).map(|v| vec![STORED_I8_TAG, v as u8]).map_err(|_| ()),
-        FieldType::Int(16) => i16::try_from(value).map(|v| tagged_bytes(STORED_I16_TAG, &v.to_le_bytes())).map_err(|_| ()),
-        FieldType::Int(32) => i32::try_from(value).map(|v| tagged_bytes(STORED_I32_TAG, &v.to_le_bytes())).map_err(|_| ()),
-        FieldType::Int(64) => i64::try_from(value).map(|v| tagged_bytes(STORED_I64_TAG, &v.to_le_bytes())).map_err(|_| ()),
-        FieldType::Int(_) => Ok(tagged_bytes(STORED_I128_TAG, &value.to_le_bytes())),
+        
+        FieldType::Int(8)   => i8::try_from(value).map(|v| vec![STORED_I8_TAG, v as u8]).map_err(|_| ()),
+        
+        FieldType::Int(16)  => i16::try_from(value).map(|v| tagged_bytes(STORED_I16_TAG, &v.to_le_bytes())).map_err(|_| ()),
+        
+        FieldType::Int(32)  => i32::try_from(value).map(|v| tagged_bytes(STORED_I32_TAG, &v.to_le_bytes())).map_err(|_| ()),
+        
+        FieldType::Int(64)  => i64::try_from(value).map(|v| tagged_bytes(STORED_I64_TAG, &v.to_le_bytes())).map_err(|_| ()),
+        
+        FieldType::Int(_)   => Ok(tagged_bytes(STORED_I128_TAG, &value.to_le_bytes())),
+        
         _ => Err(()),
+
     }
 
 }
@@ -305,12 +311,19 @@ fn encode_signed_numeric(target_type: FieldType, value: i128) -> Result<Vec<u8>,
 fn encode_unsigned_numeric(target_type: FieldType, value: u128) -> Result<Vec<u8>, ()> {
 
     match target_type {
-        FieldType::UInt(8) => u8::try_from(value).map(|v| vec![STORED_U8_TAG, v]).map_err(|_| ()),
+        
+        FieldType::UInt(8)  => u8::try_from(value).map(|v| vec![STORED_U8_TAG, v]).map_err(|_| ()),
+        
         FieldType::UInt(16) => u16::try_from(value).map(|v| tagged_bytes(STORED_U16_TAG, &v.to_le_bytes())).map_err(|_| ()),
+        
         FieldType::UInt(32) => u32::try_from(value).map(|v| tagged_bytes(STORED_U32_TAG, &v.to_le_bytes())).map_err(|_| ()),
+        
         FieldType::UInt(64) => u64::try_from(value).map(|v| tagged_bytes(STORED_U64_TAG, &v.to_le_bytes())).map_err(|_| ()),
-        FieldType::UInt(_) => Ok(tagged_bytes(STORED_U128_TAG, &value.to_le_bytes())),
+        
+        FieldType::UInt(_)  => Ok(tagged_bytes(STORED_U128_TAG, &value.to_le_bytes())),
+        
         _ => Err(()),
+
     }
 
 }
@@ -318,9 +331,13 @@ fn encode_unsigned_numeric(target_type: FieldType, value: u128) -> Result<Vec<u8
 fn encode_float_numeric(target_type: FieldType, value: f64) -> Result<Vec<u8>, ()> {
     
     match target_type {
+
         FieldType::Float(bits) if bits <= 32 => Ok(tagged_bytes(STORED_F32_TAG, &(value as f32).to_le_bytes())),
+        
         FieldType::Float(_) => Ok(tagged_bytes(STORED_F64_TAG, &value.to_le_bytes())),
+        
         _ => Err(()),
+
     }
 
 }
@@ -335,19 +352,33 @@ fn tagged_bytes(tag: u8, bytes: &[u8]) -> Vec<u8> {
 fn decode_numeric_value(value: &[u8]) -> Option<StoredNumericValue> {
 
     match value {
-        [STORED_I8_TAG, byte] => Some(StoredNumericValue::Signed(i8::from_le_bytes([*byte]) as i128)),
-        [STORED_I16_TAG, bytes @ ..] if bytes.len() == 2 => Some(StoredNumericValue::Signed(i16::from_le_bytes(bytes.try_into().ok()?) as i128)),
-        [STORED_I32_TAG, bytes @ ..] if bytes.len() == 4 => Some(StoredNumericValue::Signed(i32::from_le_bytes(bytes.try_into().ok()?) as i128)),
-        [STORED_I64_TAG, bytes @ ..] if bytes.len() == 8 => Some(StoredNumericValue::Signed(i64::from_le_bytes(bytes.try_into().ok()?) as i128)),
-        [STORED_I128_TAG, bytes @ ..] if bytes.len() == 16 => Some(StoredNumericValue::Signed(i128::from_le_bytes(bytes.try_into().ok()?))),
-        [STORED_U8_TAG, byte] => Some(StoredNumericValue::Unsigned(*byte as u128)),
-        [STORED_U16_TAG, bytes @ ..] if bytes.len() == 2 => Some(StoredNumericValue::Unsigned(u16::from_le_bytes(bytes.try_into().ok()?) as u128)),
-        [STORED_U32_TAG, bytes @ ..] if bytes.len() == 4 => Some(StoredNumericValue::Unsigned(u32::from_le_bytes(bytes.try_into().ok()?) as u128)),
-        [STORED_U64_TAG, bytes @ ..] if bytes.len() == 8 => Some(StoredNumericValue::Unsigned(u64::from_le_bytes(bytes.try_into().ok()?) as u128)),
-        [STORED_U128_TAG, bytes @ ..] if bytes.len() == 16 => Some(StoredNumericValue::Unsigned(u128::from_le_bytes(bytes.try_into().ok()?))),
-        [STORED_F32_TAG, bytes @ ..] if bytes.len() == 4 => Some(StoredNumericValue::Float(f32::from_le_bytes(bytes.try_into().ok()?) as f64)),
-        [STORED_F64_TAG, bytes @ ..] if bytes.len() == 8 => Some(StoredNumericValue::Float(f64::from_le_bytes(bytes.try_into().ok()?))),
+        
+        [STORED_I8_TAG, byte]                                 => Some(StoredNumericValue::Signed(i8::from_le_bytes([*byte]) as i128)),
+        
+        [STORED_I16_TAG, bytes @ ..] if bytes.len() == 2    => Some(StoredNumericValue::Signed(i16::from_le_bytes(bytes.try_into().ok()?) as i128)),
+        
+        [STORED_I32_TAG, bytes @ ..] if bytes.len() == 4    => Some(StoredNumericValue::Signed(i32::from_le_bytes(bytes.try_into().ok()?) as i128)),
+        
+        [STORED_I64_TAG, bytes @ ..] if bytes.len() == 8    => Some(StoredNumericValue::Signed(i64::from_le_bytes(bytes.try_into().ok()?) as i128)),
+        
+        [STORED_I128_TAG, bytes @ ..] if bytes.len() == 16  => Some(StoredNumericValue::Signed(i128::from_le_bytes(bytes.try_into().ok()?))),
+        
+        [STORED_U8_TAG, byte]                                 => Some(StoredNumericValue::Unsigned(*byte as u128)),
+        
+        [STORED_U16_TAG, bytes @ ..] if bytes.len() == 2    => Some(StoredNumericValue::Unsigned(u16::from_le_bytes(bytes.try_into().ok()?) as u128)),
+        
+        [STORED_U32_TAG, bytes @ ..] if bytes.len() == 4    => Some(StoredNumericValue::Unsigned(u32::from_le_bytes(bytes.try_into().ok()?) as u128)),
+        
+        [STORED_U64_TAG, bytes @ ..] if bytes.len() == 8    => Some(StoredNumericValue::Unsigned(u64::from_le_bytes(bytes.try_into().ok()?) as u128)),
+        
+        [STORED_U128_TAG, bytes @ ..] if bytes.len() == 16  => Some(StoredNumericValue::Unsigned(u128::from_le_bytes(bytes.try_into().ok()?))),
+        
+        [STORED_F32_TAG, bytes @ ..] if bytes.len() == 4    => Some(StoredNumericValue::Float(f32::from_le_bytes(bytes.try_into().ok()?) as f64)),
+        
+        [STORED_F64_TAG, bytes @ ..] if bytes.len() == 8    => Some(StoredNumericValue::Float(f64::from_le_bytes(bytes.try_into().ok()?))),
+        
         _ => decode_legacy_numeric_value(value),
+
     }
 
 }
@@ -372,15 +403,19 @@ fn decode_legacy_numeric_value(value: &[u8]) -> Option<StoredNumericValue> {
 fn numeric_as_i128(value: StoredNumericValue) -> Option<i128> {
 
     match value {
-        StoredNumericValue::Signed(v) => Some(v),
+        
+        StoredNumericValue::Signed(v)   => Some(v),
+
         StoredNumericValue::Unsigned(v) => i128::try_from(v).ok(),
-        StoredNumericValue::Float(v) => {
+
+        StoredNumericValue::Float(v)     => {
             if v.fract() == 0.0 && v.is_finite() {
                 Some(v as i128)
             } else {
                 None
             }
         }
+
     }
 
 }
@@ -388,16 +423,21 @@ fn numeric_as_i128(value: StoredNumericValue) -> Option<i128> {
 fn numeric_as_u128(value: StoredNumericValue) -> Option<u128> {
 
     match value {
-        StoredNumericValue::Signed(v) if v >= 0 => Some(v as u128),
-        StoredNumericValue::Signed(_) => None,
-        StoredNumericValue::Unsigned(v) => Some(v),
-        StoredNumericValue::Float(v) => {
+
+        StoredNumericValue::Signed(v) if v >= 0     => Some(v as u128),
+        
+        StoredNumericValue::Signed(_)                     => None,
+        
+        StoredNumericValue::Unsigned(v)             => Some(v),
+        
+        StoredNumericValue::Float(v)                 => {
             if v.fract() == 0.0 && v.is_finite() && v >= 0.0 {
                 Some(v as u128)
             } else {
                 None
             }
         }
+
     }
 
 }
@@ -405,9 +445,13 @@ fn numeric_as_u128(value: StoredNumericValue) -> Option<u128> {
 fn numeric_as_f64(value: StoredNumericValue) -> f64 {
 
     match value {
-        StoredNumericValue::Signed(v) => v as f64,
+        
+        StoredNumericValue::Signed(v)   => v as f64,
+        
         StoredNumericValue::Unsigned(v) => v as f64,
-        StoredNumericValue::Float(v) => v,
+        
+        StoredNumericValue::Float(v)     => v,
+
     }
     
 }

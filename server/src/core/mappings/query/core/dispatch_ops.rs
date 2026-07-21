@@ -364,7 +364,7 @@ fn apply_set_variables_with_session(
         return Err("missing variable assignment".to_string());
     }
 
-    let mut next_system_settings = catalog.recursive_cte_execution_settings().clone();
+    let mut next_system_settings = catalog.recursive_cte_execution_settings();
     let mut system_settings_changed = false;
 
     let result = if let Some(overrides) = session_variable_overrides {
@@ -819,7 +819,7 @@ fn execute_call_stored_procedure(
         );
     };
 
-    let Some(procedure) = catalog.stored_procedure(procedure_id).cloned() else {
+    let Some(procedure) = catalog.stored_procedure(procedure_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
             format!("stored procedure '{}' not found", procedure_id),

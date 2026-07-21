@@ -342,7 +342,7 @@ pub(super) fn effective_recursive_cte_execution_settings(
     session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> serverlib::RecursiveCteExecutionSettings {
 
-    let mut settings = catalog.recursive_cte_execution_settings().clone();
+    let mut settings = catalog.recursive_cte_execution_settings();
 
     let Some(overrides) = session_variable_overrides else {
         return settings;

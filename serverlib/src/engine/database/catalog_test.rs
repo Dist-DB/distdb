@@ -24,7 +24,7 @@ fn create_empty_catalog_seeds_root_with_full_privileges_and_grant_options() {
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
     let root_acl = catalog
-        .account_acl_entry("root")
+        .effective_account_acl_entry("root")
         .expect("root ACL should exist by default");
 
     assert_eq!(root_acl.user_id.0, "root");
@@ -340,7 +340,7 @@ fn schema_can_be_retrieved_from_table() {
         .register_table("users", schema.clone())
         .expect("table register should succeed");
 
-    assert_eq!(catalog.table_schema("users"), Some(&schema));
+    assert_eq!(catalog.table_schema("users"), Some(schema.clone()));
     assert_eq!(catalog.table_schema_revision("users"), Some(0));
 }
 
@@ -365,7 +365,7 @@ fn schema_change_payload_updates_existing_table() {
         .apply_schema_change(payload)
         .expect("schema change should apply");
 
-    assert_eq!(catalog.table_schema("users"), Some(&updated_schema));
+    assert_eq!(catalog.table_schema("users"), Some(updated_schema.clone()));
     assert_eq!(catalog.table_schema_revision("users"), Some(3));
 }
 
@@ -411,7 +411,7 @@ fn schema_change_tx_commit_applies_schema_and_returns_ready() {
     assert_eq!(catalog.table_schema_revision("users"), Some(1));
     assert!(catalog
         .table_schema("users")
-        .and_then(|s| s.field("email"))
+        .and_then(|s| s.field("email").cloned())
         .is_some());
     assert_eq!(
         captured_payload.expect("captured payload").schema_revision,
@@ -452,7 +452,7 @@ fn schema_change_tx_abort_returns_table_to_ready_without_schema_change() {
     tx.abort(&mut catalog).expect("abort should release lock");
 
     assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
-    assert_eq!(catalog.table_schema("users"), Some(&initial_schema));
+    assert_eq!(catalog.table_schema("users"), Some(initial_schema.clone()));
 }
 
 #[test]
@@ -548,7 +548,7 @@ fn schema_change_tx_commit_aborts_when_persist_fails() {
 
     assert!(result.is_err());
     assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
-    assert_eq!(catalog.table_schema("users"), Some(&initial_schema));
+    assert_eq!(catalog.table_schema("users"), Some(initial_schema.clone()));
 }
 
 #[test]
@@ -860,7 +860,7 @@ fn schema_replay_uses_latest_transaction_payload() {
         .expect("schema replay should succeed");
 
     assert_eq!(applied, 2);
-    assert_eq!(catalog.table_schema("users"), Some(&second_schema));
+    assert_eq!(catalog.table_schema("users"), Some(second_schema.clone()));
     assert_eq!(catalog.table_schema_revision("users"), Some(2));
 
     let email_index_id = DatabaseIndex::from_table_fields(
@@ -1151,7 +1151,6 @@ fn apply_schema_change_preserves_user_defined_indexes() {
 
     let before = catalog
         .index_in_table("users", "idx_users_email")
-        .cloned()
         .expect("user-defined index should exist");
 
     let payload = SchemaChangePayload {
@@ -1516,8 +1515,7 @@ fn normalize_loaded_entities_rekeys_and_rebuilds_indexes() {
         .expect("expected normalized table entry")
         .storage_key();
     let mut entity = catalog
-        .entities
-        .remove(&legacy_key)
+        .entity(&legacy_key)
         .expect("expected normalized table entry");
 
     match &mut entity {
@@ -1525,14 +1523,15 @@ fn normalize_loaded_entities_rekeys_and_rebuilds_indexes() {
         _ => unreachable!("expected table entity"),
     }
 
-    catalog.entities.insert("Users".to_string(), entity);
+    let mut legacy_entities = HashMap::new();
+    legacy_entities.insert("Users".to_string(), entity);
 
     catalog
-        .normalize_loaded_entities()
+        .normalize_loaded_entities(legacy_entities)
         .expect("normalization should succeed");
 
-    assert!(!catalog.entities.contains_key("users"));
-    assert!(!catalog.entities.contains_key("Users"));
+    assert!(!catalog.entity_handles.contains_key("users"));
+    assert!(!catalog.entity_handles.contains_key("Users"));
     assert_eq!(catalog.table("users").expect("table should exist").table_id, "users");
     let user_id_index_id = DatabaseIndex::from_table_fields(
         "users",

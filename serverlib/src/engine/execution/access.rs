@@ -26,7 +26,6 @@ use super::MaterializedRelationRow;
 type LiveRowCountTableMap = HashMap<String, (u64, usize)>;
 type LiveRowCountScopeMap = HashMap<usize, LiveRowCountTableMap>;
 
-#[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
 static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<LiveRowCountScopeMap>> =
     OnceLock::new();
 
@@ -1083,7 +1082,7 @@ fn apply_cached_row_insert(
         }
 
         if let Some(index) = entry.string_index_by_field.get_mut(field_name) {
-            let key = string_key_from_value(&value, false);
+            let key = string_key_from_value(value, false);
             if let Some(updated) = index.get_mut(&key) {
                 updated.push(row_id);
             } else {
@@ -1092,7 +1091,7 @@ fn apply_cached_row_insert(
         }
 
         if let Some(index) = entry.string_index_ci_by_field.get_mut(field_name) {
-            let key = string_key_from_value(&value, true);
+            let key = string_key_from_value(value, true);
             if let Some(updated) = index.get_mut(&key) {
                 updated.push(row_id);
             } else {
@@ -1587,7 +1586,12 @@ fn simple_like_prefix(pattern: &[u8]) -> Option<Vec<u8>> {
 
     Some(prefix.to_vec())
 }
-pub fn field_has_single_column_index(table: &DatabaseTable, field_name: &str) -> bool {
+pub fn field_has_single_column_index<T>(table: T, field_name: &str) -> bool
+where
+    T: Borrow<DatabaseTable>,
+{
+
+    let table = table.borrow();
 
     table.indexes.values().any(|index| {
         if !index.field_names.is_empty() {
@@ -2410,12 +2414,17 @@ pub fn load_live_row_count(
 
 }
 
-pub fn plan_relation_access(
-    table: &DatabaseTable,
+pub fn plan_relation_access<T>(
+    table: T,
     allow_index_short_circuit: bool,
     index_filter_map: HashMap<String, Vec<u8>>,
     like_filter: Option<(String, Vec<u8>, bool)>,
-) -> RelationAccessPlan {
+) -> RelationAccessPlan
+where
+    T: Borrow<DatabaseTable>,
+{
+
+    let table = table.borrow();
 
     if allow_index_short_circuit
         && let Some((index, lookup_key)) = choose_index_lookup(table, &index_filter_map)
@@ -2495,13 +2504,20 @@ pub fn plan_relation_access(
 
 }
 
-pub fn materialize_relation_rows(
+pub fn materialize_relation_rows<T, S>(
     wal: &ConcurrentWalManager,
-    table: &DatabaseTable,
-    schema: &TableSchema,
+    table: T,
+    schema: S,
     runtime_indexes: &RuntimeIndexStore,
     access_plan: &RelationAccessPlan,
-) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> 
+where
+    T: Borrow<DatabaseTable>,
+    S: Borrow<TableSchema>,
+{
+
+    let table = table.borrow();
+    let schema = schema.borrow();
 
     let table_stream_id = resolve_materialization_stream_id(wal, table);
 

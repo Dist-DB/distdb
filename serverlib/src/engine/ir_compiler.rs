@@ -837,11 +837,10 @@ where
     let lowered = procedure_sql.to_ascii_lowercase();
 
     if lowered.starts_with("create procedure") {
-        if let Ok(plan) = parse_if_else_end_plan_from_create_procedure_statement(procedure_sql) {
-            if let Some(plan) = plan {
+        if let Ok(plan) = parse_if_else_end_plan_from_create_procedure_statement(procedure_sql)
+            && let Some(plan) = plan {
                 resources.extend(collect_resources_from_if_else_plan(&plan, services, function_names));
             }
-        }
 
         if let Ok(action_statements) = parse_create_procedure_action_statements(procedure_sql) {
             for action_sql in action_statements {
@@ -1179,9 +1178,8 @@ where
     
     let mut result_sets = Vec::new();
 
-    if let Ok(plan) = parse_if_else_end_plan_from_create_procedure_statement(sql) {
-        
-        if let Some(plan) = plan {
+    if let Ok(plan) = parse_if_else_end_plan_from_create_procedure_statement(sql)        
+        && let Some(plan) = plan {
 
             for branch in plan.branches {
                 collect_result_set_from_action_sql(&branch.action_sql, &mut result_sets, services);
@@ -1192,8 +1190,6 @@ where
             }
 
         }
-
-    }
 
     result_sets
 

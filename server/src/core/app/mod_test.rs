@@ -4629,7 +4629,7 @@ fn bootstrap_replays_latest_schema_from_wal() {
         .get(&catalog.database_id.0)
         .expect("catalog should be loaded");
 
-    assert_eq!(loaded.table_schema("users"), Some(&schema));
+    assert_eq!(loaded.table_schema("users"), Some(schema.clone()));
     assert_eq!(loaded.table_schema_revision("users"), Some(2));
     let email_index_id = DatabaseIndex::from_table_fields(
         "users",
@@ -4801,8 +4801,8 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
     assert_eq!(
         loaded
             .entity_metadata("trg_users_bi")
-            .and_then(|metadata| metadata.created_by.as_deref()),
-        Some("bootstrap-object-replay")
+            .and_then(|metadata| metadata.created_by),
+        Some("bootstrap-object-replay".to_string())
     );
     
     assert!(loaded.view("users_v").is_none());
@@ -5249,7 +5249,7 @@ fn insert_query_appends_insert_record_to_table_wal() {
         .expect("users schema should exist");
 
     let payload = decode_row_payload(
-        schema,
+        &schema,
         insert_record.payload().expect("insert payload should be present"),
     )
         .expect("insert payload should deserialize");
@@ -8432,7 +8432,7 @@ fn select_alias_where_pk_returns_empty_when_runtime_index_is_empty() {
 
     for index in index_defs {
         app.runtime_indexes
-            .register_index_for_table(&table_stream_id, index);
+            .register_index_for_table(&table_stream_id, &index);
     }
 
     assert_eq!(

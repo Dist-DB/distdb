@@ -161,9 +161,9 @@ fn runtime_index_store_can_remove_scoped_index_and_table_indexes() {
         vec!["order_ref".to_string()],
     );
 
-    store.register_index_for_table("users_stream", users_email.clone());
-    store.register_index_for_table("users_stream", users_tenant.clone());
-    store.register_index_for_table("orders_stream", orders_ref.clone());
+    store.register_index_for_table("users_stream", &users_email);
+    store.register_index_for_table("users_stream", &users_tenant);
+    store.register_index_for_table("orders_stream", &orders_ref);
 
     assert!(store
         .index_for_table("users_stream", &users_email.index_id.0)

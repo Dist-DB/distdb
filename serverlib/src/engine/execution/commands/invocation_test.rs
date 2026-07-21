@@ -38,7 +38,7 @@ fn execute_stored_procedure_invocation_uses_cached_if_else_plan() {
 
     let result = execute_stored_procedure_invocation(
         &row,
-        procedure,
+        &procedure,
         EntityInvocationSource::DirectedUser,
         &mut |sql| Ok(sql.to_string()),
     )
@@ -70,7 +70,7 @@ fn execute_stored_procedure_invocation_executes_non_if_top_level_actions_in_orde
 
     let result = execute_stored_procedure_invocation(
         &HashMap::new(),
-        procedure,
+        &procedure,
         EntityInvocationSource::DirectedUser,
         &mut |sql| {
             executed.push(sql.to_string());
@@ -168,7 +168,7 @@ fn execute_stored_procedure_invocation_over_cursor_runs_for_each_row() {
     let outcomes = execute_stored_procedure_invocation_over_cursor(
         &mut cursor_source,
         &mut cursor_frame,
-        procedure,
+        &procedure,
         EntityInvocationSource::DirectedUser,
         &mut |sql, _frame| Ok(sql.to_string()),
     )
@@ -219,7 +219,7 @@ fn execute_stored_procedure_invocation_over_cursor_skips_rows_without_matching_b
     let outcomes = execute_stored_procedure_invocation_over_cursor(
         &mut cursor_source,
         &mut cursor_frame,
-        procedure,
+        &procedure,
         EntityInvocationSource::DirectedUser,
         &mut |sql, _frame| Ok(sql.to_string()),
     )
@@ -258,7 +258,7 @@ fn execute_stored_procedure_invocation_over_cursor_propagates_action_errors() {
     let err = execute_stored_procedure_invocation_over_cursor(
         &mut cursor_source,
         &mut cursor_frame,
-        procedure,
+        &procedure,
         EntityInvocationSource::DirectedUser,
         &mut |_sql, _frame| Result::<String, String>::Err("forced action failure".to_string()),
     )

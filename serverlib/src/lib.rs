@@ -56,7 +56,7 @@ pub use engine::database::core::{
 	DatabaseIndexKind, DatabaseIndexOrigin,
 	DatabaseEntityAspect, DatabaseEntityKind, DatabaseRelationship, DatabaseReplicaState,
 	DatabaseResult, DatabaseStoredProcedure, DatabaseTable, DatabaseTrigger,
-	EntityMetadata,
+	EntityHandle, EntityMetadata,
 	decode_encrypted_row_payload_envelope, decode_row_field_value, decode_row_payload,
 	encode_encrypted_row_payload_envelope, encode_row_payload,
 	AesGcmRowPayloadCryptoProvider,

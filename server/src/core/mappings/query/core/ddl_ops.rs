@@ -430,7 +430,6 @@ pub(super) fn execute_create_table_impl(
         if !is_temporary {
             let created_index = match catalog
                 .index_in_table(&normalized_table_id, &created_index_id)
-                .cloned()
             {
                 Some(index) => index,
                 None => {
@@ -527,7 +526,6 @@ pub(super) fn execute_create_table_impl(
             schema: Some(
                 catalog
                     .table_schema(&normalized_table_id)
-                    .cloned()
                     .unwrap_or_else(|| TableSchema::new(Vec::new())),
             ),
         };
@@ -692,7 +690,6 @@ pub(super) fn execute_create_other_impl(
 
     let created_index = catalog
         .index_in_table(&table_id, &created_index_id)
-        .cloned()
         .ok_or_else(|| "created index metadata missing".to_string());
 
     let created_index = match created_index {
@@ -750,27 +747,32 @@ pub(super) fn execute_create_other_impl(
         .entity_wal_stream_id(&table_id)
         .unwrap_or_else(|| table_id.clone());
 
-    let payload_context = payload_context_for_table(catalog, &table_id);
-    let live_rows = match load_live_rows_with_context(wal, &stream_id, table.schema(), &payload_context) {
-        Ok(rows) => rows,
-        Err(err) => {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("create index live-row scan failed: {err}"),
-            );
-        }
-    };
-
-    if let Some(index) = table.indexes.get(&created_index_id)
-        && runtime_indexes.should_track_index(index)
-    {
+    if let Some(index) = table.indexes.get(&created_index_id) {
+        let should_track_index = runtime_indexes.should_track_index(index);
         let state = runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0);
-        state.rebuild(
-            live_rows
-                .iter()
-                .map(|(_, row_map)| index_value_tuple(index, row_map))
-                .collect(),
-        );
+
+        if should_track_index {
+            let payload_context = payload_context_for_table(catalog, &table_id);
+            let live_rows = match load_live_rows_with_context(wal, &stream_id, table.schema(), &payload_context) {
+                Ok(rows) => rows,
+                Err(err) => {
+                    return ConnectorResponse::rejected(
+                        request_id.to_string(),
+                        format!("create index live-row scan failed: {err}"),
+                    );
+                }
+            };
+
+            state.rebuild(
+                live_rows
+                    .iter()
+                    .map(|(_, row_map)| index_value_tuple(index, row_map))
+                    .collect(),
+            );
+        } else {
+            state.rebuild(Default::default());
+        }
+
         state.index = Some(index.clone());
     }
 
@@ -917,7 +919,7 @@ pub(super) fn execute_truncate_table_impl(
         );
     }
 
-    for index in derived_indexes_for_table(table) {
+    for index in derived_indexes_for_table(&table) {
         if !runtime_indexes.should_track_index(index) {
             continue;
         }
@@ -1110,7 +1112,7 @@ fn execute_drop_entity_object(
 
     if let Some(ref stream_id) = entity_wal_stream_id
         && stream_id != &wal_id
-            && let Err(err) = wal.delete_stream(&stream_id) {
+            && let Err(err) = wal.delete_stream(stream_id) {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("drop {kind_label} WAL delete failed: {err}"),
@@ -1247,7 +1249,7 @@ fn execute_drop_other_object(
 
     let existing_index = table_id_for_drop
         .as_ref()
-        .and_then(|table_id| catalog.index_in_table(table_id, &normalized_index_name).cloned());
+        .and_then(|table_id| catalog.index_in_table(table_id, &normalized_index_name));
 
     let payload = serverlib::IndexLifecyclePayload {
         table_id: table_id_for_drop.clone().unwrap_or_default(),
@@ -2099,7 +2101,7 @@ fn persist_entity_snapshot(
         .entity(&normalized_entity_id)
         .ok_or_else(|| format!("entity '{}' not found in catalog", normalized_entity_id))?;
 
-    let payload = bincode::serialize(entity)
+    let payload = bincode::serialize(&entity)
         .map_err(|_| "failed to serialize entity snapshot".to_string())?;
 
     let mut file = Vec::with_capacity(HEADER_SIZE + payload.len());
