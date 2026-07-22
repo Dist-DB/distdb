@@ -1,6 +1,32 @@
 use super::*;
 use std::borrow::Borrow;
 
+fn encode_write_group_terminal_payload(expected_count: u64) -> Vec<u8> {
+    expected_count.to_le_bytes().to_vec()
+}
+
+fn grouped_stream_expected_record_count(
+    wal: &ConcurrentWalManager,
+    stream_id: &str,
+    group_id: TransactionId,
+) -> u64 {
+    wal.with_records(stream_id, |records| {
+        records
+            .iter()
+            .filter(|record| {
+                record.groupid == Some(group_id)
+                    && !matches!(
+                        record.kind,
+                        TransactionKind::WriteBegin |
+                        TransactionKind::WriteCommit |
+                        TransactionKind::WriteAbort
+                    )
+            })
+            .count() as u64
+    })
+    .unwrap_or(0)
+}
+
 fn summarize_sql_for_error_log(sql: &str) -> String {
     const MAX_CHARS: usize = 240;
 
@@ -19,6 +45,11 @@ fn response_error_message(response: &ConnectorResponse) -> &str {
         ConnectorResult::Error(message) => message.as_str(),
         _ => "<no error payload>",
     }
+}
+
+fn should_rebuild_runtime_indexes_after_statement_rejection(response: &ConnectorResponse) -> bool {
+    let message = response_error_message(response).to_ascii_lowercase();
+    message.contains("wal append failed")
 }
 
 fn apply_runtime_index_and_equality_batch<R>(
@@ -590,91 +621,24 @@ pub(super) fn with_statement_write_batch<F>(
     execute: F,
 ) -> ConnectorResponse
 where
-    F: FnOnce(TransactionId, &mut RuntimeIndexStore) -> ConnectorResponse,
+    F: FnOnce(Option<TransactionId>, &mut RuntimeIndexStore) -> ConnectorResponse,
 {
 
     let sql_summary = summarize_sql_for_error_log(statement_sql);
 
     let table_stream_id = table_stream_id(catalog, &table.table_id);
 
-    if let (Some(write_group_id), Some(touched_tables)) = (external_write_group_id, touched_tables)
-    {
-        if touched_tables.insert(table_stream_id.clone())
-            && let Err(err) = append_payload_record_with_group(
-                wal,
-                &table_stream_id,
-                TransactionKind::WriteBegin,
-                request_id.as_bytes().to_vec(),
-                common::epoch_nanos!(),
-                Some(write_group_id),
-            ) {
-                return ConnectorResponse::rejected(
-                    request_id.to_string(),
-                    format!("transaction write begin failed: {err}"),
-                );
-            }
+    if let Some(write_group_id) = external_write_group_id {
+        if let Some(touched_tables) = touched_tables {
+            touched_tables.insert(table_stream_id.clone());
+        }
 
-        return execute(write_group_id, runtime_indexes);
+        return execute(Some(write_group_id), runtime_indexes);
     }
 
-    let write_group_id = match append_payload_record_with_group(
-        wal,
-        &table_stream_id,
-        TransactionKind::WriteBegin,
-        request_id.as_bytes().to_vec(),
-        common::epoch_nanos!(),
-        None,
-    ) {
-
-        Ok(group_id) => group_id,
-
-        Err(err) => {
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("statement write begin failed: {err}"),
-            )
-        }
-
-    };
-
-    let response = execute(write_group_id, runtime_indexes);
+    let response = execute(None, runtime_indexes);
 
     if matches!(response.status, connector::ResponseStatus::Applied) {
-
-        if let Err(err) = append_payload_record_with_group(
-            wal,
-            &table_stream_id,
-            TransactionKind::WriteCommit,
-            Vec::new(),
-            common::epoch_nanos!(),
-            Some(write_group_id),
-        ) {
-
-            log::warn!(
-                "runtime index rebuild triggered table={} request_id={} reason=write_commit_failed error={} sql=\"{}\"",
-                table.table_id,
-                request_id,
-                err,
-                sql_summary,
-            );
-
-            let _ = append_payload_record_with_group(
-                wal,
-                &table_stream_id,
-                TransactionKind::WriteAbort,
-                Vec::new(),
-                common::epoch_nanos!(),
-                Some(write_group_id),
-            );
-
-            rebuild_runtime_indexes_for_table(catalog, table, wal, runtime_indexes);
-            return ConnectorResponse::rejected(
-                request_id.to_string(),
-                format!("statement write commit failed: {err}"),
-            );
-
-        }
-
         if let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, &table_stream_id, wal) {
             log::warn!(
                 "runtime index incremental persistence skipped table={} stream={} reason={}",
@@ -688,6 +652,9 @@ where
 
     } else {
 
+        let should_rebuild =
+            should_rebuild_runtime_indexes_after_statement_rejection(&response);
+
         log::warn!(
             "runtime index rebuild triggered table={} request_id={} reason=statement_response_rejected error={} sql=\"{}\"",
             table.table_id,
@@ -695,17 +662,17 @@ where
             response_error_message(&response),
             sql_summary,
         );
-        
-        let _ = append_payload_record_with_group(
-            wal,
-            &table_stream_id,
-            TransactionKind::WriteAbort,
-            Vec::new(),
-            common::epoch_nanos!(),
-            Some(write_group_id),
-        );
 
-        rebuild_runtime_indexes_for_table(catalog, table, wal, runtime_indexes);
+        if should_rebuild {
+            rebuild_runtime_indexes_for_table(catalog, table, wal, runtime_indexes);
+        } else {
+            log::debug!(
+                "runtime index rebuild skipped table={} request_id={} reason=statement_rejected_without_wal_append_failure",
+                table.table_id,
+                request_id,
+            );
+        }
+
         response
     
     }
@@ -722,11 +689,13 @@ pub(crate) fn commit_external_write_group(
 
     for table_id in table_ids {
 
+        let expected_count = grouped_stream_expected_record_count(wal, table_id, group_id);
+
         append_payload_record_with_group(
             wal,
             table_id,
             TransactionKind::WriteCommit,
-            Vec::new(),
+            encode_write_group_terminal_payload(expected_count),
             common::epoch_nanos!(),
             Some(group_id),
         )?;
@@ -771,11 +740,13 @@ pub(crate) fn abort_external_write_group(
 
     for table_id in table_ids {
 
+        let expected_count = grouped_stream_expected_record_count(wal, table_id, group_id);
+
         let _ = append_payload_record_with_group(
             wal,
             table_id,
             TransactionKind::WriteAbort,
-            Vec::new(),
+            encode_write_group_terminal_payload(expected_count),
             common::epoch_nanos!(),
             Some(group_id),
         );
@@ -806,7 +777,7 @@ pub(crate) fn abort_external_write_group(
 
 }
 
-fn rebuild_runtime_indexes_for_table(
+pub(super) fn rebuild_runtime_indexes_for_table(
     catalog: &DatabaseCatalog,
     table: &serverlib::DatabaseTable,
     wal: &ConcurrentWalManager,

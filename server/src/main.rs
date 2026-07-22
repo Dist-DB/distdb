@@ -39,7 +39,7 @@ use server::core::control::affinity::{
 use server::core::control::connector_handler::{
     CatalogDispatcher, handle_connector_stream, maybe_bootstrap_status_response,
     maybe_server_peer_discovery_response, maybe_show_catalog_workers_response,
-    maybe_show_entities_response,
+    maybe_show_entities_response, mark_bootstrap_status_started,
 };
 use server::core::comms::outbound_transport::{
     configure_outbound_tls_state, send_service_request_to_addr,
@@ -675,6 +675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Arc::new(RwLock::new(ServerApp::new(config)?));
     let bootstrap_ready = Arc::new(AtomicBool::new(false));
+    mark_bootstrap_status_started();
 
     let tcp_bind_addr = format!("{}:{}", listen_addr, port);
     let listener = TcpListener::bind(&tcp_bind_addr).await?;

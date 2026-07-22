@@ -78,7 +78,8 @@ use select_ops::{execute_select_impl, execute_select_plan_result, execute_select
 use wal_ops::{
     append_row_payload_record_with_live_row_ids_and_prepared_row_map,
     append_row_payload_records_batch,
-    payload_context_for_table, with_statement_write_batch,
+    payload_context_for_table, rebuild_runtime_indexes_for_table,
+    with_statement_write_batch,
 };
 
 #[allow(unused_imports)]

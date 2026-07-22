@@ -12,6 +12,7 @@ pub async fn write_response_frame(
     let len = payload.len() as u32;
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(&payload).await?;
+    stream.flush().await?;
     Ok(())
 }
 
@@ -23,5 +24,6 @@ pub async fn write_service_message_to_stream(
     let len = payload.len() as u32;
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(&payload).await?;
+    stream.flush().await?;
     Ok(())
 }

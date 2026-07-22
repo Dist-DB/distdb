@@ -61,7 +61,7 @@ fn import_reader_splits_and_executes_statements() {
     assert_eq!(transaction_state.committed_batches, 0);
     assert_eq!(executed.len(), 2);
     assert!(executed[0].contains("create table people"));
-    assert!(executed[1].contains("insert into people"));
+    assert!(executed[1].contains("insert ignore into people"));
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn import_reader_populates_mock_table_structures() {
                 return Ok(());
             }
 
-            if let Some(rest) = normalized.strip_prefix("insert into ") {
+            if let Some(rest) = normalized.strip_prefix("insert ignore into ") {
                 let table_name = rest.split_whitespace().next().unwrap_or("");
                 if table_name.is_empty() {
                     return Err("insert statement did not include table name".to_string());
@@ -234,7 +234,7 @@ fn import_reader_skips_mysql_dump_directives() {
     .expect("import reader should skip dump directives");
 
     assert_eq!(transaction_state.committed_batches, 0);
-    assert_eq!(executed, vec!["insert into ip_lookup values (1)"]);
+    assert_eq!(executed, vec!["insert ignore into ip_lookup values (1)"]);
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn import_reader_skips_delimiter_directive_without_space() {
     .expect("import reader should skip delimiter directives with or without a trailing space");
 
     assert_eq!(transaction_state.committed_batches, 0);
-    assert_eq!(executed, vec!["insert into ip_lookup values (1);"]);
+    assert_eq!(executed, vec!["insert ignore into ip_lookup values (1);"]);
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn import_reader_skips_mysql_routine_ddl_statements() {
     assert!(executed[0].contains("BEGIN"));
     assert!(executed[0].contains("RETURN 0;"));
     assert!(executed[0].ends_with("END"));
-    assert_eq!(executed[1], "insert into ip_lookup values (1)");
+    assert_eq!(executed[1], "insert ignore into ip_lookup values (1)");
     assert_eq!(executed[2], "drop procedure if exists `sp_placesnearby`");
 }
 
@@ -341,7 +341,7 @@ fn split_import_insert_values_statement_splits_large_insert_values() {
     assert!(chunks.len() >= 2);
     assert!(chunks
         .iter()
-        .all(|chunk| chunk.to_ascii_lowercase().starts_with("insert into users values ")));
+        .all(|chunk| chunk.to_ascii_lowercase().starts_with("insert ignore into users values ")));
     assert!(chunks.iter().all(|chunk| chunk.contains("(")));
 }
 
@@ -363,4 +363,22 @@ fn split_import_insert_values_statement_respects_tuple_cap() {
     assert!(chunks[0].contains("(2,'bob')"));
     assert!(chunks[1].contains("(3,'charlie')"));
     assert!(chunks[1].contains("(4,'dana')"));
+}
+
+#[test]
+fn split_import_insert_values_statement_keeps_insert_ignore_unchanged() {
+    let statement = "insert ignore into users values (1,'alice'),(2,'bob')";
+    let chunks = split_import_insert_values_statement(statement, 4_096, 16);
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0], statement);
+}
+
+#[test]
+fn split_import_insert_values_statement_keeps_on_duplicate_update_unchanged() {
+    let statement = "insert into users values (1,'alice') on duplicate key update name='alice'";
+    let chunks = split_import_insert_values_statement(statement, 4_096, 16);
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0], statement);
 }

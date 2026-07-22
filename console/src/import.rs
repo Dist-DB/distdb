@@ -388,6 +388,8 @@ fn stream_import_insert_values_statements<F>(
 where
     F: FnMut(&str) -> Result<(), String>,
 {
+    let rewritten = coerce_import_insert_to_insert_ignore(statement);
+    let statement = rewritten.as_str();
     let normalized = statement.trim_start();
     if !starts_with_ascii_case_insensitive(normalized, "insert ") {
         return on_statement(statement);
@@ -437,6 +439,39 @@ where
     }
 
     Ok(())
+}
+
+fn coerce_import_insert_to_insert_ignore(statement: &str) -> String {
+    let trimmed = statement.trim_start();
+
+    if !starts_with_ascii_case_insensitive(trimmed, "insert ") {
+        return statement.to_string();
+    }
+
+    if starts_with_ascii_case_insensitive(trimmed, "insert ignore ") {
+        return statement.to_string();
+    }
+
+    if starts_with_ascii_case_insensitive(trimmed, "insert /*") {
+        return statement.to_string();
+    }
+
+    if find_ascii_case_insensitive(trimmed, " on duplicate key update ").is_some() {
+        return statement.to_string();
+    }
+
+    let leading_ws_len = statement.len().saturating_sub(trimmed.len());
+    let insert_prefix_len = "insert ".len();
+
+    if trimmed.len() < insert_prefix_len {
+        return statement.to_string();
+    }
+
+    format!(
+        "{}insert ignore {}",
+        &statement[..leading_ws_len],
+        &trimmed[insert_prefix_len..],
+    )
 }
 
 fn import_insert_chunk_target_bytes() -> usize {

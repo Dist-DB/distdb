@@ -6553,7 +6553,6 @@ fn serializable_rejects_write_skew_across_disjoint_rows() {
 
 #[test]
 fn commit_groups_staged_dml_into_one_write_batch() {
-
     let unique_suffix = common::epoch_nanos!();
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -6634,8 +6633,8 @@ fn commit_groups_staged_dml_into_one_write_batch() {
     let write_begin = records
         .iter()
         .filter(|record| record.kind == TransactionKind::WriteBegin)
-        .collect::<Vec<_>>();
-    assert_eq!(write_begin.len(), 1);
+        .count();
+    assert_eq!(write_begin, 0);
 
     let write_commit = records
         .iter()
@@ -6649,10 +6648,23 @@ fn commit_groups_staged_dml_into_one_write_batch() {
         .count();
     assert_eq!(write_abort, 0);
 
-    let group_id = write_begin[0]
+    let group_id = write_commit[0]
         .groupid
-        .expect("write begin should carry the transaction group id");
-    assert_eq!(write_commit[0].groupid, Some(group_id));
+        .expect("write commit should carry the transaction group id");
+
+    let terminal_payload = write_commit[0]
+        .payload_logical()
+        .and_then(|payload| {
+            if payload.len() == std::mem::size_of::<u64>() {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(payload);
+                Some(u64::from_le_bytes(bytes))
+            } else {
+                None
+            }
+        })
+        .expect("write commit should include decodable terminal payload");
+    assert_eq!(terminal_payload, 2);
 
     let inserts = records
         .iter()
@@ -6891,16 +6903,23 @@ fn commit_shares_one_group_id_across_touched_tables() {
     let users_records = app.wal.since(&users_stream_id, None);
     let profiles_records = app.wal.since(&profiles_stream_id, None);
 
+    assert!(!users_records
+        .iter()
+        .any(|record| record.kind == TransactionKind::WriteBegin));
+    assert!(!profiles_records
+        .iter()
+        .any(|record| record.kind == TransactionKind::WriteBegin));
+
     let users_group_id = users_records
         .iter()
-        .find(|record| record.kind == TransactionKind::WriteBegin)
+        .find(|record| record.kind == TransactionKind::Insert)
         .and_then(|record| record.groupid)
-        .expect("users write begin should have a group id");
+        .expect("users grouped insert should carry a group id");
     let profiles_group_id = profiles_records
         .iter()
-        .find(|record| record.kind == TransactionKind::WriteBegin)
+        .find(|record| record.kind == TransactionKind::Insert)
         .and_then(|record| record.groupid)
-        .expect("profiles write begin should have a group id");
+        .expect("profiles grouped insert should carry a group id");
 
     assert_eq!(users_group_id, profiles_group_id);
     

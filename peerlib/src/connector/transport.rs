@@ -27,6 +27,9 @@ const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
+const CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_DEFAULT: u64 = 15;
+const CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS";
+const MAX_QUEUED_RESPONSES: usize = 8192;
 
 fn connector_connect_timeout_secs() -> u64 {
     std::env::var(CONNECTOR_CONNECT_TIMEOUT_SECS_ENV)
@@ -43,6 +46,58 @@ fn connector_handshake_timeout_secs() -> u64 {
         .map(|value| value.clamp(1, 30))
         .unwrap_or(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT)
 }
+
+    fn connector_ca_bootstrap_timeout_secs() -> u64 {
+        std::env::var(CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(1, 30))
+        .unwrap_or(CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_DEFAULT)
+    }
+
+    fn is_local_loopback_socket_addr(socket_addr: &str) -> bool {
+        let host = socket_addr
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(socket_addr)
+            .trim_matches('[')
+            .trim_matches(']')
+            .to_ascii_lowercase();
+
+        matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")
+    }
+
+    fn try_load_local_dev_ca_pem(socket_addr: &str) -> Option<String> {
+        if !is_local_loopback_socket_addr(socket_addr) {
+            return None;
+        }
+
+        let candidates = [
+            PathBuf::from("../server/data/p2p-tls/ca-cert.pem"),
+            PathBuf::from("./data/p2p-tls/ca-cert.pem"),
+            PathBuf::from("../data/p2p-tls/ca-cert.pem"),
+        ];
+
+        for candidate in candidates {
+            let Ok(pem) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+
+            let trimmed = pem.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            log::info!(
+                "connector loaded local dev CA certificate from {} for peer bootstrap",
+                candidate.display()
+            );
+
+            return Some(trimmed.to_string());
+        }
+
+        None
+    }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConnectorTlsConfig {
@@ -99,7 +154,7 @@ pub struct ConnectorP2pTransport {
     config: ConnectorP2pConfig,
     peers: HashMap<String, ConnectorPeer>,
     active_peer_id: Option<String>,
-    queued_responses: HashMap<String, ConnectorResponse>,
+    queued_responses: Arc<Mutex<HashMap<String, ConnectorResponse>>>,
     live_connection: Arc<Mutex<Option<LiveConnection>>>,
     cached_ca_pem: Arc<Mutex<Option<String>>>,
 }
@@ -229,7 +284,7 @@ impl ConnectorP2pTransport {
             config,
             peers: HashMap::new(),
             active_peer_id: None,
-            queued_responses: HashMap::new(),
+            queued_responses: Arc::new(Mutex::new(HashMap::new())),
             live_connection: Arc::new(Mutex::new(None)),
             cached_ca_pem: Arc::new(Mutex::new(None)),
         }
@@ -371,13 +426,27 @@ impl ConnectorP2pTransport {
             response.request_id,
             response.status
         );
-        self.queued_responses
-            .insert(response.request_id.clone(), response);
+
+        if let Ok(mut queued_responses) = self.queued_responses.lock() {
+
+            if queued_responses.len() >= MAX_QUEUED_RESPONSES {
+                log::debug!(
+                    "resetting queued response cache at {} entries",
+                    queued_responses.len()
+                );
+                queued_responses.clear();
+            }
+
+            queued_responses.insert(response.request_id.clone(), response);
+        }
 
     }
 
     pub fn queued_response_count(&self) -> usize {
-        self.queued_responses.len()
+        self.queued_responses
+            .lock()
+            .map(|queued_responses| queued_responses.len())
+            .unwrap_or(0)
     }
 
     pub fn has_live_connection(&self) -> bool {
@@ -561,26 +630,29 @@ impl ConnectorTransport for ConnectorP2pTransport {
             return Err(err);
         }
 
-        self.queued_responses
-            .get(&request.request_id)
-            .cloned()
-            .ok_or_else(|| {
-                log::warn!(
-                    "connector transport has no queued response for request_id={}",
-                    request.request_id
-                );
-                if !has_live_connection {
-                    ConnectorError::Transport(
-                        "no active peer connection; run `connect <user@peer-id>;` first"
-                            .to_string(),
-                    )
-                } else {
-                    ConnectorError::Transport(
-                        "no queued response for request_id; p2p request/response loop is not wired yet"
-                            .to_string(),
-                    )
-                }
-            })
+        let queued_response = self
+            .queued_responses
+            .lock()
+            .ok()
+            .and_then(|mut queued_responses| queued_responses.remove(&request.request_id));
+
+        queued_response.ok_or_else(|| {
+            log::warn!(
+                "connector transport has no queued response for request_id={}",
+                request.request_id
+            );
+            if !has_live_connection {
+                ConnectorError::Transport(
+                    "no active peer connection; run `connect <user@peer-id>;` first"
+                        .to_string(),
+                )
+            } else {
+                ConnectorError::Transport(
+                    "no queued response for request_id; p2p request/response loop is not wired yet"
+                        .to_string(),
+                )
+            }
+        })
     
     }
 
@@ -675,7 +747,7 @@ fn ensure_live_connection(
 
                 Ok(None) => {
                     log::debug!("CA auto-discovery from {} returned no cert", socket_addr);
-                    None
+                    try_load_local_dev_ca_pem(&socket_addr)
                 },
 
                 Err(err) => {
@@ -684,7 +756,7 @@ fn ensure_live_connection(
                             return Err(err);
                         }
                     log::debug!("CA auto-discovery from {} failed: {}", socket_addr, err);
-                    None
+                    try_load_local_dev_ca_pem(&socket_addr)
                 }
 
             }
@@ -997,14 +1069,55 @@ fn fetch_ca_pem_from_peer(
     node_id: &str,
 ) -> Result<Option<String>, ConnectorError> {
 
+    let mut last_err: Option<ConnectorError> = None;
+
+    for attempt in 1..=2 {
+        match fetch_ca_pem_from_peer_once(socket_addr, node_id) {
+            Ok(result) => return Ok(result),
+
+            Err(err) => {
+                let retryable = matches!(
+                    &err,
+                    ConnectorError::Transport(message)
+                    if message.contains("failed to read CA bootstrap response header")
+                );
+
+                if retryable && attempt < 2 {
+                    log::debug!(
+                        "CA bootstrap header read timed out from {}; retrying attempt={}",
+                        socket_addr,
+                        attempt + 1
+                    );
+                    last_err = Some(err);
+                    continue;
+                }
+
+                return Err(err);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        ConnectorError::Transport(
+            "CA bootstrap failed without detailed transport error".to_string(),
+        )
+    }))
+
+}
+
+fn fetch_ca_pem_from_peer_once(
+    socket_addr: &str,
+    node_id: &str,
+) -> Result<Option<String>, ConnectorError> {
+
     let mut tcp = connect_tcp_with_timeout(socket_addr).map_err(|err| {
         ConnectorError::Transport(format!("CA bootstrap connect to {socket_addr} failed: {err}"))
     })?;
 
-    let handshake_timeout_secs = connector_handshake_timeout_secs();
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
+    let bootstrap_timeout_secs = connector_ca_bootstrap_timeout_secs();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(bootstrap_timeout_secs)))
         .map_err(|err| ConnectorError::Transport(format!("set read timeout failed: {err}")))?;
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(bootstrap_timeout_secs)))
         .map_err(|err| ConnectorError::Transport(format!("set write timeout failed: {err}")))?;
     tcp.set_nodelay(true)
         .map_err(|err| ConnectorError::Transport(format!("set TCP_NODELAY failed: {err}")))?;

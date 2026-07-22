@@ -105,7 +105,13 @@ pub use engine::ir_compiler::{
 	validate_sql_programatic_procedure_artifact,
 };
 
-pub use engine::database::runtime_index::{index_value_tuple, primary_key_index, RuntimeIndexStore};
+pub use engine::database::runtime_index::{
+	current_runtime_index_bootstrap_progress,
+	index_value_tuple,
+	primary_key_index,
+	RuntimeIndexBootstrapProgress,
+	RuntimeIndexStore,
+};
 pub use engine::execution::{
 	build_joined_row_tuples, build_relation_probe_index, choose_index_lookup,
 	collect_indexable_equality_filters, compare_row_value, count_condition_predicates,

@@ -6,7 +6,7 @@ use crate::{
 };
 use common::helpers::utils::md5_hash;
 use connector::{
-    ConnectorClient, ConnectorCommand, ConnectorRequest, ConnectorResult, DataQuery,
+    ConnectorCommand, ConnectorRequest, ConnectorResult, ConnectorTransport, DataQuery,
     ResponseStatus,
 };
 use peerlib::{ConnectorP2pConfig, ConnectorP2pTransport, ConnectorPeer};
@@ -308,8 +308,7 @@ fn send_query_sync(
         },
     );
 
-    let client = ConnectorClient::new(inner.transport.clone());
-    client.execute(&request).map_err(Into::into)
+    inner.transport.request(&request).map_err(Into::into)
     
 }
 

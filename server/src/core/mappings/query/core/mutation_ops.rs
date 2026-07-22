@@ -1,6 +1,8 @@
 use super::*;
 use crate::core::mappings::query::core::wal_ops::table_stream_id;
+use std::borrow::Borrow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const ORDER_EXPR_LOWER_PREFIX: &str = serverlib::ORDER_EXPR_LOWER_PREFIX;
 const ORDER_EXPR_UPPER_PREFIX: &str = serverlib::ORDER_EXPR_UPPER_PREFIX;
@@ -16,6 +18,177 @@ const ORDER_EXPR_ROUND_PREFIX: &str = serverlib::ORDER_EXPR_ROUND_PREFIX;
 const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = serverlib::ORDER_EXPR_ROUND_SCALE_PREFIX;
 
 type MutationRowMap = Arc<HashMap<String, Vec<u8>>>;
+
+static MUTATION_RUNTIME_INDEX_REBUILD_COUNT: AtomicU64 = AtomicU64::new(0);
+static INSERT_FALLBACK_LIVE_ROW_LOAD_COUNT: AtomicU64 = AtomicU64::new(0);
+static INSERT_FALLBACK_LIVE_ROW_MATERIALIZED_TOTAL: AtomicU64 = AtomicU64::new(0);
+const INSERT_VALUE_BLOCK_MAX_ROWS: usize = 64;
+
+fn should_emit_diagnostics(counter: u64, first_n: u64, interval: u64) -> bool {
+    counter <= first_n || (interval > 0 && counter.is_multiple_of(interval))
+}
+
+fn record_mutation_runtime_index_rebuild(table_id: &str, reason: &str) {
+    let count = MUTATION_RUNTIME_INDEX_REBUILD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+
+    if should_emit_diagnostics(count, 5, 64) {
+        log::info!(
+            "mutation diagnostics: runtime index rebuild table={} reason={} rebuild_count={}",
+            table_id,
+            reason,
+            count,
+        );
+    }
+}
+
+fn record_insert_fallback_live_row_load(
+    table_id: &str,
+    live_rows: usize,
+    detail: Option<&str>,
+) {
+    let load_count = INSERT_FALLBACK_LIVE_ROW_LOAD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let total_rows = INSERT_FALLBACK_LIVE_ROW_MATERIALIZED_TOTAL
+        .fetch_add(live_rows as u64, Ordering::Relaxed)
+        + live_rows as u64;
+
+    if should_emit_diagnostics(load_count, 5, 32) {
+        let average_rows = total_rows.checked_div(load_count).unwrap_or(0);
+
+        log::info!(
+            "mutation diagnostics: insert fallback live-row load table={} load_count={} last_live_rows={} total_materialized_rows={} avg_rows_per_load={}",
+            table_id,
+            load_count,
+            live_rows,
+            total_rows,
+            average_rows,
+        );
+
+        if let Some(detail) = detail {
+            log::info!(
+                "mutation diagnostics: insert fallback context table={} {}",
+                table_id,
+                detail,
+            );
+        }
+    }
+}
+
+fn append_insert_payloads_in_value_blocks<R>(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table: &serverlib::DatabaseTable,
+    runtime_indexes: &mut RuntimeIndexStore,
+    payloads: Vec<Vec<u8>>,
+    prepared_row_maps: Option<Vec<R>>,
+    timestamp_epoch_ms: u64,
+    group_id: Option<TransactionId>,
+    split_per_value_block: bool,
+) -> Result<(), String>
+where
+    R: Borrow<HashMap<String, Vec<u8>>>,
+{
+    if payloads.is_empty() {
+        return Ok(());
+    }
+
+    if !split_per_value_block || payloads.len() <= 1 {
+        return append_row_payload_records_batch(
+            catalog,
+            wal,
+            table_stream_id,
+            table,
+            runtime_indexes,
+            TransactionKind::Insert,
+            payloads,
+            prepared_row_maps,
+            timestamp_epoch_ms,
+            group_id,
+        );
+    }
+
+    let block_rows = INSERT_VALUE_BLOCK_MAX_ROWS.max(1);
+
+    match prepared_row_maps {
+        Some(row_maps) => {
+            if row_maps.len() != payloads.len() {
+                return Err("row map preparation mismatch for insert value blocks".to_string());
+            }
+
+            let mut payload_iter = payloads.into_iter();
+            let mut row_map_iter = row_maps.into_iter();
+
+            loop {
+                let mut payload_block = Vec::with_capacity(block_rows);
+                let mut row_map_block = Vec::with_capacity(block_rows);
+
+                for _ in 0..block_rows {
+                    match (payload_iter.next(), row_map_iter.next()) {
+                        (Some(payload), Some(row_map)) => {
+                            payload_block.push(payload);
+                            row_map_block.push(row_map);
+                        }
+                        (None, None) => break,
+                        _ => {
+                            return Err("row map preparation mismatch for insert value blocks".to_string());
+                        }
+                    }
+                }
+
+                if payload_block.is_empty() {
+                    break;
+                }
+
+                append_row_payload_records_batch(
+                    catalog,
+                    wal,
+                    table_stream_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    payload_block,
+                    Some(row_map_block),
+                    timestamp_epoch_ms,
+                    group_id,
+                )?;
+            }
+        }
+
+        None => {
+            let mut payload_iter = payloads.into_iter();
+
+            loop {
+                let mut payload_block = Vec::with_capacity(block_rows);
+
+                for _ in 0..block_rows {
+                    match payload_iter.next() {
+                        Some(payload) => payload_block.push(payload),
+                        None => break,
+                    }
+                }
+
+                if payload_block.is_empty() {
+                    break;
+                }
+
+                append_row_payload_records_batch(
+                    catalog,
+                    wal,
+                    table_stream_id,
+                    table,
+                    runtime_indexes,
+                    TransactionKind::Insert,
+                    payload_block,
+                    Option::<Vec<R>>::None,
+                    timestamp_epoch_ms,
+                    group_id,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
 
 trait ReturningRowRef {
     fn row_map_ref(&self) -> &HashMap<String, Vec<u8>>;
@@ -316,6 +489,14 @@ fn execute_insert_locked(
                 .filter(|index| !index.is_primary_key())
                 .collect::<Vec<_>>();
 
+            // Register table-scoped unique/PK runtime indexes up front so fast-path
+            // duplicate checks do not miss due to uninitialized scoped index state.
+            // This is especially important for grouped imports where early batches
+            // can otherwise fall back repeatedly with "missing" unique index stats.
+            for index in &unique_indexes {
+                runtime_indexes.register_index_for_table(&table_stream_id, index);
+            }
+
             if !plan.on_duplicate_update.is_empty()
                 && unique_indexes.is_empty()
             {
@@ -345,8 +526,7 @@ fn execute_insert_locked(
                 );
             }
 
-            let fast_path_simple_values_insert = !plan.ignore
-                && !plan.replace_into
+            let fast_path_simple_values_insert = !plan.replace_into
                 && plan.on_duplicate_update.is_empty()
                 && plan.returning.is_none()
                 && matches!(plan.source, serverlib::InsertRowsSource::Values(_));
@@ -433,17 +613,19 @@ fn execute_insert_locked(
 
                 }
 
-                if let Err(err) = append_row_payload_records_batch(
+                let split_per_value_block = staged_payloads.len() > 1;
+
+                if let Err(err) = append_insert_payloads_in_value_blocks(
                     catalog,
                     wal,
                     &table_stream_id,
                     &table,
                     runtime_indexes,
-                    TransactionKind::Insert,
                     staged_payloads,
                     Option::<Vec<MutationRowMap>>::None,
                     common::epoch_nanos!(),
-                    Some(group_id),
+                    group_id,
+                    split_per_value_block,
                 ) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
@@ -477,7 +659,7 @@ fn execute_insert_locked(
 
             let wal_has_existing_records = wal.latest_transaction_id(&table_stream_id).is_some();
 
-            let unique_fast_path_context = fast_path_simple_values_insert
+            let mut unique_fast_path_context = fast_path_simple_values_insert
                 .then(|| {
                     let mut runtime_indexes_for_unique = Vec::with_capacity(unique_indexes.len());
 
@@ -491,7 +673,6 @@ fn execute_insert_locked(
                         };
 
                         runtime_indexes_for_unique.push((*index, runtime_index));
-                        
                     }
 
                     if wal_has_existing_records
@@ -505,6 +686,53 @@ fn execute_insert_locked(
                     Some(runtime_indexes_for_unique)
                 })
                 .flatten();
+
+            // If WAL already has rows but runtime unique indexes are cold, do a one-time
+            // table rebuild and retry fast-path duplicate checks instead of repeatedly
+            // materializing full live rows from WAL for every import chunk.
+            if fast_path_simple_values_insert
+                && wal_has_existing_records
+                && !unique_indexes.is_empty()
+                && unique_fast_path_context.is_none()
+            {
+                record_mutation_runtime_index_rebuild(
+                    table.table_id.as_str(),
+                    "insert_unique_fast_path_cold_index",
+                );
+                rebuild_runtime_indexes_for_table(catalog, &table, wal, runtime_indexes);
+
+                unique_fast_path_context = {
+                    let mut runtime_indexes_for_unique = Vec::with_capacity(unique_indexes.len());
+
+                    let mut ready = true;
+
+                    for index in &unique_indexes {
+
+                        match runtime_indexes
+                            .index_for_table(&table_stream_id, index.index_id.0.as_str())
+                        {
+                            // After an explicit rebuild, index presence is the readiness signal.
+                            // Cardinality may legitimately be zero when a table has no live rows.
+                            Some(runtime_index) => {
+                                runtime_indexes_for_unique.push((*index, runtime_index));
+                            }
+
+                            None => {
+                                ready = false;
+                                break;
+                            }
+
+                        }
+
+                    }
+
+                    if ready {
+                        Some(runtime_indexes_for_unique)
+                    } else {
+                        None
+                    }
+                };
+            }
 
             if let Some(unique_runtime_indexes) = unique_fast_path_context {
 
@@ -638,6 +866,10 @@ fn execute_insert_locked(
                             .collect::<Vec<_>>()
                             .join(", ");
 
+                        if plan.ignore {
+                            continue;
+                        }
+
                         let reason = if index.is_primary_key() {
                             format!("insert failed: duplicate primary key ({})", key_display)
                         } else {
@@ -661,17 +893,19 @@ fn execute_insert_locked(
 
                 }
 
-                if let Err(err) = append_row_payload_records_batch(
+                let split_per_value_block = staged_payloads.len() > 1;
+
+                if let Err(err) = append_insert_payloads_in_value_blocks(
                     catalog,
                     wal,
                     &table_stream_id,
                     &table,
                     runtime_indexes,
-                    TransactionKind::Insert,
                     staged_payloads,
                     Option::<Vec<MutationRowMap>>::None,
                     common::epoch_nanos!(),
-                    Some(group_id),
+                    group_id,
+                    split_per_value_block,
                 ) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
@@ -703,7 +937,7 @@ fn execute_insert_locked(
 
             }
 
-            let fast_path_context = fast_path_simple_values_insert
+            let mut fast_path_context = fast_path_simple_values_insert
                 .then(|| {
                     primary_key_details
                         .as_ref()
@@ -718,6 +952,30 @@ fn execute_insert_locked(
                     !wal_has_existing_records || pk_runtime.cardinality() > 0
                 })
                 .filter(|_| non_primary_unique_indexes.is_empty());
+
+            // If WAL has history and PK runtime index looks cold/empty, rebuild once and
+            // retry PK fast-path setup. After a rebuild, index presence is sufficient even
+            // when cardinality is zero (table can be logically empty).
+            if fast_path_simple_values_insert
+                && wal_has_existing_records
+                && non_primary_unique_indexes.is_empty()
+                && primary_key_details.is_some()
+                && fast_path_context.is_none()
+            {
+                record_mutation_runtime_index_rebuild(
+                    table.table_id.as_str(),
+                    "insert_primary_fast_path_cold_index",
+                );
+                rebuild_runtime_indexes_for_table(catalog, &table, wal, runtime_indexes);
+
+                fast_path_context = primary_key_details
+                    .as_ref()
+                    .and_then(|(pk_index_id, pk_fields)| {
+                        runtime_indexes
+                            .index_for_table(&table_stream_id, pk_index_id)
+                            .map(|pk_runtime| (pk_fields, pk_runtime))
+                    });
+            }
 
             if let Some((pk_fields, pk_runtime)) = fast_path_context {
 
@@ -814,6 +1072,11 @@ fn execute_insert_locked(
                     if pk_runtime.contains(&incoming_pk)
                         || staged_pk_keys.contains(&incoming_pk)
                     {
+                        
+                        if plan.ignore {
+                            continue;
+                        }
+
                         let pk_display = pk_fields
                             .iter()
                             .zip(incoming_pk.iter())
@@ -835,17 +1098,19 @@ fn execute_insert_locked(
 
                 }
 
-                if let Err(err) = append_row_payload_records_batch(
+                let split_per_value_block = staged_payloads.len() > 1;
+
+                if let Err(err) = append_insert_payloads_in_value_blocks(
                     catalog,
                     wal,
                     &table_stream_id,
                     &table,
                     runtime_indexes,
-                    TransactionKind::Insert,
                     staged_payloads,
                     Option::<Vec<MutationRowMap>>::None,
                     common::epoch_nanos!(),
-                    Some(group_id),
+                    group_id,
+                    split_per_value_block,
                 ) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
@@ -890,6 +1155,47 @@ fn execute_insert_locked(
                 .into_iter()
                 .map(|(row_id, row_map)| (row_id, Arc::new(row_map)))
                 .collect::<Vec<_>>();
+
+            let fallback_count_hint = INSERT_FALLBACK_LIVE_ROW_LOAD_COUNT
+                .load(Ordering::Relaxed)
+                .saturating_add(1);
+
+            let fallback_detail = if should_emit_diagnostics(fallback_count_hint, 5, 32) {
+                let unique_stats = unique_indexes
+                    .iter()
+                    .map(|index| {
+                        let index_id = index.index_id.0.as_str();
+                        let stats = runtime_indexes.stats_for_table(&table_stream_id, index_id);
+
+                        let stats_display = stats
+                            .map(|(cardinality, capacity)| format!("{cardinality}/{capacity}"))
+                            .unwrap_or_else(|| "missing".to_string());
+
+                        format!("{}:{}", index_id, stats_display)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                Some(format!(
+                    "simple_values={} wal_has_existing_records={} group_mode={} replace_into={} on_duplicate_update_count={} returning={} unique_index_count={} unique_index_stats=[{}]",
+                    fast_path_simple_values_insert,
+                    wal_has_existing_records,
+                    group_id.is_some(),
+                    plan.replace_into,
+                    plan.on_duplicate_update.len(),
+                    plan.returning.is_some(),
+                    unique_indexes.len(),
+                    unique_stats,
+                ))
+            } else {
+                None
+            };
+
+            record_insert_fallback_live_row_load(
+                table.table_id.as_str(),
+                current_live_rows.len(),
+                fallback_detail.as_deref(),
+            );
             
             let current_live_row_ids = current_live_rows
                 .iter()
@@ -1094,7 +1400,7 @@ fn execute_insert_locked(
                             Some(TransactionId(row_id)),
                             Some(&current_live_row_ids),
                             Some(existing_row.as_ref()),
-                            Some(group_id),
+                            group_id,
                         ) {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
@@ -1113,7 +1419,7 @@ fn execute_insert_locked(
                             Some(&canonical_row),
                             common::epoch_nanos!(),
                             None,
-                            Some(group_id),
+                            group_id,
                         ) {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
@@ -1292,7 +1598,7 @@ fn execute_insert_locked(
                             Some(TransactionId(row_id)),
                             Some(&current_live_row_ids),
                             Some(existing_row.as_ref()),
-                            Some(group_id),
+                            group_id,
                         ) {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
@@ -1311,7 +1617,7 @@ fn execute_insert_locked(
                             Some(updated_row.as_ref()),
                             common::epoch_nanos!(),
                             None,
-                            Some(group_id),
+                            group_id,
                         ) {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
@@ -1630,7 +1936,7 @@ fn execute_insert_locked(
                                     Some(TransactionId(row_id)),
                                     Some(&current_live_row_ids),
                                     Some(existing_row.as_ref()),
-                                    Some(group_id),
+                                    group_id,
                                 ) {
                                     return ConnectorResponse::rejected(
                                         request_id.to_string(),
@@ -1649,7 +1955,7 @@ fn execute_insert_locked(
                                     Some(updated_row.as_ref()),
                                     common::epoch_nanos!(),
                                     None,
-                                    Some(group_id),
+                                    group_id,
                                 ) {
                                     return ConnectorResponse::rejected(
                                         request_id.to_string(),
@@ -1808,17 +2114,22 @@ fn execute_insert_locked(
 
             let staged_row_maps = track_runtime_indexes_for_insert.then_some(staged_rows);
 
-            if let Err(err) = append_row_payload_records_batch(
+            let split_per_value_block = matches!(
+                plan.source,
+                serverlib::InsertRowsSource::Values(_)
+            ) && staged_payloads.len() > 1;
+
+            if let Err(err) = append_insert_payloads_in_value_blocks(
                 catalog,
                 wal,
                 &table_stream_id,
                 &table,
                 runtime_indexes,
-                TransactionKind::Insert,
                 staged_payloads,
                 staged_row_maps,
                 common::epoch_nanos!(),
-                Some(group_id),
+                group_id,
+                split_per_value_block,
             ) {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
@@ -2321,13 +2632,16 @@ fn execute_update_locked(
                 }
 
                 let insert_payload = match encode_row_payload(&schema, &updated_row) {
+
                     Ok(encoded) => encoded,
+
                     Err(err) => {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
                             format!("update insert payload encode failed: {err}"),
                         );
                     }
+                    
                 };
 
                 let canonical_row = if update_requires_canonical_row {
@@ -2389,7 +2703,7 @@ fn execute_update_locked(
                     Some(TransactionId(row_id)),
                     Some(&current_live_row_ids),
                     Some(row_map.as_ref()),
-                    Some(group_id),
+                    group_id,
                 ) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
@@ -2408,7 +2722,7 @@ fn execute_update_locked(
                     canonical_row.as_ref(),
                     common::epoch_nanos!(),
                     None,
-                    Some(group_id),
+                    group_id,
                 ) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
@@ -2628,7 +2942,7 @@ fn execute_delete_locked(
                     Some(TransactionId(row_id)),
                     Some(&current_live_row_ids),
                     Some(row_map.as_ref()),
-                    Some(group_id),
+                    group_id,
                 ) {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),

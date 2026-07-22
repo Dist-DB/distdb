@@ -1,8 +1,8 @@
 
 use connector::{
-    ConnectorClient, ConnectorCommand, ConnectorRequest,
+    ConnectorCommand, ConnectorRequest,
     ConnectorResult, ConnectorError,
-    DataQuery, ResponseStatus,
+    DataQuery, ResponseStatus, ConnectorTransport,
 };
 use peerlib::{
     ConnectorP2pConfig, ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer,
@@ -264,8 +264,7 @@ impl ConsoleSession {
                     },
                 );
 
-                let client = ConnectorClient::new(self.runtime.transport().clone());
-                client.execute(&probe_request)?;
+                self.runtime.transport().request(&probe_request)?;
 
                 self.current_database = Some(database);
 
@@ -319,10 +318,9 @@ impl ConsoleSession {
         let mut response = None;
 
         for attempt in 0..=SQL_TRANSPORT_RETRY_LIMIT {
-            let client = ConnectorClient::new(self.runtime.transport().clone());
             let request_start = std::time::Instant::now();
 
-            match client.execute(&request) {
+            match self.runtime.transport().request(&request) {
 
                 Ok(mut current_response) => {
                     let round_trip_ms = request_start.elapsed().as_millis() as u64;
@@ -496,10 +494,9 @@ impl ConsoleSession {
                 },
             );
 
-            let client = ConnectorClient::new(self.runtime.transport().clone());
             let execute_started_at = std::time::Instant::now();
 
-            match client.execute(&request) {
+            match self.runtime.transport().request(&request) {
 
                 Ok(response) => {
                     
@@ -850,13 +847,12 @@ impl ConsoleSession {
                 },
             );
 
-            let client = ConnectorClient::new(self.runtime.transport().clone());
             let _ = self.runtime.transport().set_active_connection_timeouts(
                 Some(Duration::from_secs(show_peers_timeout_secs)),
                 Some(Duration::from_secs(show_peers_timeout_secs)),
             );
 
-            let response = match client.execute(&request) {
+            let response = match self.runtime.transport().request(&request) {
                 
                 Ok(response) => response,
                 

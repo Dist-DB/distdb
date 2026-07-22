@@ -3,6 +3,7 @@ use serverlib::{
     AccountAclEntry, ConcurrentWalManager, TransactionId, TransactionKind,
     TransactionRecord, UserCredential, UserId,
 };
+use std::collections::{HashMap, HashSet};
 
 use crate::core::app::ServerApp;
 use crate::core::app::helpers::SessionTxMarkerType;
@@ -324,13 +325,26 @@ impl ServerApp {
         let import_result = (|| {
 
             let mut appended_any = false;
+            let mut known_record_ids_by_stream = HashMap::<String, HashSet<u64>>::new();
 
             for (stream_id, record) in records {
 
-                if self
-                    .wal
-                    .since(&stream_id, None).contains(&record)
-                {
+                let record_id = record.id.0;
+
+                let known_record_ids = known_record_ids_by_stream
+                    .entry(stream_id.clone())
+                    .or_insert_with(|| {
+                        self.wal
+                            .with_records(&stream_id, |existing| {
+                                existing
+                                    .iter()
+                                    .map(|existing_record| existing_record.id.0)
+                                    .collect::<HashSet<u64>>()
+                            })
+                            .unwrap_or_default()
+                    });
+
+                if known_record_ids.contains(&record_id) {
                     continue;
                 }
 
@@ -338,10 +352,12 @@ impl ServerApp {
 
                     Ok(()) => {
                         appended_any = true;
+                        known_record_ids.insert(record_id);
                     },
 
                     Err(err) if err.contains("out-of-order") => {
                         // Duplicate or older record already present locally; skip.
+                        known_record_ids.insert(record_id);
                         continue;
                     },
 

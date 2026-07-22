@@ -3,6 +3,7 @@ use common::epoch_ms;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use super::runtime_index_snapshot::{
@@ -23,6 +24,40 @@ use crate::{
 
 const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: usize = 250_000;
 const RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS: usize = 32;
+static RUNTIME_INDEX_BOOTSTRAP_PROGRESS: OnceLock<Mutex<RuntimeIndexBootstrapProgress>> = OnceLock::new();
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeIndexBootstrapProgress {
+    pub phase: String,
+    pub tables_total: usize,
+    pub tables_completed: usize,
+    pub current_database_id: String,
+    pub current_table_id: String,
+    pub current_table_started_epoch_ms: u64,
+    pub done: bool,
+    pub started_epoch_ms: u64,
+    pub last_update_epoch_ms: u64,
+}
+
+fn runtime_index_bootstrap_progress_store() -> &'static Mutex<RuntimeIndexBootstrapProgress> {
+    RUNTIME_INDEX_BOOTSTRAP_PROGRESS
+        .get_or_init(|| Mutex::new(RuntimeIndexBootstrapProgress::default()))
+}
+
+fn set_runtime_index_bootstrap_progress(
+    mut update: impl FnMut(&mut RuntimeIndexBootstrapProgress),
+) {
+    if let Ok(mut guard) = runtime_index_bootstrap_progress_store().lock() {
+        update(&mut guard);
+    }
+}
+
+pub fn current_runtime_index_bootstrap_progress() -> RuntimeIndexBootstrapProgress {
+    runtime_index_bootstrap_progress_store()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
 
 fn runtime_index_parallel_build_max_workers() -> usize {
 
@@ -68,6 +103,22 @@ fn runtime_index_incremental_persistence_min_interval_ms() -> u64 {
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(1_000)
+
+}
+
+fn runtime_index_incremental_persistence_large_table_interval_ms(
+    live_row_count: usize,
+) -> u64 {
+
+    if live_row_count >= 750_000 {
+        300_000
+    } else if live_row_count >= 250_000 {
+        60_000
+    } else if live_row_count >= 100_000 {
+        15_000
+    } else {
+        0
+    }
 
 }
 
@@ -123,25 +174,96 @@ impl RuntimeIndexState {
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
-
         if additional == 0 {
             return;
         }
 
-        // Keep a meaningful free-capacity runway so sustained ingest does not
-        // repeatedly hit expensive resize/rehash cliffs.
+        // Keep reserve decisions conservative: reserve when required capacity
+        // would be exceeded, and only apply extra runway for large batches.
+        // This avoids triggering expensive doublings on small tail batches.
         let len = self.entries.len();
         let required = len.saturating_add(additional);
         let capacity = self.entries.capacity();
         let spare = capacity.saturating_sub(len);
 
-        if capacity < required || spare < additional {
-            let geometric_target = required.saturating_mul(2);
-            let runway_target = required.saturating_add(8_192);
-            let target = geometric_target.max(runway_target);
+        let high_ingest_batch = additional >= 64;
+        let near_capacity = capacity > 0
+            && len.saturating_mul(10) >= capacity.saturating_mul(9);
+        let is_unique_key_index = self
+            .index
+            .as_ref()
+            .is_some_and(|index| index.is_unique_key());
+
+        // For sustained bulk ingest on large unique-key indexes, grow before
+        // hitting the near-full threshold so rehash happens on smaller maps.
+        let proactive_growth = is_unique_key_index
+            && high_ingest_batch
+            && capacity >= 16_384
+            && len.saturating_mul(100) >= capacity.saturating_mul(55);
+
+        // Keep large unique-key indexes below dense occupancy during sustained
+        // ingest so expensive rehashes happen less often and on smaller states.
+        let proactive_target_capacity = if proactive_growth {
+            let target_load_percent = if capacity >= 229_376 {
+                40usize
+            } else if capacity >= 114_688 {
+                50usize
+            } else {
+                60usize
+            };
+
+            required
+                .saturating_mul(100)
+                .checked_div(target_load_percent)
+                .unwrap_or(usize::MAX)
+        } else {
+            required
+        };
+
+        let proactive_skip_capacity = if proactive_growth {
+            if capacity >= 229_376 {
+                capacity.saturating_mul(4)
+            } else if capacity >= 28_672 {
+                capacity.saturating_mul(4)
+            } else if capacity >= 57_344 {
+                capacity.saturating_mul(3)
+            } else {
+                capacity.saturating_mul(2)
+            }
+        } else {
+            0
+        };
+
+        let should_add_runway = additional >= 1_024
+            || (high_ingest_batch && near_capacity)
+            || proactive_growth;
+        let desired_runway = if should_add_runway {
+            if proactive_growth {
+                if capacity >= 229_376 {
+                    capacity.clamp(131_072, 2_097_152)
+                } else if capacity >= 114_688 {
+                    capacity.clamp(65_536, 1_048_576)
+                } else {
+                    capacity.clamp(16_384, 262_144)
+                }
+            } else if high_ingest_batch && near_capacity {
+                // Under sustained large-batch ingest near load threshold, reserve
+                // a wider runway to avoid repeated tier-by-tier rehash cliffs.
+                capacity.clamp(16_384, 131_072)
+            } else {
+                additional.saturating_mul(2).clamp(4_096, 32_768)
+            }
+        } else {
+            0
+        };
+
+        if capacity < required || (should_add_runway && spare < desired_runway) {
+            let target = required
+                .saturating_add(desired_runway)
+                .max(proactive_target_capacity)
+                .max(proactive_skip_capacity);
             self.entries.reserve(target.saturating_sub(len));
         }
-
     }
 
 }
@@ -602,6 +724,23 @@ impl RuntimeIndexStore {
         let mut bootstrapped_tables = 0usize;
         let mut bootstrapped_indexes = 0usize;
         let mut bootstrapped_rows = 0usize;
+        let tables_total = catalogs
+            .values()
+            .map(|catalog| catalog.table_ids().len())
+            .sum::<usize>();
+
+        set_runtime_index_bootstrap_progress(|progress| {
+            let now = epoch_ms!();
+            progress.phase = "runtime_index_bootstrap".to_string();
+            progress.tables_total = tables_total;
+            progress.tables_completed = 0;
+            progress.current_database_id.clear();
+            progress.current_table_id.clear();
+            progress.current_table_started_epoch_ms = 0;
+            progress.done = false;
+            progress.started_epoch_ms = now;
+            progress.last_update_epoch_ms = now;
+        });
 
         let snapshot_data_dir = wal.data_dir_path();
 
@@ -609,16 +748,38 @@ impl RuntimeIndexStore {
             
             for table_id in catalog.table_ids() {
 
+                set_runtime_index_bootstrap_progress(|progress| {
+                    let now = epoch_ms!();
+                    progress.current_database_id = database_id.clone();
+                    progress.current_table_id = table_id.clone();
+                    progress.current_table_started_epoch_ms = now;
+                    progress.last_update_epoch_ms = now;
+                });
+
                 let table_started_at = Instant::now();
 
                 let Some(table) = catalog
                     .table_handle(&table_id)
                     .and_then(|handle| handle.table_snapshot()) else {
+                    set_runtime_index_bootstrap_progress(|progress| {
+                        progress.tables_completed = progress.tables_completed.saturating_add(1);
+                        progress.current_database_id.clear();
+                        progress.current_table_id.clear();
+                        progress.current_table_started_epoch_ms = 0;
+                        progress.last_update_epoch_ms = epoch_ms!();
+                    });
                     continue;
                 };
 
                 let table_stream_id = resolve_table_stream_id_for_bootstrap(catalog, &table_id, wal);
                 if table.indexes.is_empty() {
+                    set_runtime_index_bootstrap_progress(|progress| {
+                        progress.tables_completed = progress.tables_completed.saturating_add(1);
+                        progress.current_database_id.clear();
+                        progress.current_table_id.clear();
+                        progress.current_table_started_epoch_ms = 0;
+                        progress.last_update_epoch_ms = epoch_ms!();
+                    });
                     continue;
                 }
 
@@ -633,6 +794,13 @@ impl RuntimeIndexStore {
                     .collect::<Vec<_>>();
 
                 if tracked_indexes.is_empty() {
+                    set_runtime_index_bootstrap_progress(|progress| {
+                        progress.tables_completed = progress.tables_completed.saturating_add(1);
+                        progress.current_database_id.clear();
+                        progress.current_table_id.clear();
+                        progress.current_table_started_epoch_ms = 0;
+                        progress.last_update_epoch_ms = epoch_ms!();
+                    });
                     continue;
                 }
 
@@ -779,6 +947,14 @@ impl RuntimeIndexStore {
                                 table_started_at.elapsed().as_millis(),
                             );
 
+                            set_runtime_index_bootstrap_progress(|progress| {
+                                progress.tables_completed = progress.tables_completed.saturating_add(1);
+                                progress.current_database_id.clear();
+                                progress.current_table_id.clear();
+                                progress.current_table_started_epoch_ms = 0;
+                                progress.last_update_epoch_ms = epoch_ms!();
+                            });
+
                             continue;
 
                         }
@@ -885,6 +1061,14 @@ impl RuntimeIndexStore {
                         snapshot.live_row_count,
                         table_started_at.elapsed().as_millis(),
                     );
+
+                    set_runtime_index_bootstrap_progress(|progress| {
+                        progress.tables_completed = progress.tables_completed.saturating_add(1);
+                        progress.current_database_id.clear();
+                        progress.current_table_id.clear();
+                        progress.current_table_started_epoch_ms = 0;
+                        progress.last_update_epoch_ms = epoch_ms!();
+                    });
 
                     continue;
 
@@ -1054,10 +1238,29 @@ impl RuntimeIndexStore {
                         bootstrap_started_at.elapsed().as_millis(),
                     );
                 }
+
+                set_runtime_index_bootstrap_progress(|progress| {
+                    progress.tables_completed = progress.tables_completed.saturating_add(1);
+                    progress.current_database_id.clear();
+                    progress.current_table_id.clear();
+                    progress.current_table_started_epoch_ms = 0;
+                    progress.last_update_epoch_ms = epoch_ms!();
+                });
             
             }
         
         }
+
+        set_runtime_index_bootstrap_progress(|progress| {
+            progress.phase = "ready".to_string();
+            progress.tables_total = tables_total;
+            progress.tables_completed = tables_total;
+            progress.current_database_id.clear();
+            progress.current_table_id.clear();
+            progress.current_table_started_epoch_ms = 0;
+            progress.done = true;
+            progress.last_update_epoch_ms = epoch_ms!();
+        });
 
         log::info!(
             "runtime index bootstrap complete tables={} indexes={} live_rows={} elapsed_ms={}",
@@ -1139,16 +1342,6 @@ impl RuntimeIndexStore {
             return Ok(());
         }
 
-        let min_interval_ms = runtime_index_incremental_persistence_min_interval_ms();
-        let now_ms = epoch_ms!();
-
-        if min_interval_ms > 0
-            && let Some(last_persist_ms) = self.incremental_persist_last_saved_ms.get(table_stream_id)
-            && now_ms.saturating_sub(*last_persist_ms) < min_interval_ms
-        {
-            return Ok(());
-        }
-
         let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(&data_dir, table_stream_id);
         let latest_tx_id = wal
             .latest_transaction_id(table_stream_id)
@@ -1169,6 +1362,19 @@ impl RuntimeIndexStore {
                     .max()
                     .unwrap_or(0)
             });
+
+        let min_interval_ms = runtime_index_incremental_persistence_min_interval_ms()
+            .max(runtime_index_incremental_persistence_large_table_interval_ms(
+                live_row_count,
+            ));
+        let now_ms = epoch_ms!();
+
+        if min_interval_ms > 0
+            && let Some(last_persist_ms) = self.incremental_persist_last_saved_ms.get(table_stream_id)
+            && now_ms.saturating_sub(*last_persist_ms) < min_interval_ms
+        {
+            return Ok(());
+        }
 
         persist_runtime_index_snapshot(
             self,

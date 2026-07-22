@@ -1674,6 +1674,27 @@ impl DatabaseCatalog {
         log: &L,
     ) -> DatabaseResult<usize> {
 
+        self.replay_entity_construction_from_log_with_options(wal_id, log, true)
+
+    }
+
+    pub fn replay_entity_construction_from_log_quiet<L: TransactionLog>(
+        &mut self,
+        wal_id: &str,
+        log: &L,
+    ) -> DatabaseResult<usize> {
+
+        self.replay_entity_construction_from_log_with_options(wal_id, log, false)
+
+    }
+
+    fn replay_entity_construction_from_log_with_options<L: TransactionLog>(
+        &mut self,
+        wal_id: &str,
+        log: &L,
+        emit_stale_warnings: bool,
+    ) -> DatabaseResult<usize> {
+
         log.with_all_records(wal_id, |records| {
 
             let mut applied = 0usize;
@@ -1765,11 +1786,41 @@ impl DatabaseCatalog {
                             },
 
                             DecodedTransactionPayload::IndexLifecycle(payload) => {
-                                self.apply_index_lifecycle(payload)?;
+                                if let Err(err) = self.apply_index_lifecycle(payload.clone()) {
+                                    if matches!(err, DatabaseError::TableNotFound) {
+                                        if emit_stale_warnings {
+                                            log::warn!(
+                                                "catalog replay skipped stale index lifecycle payload database={} table={} index={} action={:?}",
+                                                self.database_id.0,
+                                                payload.table_id,
+                                                payload.index_id,
+                                                payload.action,
+                                            );
+                                        }
+                                        continue;
+                                    }
+
+                                    return Err(err);
+                                }
                             },
 
                             DecodedTransactionPayload::EntityMetadata(payload) => {
-                                self.apply_entity_metadata(payload)?;
+                                let entity_id = payload.entity_id.clone();
+
+                                if let Err(err) = self.apply_entity_metadata(payload) {
+                                    if matches!(err, DatabaseError::EntityNotFound) {
+                                        if emit_stale_warnings {
+                                            log::warn!(
+                                                "catalog replay skipped stale entity metadata payload database={} entity_id={}",
+                                                self.database_id.0,
+                                                entity_id,
+                                            );
+                                        }
+                                        continue;
+                                    }
+
+                                    return Err(err);
+                                }
                             },
 
                             DecodedTransactionPayload::SqlDefinition(payload) => {

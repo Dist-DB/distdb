@@ -18,6 +18,7 @@ pub type BoxedConnectorStream = Box<dyn AsyncReadWrite>;
 
 
 const OPTIONAL_TLS_PROBE_TIMEOUT_MS: u64 = 250;
+const REQUIRED_TLS_BOOTSTRAP_PROBE_TIMEOUT_MS: u64 = 1_500;
 
 
 pub fn parse_tls_mode_from_args(args: &[String]) -> Result<common::TlsMode, String> {
@@ -168,9 +169,12 @@ fn looks_like_tls_client_hello(buf: &[u8]) -> bool {
     buf.len() >= 3 && buf[0] == 22 && buf[1] == 3 && (1..=4).contains(&buf[2])
 }
 
-async fn probe_plaintext_bootstrap_frame(stream: &TcpStream) -> Result<Option<bool>, std::io::Error> {
+async fn probe_plaintext_bootstrap_frame(
+    stream: &TcpStream,
+    probe_timeout_ms: u64,
+) -> Result<Option<bool>, std::io::Error> {
 
-    let deadline = Instant::now() + Duration::from_millis(OPTIONAL_TLS_PROBE_TIMEOUT_MS);
+    let deadline = Instant::now() + Duration::from_millis(probe_timeout_ms);
     let mut probe = [0u8; 8];
 
     loop {
@@ -183,7 +187,13 @@ async fn probe_plaintext_bootstrap_frame(stream: &TcpStream) -> Result<Option<bo
         {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(err)) => return Err(err),
-            Err(_) => return Ok(None),
+            Err(_) => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                sleep(Duration::from_millis(10)).await;
+                continue;
+            },
         };
 
         if bytes_peeked == 0 {
@@ -196,6 +206,13 @@ async fn probe_plaintext_bootstrap_frame(stream: &TcpStream) -> Result<Option<bo
 
         if bytes_peeked >= 3 && looks_like_tls_client_hello(&probe[..bytes_peeked]) {
             return Ok(Some(false));
+        }
+
+        // In required-TLS mode, CA bootstrap is a plaintext len-prefixed frame.
+        // Once we have a full length prefix and the stream does not look like
+        // TLS, prefer handing off as plaintext bootstrap immediately.
+        if bytes_peeked >= 4 && bytes_peeked < 8 {
+            return Ok(Some(true));
         }
 
         if bytes_peeked >= 8 {
@@ -232,7 +249,10 @@ pub async fn negotiate_connector_stream(
                 )
             })?;
 
-            if let Some(is_bootstrap_frame) = probe_plaintext_bootstrap_frame(&stream).await?
+            if let Some(is_bootstrap_frame) = probe_plaintext_bootstrap_frame(
+                &stream,
+                REQUIRED_TLS_BOOTSTRAP_PROBE_TIMEOUT_MS,
+            ).await?
                 && is_bootstrap_frame {
                     return Ok(Box::new(stream));
                 }

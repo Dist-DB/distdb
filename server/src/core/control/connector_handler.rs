@@ -35,6 +35,7 @@ use peerlib::{
 use serverlib::core::cluster::NodeDescriptor;
 use serverlib::{
     AffinityProcessor,
+    current_runtime_index_bootstrap_progress,
     ConcurrentWalManager, DatabaseCatalog, DatabaseEntity,
     DatabaseEntityAspect, DatabaseId,
     SqlOperation, SqlRequest, encode_wal_frame, import_p2p_ca_pem_if_missing, parse_mysql8_sql_requests,
@@ -48,8 +49,9 @@ use common::helpers::format::FileKind;
 use common::helpers::list_files;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
@@ -59,6 +61,35 @@ const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
 const SERVER_BOOTSTRAP_STATUS_SQL: &str = "__distdb_bootstrap_status__";
 const SERVER_SHOW_ENTITIES_SQL: &str = "__distdb_show_entities__";
 const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
+const MAX_SEEN_NODE_ANNOUNCES: usize = 8192;
+const MAX_SESSION_ROUTE_ENTRIES: usize = 65536;
+const MAX_SERVICE_REGISTRY_ENTRIES: usize = 8192;
+static BOOTSTRAP_STATUS_STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+pub fn mark_bootstrap_status_started() {
+    let _ = BOOTSTRAP_STATUS_STARTED_AT.get_or_init(Instant::now);
+}
+
+fn bootstrap_elapsed_seconds(bootstrap_ready: bool) -> u64 {
+
+    if !bootstrap_ready {
+        let started_at = BOOTSTRAP_STATUS_STARTED_AT.get_or_init(Instant::now);
+        return started_at.elapsed().as_secs();
+    }
+
+    BOOTSTRAP_STATUS_STARTED_AT
+        .get()
+        .map(|started_at| started_at.elapsed().as_secs())
+        .unwrap_or(0)
+
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 fn validate_affinity_join_request(
     join_req: &peerlib::AffinityJoinRequest,
@@ -211,6 +242,14 @@ fn append_catalog_entity_rows(
     bootstrap_ready: bool,
 ) {
 
+    fn load_state_for_status(status: &str) -> Vec<u8> {
+        if status == "ready" {
+            b"loaded".to_vec()
+        } else {
+            b"loading".to_vec()
+        }
+    }
+
     let mut catalog_status = catalog.status().to_string().to_ascii_lowercase();
     if !bootstrap_ready && catalog_status == "load" {
         catalog_status = "indexing".to_string();
@@ -221,12 +260,8 @@ fn append_catalog_entity_rows(
         catalog.database_name().as_bytes().to_vec(),
         b"database".to_vec(),
         resolved_database_id.as_bytes().to_vec(),
-        catalog_status.into_bytes(),
-        if bootstrap_ready {
-            b"loaded".to_vec()
-        } else {
-            b"loading".to_vec()
-        },
+        catalog_status.clone().into_bytes(),
+        load_state_for_status(&catalog_status),
         b"n/a".to_vec(),
     ]);
 
@@ -255,12 +290,8 @@ fn append_catalog_entity_rows(
                     catalog.database_name().as_bytes().to_vec(),
                     b"table".to_vec(),
                     table.table_id.clone().into_bytes(),
-                    entity_status.into_bytes(),
-                    if bootstrap_ready {
-                        b"loaded".to_vec()
-                    } else {
-                        b"loading".to_vec()
-                    },
+                    entity_status.clone().into_bytes(),
+                    load_state_for_status(&entity_status),
                     table.indexes.len().to_string().into_bytes(),
                 ]);
 
@@ -274,21 +305,21 @@ fn append_catalog_entity_rows(
 
                 for index_id in indexes {
 
+                    let index_status = if entity_status == "ready" {
+                        "ready"
+                    } else if entity_status == "indexing" {
+                        "indexing"
+                    } else {
+                        "load"
+                    };
+
                     rows.push(vec![
                         resolved_database_id.as_bytes().to_vec(),
                         catalog.database_name().as_bytes().to_vec(),
                         b"index".to_vec(),
                         index_id.into_bytes(),
-                        if bootstrap_ready {
-                            b"ready".to_vec()
-                        } else {
-                            b"load".to_vec()
-                        },
-                        if bootstrap_ready {
-                            b"loaded".to_vec()
-                        } else {
-                            b"loading".to_vec()
-                        },
+                        index_status.as_bytes().to_vec(),
+                        load_state_for_status(index_status),
                         b"n/a".to_vec(),
                     ]);
 
@@ -302,12 +333,8 @@ fn append_catalog_entity_rows(
                     catalog.database_name().as_bytes().to_vec(),
                     entity.kind().to_string().into_bytes(),
                     entity.name().as_bytes().to_vec(),
-                    entity_status.into_bytes(),
-                    if bootstrap_ready {
-                        b"loaded".to_vec()
-                    } else {
-                        b"loading".to_vec()
-                    },
+                    entity_status.clone().into_bytes(),
+                    load_state_for_status(&entity_status),
                     b"n/a".to_vec(),
                 ]);
             }
@@ -335,7 +362,7 @@ struct CatalogWorkerHandle {
 
 struct CatalogDispatchMessage {
     request: ConnectorRequest,
-    parsed_query_requests: Option<Vec<SqlRequest>>,
+    parsed_query_requests: Option<Arc<Vec<SqlRequest>>>,
     parsed_query_ms: Option<u64>,
     session_id: String,
     user_id: String,
@@ -534,7 +561,7 @@ impl CatalogDispatcher {
         &self,
         catalog_id: &str,
         request: ConnectorRequest,
-        parsed_query_requests: Option<Vec<SqlRequest>>,
+        parsed_query_requests: Option<Arc<Vec<SqlRequest>>>,
         parsed_query_ms: Option<u64>,
         session_id: String,
         user_id: String,
@@ -547,6 +574,15 @@ impl CatalogDispatcher {
 
         {
             let mut routes = self.session_routes.lock().await;
+
+            if routes.len() >= MAX_SESSION_ROUTE_ENTRIES {
+                log::debug!(
+                    "resetting catalog session route cache at {} entries",
+                    routes.len()
+                );
+                routes.clear();
+            }
+
             routes.insert(session_id.clone(), catalog_id.to_string());
         }
 
@@ -674,23 +710,34 @@ fn explicit_catalog_ids_from_query_sql_with_parsed_requests(
     parsed_requests: Option<&[SqlRequest]>,
 ) -> HashSet<String> {
 
-    let requests = if let Some(requests) = parsed_requests {
-        requests.to_vec()
+    let mut explicit_catalogs = HashSet::<String>::new();
+
+    if let Some(requests) = parsed_requests {
+
+        for request in requests {
+
+            if let Some(object_name) = request.object_name.as_ref()
+                && let Some(catalog_id) = catalog_id_from_qualified_object_name(object_name)
+            {
+                explicit_catalogs.insert(catalog_id);
+            }
+
+        }
+
     } else {
+
         let Ok(requests) = parse_mysql8_sql_requests(sql, "") else {
             return relation_catalog_hints_from_sql(sql);
         };
-        requests
-    };
 
-    let mut explicit_catalogs = HashSet::<String>::new();
+        for request in requests {
 
-    for request in requests {
+            if let Some(object_name) = request.object_name
+                && let Some(catalog_id) = catalog_id_from_qualified_object_name(&object_name)
+            {
+                explicit_catalogs.insert(catalog_id);
+            }
 
-        if let Some(object_name) = request.object_name
-            && let Some(catalog_id) = catalog_id_from_qualified_object_name(&object_name)
-        {
-            explicit_catalogs.insert(catalog_id);
         }
 
     }
@@ -764,6 +811,8 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
         ));
     }
 
+    let shared_parsed_requests = parsed_requests.map(|requests| Arc::new(requests.to_vec()));
+
     let mut merged_columns: Option<Vec<FieldDef>> = None;
     let mut merged_rows: Vec<Vec<Vec<u8>>> = Vec::new();
     let mut parse_ms = 0u64;
@@ -781,7 +830,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
             .dispatch_with_access_mode(
                 &catalog_id,
                 routed,
-                parsed_requests.map(|requests| requests.to_vec()),
+                shared_parsed_requests.clone(),
                 parsed_query_ms,
                 session_id.to_string(),
                 user_id.to_string(),
@@ -806,7 +855,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
         };
 
         if !matches!(response.status, connector::ResponseStatus::Applied) {
-            
+
             return Some(ConnectorResponse::rejected(
                 request.request_id.clone(),
                 format!(
@@ -952,7 +1001,7 @@ fn catalog_id_from_relation_token(token: &str) -> Option<String> {
 async fn execute_app_request_for_session(
     app: &Arc<RwLock<ServerApp>>,
     request: &ConnectorRequest,
-    parsed_query_requests: Option<Vec<SqlRequest>>,
+    parsed_query_requests: Option<Arc<Vec<SqlRequest>>>,
     parsed_query_ms: Option<u64>,
     session_id: &str,
     user_id: &str,
@@ -969,7 +1018,7 @@ async fn execute_app_request_for_session(
                 && let Some(response) = app_read.handle_read_only_connector_request_for_session_with_parsed(
                     request,
                     session_id,
-                    parsed_requests.clone(),
+                    parsed_requests.as_ref().clone(),
                     parsed_query_ms.unwrap_or(0),
                 )
             {
@@ -1000,7 +1049,7 @@ async fn execute_app_request_for_session(
         app.handle_connector_request_for_session_with_parsed_query(
             request,
             session_id,
-            parsed_requests,
+            parsed_requests.as_ref().clone(),
             parsed_query_ms.unwrap_or(0),
         )
     } else {
@@ -1047,19 +1096,85 @@ pub fn maybe_bootstrap_status_response(
         return None;
     }
 
+    let elapsed_secs = bootstrap_elapsed_seconds(bootstrap_ready);
+    let progress = current_runtime_index_bootstrap_progress();
+    let progress_phase = if bootstrap_ready {
+        "ready".to_string()
+    } else if progress.phase.is_empty() {
+        "runtime_index_bootstrap".to_string()
+    } else {
+        progress.phase.clone()
+    };
+
+    let tables_total = progress.tables_total;
+    let tables_completed = progress.tables_completed.min(tables_total);
+    let now_ms = now_epoch_ms();
+
+    let current_table = if progress.current_table_id.is_empty() {
+        if bootstrap_ready {
+            "n/a".to_string()
+        } else {
+            "pending".to_string()
+        }
+    } else if progress.current_database_id.is_empty() {
+        progress.current_table_id.clone()
+    } else {
+        format!("{}.{}", progress.current_database_id, progress.current_table_id)
+    };
+
+    let current_table_elapsed_secs = if progress.current_table_started_epoch_ms > 0
+        && now_ms >= progress.current_table_started_epoch_ms
+    {
+        (now_ms - progress.current_table_started_epoch_ms) / 1_000
+    } else {
+        0
+    };
+
+    let last_progress_update_secs_ago = if progress.last_update_epoch_ms > 0
+        && now_ms >= progress.last_update_epoch_ms
+    {
+        (now_ms - progress.last_update_epoch_ms) / 1_000
+    } else {
+        0
+    };
+
+    let progress_percent = if tables_total > 0 {
+        (tables_completed.saturating_mul(100)) / tables_total
+    } else if bootstrap_ready {
+        100
+    } else {
+        0
+    };
+
     let (mode, entities_state, indexes_state, message) = if bootstrap_ready {
         (
             "full",
             "loaded",
             "loaded",
-            "server bootstrap complete; full database command set is enabled",
+            format!(
+                "server bootstrap complete (elapsed={}s, progress={}/{} {}%); full database command set is enabled",
+                elapsed_secs,
+                tables_completed,
+                tables_total,
+                progress_percent,
+            ),
         )
     } else {
         (
             "limited",
             "loading",
             "loading",
-            "server is bootstrapping; only connectivity and status/discovery commands are enabled",
+            format!(
+                "server is bootstrapping (elapsed={}s, phase={}, progress={}/{} {}%, current_table={}, current_table_elapsed={}s, last_progress_update={}s_ago); only connectivity and status/discovery commands are enabled",
+                elapsed_secs,
+                progress_phase,
+                tables_completed,
+                tables_total,
+                progress_percent,
+                current_table,
+                current_table_elapsed_secs,
+                last_progress_update_secs_ago,
+            ),
         )
     };
 
@@ -1121,6 +1236,60 @@ pub fn maybe_bootstrap_status_response(
                     default_value: None,
                     metadata: None,
                 },
+                FieldDef {
+                    seqno: 7,
+                    field_name: "progress_phase".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 8,
+                    field_name: "tables_completed".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 9,
+                    field_name: "tables_total".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 10,
+                    field_name: "current_table".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 11,
+                    field_name: "current_table_elapsed_secs".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 12,
+                    field_name: "last_progress_update_secs_ago".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                },
             ],
             rows: vec![vec![
                 if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
@@ -1128,7 +1297,13 @@ pub fn maybe_bootstrap_status_response(
                 entities_state.as_bytes().to_vec(),
                 indexes_state.as_bytes().to_vec(),
                 if bootstrap_ready { b"true".to_vec() } else { b"false".to_vec() },
-                message.as_bytes().to_vec(),
+                message.into_bytes(),
+                progress_phase.into_bytes(),
+                tables_completed.to_string().into_bytes(),
+                tables_total.to_string().into_bytes(),
+                current_table.into_bytes(),
+                current_table_elapsed_secs.to_string().into_bytes(),
+                last_progress_update_secs_ago.to_string().into_bytes(),
             ]],
             timings: QueryTimings {
                 server_parse_ms: 0,
@@ -1350,7 +1525,7 @@ pub async fn maybe_show_entities_response(
 
             let wal_id = catalog.database_id.0.clone();
 
-            if let Err(err) = catalog.replay_entity_construction_from_log(&wal_id, &wal) {
+            if let Err(err) = catalog.replay_entity_construction_from_log_quiet(&wal_id, &wal) {
                 log::debug!(
                     "show entities bootstrap fallback replay failed for database_id={} err={}",
                     wal_id,
@@ -1663,26 +1838,28 @@ pub async fn maybe_server_peer_discovery_response(
     let mut seen_ids = HashSet::new();
     peers.retain(|peer| seen_ids.insert(peer.id.clone()));
 
-    let service_snapshot = {
-        let registry = service_registry.lock().await;
-        registry.clone()
-    };
+    let rows = {
+        let mut registry = service_registry.lock().await;
+        let local_node_id = local_node.id.0.as_str();
 
-    let rows = peers
-        .into_iter()
-        .map(|peer| {
-            let services = service_snapshot
-                .get(&peer.id)
-                .cloned()
-                .unwrap_or_default()
-                .join(",");
-            vec![
-                peer.id.into_bytes(),
-                peer.addrs.join(",").into_bytes(),
-                services.into_bytes(),
-            ]
-        })
-        .collect::<Vec<_>>();
+        registry.retain(|node_id, _| seen_ids.contains(node_id) || node_id == local_node_id);
+
+        peers
+            .into_iter()
+            .map(|peer| {
+                let services = registry
+                    .get(&peer.id)
+                    .map(|service_list| service_list.join(","))
+                    .unwrap_or_default();
+
+                vec![
+                    peer.id.into_bytes(),
+                    peer.addrs.join(",").into_bytes(),
+                    services.into_bytes(),
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
 
     let response = ConnectorResponse::applied(
         request.request_id.clone(),
@@ -1764,10 +1941,14 @@ pub async fn handle_connector_stream(
     connection_id: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
-    {
-        let app_read = app.read().await;
+    if let Ok(app_read) = app.try_read() {
         let first_wal_ts = app_read.first_wal_record_timestamp_for_database("main");
         configure_bootstrap_crypto_context(local_node.id.0.clone(), first_wal_ts);
+    } else {
+        log::debug!(
+            "connector bootstrap crypto context deferred: app lock busy peer_addr={}",
+            peer_addr
+        );
     }
 
     let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
@@ -1815,12 +1996,6 @@ pub async fn handle_connector_stream(
         }
 
         if is_ca_bootstrap_frame(&payload) {
-
-            let node_data_dir = {
-                let app_guard = app.read().await;
-                app_guard.node_data_dir().clone()
-            };
-
             let response = if let Some(_req) = decode_ca_bootstrap_request(&payload) {
                 
                 match serverlib::load_p2p_ca_pem(&node_data_dir) {
@@ -1858,8 +2033,18 @@ pub async fn handle_connector_stream(
             if let Some(encoded) = encode_ca_bootstrap_response(&response) {
                 let len = encoded.len() as u32;
                 use tokio::io::AsyncWriteExt;
-                let _ = stream.write_all(&len.to_le_bytes()).await;
-                let _ = stream.write_all(&encoded).await;
+                if let Err(err) = stream.write_all(&len.to_le_bytes()).await {
+                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+                    return Err(Box::new(err));
+                }
+                if let Err(err) = stream.write_all(&encoded).await {
+                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+                    return Err(Box::new(err));
+                }
+                if let Err(err) = stream.flush().await {
+                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
+                    return Err(Box::new(err));
+                }
             }
 
             log::debug!(
@@ -2023,6 +2208,15 @@ pub async fn handle_connector_stream(
 
                 {
                     let mut services = service_registry.lock().await;
+
+                    if services.len() >= MAX_SERVICE_REGISTRY_ENTRIES {
+                        log::debug!(
+                            "resetting service registry cache at {} entries",
+                            services.len()
+                        );
+                        services.clear();
+                    }
+
                     services.insert(announcement.node_id.clone(), announcement.services.clone());
                 }
 
@@ -2401,6 +2595,15 @@ pub async fn handle_connector_stream(
                 let dedup_key = node_announce_dedup_key(&node);
                 let should_fanout = {
                     let mut seen = seen_node_announces.lock().await;
+
+                    if seen.len() >= MAX_SEEN_NODE_ANNOUNCES {
+                        log::debug!(
+                            "resetting node announce dedup cache at {} entries",
+                            seen.len()
+                        );
+                        seen.clear();
+                    }
+
                     seen.insert(dedup_key)
                 };
 
@@ -2672,6 +2875,7 @@ pub async fn handle_connector_stream(
         let parsed_query_ms = parsed_requests_for_routing
             .as_ref()
             .map(|(_, parse_ms)| *parse_ms);
+        let parsed_requests_shared = parsed_requests_ref.map(|requests| Arc::new(requests.to_vec()));
 
         let access_mode = classify_catalog_access_mode_with_parsed_requests(
             &request,
@@ -2702,7 +2906,7 @@ pub async fn handle_connector_stream(
                 .dispatch_with_access_mode(
                     &catalog_id,
                     request.clone(),
-                    parsed_requests_ref.map(|requests| requests.to_vec()),
+                    parsed_requests_shared.clone(),
                     parsed_query_ms,
                     session.session_id.clone(),
                     session.user_id().to_string(),
@@ -2723,7 +2927,7 @@ pub async fn handle_connector_stream(
             execute_app_request_for_session(
                 &app,
                 &request,
-                parsed_requests_ref.map(|requests| requests.to_vec()),
+                parsed_requests_shared.clone(),
                 parsed_query_ms,
                 &session.session_id,
                 session.user_id(),
