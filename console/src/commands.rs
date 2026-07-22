@@ -419,11 +419,10 @@ fn parse_delimiter_directive(
         return Err("delimiter accepts exactly one token".to_string());
     }
 
-    if active_delimiter != ";" && next_delimiter.ends_with(active_delimiter) {
-        if let Some(without_suffix) = next_delimiter.strip_suffix(active_delimiter) {
+    if active_delimiter != ";" && next_delimiter.ends_with(active_delimiter)
+        && let Some(without_suffix) = next_delimiter.strip_suffix(active_delimiter) {
             next_delimiter = without_suffix.to_string();
         }
-    }
 
     if active_delimiter == ";" && next_delimiter.ends_with(';') && next_delimiter != ";" {
         next_delimiter = next_delimiter.trim_end_matches(';').to_string();

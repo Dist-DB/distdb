@@ -788,11 +788,10 @@ impl SqlStatementParser {
                 continue;
             }
 
-            if ch == '\n' && !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote {
-                if self.try_apply_delimiter_directive()? {
+            if ch == '\n' && !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote
+                && self.try_apply_delimiter_directive()? {
                     continue;
                 }
-            }
 
             self.buffer.push(ch);
 
@@ -869,11 +868,10 @@ fn parse_import_delimiter_directive(
 ) -> Result<Option<String>, String> {
     let mut directive = statement.trim();
 
-    if let Some(delimiter) = trailing_delimiter {
-        if !delimiter.is_empty() && directive.ends_with(delimiter) {
+    if let Some(delimiter) = trailing_delimiter
+        && !delimiter.is_empty() && directive.ends_with(delimiter) {
             directive = directive[..directive.len() - delimiter.len()].trim_end();
         }
-    }
 
     if !starts_with_keyword_ascii_case_insensitive(directive, "delimiter") {
         return Ok(None);
