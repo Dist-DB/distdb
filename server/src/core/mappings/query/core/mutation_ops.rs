@@ -483,6 +483,7 @@ fn execute_insert_locked(
 
                     for index in &unique_indexes {
 
+                        #[expect(clippy::question_mark, reason="we want to return None if the runtime index is not found")]
                         let Some(runtime_index) = runtime_indexes
                             .index_for_table(&table_stream_id, index.index_id.0.as_str())
                         else {
@@ -2782,6 +2783,7 @@ fn format_update_arithmetic_result(value: f64) -> String {
     }
 }
 
+#[expect(clippy::ptr_arg, reason="we want to accept a Vec of tuples for mutation rows")]
 fn apply_delete_order_by_items(
     rows: &mut Vec<(u64, MutationRowMap)>,
     order_by_items: &[serverlib::SelectOrderByItem],
@@ -3102,7 +3104,6 @@ where
 
 }
 
-#[expect(clippy::type_complexity, reason="complexity is inherent to the operation being performed and attempting to simplify it would reduce readability")]
 fn load_mutation_rows(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,

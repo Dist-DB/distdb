@@ -334,6 +334,7 @@ fn handle_select_introspection_request(
 
         let show_tables_target_db = parse_show_tables_target_database(&statement.sql);
 
+        #[expect(clippy::unnecessary_lazy_evaluations, reason="we want to avoid unnecessary string allocations when the target database is specified in the SQL statement")]
         let target_db = show_tables_target_db
             .as_deref()
             .or_else(|| statement.object_name.as_deref())
@@ -1564,8 +1565,7 @@ fn compare_slice_coordinates(left: &[String], right: &[String]) -> std::cmp::Ord
 
 fn extract_projected_field_names_from_olap_view_sql(olap_sql: &str) -> Option<Vec<String>> {
     let select_sql = extract_view_select_sql(olap_sql).ok()?;
-    let projection = serverlib::parse_select_projection_from_statement(&select_sql).ok()?;
-    projection
+    serverlib::parse_select_projection_from_statement(&select_sql).ok()?
 }
 
 fn resolve_catalog_and_read_plan_for_select<'a>(

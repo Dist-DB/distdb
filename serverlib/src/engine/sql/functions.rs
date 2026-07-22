@@ -117,6 +117,7 @@ pub fn evaluate_inbuilt_sql_function_with_lookup(
 
 }
 
+#[expect(clippy::type_complexity, reason="this is a generic function that takes two closures for lookup and nested function evaluation")]
 pub fn function_argument_values(
     function: &Function,
     lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
@@ -144,6 +145,7 @@ pub fn function_argument_values(
 
 }
 
+#[expect(clippy::type_complexity, reason="this is a generic function that takes two closures for lookup and nested function evaluation")]
 pub fn evaluate_expression_sql_to_bytes(
     expression_sql: &str,
     lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
@@ -222,6 +224,7 @@ fn collect_function_argument_references(
 
 }
 
+#[expect(clippy::type_complexity, reason="this is a generic function that takes two closures for lookup and nested function evaluation")]
 fn function_argument_to_bytes(
     argument: &FunctionArg,
     lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
@@ -248,6 +251,7 @@ fn function_argument_to_bytes(
 
 }
 
+#[expect(clippy::type_complexity, reason="this is a generic function that takes two closures for lookup and nested function evaluation")]
 fn expression_to_argument_bytes(
     expression: &Expr,
     lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,

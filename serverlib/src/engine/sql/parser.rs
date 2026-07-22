@@ -518,6 +518,7 @@ fn consume_table_index_hint(bytes: &[u8], start: usize) -> Option<usize> {
 
             after_for = skip_ascii_whitespace(bytes, after_for);
 
+            #[expect(clippy::question_mark, reason="we want to return None if the next token is not 'by'")]
             if let Some(after_join) = match_ascii_keyword(bytes, after_for, "join") {
 
                 after_key = after_join;
@@ -541,7 +542,9 @@ fn consume_table_index_hint(bytes: &[u8], start: usize) -> Option<usize> {
                 after_key = match_ascii_keyword(bytes, after_group_ws, "by")?;
 
             } else {
+
                 return None;
+
             }
 
         }

@@ -508,6 +508,7 @@ fn inbuilt_runtime_context_for_query(
     
 }
 
+#[expect(clippy::result_large_err, reason="we want to return a detailed error response for sql parse failures")]
 fn parse_query_requests_with_timing(
     request_id: &str,
     database_id: &str,

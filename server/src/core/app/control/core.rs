@@ -1864,9 +1864,8 @@ impl ServerApp {
 
             self.seed_sandbox_wal_from_source(&sandbox_catalogs, source_wal, &sandbox_wal)
                 .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
-            let cloned = snapshot_runtime_indexes.clone();
-
-            cloned
+    
+            snapshot_runtime_indexes.clone()
 
         };
 

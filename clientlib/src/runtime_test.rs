@@ -113,6 +113,7 @@ fn query_value_to_json_maps_variants() {
     );
 }
 
+#[expect(clippy::bool_assert_comparison, reason="we want to allow boolean assertions")]
 #[test]
 fn query_response_from_wire_maps_columns_rows_and_timings() {
     
@@ -167,6 +168,7 @@ fn query_response_from_wire_maps_columns_rows_and_timings() {
     assert_eq!(response.columns[0].ordinal, 0);
     assert_eq!(response.columns[0].name, "id");
     assert_eq!(response.columns[0].sql_type, "BIGINT");
+
     assert_eq!(response.columns[0].nullable, false);
     assert_eq!(response.columns[0].indexed, "PrimaryKey");
 

@@ -157,6 +157,7 @@ fn parse_wss_port_from_args(args: &[String], connector_port: u16) -> u16 {
         .unwrap_or_else(|| connector_port.saturating_add(1))
 }
 
+#[expect(clippy::too_many_arguments, reason="this function is a connection handler and needs to pass many arguments to the executor closure")]
 async fn handle_wss_connection(
     stream: tokio::net::TcpStream,
     tls_acceptor: TlsAcceptor,

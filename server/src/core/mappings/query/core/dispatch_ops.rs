@@ -2388,10 +2388,14 @@ fn parse_local_scalar_value(
     if (value.starts_with('\'') && value.ends_with('\''))
         || (value.starts_with('"') && value.ends_with('"'))
     {
+        
         if value.len() < 2 {
             return Err("local assignment parse failed: quoted value is malformed".to_string());
         }
+
+        #[expect(clippy::sliced_string_as_bytes, reason="we want to extract the inner bytes of the quoted string")]
         return Ok(value[1..(value.len() - 1)].as_bytes().to_vec());
+
     }
 
     let lowered = value.to_ascii_lowercase();

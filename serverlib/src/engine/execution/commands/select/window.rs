@@ -748,6 +748,7 @@ fn render_window_default_value(expression: &Expr) -> Result<Vec<u8>, String> {
 
 }
 
+#[expect(clippy::type_complexity, reason="returning a tuple of partition and order indexes")]
 fn window_partition_and_order_indexes(
     window_spec: &WindowSpec,
     columns: &[FieldDef],
@@ -1155,6 +1156,7 @@ fn apply_avg_window_projection(
 
 }
 
+#[expect(clippy::too_many_arguments, reason="window projection functions require many parameters")]
 fn apply_min_max_window_projection(
     rows: &mut [Vec<Vec<u8>>],
     columns: &[FieldDef],
@@ -1230,6 +1232,7 @@ fn apply_min_max_window_projection(
 
 }
 
+#[expect(clippy::too_many_arguments, reason="window projection functions require many parameters")]
 fn apply_first_last_value_window_projection(
     rows: &mut [Vec<Vec<u8>>],
     columns: &[FieldDef],

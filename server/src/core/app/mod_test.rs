@@ -5122,7 +5122,7 @@ fn mutation_command_insert_executes_via_query_routing() {
         "req-mutation-verify",
         ConnectorCommand::Query {
             query: connector::DataQuery {
-                database_id: database_id,
+                database_id,
                 sql: "select count(*) as c_all from users".to_string(),
             },
         },

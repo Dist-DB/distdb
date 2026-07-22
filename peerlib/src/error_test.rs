@@ -24,6 +24,7 @@
         );
     }
 
+    #[expect(clippy::unnecessary_literal_unwrap, reason="we want to test the error display formatting")]
     #[test]
     fn result_alias_supports_ok_and_err() {
         let ok_value: Result<u64> = Ok(42);

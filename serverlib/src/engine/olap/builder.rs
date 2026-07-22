@@ -94,6 +94,7 @@ impl HypercubeBuilder {
 
         // Accumulate raw values per cell before computing aggregates.
         // key: coordinate vec  →  (row_ids, measure_raw_values[measure_idx])
+        #[expect(clippy::type_complexity, reason="complexity is inherent to the operation being performed and attempting to simplify it would reduce readability")]
         let mut acc: HashMap<Vec<DimensionCoordinate>, (Vec<u64>, Vec<Vec<f64>>)> =
             HashMap::new();
 
@@ -108,11 +109,10 @@ impl HypercubeBuilder {
             entry.0.push(*row_id);
 
             for (idx, measure) in self.measures.iter().enumerate() {
-                if let Some(raw) = fields.get(&measure.field_name) {
-                    if let Some(val) = decode_f64(raw) {
+                if let Some(raw) = fields.get(&measure.field_name)
+                    && let Some(val) = decode_f64(raw) {
                         entry.1[idx].push(val);
                     }
-                }
             }
 
         }

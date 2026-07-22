@@ -342,7 +342,7 @@ impl RuntimeIndexStore {
 
     pub fn register_index_for_table(&mut self, table_scope_id: &str, index: &DatabaseIndex) {
 
-        if !self.should_track_index(&index) {
+        if !self.should_track_index(index) {
             return;
         }
 
@@ -1254,7 +1254,6 @@ fn snapshot_indexes_for_table(
     Ok(indexes)
 }
 
-#[expect(clippy::type_complexity, reason="returning a tuple of (latest_tx_id, live_rows)")]
 fn build_bootstrap_index_entries(
     tracked_indexes: &[DatabaseIndex],
     live_rows: &[(u64, HashMap<String, Vec<u8>>)],
@@ -1348,7 +1347,6 @@ fn build_bootstrap_index_entries(
 
 }
 
-#[expect(clippy::type_complexity, reason="returning a tuple of (index_id, entries)")]
 fn build_snapshot_index_entries(
     tracked_indexes: &[DatabaseIndex],
     snapshot: &RuntimeIndexTableSnapshot,

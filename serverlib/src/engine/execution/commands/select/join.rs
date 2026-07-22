@@ -278,6 +278,7 @@ where
 
 }
 
+#[expect(clippy::too_many_arguments, reason="this function is a join select executor and needs to pass many arguments to the executor closure")]
 pub fn execute_relation_select_plan<E, R, T, S>(
     wal: &ConcurrentWalManager,
     table: T,
