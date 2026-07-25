@@ -540,13 +540,21 @@ impl ConcurrentWalManager {
     fn get_or_spawn_worker(&self, wal_id: &str) -> Result<Sender<WalCommand>, &'static str> {
 
         let stream_key = obfuscated_stream_key(wal_id)?;
-        
+        self.get_or_spawn_worker_for_stream_key(&stream_key)
+
+    }
+
+    fn get_or_spawn_worker_for_stream_key(
+        &self,
+        stream_key: &str,
+    ) -> Result<Sender<WalCommand>, &'static str> {
+
         let mut workers = self
             .workers
             .lock()
             .map_err(|_| "failed to lock WAL workers")?;
 
-        if let Some(existing) = workers.get(&stream_key) {
+        if let Some(existing) = workers.get(stream_key) {
             return Ok(existing.clone());
         }
 
@@ -554,24 +562,28 @@ impl ConcurrentWalManager {
             .stream_modes
             .lock()
             .ok()
-            .and_then(|modes| modes.get(&stream_key).copied())
+            .and_then(|modes| modes.get(stream_key).copied())
             .unwrap_or(WalStreamMode::Durable);
 
         let wal_path = match stream_mode {
             WalStreamMode::Durable => self
                 .data_dir
                 .as_ref()
-                .map(|dir| dir.join(FileKind::Data.file_name(&stream_key))),
+                .map(|dir| dir.join(FileKind::Data.file_name(stream_key))),
             WalStreamMode::Ephemeral => None,
         };
 
-        let (sender, ready_rx) = spawn_worker(stream_key.clone(), Arc::clone(&self.storage), wal_path);
+        let (sender, ready_rx) = spawn_worker(
+            stream_key.to_string(),
+            Arc::clone(&self.storage),
+            wal_path,
+        );
 
         ready_rx
             .recv()
             .map_err(|_| "failed to receive WAL worker startup acknowledgement")?;
         
-        workers.insert(stream_key, sender.clone());
+        workers.insert(stream_key.to_string(), sender.clone());
         
         Ok(sender)
 
@@ -629,7 +641,8 @@ impl ConcurrentWalManager {
             .filter_map(write_timestamp_if_data_write)
             .max();
 
-        let sender = self.get_or_spawn_worker(wal_id)?;
+        let stream_key = obfuscated_stream_key(wal_id)?;
+        let sender = self.get_or_spawn_worker_for_stream_key(&stream_key)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
 
         sender
@@ -645,7 +658,6 @@ impl ConcurrentWalManager {
             .map_err(|_| "failed to receive WAL append-batch acknowledgement")??;
 
         if let Some(batch_max_write_ts) = batch_max_write_ts
-            && let Ok(stream_key) = obfuscated_stream_key(wal_id)
             && let Ok(mut high_water) = self.write_high_water_by_stream.lock() {
                 high_water
                     .entry(stream_key)
@@ -780,8 +792,14 @@ impl TransactionLog for ConcurrentWalManager {
                 entries
                     .iter()
                     .filter(|entry| {
+                        let kind_matched = match kinds {
+                            [kind] => entry.kind == *kind,
+                            [first, second] => entry.kind == *first || entry.kind == *second,
+                            _ => kinds.contains(&entry.kind),
+                        };
+
                         from.map(|min_id| entry.id.0 > min_id.0).unwrap_or(true)
-                            && kinds.contains(&entry.kind)
+                            && kind_matched
                     })
                     .cloned()
                     .collect()
@@ -802,8 +820,9 @@ impl ConcurrentWalManager {
     ) -> Result<(), &'static str> {
 
         let write_ts = write_timestamp_if_data_write(&record);
-        
-        let sender = self.get_or_spawn_worker(wal_id)?;
+        let stream_key = obfuscated_stream_key(wal_id)?;
+
+        let sender = self.get_or_spawn_worker_for_stream_key(&stream_key)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
 
         sender
@@ -819,7 +838,6 @@ impl ConcurrentWalManager {
             .map_err(|_| "failed to receive WAL append acknowledgement")??;
 
         if let Some(write_ts) = write_ts
-            && let Ok(stream_key) = obfuscated_stream_key(wal_id)
             && let Ok(mut high_water) = self.write_high_water_by_stream.lock() {
                 high_water
                     .entry(stream_key)
@@ -834,6 +852,7 @@ impl ConcurrentWalManager {
         Ok(())
 
     }
+    
 }
 
 fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
@@ -1445,6 +1464,24 @@ fn compact_entries_to_latest_schema_and_metadata(
 
 }
 
+fn exact_record_duplicate_at_or_after(
+    entries: &[TransactionRecord],
+    record: &TransactionRecord,
+    start_idx: usize,
+) -> bool {
+
+    let mut idx = start_idx;
+    while idx < entries.len() && entries[idx].id.0 == record.id.0 {
+        if &entries[idx] == record {
+            return true;
+        }
+        idx += 1;
+    }
+
+    false
+
+}
+
 fn spawn_worker(
     stream_key: String,
     storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
@@ -1549,8 +1586,11 @@ fn spawn_worker(
                             let _ = ack.send(Ok(()));
                         
                         } else {
-                            
-                            if entries.contains(&record) {
+                            let base_pos = entries
+                                .binary_search_by_key(&record.id.0, |existing| existing.id.0)
+                                .unwrap_or_else(|idx| idx);
+
+                            if exact_record_duplicate_at_or_after(entries, &record, base_pos) {
                                 // Exact duplicate already present; treat as idempotent success.
                                 let _ = ack.send(Ok(()));
                                 continue;
@@ -1558,9 +1598,7 @@ fn spawn_worker(
 
                             // Insert older records into sorted position so affinity imports from
                             // peers with divergent local id ranges are still preserved.
-                            let mut insert_pos = entries
-                                .binary_search_by_key(&record.id.0, |existing| existing.id.0)
-                                .unwrap_or_else(|idx| idx);
+                            let mut insert_pos = base_pos;
 
                             while insert_pos < entries.len()
                                 && entries[insert_pos].id.0 <= record.id.0
@@ -1568,10 +1606,12 @@ fn spawn_worker(
                                 insert_pos += 1;
                             }
 
-                            entries.insert(insert_pos, record);
+                            if let Some(ref path) = wal_path {
 
-                            if let Some(ref path) = wal_path
-                                && let Err(e) = rewrite_wal_file_with_context(path, entries, &context) {
+                                let mut staged_entries = entries.clone();
+                                staged_entries.insert(insert_pos, record);
+
+                                if let Err(e) = rewrite_wal_file_with_context(path, &staged_entries, &context) {
                                     log::error!(
                                         "failed to rewrite WAL file for out-of-order insert stream={}: {}",
                                         stream_key,
@@ -1580,6 +1620,12 @@ fn spawn_worker(
                                     let _ = ack.send(Err(e));
                                     continue;
                                 }
+
+                                *entries = staged_entries;
+
+                            } else {
+                                entries.insert(insert_pos, record);
+                            }
 
                             if let Some(ref path) = wal_path {
                                 append_file = open_wal_append_file(path).ok();
@@ -1624,19 +1670,20 @@ fn spawn_worker(
                             state.get_mut(&stream_key).expect("WAL stream entry should exist")
                         };
 
-                        let mut expected_next_id = entries
-                            .last()
-                            .map(|last| last.id.0.saturating_add(1))
-                            .unwrap_or(1);
+                        let mut previous_id = entries.last().map(|last| last.id.0);
 
                         let ordered = records
                             .iter()
                             .all(|record| {
-                                let is_next = record.id.0 == expected_next_id;
-                                if is_next {
-                                    expected_next_id = expected_next_id.saturating_add(1);
+                                let is_after = previous_id
+                                    .map(|last_id| record.id.0 > last_id)
+                                    .unwrap_or(true);
+
+                                if is_after {
+                                    previous_id = Some(record.id.0);
                                 }
-                                is_next
+
+                                is_after
                             });
 
                         if ordered {
@@ -1681,88 +1728,102 @@ fn spawn_worker(
                         }
 
                         let mut batch_error: Option<&'static str> = None;
+                        let mut merged_out_of_order = false;
+                        let mut staged_dirty = false;
                         let reserve_hint = records.len().saturating_add(records.len() / 2);
 
-                        entries.reserve(reserve_hint);
+                        if wal_path.is_none() {
+                            entries.reserve(reserve_hint);
+                        }
+
+                        let mut staged_entries = wal_path
+                            .as_ref()
+                            .map(|_| {
+                                let mut staged = entries.clone();
+                                staged.reserve(reserve_hint);
+                                staged
+                            });
+
+                        let working_entries = staged_entries.as_mut().unwrap_or(entries);
 
                         for record in records {
 
-                            let is_ordered = entries
+                            let is_ordered = working_entries
                                 .last()
                                 .map(|last| record.id.0 > last.id.0)
                                 .unwrap_or(true);
 
                             if is_ordered {
 
-                                if let Some(ref path) = wal_path {
-                                    match frame_record_with_context(&record, &context) {
-                                        Ok(frame) => {
-                                            if let Err(e) = append_wal_bytes(&mut append_file, path, &frame) {
-                                                log::error!(
-                                                    "failed to persist WAL record for stream={}: {}",
-                                                    stream_key,
-                                                    e
-                                                );
-                                                batch_error = Some("failed to persist WAL record to disk");
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            batch_error = Some(e);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if batch_error.is_some() {
-                                    break;
-                                }
-
-                                entries.push(record);
+                                working_entries.push(record);
+                                staged_dirty = true;
                                 continue;
                                 
                             }
 
-                            if entries.contains(&record) {
-                                continue;
-                            }
-
-                            let mut insert_pos = entries
+                            let base_pos = working_entries
                                 .binary_search_by_key(&record.id.0, |existing| existing.id.0)
                                 .unwrap_or_else(|idx| idx);
 
-                            while insert_pos < entries.len() && entries[insert_pos].id.0 <= record.id.0 {
+                            if exact_record_duplicate_at_or_after(working_entries, &record, base_pos) {
+                                continue;
+                            }
+
+                            let mut insert_pos = base_pos;
+
+                            while insert_pos < working_entries.len()
+                                && working_entries[insert_pos].id.0 <= record.id.0 {
                                 insert_pos += 1;
                             }
 
-                            entries.insert(insert_pos, record);
-
-                            if let Some(ref path) = wal_path
-                                && let Err(e) = rewrite_wal_file_with_context(path, entries, &context) {
-                                    log::error!(
-                                        "failed to rewrite WAL file for out-of-order insert stream={}: {}",
-                                        stream_key,
-                                        e
-                                    );
-                                    batch_error = Some(e);
-                                    break;
-                                }
-
-                            if let Some(ref path) = wal_path {
-                                append_file = open_wal_append_file(path).ok();
-                            }
+                            working_entries.insert(insert_pos, record);
+                            merged_out_of_order = true;
+                            staged_dirty = true;
 
                         }
+
+                        if batch_error.is_none()
+                            && let Some(ref path) = wal_path
+                            && staged_dirty
+                            && let Some(staged) = staged_entries.as_ref()
+                            && let Err(e) = rewrite_wal_file_with_context(path, staged, &context) {
+                                log::error!(
+                                    "failed to rewrite WAL file for out-of-order batch merge stream={}: {}",
+                                    stream_key,
+                                    e
+                                );
+                                batch_error = Some(e);
+                            }
+
+                        if batch_error.is_none()
+                            && staged_dirty
+                            && let Some(staged) = staged_entries.take() {
+                                *entries = staged;
+                            }
+
+                        if batch_error.is_none()
+                            && merged_out_of_order
+                            && let Some(ref path) = wal_path {
+                                append_file = open_wal_append_file(path).ok();
+                            }
 
                         if let Some(err) = batch_error {
                             let _ = ack.send(Err(err));
                             continue;
                         }
 
-                        log::warn!(
-                            "out-of-order transaction batch accepted and merged for stream={}",
-                            stream_key
-                        );
+                        if merged_out_of_order {
+                            log::warn!(
+                                "out-of-order transaction batch accepted and merged for stream={}",
+                                stream_key
+                            );
+                        } else {
+                            log::debug!(
+                                "out-of-order transaction batch accepted without merge for stream={}",
+                                stream_key
+                            );
+                        }
+
                         let _ = ack.send(Ok(()));
 
                     } else {

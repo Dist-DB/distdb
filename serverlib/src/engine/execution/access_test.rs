@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::*;
 use crate::engine::database::transaction::TransactionLog;
 use crate::{
+    DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin,
     encode_row_payload, ConcurrentWalManager, DatabaseCatalog, FieldDef, FieldIndex, FieldType,
     RuntimeIndexStore, SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema,
     TransactionId, TransactionKind, TransactionRecord, UserId,
@@ -203,8 +204,81 @@ fn choose_index_lookup_returns_lookup_for_matching_index() {
         choose_index_lookup(&table, &filters).expect("an index lookup should be selected");
 
     assert_eq!(lookup_key.len(), 1);
-    assert!(lookup_key[0] == b"1".to_vec() || lookup_key[0] == b"sam@example.com".to_vec());
-    assert!(!index.index_id.0.is_empty());
+    assert_eq!(lookup_key[0], b"1".to_vec());
+    assert!(index.is_primary_key());
+
+}
+
+#[test]
+fn choose_index_lookup_prioritizes_pk_then_uk_then_relationship() {
+
+    let mut indexes = HashMap::new();
+
+    let pk = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::PrimaryKey,
+        vec!["id".to_string()],
+    );
+    indexes.insert(pk.index_id.0.clone(), pk.clone());
+
+    let uk = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Unique,
+        vec!["email".to_string()],
+    );
+    indexes.insert(uk.index_id.0.clone(), uk.clone());
+
+    let rel = DatabaseIndex::from_table_fields_with_origin(
+        "users",
+        DatabaseIndexKind::Indexed,
+        DatabaseIndexOrigin::Relationship,
+        None,
+        vec!["account_id".to_string()],
+    );
+    indexes.insert(rel.index_id.0.clone(), rel.clone());
+
+    let sec = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["status".to_string()],
+    );
+    indexes.insert(sec.index_id.0.clone(), sec.clone());
+
+    let table = crate::DatabaseTable::new(
+        "users".to_string(),
+        TableSchema::new(Vec::new()),
+        indexes,
+    );
+
+    let filters = HashMap::from([
+        ("id".to_string(), b"1".to_vec()),
+        ("email".to_string(), b"a@example.com".to_vec()),
+        ("account_id".to_string(), b"acc-1".to_vec()),
+        ("status".to_string(), b"active".to_vec()),
+    ]);
+
+    let (chosen_pk, _) =
+        choose_index_lookup(&table, &filters).expect("pk candidate should be selected");
+    assert!(chosen_pk.is_primary_key());
+
+    let filters_without_pk = HashMap::from([
+        ("email".to_string(), b"a@example.com".to_vec()),
+        ("account_id".to_string(), b"acc-1".to_vec()),
+        ("status".to_string(), b"active".to_vec()),
+    ]);
+
+    let (chosen_uk, _) = choose_index_lookup(&table, &filters_without_pk)
+        .expect("uk candidate should be selected");
+    assert!(chosen_uk.is_unique_key() && !chosen_uk.is_primary_key());
+
+    let filters_relationship_only = HashMap::from([
+        ("account_id".to_string(), b"acc-1".to_vec()),
+        ("status".to_string(), b"active".to_vec()),
+    ]);
+
+    let (chosen_rel, _) = choose_index_lookup(&table, &filters_relationship_only)
+        .expect("relationship candidate should be selected");
+    assert!(chosen_rel.is_relationship_driven());
 
 }
 

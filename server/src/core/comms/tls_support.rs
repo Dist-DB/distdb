@@ -211,7 +211,7 @@ async fn probe_plaintext_bootstrap_frame(
         // In required-TLS mode, CA bootstrap is a plaintext len-prefixed frame.
         // Once we have a full length prefix and the stream does not look like
         // TLS, prefer handing off as plaintext bootstrap immediately.
-        if bytes_peeked >= 4 && bytes_peeked < 8 {
+        if (4..8).contains(&bytes_peeked) {
             return Ok(Some(true));
         }
 

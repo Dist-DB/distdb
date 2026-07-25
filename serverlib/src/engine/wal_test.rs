@@ -180,6 +180,28 @@ fn stream_mode_defaults_to_durable_and_can_be_set_ephemeral() {
 }
 
 #[test]
+fn append_batch_accepts_strictly_increasing_non_contiguous_ids() {
+    let wal = ConcurrentWalManager::new();
+    let actor = UserId::from_username("tester");
+
+    wal.append_batch(
+        "users",
+        vec![
+            make_record(10, TransactionKind::Insert, &actor),
+            make_record(12, TransactionKind::Update, &actor),
+            make_record(20, TransactionKind::Delete, &actor),
+        ],
+    )
+    .expect("append batch should succeed for strictly increasing ids");
+
+    let records = wal.since("users", None);
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].id, TransactionId(10));
+    assert_eq!(records[1].id, TransactionId(12));
+    assert_eq!(records[2].id, TransactionId(20));
+}
+
+#[test]
 fn ephemeral_stream_in_file_mode_keeps_data_in_memory_only() {
     let temp_root = std::env::temp_dir().join(format!(
         "distdb-wal-ephemeral-stream-{}-{}",

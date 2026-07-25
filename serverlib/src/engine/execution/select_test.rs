@@ -312,7 +312,7 @@ fn execute_relation_select_plan_supports_count_star_projection() {
 }
 
 #[test]
-fn execute_relation_select_plan_count_star_materializes_rows_when_full_table() {
+fn execute_relation_select_plan_count_star_uses_live_row_count_when_full_table() {
 
     let mut runtime_indexes = RuntimeIndexStore::new();
     let mut catalog =
@@ -377,9 +377,11 @@ fn execute_relation_select_plan_count_star_materializes_rows_when_full_table() {
            &read_plan,
            &access_plan,
            &mut evaluate_none_for_test,
-        &mut |_row_map, _nested_condition| Ok(true),
+        &mut |_row_map, _nested_condition| {
+            panic!("strict full-table count(*) should not materialize rows")
+        },
     )
-    .expect("count select should execute from materialized relation rows");
+    .expect("count select should execute from live row count");
 
     assert_eq!(result.rows, vec![vec![b"3".to_vec()]]);
     

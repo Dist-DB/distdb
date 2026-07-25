@@ -91,6 +91,10 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn normalized_sql(sql: &str) -> String {
+    sql.trim().trim_end_matches(';').trim().to_ascii_lowercase()
+}
+
 fn validate_affinity_join_request(
     join_req: &peerlib::AffinityJoinRequest,
     document: &serverlib::AffinityDocument,
@@ -166,6 +170,37 @@ async fn rollback_active_session_transaction(
 
 }
 
+async fn write_response_or_rollback(
+    stream: &mut BoxedConnectorStream,
+    response: ConnectorResponse,
+    app: &Arc<RwLock<ServerApp>>,
+    p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    local_node: &NodeDescriptor,
+    session_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
+    if let Err(err) = write_response_frame(stream, response).await {
+        rollback_active_session_transaction(app, p2p_runtime, local_node, session_id).await;
+        return Err(err);
+    }
+
+    Ok(())
+
+}
+
+async fn finalize_service_message(
+    session: &mut ServerConnectionSession,
+    app: &Arc<RwLock<ServerApp>>,
+    p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    local_node: &NodeDescriptor,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
+    session.mark_disconnect();
+    rollback_active_session_transaction(app, p2p_runtime, local_node, &session.session_id).await;
+    Ok(())
+
+}
+
 fn parse_lock_table_ids(sql: &str) -> Vec<String> {
 
     let trimmed = sql.trim().trim_end_matches(';').trim();
@@ -221,7 +256,7 @@ fn table_lock_update_from_request(request: &ConnectorRequest) -> Option<(bool, S
         return None;
     };
 
-    let normalized = query.sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    let normalized = normalized_sql(&query.sql);
 
     if normalized.starts_with("lock table") || normalized.starts_with("lock tables") {
         return Some((true, query.database_id.clone(), parse_lock_table_ids(&query.sql)));
@@ -411,7 +446,7 @@ fn classify_catalog_access_mode_with_parsed_requests(
 
         ConnectorCommand::Query { query } => {
 
-            let normalized = query.sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+            let normalized = normalized_sql(&query.sql);
 
             // Fast-path well-known read-only introspection directives so we do not
             // parse again in access-mode classification when execution will parse.
@@ -655,7 +690,7 @@ fn request_catalog_route_key_with_parsed_requests(
 
         ConnectorCommand::Schema { database_id, .. }
         | ConnectorCommand::Mutation { database_id, .. } => {
-            let database_id = common::normalize_identifier!(database_id.clone());
+            let database_id = common::normalize_identifier!(database_id.as_str());
             if database_id.is_empty() {
                 None
             } else {
@@ -664,7 +699,7 @@ fn request_catalog_route_key_with_parsed_requests(
         },
 
         ConnectorCommand::Query { query } => {
-            let database_id = common::normalize_identifier!(query.database_id.clone());
+            let database_id = common::normalize_identifier!(query.database_id.as_str());
             if !database_id.is_empty() {
                 return Some(database_id);
             }
@@ -789,9 +824,14 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
         return None;
     };
 
-    if !common::normalize_identifier!(query.database_id.clone()).is_empty() {
+    if !common::normalize_identifier!(query.database_id.as_str()).is_empty() {
         return None;
     }
+
+    let request_id = request.request_id.clone();
+    let query_sql = query.sql.clone();
+    let session_id = session_id.to_string();
+    let user_id = user_id.to_string();
 
     let mut catalog_ids = explicit_catalog_ids_from_query_sql_with_parsed_requests(&query.sql, parsed_requests)
         .into_iter()
@@ -806,7 +846,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
 
     if !matches!(access_mode, CatalogAccessMode::Read) {
         return Some(ConnectorResponse::rejected(
-            request.request_id.clone(),
+            request_id.as_str(),
             "multi-catalog coordination currently supports read-only queries only",
         ));
     }
@@ -821,10 +861,15 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
 
     for catalog_id in catalog_ids {
 
-        let mut routed = request.clone();
-        if let ConnectorCommand::Query { query } = &mut routed.command {
-            query.database_id = catalog_id.clone();
-        }
+        let routed = ConnectorRequest {
+            request_id: request_id.clone(),
+            command: ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: catalog_id.clone(),
+                    sql: query_sql.clone(),
+                },
+            },
+        };
 
         let response = match catalog_dispatcher
             .dispatch_with_access_mode(
@@ -832,8 +877,8 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
                 routed,
                 shared_parsed_requests.clone(),
                 parsed_query_ms,
-                session_id.to_string(),
-                user_id.to_string(),
+                session_id.clone(),
+                user_id.clone(),
                 connection_id,
                 access_mode,
             )
@@ -843,7 +888,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
 
             Err(err) => {
                 return Some(ConnectorResponse::rejected(
-                    request.request_id.clone(),
+                    request_id.as_str(),
                     format!(
                         "multi-catalog dispatch failed for catalog '{}': {}",
                         catalog_id,
@@ -857,7 +902,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
         if !matches!(response.status, connector::ResponseStatus::Applied) {
 
             return Some(ConnectorResponse::rejected(
-                request.request_id.clone(),
+                request_id.as_str(),
                 format!(
                     "multi-catalog query failed in catalog '{}' with status {:?}",
                     catalog_id,
@@ -870,7 +915,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
         let ConnectorResult::Query(result) = response.result else {
 
             return Some(ConnectorResponse::rejected(
-                request.request_id.clone(),
+                request_id.as_str(),
                 format!(
                     "multi-catalog query expected query response from catalog '{}'",
                     catalog_id
@@ -884,7 +929,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
             if columns != &result.columns {
 
                 return Some(ConnectorResponse::rejected(
-                    request.request_id.clone(),
+                    request_id.as_str(),
                     "multi-catalog query produced mismatched schemas across catalogs",
                 ));
 
@@ -904,7 +949,7 @@ async fn maybe_dispatch_multi_catalog_query_with_access_mode(
     let columns = merged_columns.unwrap_or_default();
 
     Some(ConnectorResponse::applied(
-        request.request_id.clone(),
+        request_id,
         ConnectorResult::Query(QueryResult {
             columns,
             rows: merged_rows,
@@ -1063,23 +1108,23 @@ pub fn node_announce_dedup_key(node: &PeerNode) -> String {
 }
 
 pub fn is_server_peer_discovery_query(sql: &str) -> bool {
-    let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    let normalized = normalized_sql(sql);
 
     normalized == SERVER_PEER_DISCOVERY_SQL || normalized == "show server peers"
 }
 
 pub fn is_bootstrap_status_query(sql: &str) -> bool {
-    let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    let normalized = normalized_sql(sql);
     normalized == SERVER_BOOTSTRAP_STATUS_SQL || normalized == "show bootstrap status"
 }
 
 pub fn is_show_entities_query(sql: &str) -> bool {
-    let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    let normalized = normalized_sql(sql);
     normalized == SERVER_SHOW_ENTITIES_SQL || normalized == "show entities"
 }
 
 pub fn is_show_catalog_workers_query(sql: &str) -> bool {
-    let normalized = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
+    let normalized = normalized_sql(sql);
     normalized == SERVER_SHOW_CATALOG_WORKERS_SQL || normalized == "show catalog workers"
 }
 
@@ -1139,7 +1184,7 @@ pub fn maybe_bootstrap_status_response(
     };
 
     let progress_percent = if tables_total > 0 {
-        (tables_completed.saturating_mul(100)) / tables_total
+        ((tables_completed as u128 * 100) / tables_total as u128) as usize
     } else if bootstrap_ready {
         100
     } else {
@@ -1478,7 +1523,7 @@ pub async fn maybe_show_entities_response(
         .to_ascii_lowercase();
 
     let database_filter = if normalized_sql == SERVER_SHOW_ENTITIES_SQL {
-        common::normalize_identifier!(query.database_id.clone())
+        common::normalize_identifier!(query.database_id.as_str())
     } else {
         String::new()
     };
@@ -2124,10 +2169,7 @@ pub async fn handle_connector_stream(
 
                 }
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
@@ -2155,10 +2197,7 @@ pub async fn handle_connector_stream(
                         );
                     }
 
-                    session.mark_disconnect();
-                    
-                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                    return Ok(());
+                    return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
                 }
                 
@@ -2197,10 +2236,7 @@ pub async fn handle_connector_stream(
                     );
                 }
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
@@ -2241,9 +2277,7 @@ pub async fn handle_connector_stream(
                     announcement.services.join(",")
                 );
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
@@ -2341,10 +2375,7 @@ pub async fn handle_connector_stream(
                     join_req.request_id
                 );
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
@@ -2422,9 +2453,7 @@ pub async fn handle_connector_stream(
                     schema_req.request_id
                 );
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
@@ -2461,10 +2490,7 @@ pub async fn handle_connector_stream(
                     snapshot_req.request_id
                 );
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
@@ -2558,16 +2584,14 @@ pub async fn handle_connector_stream(
                     txn_req.request_id
                 );
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
             if let ServiceMessage::TableLockState(lock_state) = &message_for_fanout {
 
                 let mut app_guard = app.write().await;
+                
                 app_guard.apply_remote_table_lock_state(
                     &lock_state.owner_node_id,
                     &lock_state.owner_session_id,
@@ -2583,10 +2607,7 @@ pub async fn handle_connector_stream(
                     lock_state.table_ids.join(",")
                 );
 
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
             }
 
@@ -2663,10 +2684,7 @@ pub async fn handle_connector_stream(
 
             }
 
-            session.mark_disconnect();
-            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-
-            return Ok(());
+            return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
         }
 
@@ -2683,10 +2701,15 @@ pub async fn handle_connector_stream(
         if let Some(response) =
             maybe_server_peer_discovery_response(&request, &p2p_runtime, &local_node, &service_registry).await
         {
-            if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Err(err);
-            }
+            write_response_or_rollback(
+                &mut stream,
+                response,
+                &app,
+                &p2p_runtime,
+                &local_node,
+                &session.session_id,
+            )
+            .await?;
             continue;
         }
 
@@ -2694,10 +2717,15 @@ pub async fn handle_connector_stream(
             &request,
             bootstrap_ready.load(Ordering::SeqCst),
         ) {
-            if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Err(err);
-            }
+            write_response_or_rollback(
+                &mut stream,
+                response,
+                &app,
+                &p2p_runtime,
+                &local_node,
+                &session.session_id,
+            )
+            .await?;
             continue;
         }
 
@@ -2709,10 +2737,15 @@ pub async fn handle_connector_stream(
         )
         .await
         {
-            if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Err(err);
-            }
+            write_response_or_rollback(
+                &mut stream,
+                response,
+                &app,
+                &p2p_runtime,
+                &local_node,
+                &session.session_id,
+            )
+            .await?;
             continue;
         }
 
@@ -2723,10 +2756,15 @@ pub async fn handle_connector_stream(
         )
         .await
         {
-            if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Err(err);
-            }
+            write_response_or_rollback(
+                &mut stream,
+                response,
+                &app,
+                &p2p_runtime,
+                &local_node,
+                &session.session_id,
+            )
+            .await?;
             continue;
         }
 
@@ -2760,10 +2798,15 @@ pub async fn handle_connector_stream(
 
             };
 
-            if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Err(err);
-            }
+            write_response_or_rollback(
+                &mut stream,
+                response,
+                &app,
+                &p2p_runtime,
+                &local_node,
+                &session.session_id,
+            )
+            .await?;
 
             continue;
 
@@ -2806,10 +2849,15 @@ pub async fn handle_connector_stream(
                     Err(message) => ConnectorResponse::rejected(request.request_id, message),
                 };
 
-                if let Err(err) = write_response_frame(&mut stream, response).await {
-                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                    return Err(err);
-                }
+                write_response_or_rollback(
+                    &mut stream,
+                    response,
+                    &app,
+                    &p2p_runtime,
+                    &local_node,
+                    &session.session_id,
+                )
+                .await?;
 
                 continue;
 
@@ -2822,10 +2870,15 @@ pub async fn handle_connector_stream(
                     ConnectorResult::Mutation(MutationResult { affected_rows: 0 }),
                 );
 
-                if let Err(err) = write_response_frame(&mut stream, response).await {
-                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                    return Err(err);
-                }
+                write_response_or_rollback(
+                    &mut stream,
+                    response,
+                    &app,
+                    &p2p_runtime,
+                    &local_node,
+                    &session.session_id,
+                )
+                .await?;
 
                 continue;
 
@@ -2842,10 +2895,15 @@ pub async fn handle_connector_stream(
                 "server is bootstrapping; limited session mode allows only password setup, server peer discovery, entity status (`show entities;`), catalog worker status (`show catalog workers;`), and bootstrap status (`show bootstrap status;`)".to_string(),
             );
 
-            if let Err(err) = write_response_frame(&mut stream, response).await {
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Err(err);
-            }
+            write_response_or_rollback(
+                &mut stream,
+                response,
+                &app,
+                &p2p_runtime,
+                &local_node,
+                &session.session_id,
+            )
+            .await?;
 
             log::info!(
                 "connector request limited while bootstrapping from {} request_id={}",
@@ -2872,9 +2930,11 @@ pub async fn handle_connector_stream(
         let parsed_requests_ref = parsed_requests_for_routing
             .as_ref()
             .map(|(requests, _)| requests.as_slice());
+
         let parsed_query_ms = parsed_requests_for_routing
             .as_ref()
             .map(|(_, parse_ms)| *parse_ms);
+        
         let parsed_requests_shared = parsed_requests_ref.map(|requests| Arc::new(requests.to_vec()));
 
         let access_mode = classify_catalog_access_mode_with_parsed_requests(
@@ -2972,10 +3032,15 @@ pub async fn handle_connector_stream(
 
         }
 
-        if let Err(err) = write_response_frame(&mut stream, response).await {
-            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-            return Err(err);
-        }
+        write_response_or_rollback(
+            &mut stream,
+            response,
+            &app,
+            &p2p_runtime,
+            &local_node,
+            &session.session_id,
+        )
+        .await?;
 
     }
 

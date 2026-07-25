@@ -53,10 +53,12 @@ fn set_runtime_index_bootstrap_progress(
 }
 
 pub fn current_runtime_index_bootstrap_progress() -> RuntimeIndexBootstrapProgress {
+
     runtime_index_bootstrap_progress_store()
         .lock()
         .map(|guard| guard.clone())
         .unwrap_or_default()
+
 }
 
 fn runtime_index_parallel_build_max_workers() -> usize {
@@ -189,6 +191,7 @@ impl RuntimeIndexState {
         let high_ingest_batch = additional >= 64;
         let near_capacity = capacity > 0
             && len.saturating_mul(10) >= capacity.saturating_mul(9);
+
         let is_unique_key_index = self
             .index
             .as_ref()
@@ -223,8 +226,6 @@ impl RuntimeIndexState {
         let proactive_skip_capacity = if proactive_growth {
             if capacity >= 229_376 {
                 capacity.saturating_mul(4)
-            } else if capacity >= 28_672 {
-                capacity.saturating_mul(4)
             } else if capacity >= 57_344 {
                 capacity.saturating_mul(3)
             } else {
@@ -237,6 +238,7 @@ impl RuntimeIndexState {
         let should_add_runway = additional >= 1_024
             || (high_ingest_batch && near_capacity)
             || proactive_growth;
+
         let desired_runway = if should_add_runway {
             if proactive_growth {
                 if capacity >= 229_376 {
@@ -630,9 +632,15 @@ impl RuntimeIndexStore {
 
             let state = self.index_mut_for_table(table_scope_id, &index.index_id.0);
 
+            let mut key_scratch = Vec::with_capacity(if index.field_names.is_empty() {
+                1
+            } else {
+                index.field_names.len()
+            });
+
             for row_map in row_maps {
-                let key = index_value_tuple(index, row_map.borrow());
-                state.remove(&key);
+                write_index_value_tuple(index, row_map.borrow(), &mut key_scratch);
+                state.remove(&key_scratch);
             }
 
         }
@@ -673,8 +681,8 @@ impl RuntimeIndexStore {
 
             TransactionKind::Delete => self.remove_table_row_for_table(table_scope_id, indexes, row_map),
 
-            TransactionKind::Insert 
-            | TransactionKind::Update => {
+            TransactionKind::Insert |
+            TransactionKind::Update => {
                 self.record_table_row_for_table(table_scope_id, indexes, row_map)
             },
 
@@ -724,6 +732,7 @@ impl RuntimeIndexStore {
         let mut bootstrapped_tables = 0usize;
         let mut bootstrapped_indexes = 0usize;
         let mut bootstrapped_rows = 0usize;
+
         let tables_total = catalogs
             .values()
             .map(|catalog| catalog.table_ids().len())
@@ -915,6 +924,7 @@ impl RuntimeIndexStore {
                         {
 
                             let live_row_count = accessor_snapshot.live_row_count;
+
                             restore_equality_cache_from_snapshot(
                                 wal.cache_scope_id(),
                                 &table_stream_id,
@@ -959,58 +969,26 @@ impl RuntimeIndexStore {
 
                         }
 
-                        let checkpoint_started_at = Instant::now();
-                        let checkpoint_rows = snapshot_data_dir
-                            .as_ref()
-                            .and_then(|data_dir| {
-                                RuntimeIndexSnapshotService::load_live_row_checkpoint(
-                                    data_dir,
-                                    &table,
-                                    &table_stream_id,
-                                    wal_fingerprint,
-                                )
-                            });
-
-                        let checkpoint_elapsed_ms = checkpoint_started_at.elapsed().as_millis();
-
                         let (latest_tx_id, live_rows, source, load_elapsed_ms) =
-                            if let Some(checkpoint) = checkpoint_rows {
-                                (
-                                    checkpoint.latest_tx_id,
-                                    checkpoint.live_rows,
-                                    "checkpoint",
-                                    checkpoint_elapsed_ms,
-                                )
-                            } else {
-                                let live_rows_started_at = Instant::now();
-                                let live_rows = load_live_rows_in_place(wal, &table_stream_id, &table.schema);
-                                let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
-
-                                (
-                                    snapshot.latest_tx_id,
-                                    live_rows,
-                                    "wal",
-                                    live_rows_elapsed_ms,
-                                )
-                            };
-
-                        if let Some(data_dir) = snapshot_data_dir.as_ref()
-                            && source == "wal"
-                            && let Err(err) = RuntimeIndexSnapshotService::save_live_row_checkpoint(
-                                data_dir,
+                            load_bootstrap_live_rows(
+                                snapshot_data_dir.as_ref(),
+                                wal,
                                 &table,
                                 &table_stream_id,
-                                latest_tx_id,
                                 wal_fingerprint,
-                                &live_rows,
-                            )
-                        {
-                            log::warn!(
-                                "live-row checkpoint save skipped table={} reason={}",
-                                table_id,
-                                err,
+                                snapshot.latest_tx_id,
                             );
-                        }
+
+                        persist_live_row_checkpoint_if_from_wal(
+                            snapshot_data_dir.as_ref(),
+                            &table,
+                            &table_stream_id,
+                            latest_tx_id,
+                            wal_fingerprint,
+                            source,
+                            &live_rows,
+                            &table_id,
+                        );
 
                         let live_row_count = live_rows.len();
 
@@ -1079,40 +1057,15 @@ impl RuntimeIndexStore {
                     .map(|tx| tx.0)
                     .unwrap_or(0);
 
-                let checkpoint_started_at = Instant::now();
-                let checkpoint_rows = snapshot_data_dir
-                    .as_ref()
-                    .and_then(|data_dir| {
-                        RuntimeIndexSnapshotService::load_live_row_checkpoint(
-                            data_dir,
-                            &table,
-                            &table_stream_id,
-                            wal_fingerprint,
-                        )
-                    });
-                let checkpoint_elapsed_ms = checkpoint_started_at.elapsed().as_millis();
-
-                let (latest_tx_id, live_rows, live_rows_elapsed_ms, live_rows_mode) =
-
-                    if let Some(checkpoint) = checkpoint_rows {
-                        (
-                            checkpoint.latest_tx_id,
-                            checkpoint.live_rows,
-                            checkpoint_elapsed_ms,
-                            "checkpoint",
-                        )
-                    } else {
-                        let live_rows_started_at = Instant::now();
-                        let live_rows = load_live_rows_in_place(wal, &table_stream_id, &table.schema);
-                        let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
-
-                        (
-                            latest_tx_id,
-                            live_rows,
-                            live_rows_elapsed_ms,
-                            "wal",
-                        )
-                    };
+                let (latest_tx_id, live_rows, live_rows_mode, live_rows_elapsed_ms) =
+                    load_bootstrap_live_rows(
+                        snapshot_data_dir.as_ref(),
+                        wal,
+                        &table,
+                        &table_stream_id,
+                        wal_fingerprint,
+                        latest_tx_id,
+                    );
                     
                 let live_row_count = live_rows.len();
 
@@ -1136,23 +1089,16 @@ impl RuntimeIndexStore {
                     state.rebuild(entries);
                 }
 
-                if let Some(data_dir) = snapshot_data_dir.as_ref()
-                    && live_rows_mode == "wal"
-                    && let Err(err) = RuntimeIndexSnapshotService::save_live_row_checkpoint(
-                        data_dir,
-                        &table,
-                        &table_stream_id,
-                        latest_tx_id,
-                        wal_fingerprint,
-                        &live_rows,
-                    )
-                {
-                    log::warn!(
-                        "live-row checkpoint save skipped table={} reason={}",
-                        table_id,
-                        err,
-                    );
-                }
+                persist_live_row_checkpoint_if_from_wal(
+                    snapshot_data_dir.as_ref(),
+                    &table,
+                    &table_stream_id,
+                    latest_tx_id,
+                    wal_fingerprint,
+                    live_rows_mode,
+                    &live_rows,
+                    &table_id,
+                );
 
                 let warm_started_at = Instant::now();
                 warm_equality_cache_from_live_rows(
@@ -1392,6 +1338,86 @@ impl RuntimeIndexStore {
 
         Ok(())
 
+    }
+
+}
+
+#[expect(clippy::type_complexity, reason="returning a tuple of (latest_tx_id, live_rows, source, elapsed_ms)")]
+fn load_bootstrap_live_rows(
+    snapshot_data_dir: Option<&std::path::PathBuf>,
+    wal: &ConcurrentWalManager,
+    table: &DatabaseTable,
+    table_stream_id: &str,
+    wal_fingerprint: Option<(u64, u64)>,
+    fallback_latest_tx_id: u64,
+) -> (u64, Vec<(u64, HashMap<String, Vec<u8>>)>, &'static str, u128) {
+
+    let checkpoint_started_at = Instant::now();
+    let checkpoint_rows = snapshot_data_dir
+        .and_then(|data_dir| {
+            RuntimeIndexSnapshotService::load_live_row_checkpoint(
+                data_dir,
+                table,
+                table_stream_id,
+                wal_fingerprint,
+            )
+        });
+
+    let checkpoint_elapsed_ms = checkpoint_started_at.elapsed().as_millis();
+
+    if let Some(checkpoint) = checkpoint_rows {
+        return (
+            checkpoint.latest_tx_id,
+            checkpoint.live_rows,
+            "checkpoint",
+            checkpoint_elapsed_ms,
+        );
+    }
+
+    let live_rows_started_at = Instant::now();
+    let live_rows = load_live_rows_in_place(wal, table_stream_id, &table.schema);
+    let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
+
+    (
+        fallback_latest_tx_id,
+        live_rows,
+        "wal",
+        live_rows_elapsed_ms,
+    )
+
+}
+
+#[expect(clippy::too_many_arguments, reason="this is a utility function for persisting live-row checkpoints")]
+fn persist_live_row_checkpoint_if_from_wal(
+    snapshot_data_dir: Option<&std::path::PathBuf>,
+    table: &DatabaseTable,
+    table_stream_id: &str,
+    latest_tx_id: u64,
+    wal_fingerprint: Option<(u64, u64)>,
+    source: &str,
+    live_rows: &[(u64, HashMap<String, Vec<u8>>)],
+    table_id: &str,
+) {
+
+    if source != "wal" {
+        return;
+    }
+
+    if let Some(data_dir) = snapshot_data_dir
+        && let Err(err) = RuntimeIndexSnapshotService::save_live_row_checkpoint(
+            data_dir,
+            table,
+            table_stream_id,
+            latest_tx_id,
+            wal_fingerprint,
+            live_rows,
+        )
+    {
+        log::warn!(
+            "live-row checkpoint save skipped table={} reason={}",
+            table_id,
+            err,
+        );
     }
 
 }
@@ -1705,18 +1731,34 @@ fn parse_runtime_index_allowlist_env(var_name: &str) -> AHashSet<String> {
 
 pub fn index_value_tuple(index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) -> Vec<Vec<u8>> {
 
-    let mut values = Vec::with_capacity(if index.field_names.is_empty() { 1 } else { index.field_names.len() });
+    let mut values = Vec::with_capacity(if index.field_names.is_empty() {
+        1
+    } else {
+        index.field_names.len()
+    });
+
+    write_index_value_tuple(index, row_map, &mut values);
+
+    values
+
+}
+
+fn write_index_value_tuple(
+    index: &DatabaseIndex,
+    row_map: &HashMap<String, Vec<u8>>,
+    out: &mut Vec<Vec<u8>>,
+) {
+
+    out.clear();
 
     if index.field_names.is_empty() && !index.field_name.is_empty() {
-        values.push(row_map.get(&index.field_name).cloned().unwrap_or_default());
-        return values;
+        out.push(row_map.get(&index.field_name).cloned().unwrap_or_default());
+        return;
     }
 
     for field_name in &index.field_names {
-        values.push(row_map.get(field_name).cloned().unwrap_or_default());
+        out.push(row_map.get(field_name).cloned().unwrap_or_default());
     }
-
-    values
 
 }
 

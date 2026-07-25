@@ -149,24 +149,26 @@ fn collect_subquery_exists_with_outer(
             .and_then(|handle| handle.table_snapshot()) else {
             return Ok(false);
         };
-        let schema = table.schema.clone();
+        let schema = &table.schema;
 
-        let mut scoped_table = table.clone();
-        if let Some(stream_id) = catalog.entity_wal_stream_id(&subquery.table_id) {
-            scoped_table.entity_id = stream_id;
-        }
+        let scoped_table_owned = catalog.entity_wal_stream_id(&subquery.table_id).map(|stream_id| {
+            let mut table_with_stream = table.clone();
+            table_with_stream.entity_id = stream_id;
+            table_with_stream
+        });
+        let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
         let mut index_filter_map = HashMap::new();
         let like_filter = subquery
             .where_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
             .map(|condition| {
                 collect_indexable_equality_filters_for_schema(
-                    &schema,
+                    schema,
                     condition,
                     &mut index_filter_map,
                 )
@@ -174,7 +176,7 @@ fn collect_subquery_exists_with_outer(
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(
-            &scoped_table,
+            scoped_table,
             allow_index_short_circuit,
             index_filter_map,
             like_filter,
@@ -189,8 +191,8 @@ fn collect_subquery_exists_with_outer(
 
         let result = execute_relation_select_plan(
             wal,
-            &scoped_table,
-            &schema,
+            scoped_table,
+            schema,
             runtime_indexes,
             subquery,
             &access_plan,
@@ -293,26 +295,28 @@ fn collect_subquery_projection_values_with_outer(
             .and_then(|handle| handle.table_snapshot()) else {
             return Ok(HashSet::new());
         };
-        let schema = table.schema.clone();
+        let schema = &table.schema;
 
-        let mut scoped_table = table.clone();
-        if let Some(stream_id) = catalog.entity_wal_stream_id(&subquery.table_id) {
-            scoped_table.entity_id = stream_id;
-        }
+        let scoped_table_owned = catalog.entity_wal_stream_id(&subquery.table_id).map(|stream_id| {
+            let mut table_with_stream = table.clone();
+            table_with_stream.entity_id = stream_id;
+            table_with_stream
+        });
+        let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
         let mut index_filter_map = HashMap::new();
 
         let like_filter = subquery
             .where_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
         
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
             .map(|condition| {
                 collect_indexable_equality_filters_for_schema(
-                    &schema,
+                    schema,
                     condition,
                     &mut index_filter_map,
                 )
@@ -320,7 +324,7 @@ fn collect_subquery_projection_values_with_outer(
             .unwrap_or(true);
 
         let access_plan = plan_relation_access(
-            &scoped_table,
+            scoped_table,
             allow_index_short_circuit,
             index_filter_map,
             like_filter,
@@ -328,8 +332,8 @@ fn collect_subquery_projection_values_with_outer(
 
         return execute_relation_select_plan(
             wal,
-            &scoped_table,
-            &schema,
+            scoped_table,
+            schema,
             runtime_indexes,
             subquery,
             &access_plan,
@@ -423,19 +427,19 @@ fn collect_subquery_scalar_value_with_outer(
             .and_then(|handle| handle.table_snapshot()) else {
             return Ok(None);
         };
-        let schema = table.schema.clone();
+        let schema = &table.schema;
 
         let mut index_filter_map = HashMap::new();
         let like_filter = subquery
             .where_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
         let allow_index_short_circuit = subquery
             .where_condition
             .as_ref()
             .map(|condition| {
                 collect_indexable_equality_filters_for_schema(
-                    &schema,
+                    schema,
                     condition,
                     &mut index_filter_map,
                 )
@@ -452,7 +456,7 @@ fn collect_subquery_scalar_value_with_outer(
         return execute_relation_select_plan(
             wal,
             &table,
-            &schema,
+            schema,
             runtime_indexes,
             subquery,
             &access_plan,
@@ -595,24 +599,26 @@ where
         .table_handle(table_id)
         .and_then(|handle| handle.table_snapshot())
         .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
-    let schema = table.schema.clone();
+    let schema = &table.schema;
 
-    let mut scoped_table = table.clone();
-    if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
-        scoped_table.entity_id = stream_id;
-    }
+    let scoped_table_owned = catalog.entity_wal_stream_id(table_id).map(|stream_id| {
+        let mut table_with_stream = table.clone();
+        table_with_stream.entity_id = stream_id;
+        table_with_stream
+    });
+    let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
     let mut index_filter_map = HashMap::new();
     let like_filter = read_plan
         .where_condition
         .as_ref()
-        .and_then(|condition| collect_indexable_like_filter_for_schema(&schema, condition));
+        .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
     let allow_index_short_circuit = read_plan
         .where_condition
         .as_ref()
         .map(|condition| {
             collect_indexable_equality_filters_for_schema(
-                &schema,
+                schema,
                 condition,
                 &mut index_filter_map,
             )
@@ -620,7 +626,7 @@ where
         .unwrap_or(true);
 
     let access_plan = plan_relation_access(
-        &scoped_table,
+        scoped_table,
         allow_index_short_circuit,
         index_filter_map,
         like_filter,
@@ -628,8 +634,8 @@ where
 
     execute_relation_select_plan(
         wal,
-        &scoped_table,
-        &schema,
+        scoped_table,
+        schema,
         runtime_indexes,
         read_plan,
         &access_plan,
@@ -702,15 +708,10 @@ fn execute_local_sql_function_with_lookup(
         ));
     }
 
-    let inbound_parameters = parameter_names
+    let inbound_provider = parameter_names
         .into_iter()
         .zip(argument_values)
-        .collect::<Vec<_>>();
-
-    let inbound_provider = inbound_parameters
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect::<Vec<_>>();
+        .collect::<HashMap<_, _>>();
 
     let artifact = local_function.compiled_artifact().ok_or_else(|| {
         format!(
@@ -718,10 +719,6 @@ fn execute_local_sql_function_with_lookup(
             local_function.procedure_id,
         )
     })?;
-
-    let inbound_provider = inbound_provider
-        .into_iter()
-        .collect::<HashMap<_, _>>();
 
     if let Some(return_expression) = extract_create_function_return_expression(&local_function.sql)
         .map_err(|err| format!("function '{}' return extraction failed: {err}", local_function.procedure_id))?

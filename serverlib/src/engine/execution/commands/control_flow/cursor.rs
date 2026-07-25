@@ -110,19 +110,21 @@ impl SelectReadPlanCursorSource {
                 .and_then(|handle| handle.table_snapshot())
                 .ok_or_else(|| format!("cursor source select failed: table '{}' not found", table_id))?;
 
-            let mut scoped_table = table.clone();
-            if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
-                scoped_table.entity_id = stream_id;
-            }
+            let scoped_table_owned = catalog.entity_wal_stream_id(table_id).map(|stream_id| {
+                let mut table_with_stream = table.clone();
+                table_with_stream.entity_id = stream_id;
+                table_with_stream
+            });
+            let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
-            let schema = table.schema.clone();
+            let schema = &table.schema;
 
             let mut index_filter_map = HashMap::new();
             let like_filter = read_plan
                 .where_condition
                 .as_ref()
                 .and_then(|condition| {
-                    collect_indexable_like_filter_for_schema(&schema, condition)
+                    collect_indexable_like_filter_for_schema(schema, condition)
                 });
 
             let allow_index_short_circuit = read_plan
@@ -130,7 +132,7 @@ impl SelectReadPlanCursorSource {
                 .as_ref()
                 .map(|condition| {
                     collect_indexable_equality_filters_for_schema(
-                        &schema,
+                        schema,
                         condition,
                         &mut index_filter_map,
                     )
@@ -138,7 +140,7 @@ impl SelectReadPlanCursorSource {
                 .unwrap_or(true);
 
             let access_plan = plan_relation_access(
-                &scoped_table,
+                scoped_table,
                 allow_index_short_circuit,
                 index_filter_map,
                 like_filter,
@@ -146,8 +148,8 @@ impl SelectReadPlanCursorSource {
 
             execute_relation_select_plan(
                 wal,
-                &scoped_table,
-                &schema,
+                scoped_table,
+                schema,
                 runtime_indexes,
                 read_plan,
                 &access_plan,

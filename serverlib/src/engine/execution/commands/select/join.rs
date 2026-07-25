@@ -302,15 +302,41 @@ where
 
     if let Some(output_name) = &count_star_projection {
 
-        let mut matched_rows = 0usize;
+        let matched_rows = if count_star_is_strict_full_table(read_plan) {
 
-        for (_, row_map) in materialize_relation_rows(wal, table, schema, runtime_indexes, access_plan) {
-            if !row_matches(&row_map, read_plan.where_condition.as_ref())? {
-                continue;
+            let scoped_stream_id = if table.entity_id.is_empty() {
+                table.table_id.as_str()
+            } else {
+                table.entity_id.as_str()
+            };
+
+            let table_stream_id = if scoped_stream_id != table.table_id
+                && wal.data_dir_path().is_none()
+                && wal.latest_transaction_id_if_loaded(scoped_stream_id).is_none()
+                && wal.latest_transaction_id_if_loaded(&table.table_id).is_some()
+            {
+                table.table_id.as_str()
+            } else {
+                scoped_stream_id
+            };
+
+            crate::load_live_row_count(wal, table_stream_id)
+
+        } else {
+
+            let mut matched_rows = 0usize;
+
+            for (_, row_map) in materialize_relation_rows(wal, table, schema, runtime_indexes, access_plan) {
+                if !row_matches(&row_map, read_plan.where_condition.as_ref())? {
+                    continue;
+                }
+
+                matched_rows += 1;
             }
 
-            matched_rows += 1;
-        }
+            matched_rows
+            
+        };
 
         return Ok(SelectExecutionResult {
             columns: vec![FieldDef {

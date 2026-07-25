@@ -2763,66 +2763,103 @@ pub fn choose_index_lookup<'a>(
     filters: &HashMap<String, Vec<u8>>,
 ) -> Option<(&'a DatabaseIndex, Vec<Vec<u8>>)> {
 
-    let mut selected: Option<(&DatabaseIndex, Vec<Vec<u8>>, usize)> = None;
+    let mut selected: Option<(&DatabaseIndex, u8, usize)> = None;
 
     for index in derived_indexes_for_table(table) {
 
-        let mut lookup_key = Vec::new();
-        
-        let all_present = if !index.field_names.is_empty() {
-            
-            lookup_key.reserve(index.field_names.len());
-            let mut present = true;
-            
-            for field_name in &index.field_names {
-                
-                match filters.get(field_name.as_str()) {
-
-                    Some(value) => lookup_key.push(value.clone()),
-
-                    None => {
-                        present = false;
-                        break;
-                    }
-                    
-                }
-
-            }
-            
-            present
-
-        } else if !index.field_name.is_empty() {
-            match filters.get(index.field_name.as_str()) {
-                Some(value) => {
-                    lookup_key.push(value.clone());
-                    true
-                }
-                None => false,
-            }
-
-        } else {
-            
-            false
-
+        let Some(score) = index_lookup_match_score(index, filters) else {
+            continue;
         };
 
-        if !all_present {
-            continue;
-        }
+        let priority = index_lookup_priority(index);
 
-        let score = lookup_key.len();
-        let should_replace = selected
-            .as_ref()
-            .map(|(_, _, best_score)| score > *best_score)
-            .unwrap_or(true);
+        #[expect(clippy::unnecessary_map_or, reason="this is intentional for clarity")]
+        let should_replace = selected.as_ref().map_or(true, |(best_index, best_priority, best_score)| {
+            priority > *best_priority
+                || (priority == *best_priority && score > *best_score)
+                || (priority == *best_priority
+                    && score == *best_score
+                    && index.index_id.0 < best_index.index_id.0)
+        });
         
         if should_replace {
-            selected = Some((index, lookup_key, score));
+            selected = Some((index, priority, score));
         }
 
     }
 
-    selected.map(|(index, lookup_key, _)| (index, lookup_key))
+    selected.and_then(|(index, _, _)| {
+        build_lookup_key(index, filters).map(|lookup_key| (index, lookup_key))
+    })
+
+}
+
+fn index_lookup_match_score(
+    index: &DatabaseIndex,
+    filters: &HashMap<String, Vec<u8>>,
+) -> Option<usize> {
+
+    if !index.field_names.is_empty() {
+        for field_name in &index.field_names {
+            if !filters.contains_key(field_name.as_str()) {
+                return None;
+            }
+        }
+
+        return Some(index.field_names.len());
+    }
+
+    if index.field_name.is_empty() {
+        return None;
+    }
+
+    filters
+        .contains_key(index.field_name.as_str())
+        .then_some(1)
+
+}
+
+fn build_lookup_key(
+    index: &DatabaseIndex,
+    filters: &HashMap<String, Vec<u8>>,
+) -> Option<Vec<Vec<u8>>> {
+
+    if !index.field_names.is_empty() {
+        let mut lookup_key = Vec::with_capacity(index.field_names.len());
+
+        for field_name in &index.field_names {
+            lookup_key.push(filters.get(field_name.as_str())?.clone());
+        }
+
+        return Some(lookup_key);
+    }
+
+    if index.field_name.is_empty() {
+        return None;
+    }
+
+    filters
+        .get(index.field_name.as_str())
+        .cloned()
+        .map(|value| vec![value])
+
+}
+
+fn index_lookup_priority(index: &DatabaseIndex) -> u8 {
+
+    if index.is_primary_key() {
+        return 4;
+    }
+
+    if index.is_unique_key() {
+        return 3;
+    }
+
+    if index.is_relationship_driven() {
+        return 2;
+    }
+
+    1
 
 }
 

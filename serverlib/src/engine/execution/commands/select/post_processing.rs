@@ -4,10 +4,27 @@ use std::collections::HashSet;
 
 use crate::{FieldDef, SelectCondition, SelectOrderByItem, SelectProjectionItem, SelectReadPlan};
 use crate::engine::sql::SelectLimitByPlan;
-use crate::engine::execution::row_matches_condition_with_result;
+use crate::engine::execution::{ConditionValueProvider, row_matches_condition_with_result};
 use crate::engine::execution::{apply_limit_by_rows, apply_percent_rows, apply_with_ties_rows};
 
 use super::window::apply_window_projection_values;
+
+struct QualifyRowProvider<'a> {
+    field_indexes: &'a HashMap<&'a str, usize>,
+    row: &'a [Vec<u8>],
+}
+
+impl ConditionValueProvider for QualifyRowProvider<'_> {
+
+    fn value(&self, field_name: &str) -> Option<&Vec<u8>> {
+
+        let column_index = *self.field_indexes.get(field_name)?;
+
+        self.row.get(column_index)
+
+    }
+
+}
 
 pub fn apply_row_window(
     rows: Vec<Vec<Vec<u8>>>,
@@ -52,12 +69,21 @@ pub fn apply_select_post_processing(
 
         let mut unique_rows = Vec::with_capacity(rows.len());
         let mut seen = HashSet::new();
+        let all_visible = visible_indexes.len() == columns.len();
 
         for row in rows {
 
-            let key = if visible_indexes.len() == columns.len() {
-                row.clone()
-            } else {
+            if all_visible {
+                if seen.contains(&row) {
+                    continue;
+                }
+
+                seen.insert(row.clone());
+                unique_rows.push(row);
+                continue;
+            }
+
+            let key = {
                 visible_indexes
                     .iter()
                     .filter_map(|index| row.get(*index).cloned())
@@ -234,20 +260,23 @@ fn apply_qualify_post_filter(
         return Ok(rows);
     }
 
+    let field_indexes = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column.field_name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+
     let mut filtered = Vec::with_capacity(rows.len());
 
     for row in rows {
-        let mut row_map = HashMap::with_capacity(columns.len());
 
-        for (index, column) in columns.iter().enumerate() {
-            row_map.insert(
-                column.field_name.clone(),
-                row.get(index).cloned().unwrap_or_else(|| b"NULL".to_vec()),
-            );
-        }
+        let row_provider = QualifyRowProvider {
+            field_indexes: &field_indexes,
+            row: &row,
+        };
 
         let matched = row_matches_condition_with_result(
-            &row_map,
+            &row_provider,
             qualify_condition,
             &mut |_, _| {
                 Err("QUALIFY subquery predicates are not supported in post-window evaluation".to_string())
@@ -310,25 +339,27 @@ pub fn strip_hidden_output_columns(
         return (columns, rows);
     }
 
-    let visible_columns = visible_indexes
-        .iter()
-        .enumerate()
-        .filter_map(|(visible_seq, index)| {
-            
-            columns.get(*index).cloned().map(|mut column| {
-                column.seqno = (visible_seq + 1) as u32;
-                column
-            })
+    let mut visible_flags = vec![false; columns.len()];
+    for index in &visible_indexes {
+        visible_flags[*index] = true;
+    }
 
-        })
-        .collect::<Vec<_>>();
+    let mut visible_columns = Vec::with_capacity(visible_indexes.len());
+    for (index, mut column) in columns.into_iter().enumerate() {
+        if !visible_flags[index] {
+            continue;
+        }
+
+        column.seqno = (visible_columns.len() + 1) as u32;
+        visible_columns.push(column);
+    }
 
     let visible_rows = rows
         .into_iter()
         .map(|row| {
-            visible_indexes
-                .iter()
-                .filter_map(|index| row.get(*index).cloned())
+            row.into_iter()
+                .enumerate()
+                .filter_map(|(index, value)| visible_flags[index].then_some(value))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();

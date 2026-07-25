@@ -112,6 +112,7 @@ impl StoredProcedureResourceManifest {
     }
 
     pub fn find_by_name(&self, name: &str) -> Vec<&StoredProcedureResourceEntry> {
+
         self.by_name
             .get(&name.to_ascii_lowercase())
             .map(|indices| {
@@ -121,6 +122,7 @@ impl StoredProcedureResourceManifest {
                     .collect()
             })
             .unwrap_or_default()
+
     }
 
     pub fn find_by_scope(
@@ -128,6 +130,7 @@ impl StoredProcedureResourceManifest {
         kind: StoredProcedureResourceKind,
         direction: StoredProcedureResourceDirection,
     ) -> Vec<&StoredProcedureResourceEntry> {
+
         self.by_scope
             .get(&(kind, direction))
             .map(|indices| {
@@ -137,6 +140,7 @@ impl StoredProcedureResourceManifest {
                     .collect()
             })
             .unwrap_or_default()
+
     }
 
     pub fn format_for_debug(&self) -> String {
@@ -144,9 +148,11 @@ impl StoredProcedureResourceManifest {
     }
 
     pub fn inbound_parameter(&self, name: &str) -> Option<&[u8]> {
+
         self.inbound_parameters
             .get(&name.to_ascii_lowercase())
             .map(Vec::as_slice)
+
     }
 
     pub fn inbound_parameters(&self) -> &BTreeMap<String, Vec<u8>> {
@@ -220,6 +226,7 @@ pub type SQLProgramaticValidationResult = Result<(), Vec<SQLProgramaticValidatio
 pub fn format_sql_programatic_resource_manifest(
     resources: impl AsRef<[SQLProgramaticResourceEntry]>,
 ) -> String {
+
     resources
         .as_ref()
         .iter()
@@ -239,21 +246,25 @@ pub fn format_sql_programatic_resource_manifest(
         })
         .collect::<Vec<_>>()
         .join("\n")
+
 }
 
 pub fn sql_programatic_resource_set_by_direction(
     manifest: &SQLProgramaticResourceManifest,
     direction: SQLProgramaticResourceDirection,
 ) -> Vec<&SQLProgramaticResourceEntry> {
+
     manifest
         .iter()
         .filter(|entry| entry.direction == direction)
         .collect()
+
 }
 
 pub fn validate_sql_programatic_function_artifact(
     artifact: &SQLProgramaticCompilationArtifact,
 ) -> SQLProgramaticValidationResult {
+
     let mut issues = validate_sql_programatic_inbound_bindings(artifact);
     let outbound = sql_programatic_resource_set_by_direction(
         &artifact.resources,
@@ -296,17 +307,20 @@ pub fn validate_sql_programatic_function_artifact(
     } else {
         Err(issues)
     }
+
 }
 
 pub fn validate_sql_programatic_procedure_artifact(
     artifact: &SQLProgramaticCompilationArtifact,
 ) -> SQLProgramaticValidationResult {
+
     let issues = validate_sql_programatic_inbound_bindings(artifact);
     if issues.is_empty() {
         Ok(())
     } else {
         Err(issues)
     }
+
 }
 
 fn validate_sql_programatic_inbound_bindings(
@@ -928,9 +942,8 @@ where
                         SqlOperation::DropTable |
                         SqlOperation::AlterTable => StoredProcedureResourceKind::Table,
 
-                        SqlOperation::CreateStoredProcedure | SqlOperation::DropStoredProcedure => {
-                            StoredProcedureResourceKind::Dependency
-                        }
+                        SqlOperation::CreateStoredProcedure | 
+                        SqlOperation::DropStoredProcedure => StoredProcedureResourceKind::Dependency,
 
                         _ => StoredProcedureResourceKind::Dependency,
 

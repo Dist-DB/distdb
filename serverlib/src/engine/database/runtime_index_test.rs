@@ -224,3 +224,43 @@ fn runtime_index_policy_keeps_unique_indexes_and_skips_non_unique_by_default() {
     assert!(store.should_track_index(&unique));
     assert!(!store.should_track_index(&indexed));
 }
+
+#[test]
+fn runtime_index_store_batch_record_and_remove_restores_cardinality() {
+    let mut store = RuntimeIndexStore {
+        indexes: AHashMap::new(),
+        materialize_non_primary: true,
+        non_primary_field_allowlist: AHashSet::new(),
+        non_primary_index_allowlist: AHashSet::new(),
+        incremental_persist_last_saved_ms: AHashMap::new(),
+    };
+
+    let by_email = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["email".to_string()],
+    );
+
+    let table_scope_id = "users_stream";
+    store.register_index_for_table(table_scope_id, &by_email);
+
+    let row_a = HashMap::from([("email".to_string(), b"a@example.com".to_vec())]);
+    let row_b = HashMap::from([("email".to_string(), b"b@example.com".to_vec())]);
+
+    let row_maps = vec![row_a, row_b];
+    let indexes = vec![&by_email];
+
+    store.record_table_rows_batch(table_scope_id, &indexes, &row_maps);
+
+    assert_eq!(
+        store.cardinality_for_table(table_scope_id, &by_email.index_id.0),
+        Some(2),
+    );
+
+    store.remove_table_rows_batch(table_scope_id, &indexes, &row_maps);
+
+    assert_eq!(
+        store.cardinality_for_table(table_scope_id, &by_email.index_id.0),
+        Some(0),
+    );
+}

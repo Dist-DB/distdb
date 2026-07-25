@@ -43,26 +43,28 @@ where
             primary_relation.table_id
         ));
     };
-    let primary_schema = primary_table.schema.clone();
+    let primary_schema = &primary_table.schema;
 
-    let mut scoped_primary_table = primary_table.clone();
-    if let Some(stream_id) = catalog.entity_wal_stream_id(&primary_relation.table_id) {
-        scoped_primary_table.entity_id = stream_id;
-    }
+    let scoped_primary_table_owned = catalog.entity_wal_stream_id(&primary_relation.table_id).map(|stream_id| {
+        let mut table_with_stream = primary_table.clone();
+        table_with_stream.entity_id = stream_id;
+        table_with_stream
+    });
+    let scoped_primary_table = scoped_primary_table_owned.as_ref().unwrap_or(&primary_table);
 
     let primary_condition = pushdown_conditions.first().and_then(|condition| condition.as_ref());
     let mut primary_filter_map = HashMap::new();
 
     let primary_like_filter = primary_condition
         .as_ref()
-        .and_then(|condition| collect_indexable_like_filter_for_schema(&primary_schema, condition));
+        .and_then(|condition| collect_indexable_like_filter_for_schema(primary_schema, condition));
 
     let primary_allow_index_short_circuit = primary_condition
         .as_ref()
         .map(|condition| {
 
             collect_indexable_equality_filters_for_schema(
-                &primary_schema,
+                primary_schema,
                 condition,
                 &mut primary_filter_map,
             )
@@ -71,7 +73,7 @@ where
         .unwrap_or(true);
 
     let primary_access_plan = plan_relation_access(
-        &scoped_primary_table,
+        scoped_primary_table,
         primary_allow_index_short_circuit,
         primary_filter_map,
         primary_like_filter,
@@ -79,8 +81,8 @@ where
 
     let mut joined_rows = materialize_relation_rows(
         wal,
-        &scoped_primary_table,
-        &primary_schema,
+        scoped_primary_table,
+        primary_schema,
         runtime_indexes,
         &primary_access_plan,
     )
@@ -111,12 +113,15 @@ where
                 join.relation.table_id
             ));
         };
-        let right_schema = right_table.schema.clone();
 
-        let mut scoped_right_table = right_table.clone();
-        if let Some(stream_id) = catalog.entity_wal_stream_id(&join.relation.table_id) {
-            scoped_right_table.entity_id = stream_id;
-        }
+        let right_schema = &right_table.schema;
+
+        let scoped_right_table_owned = catalog.entity_wal_stream_id(&join.relation.table_id).map(|stream_id| {
+            let mut table_with_stream = right_table.clone();
+            table_with_stream.entity_id = stream_id;
+            table_with_stream
+        });
+        let scoped_right_table = scoped_right_table_owned.as_ref().unwrap_or(&right_table);
 
         let right_condition = pushdown_conditions
             .get(join_index + 1)
@@ -126,14 +131,14 @@ where
 
         let right_like_filter = right_condition
             .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(&right_schema, condition));
+            .and_then(|condition| collect_indexable_like_filter_for_schema(right_schema, condition));
         
         let right_allow_index_short_circuit = right_condition
             .as_ref()
             .map(|condition| {
 
                 collect_indexable_equality_filters_for_schema(
-                    &right_schema,
+                    right_schema,
                     condition,
                     &mut right_filter_map,
                 )
@@ -142,7 +147,7 @@ where
             .unwrap_or(true);
 
         let right_access_plan = plan_relation_access(
-            &scoped_right_table,
+            scoped_right_table,
             right_allow_index_short_circuit,
             right_filter_map,
             right_like_filter,
@@ -150,8 +155,8 @@ where
 
         let right_rows = materialize_relation_rows(
             wal,
-            &scoped_right_table,
-            &right_schema,
+            scoped_right_table,
+            right_schema,
             runtime_indexes,
             &right_access_plan,
         )
@@ -228,7 +233,9 @@ where
                 };
 
                 if let Some(matches) = right_probe_index.as_ref().and_then(|index| index.get(left_value)) {
+                    
                     for right_row_index in matches {
+                        
                         let Some(right_row) = right_rows.get(*right_row_index) else {
                             continue;
                         };
@@ -244,7 +251,9 @@ where
                             matched_right_ids.insert(right_row.row_id);
                             next_rows.push(left_row.append(&join.relation, right_row));
                         }
+
                     }
+                    
                 }
 
             } else {

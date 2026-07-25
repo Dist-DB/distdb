@@ -2160,28 +2160,8 @@ fn resolve_catalog_and_object_for_lookup<'a>(
     object_name: &str,
 ) -> Result<(&'a DatabaseCatalog, String, String), String> {
 
-    if requested_database_id.trim().is_empty() {
-
-        if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
-
-            let Some(catalog) = resolve_catalog(catalogs, database_name) else {
-                return Err(format!("database '{}' not found", database_name));
-            };
-
-            let resolved_database_id = catalog.database_id.0.clone();
-            return Ok((
-                catalog,
-                common::normalize_identifier!(object_id),
-                resolved_database_id,
-            ));
-
-        }
-
-        return Err(format!("database '{}' not found", object_name));
-    }
-
+    // Try qualified name (database.object) regardless of requested_database_id
     if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
-
         let Some(catalog) = resolve_catalog(catalogs, database_name) else {
             return Err(format!("database '{}' not found", database_name));
         };
@@ -2192,19 +2172,23 @@ fn resolve_catalog_and_object_for_lookup<'a>(
             common::normalize_identifier!(object_id),
             resolved_database_id,
         ));
-        
     }
 
-    let Some(catalog) = resolve_catalog(catalogs, requested_database_id) else {
-        return Err(format!("database '{}' not found", requested_database_id));
-    };
+    // Fall back to requested_database_id for unqualified names
+    if !requested_database_id.trim().is_empty() {
+        let Some(catalog) = resolve_catalog(catalogs, requested_database_id) else {
+            return Err(format!("database '{}' not found", requested_database_id));
+        };
 
-    let resolved_database_id = catalog.database_id.0.clone();
-    Ok((
-        catalog,
-        common::normalize_identifier!(object_name),
-        resolved_database_id,
-    ))
+        let resolved_database_id = catalog.database_id.0.clone();
+        return Ok((
+            catalog,
+            common::normalize_identifier!(object_name),
+            resolved_database_id,
+        ));
+    }
+
+    Err(format!("database '{}' not found", object_name))
 
 }
 
