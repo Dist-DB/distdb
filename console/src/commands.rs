@@ -235,6 +235,10 @@ pub fn parse_console_command_with_delimiter(
 
     }
 
+    if command_text.starts_with("conenct ") {
+        return Err("unknown console command 'conenct'; did you mean 'connect'?".to_string());
+    }
+
     let sql = command_text.trim();
     if sql.is_empty() {
         return Ok(None);

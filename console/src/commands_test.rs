@@ -191,6 +191,15 @@ fn resolve_database_without_selection_allows_qualified_show_tables() {
 }
 
 #[test]
+fn parse_console_command_reports_connect_typo() {
+	let result = parse_console_command("conenct root@server-node-01;", TEMP_CONNECT_USER);
+	assert!(matches!(
+		result,
+		Err(message) if message == "unknown console command 'conenct'; did you mean 'connect'?"
+	));
+}
+
+#[test]
 fn resolve_database_without_selection_allows_show_databases() {
 	let database = resolve_database_for_sql(None, false, "show databases;", "main")
 		.expect("show databases should not require explicit selection");

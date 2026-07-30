@@ -2,10 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
-use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, MutationResult};
+use connector::{
+    ConnectorCommand, ConnectorRequest, ConnectorResponse, ConnectorResult, FieldDef, FieldIndex,
+    FieldType, MutationResult, QueryResult, QueryTimings,
+};
 use serverlib::{
-    AclMutationKind, AccountAclEntry, ConcurrentWalManager, DatabaseCatalog, SqlOperation,
-    RuntimeIndexStore, SqlRequest, TransactionId, UserCredential, UserId,
+    AclMutationKind, AccountAclEntry, ConcurrentWalManager, DatabaseCatalog, DatabaseId,
+    SqlOperation, show_indexes_result,
+    RuntimeIndexStore, SelectProjectionItem, SelectReadPlan, SqlRequest, TransactionId,
+    UserCredential, UserId,
+    current_runtime_index_bootstrap_progress, primary_key_index,
+    load_live_row_count, parse_select_read_plan_from_statement,
     parse_mysql8_sql_requests,
 };
 
@@ -36,6 +43,33 @@ impl ServerApp {
         let parsed = Self::parse_query_requests(query)?;
         let parse_ms = parse_start.elapsed().as_millis() as u64;
         Ok((parsed, parse_ms))
+    }
+
+    fn read_only_runtime_index_scope_table_ids(parsed_requests: &[SqlRequest]) -> HashSet<String> {
+        let mut table_ids = HashSet::new();
+
+        for request in parsed_requests {
+            for object_name in request.referenced_object_names() {
+                let trimmed = object_name.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let normalized = common::normalize_identifier!(trimmed);
+                if !normalized.is_empty() {
+                    table_ids.insert(normalized);
+                }
+
+                if let Some(unqualified) = trimmed.rsplit('.').next() {
+                    let normalized_unqualified = common::normalize_identifier!(unqualified);
+                    if !normalized_unqualified.is_empty() {
+                        table_ids.insert(normalized_unqualified);
+                    }
+                }
+            }
+        }
+
+        table_ids
     }
 
     fn quoted_sql_identifier(name: &str) -> String {
@@ -920,6 +954,8 @@ impl ServerApp {
         parse_ms: u64,
     ) -> Option<ConnectorResponse> {
 
+        let request_started_at = Instant::now();
+
         if self.get_session(session_id).is_none() {
             return Some(ConnectorResponse::rejected(
                 request.request_id.clone(),
@@ -959,8 +995,43 @@ impl ServerApp {
             return None;
         }
 
+        if let Some(response) = self.try_handle_strict_count_star_read_only_query(
+            request,
+            query,
+            parse_ms,
+            request_started_at,
+        ) {
+            return Some(response);
+        }
+
+        if let Some(response) = self.try_handle_show_indexes_read_only_query(
+            request,
+            query,
+            &parsed_requests,
+            parse_ms,
+            request_started_at,
+        ) {
+            return Some(response);
+        }
+
+        let catalog_clone_started_at = Instant::now();
         let mut catalogs = self.catalogs.clone();
-        let mut runtime_indexes = self.runtime_indexes.clone();
+        let catalog_clone_ms = catalog_clone_started_at.elapsed().as_millis() as u64;
+
+        let runtime_clone_started_at = Instant::now();
+        let mut runtime_indexes = RuntimeIndexStore::new();
+        let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
+
+        if catalog_clone_ms > 50 || runtime_clone_ms > 50 {
+            log::info!(
+                "read-only clone timing request_id={} catalog_clone_ms={} runtime_index_clone_ms={} scope_tables={} runtime_mode={}",
+                request.request_id,
+                catalog_clone_ms,
+                runtime_clone_ms,
+                0,
+                "ephemeral",
+            );
+        }
         
         let Some(session_ctx) = self.query_session_context(session_id) else {
             return Some(ConnectorResponse::rejected(
@@ -984,8 +1055,208 @@ impl ServerApp {
             &mut session_variable_overrides,
         );
 
-        Some(response)
+        let total_ms = request_started_at.elapsed().as_millis() as u64;
 
+        Some(match response {
+            ConnectorResponse {
+                request_id,
+                status,
+                result: ConnectorResult::Query(mut result),
+            } => {
+                result.timings.server_parse_ms = parse_ms;
+                result.timings.server_total_ms = total_ms;
+                result.timings.server_execute_ms = total_ms.saturating_sub(parse_ms);
+
+                ConnectorResponse {
+                    request_id,
+                    status,
+                    result: ConnectorResult::Query(result),
+                }
+            }
+            other => other,
+        })
+
+    }
+
+    fn try_handle_strict_count_star_read_only_query(
+        &self,
+        request: &ConnectorRequest,
+        query: &connector::DataQuery,
+        parse_ms: u64,
+        request_started_at: Instant,
+    ) -> Option<ConnectorResponse> {
+
+        let read_plan = parse_select_read_plan_from_statement(&query.sql).ok()?;
+        let output_name = strict_count_star_projection_output_name(&read_plan)?;
+
+        if !strict_count_star_is_full_table(&read_plan) || read_plan.table_id.is_empty() {
+            return None;
+        }
+
+        let catalog = self
+            .catalogs
+            .get(query.database_id.as_str())
+            .or_else(|| {
+                DatabaseId::from_database_name(query.database_id.as_str())
+                    .ok()
+                    .and_then(|database_id| self.catalogs.get(&database_id.0))
+            })?;
+        let table = catalog.table(&read_plan.table_id)?;
+
+        let scoped_stream_id = catalog
+            .entity_wal_stream_id(&read_plan.table_id)
+            .unwrap_or_else(|| table.table_id.clone());
+
+        let table_stream_id = if scoped_stream_id != table.table_id
+            && self.wal.data_dir_path().is_none()
+            && self.wal.latest_transaction_id_if_loaded(&scoped_stream_id).is_none()
+            && self.wal.latest_transaction_id_if_loaded(&table.table_id).is_some()
+        {
+            table.table_id.clone()
+        } else {
+            scoped_stream_id
+        };
+
+        let runtime_bootstrap_done = current_runtime_index_bootstrap_progress().done;
+
+        let runtime_index_cardinality = primary_key_index(&table)
+            .and_then(|index| {
+                self.runtime_indexes
+                    .cardinality_for_table(&table_stream_id, &index.index_id.0)
+            });
+
+        let matched_rows = runtime_index_cardinality
+            .unwrap_or_else(|| load_live_row_count(&self.wal, &table_stream_id));
+
+        if let Some(cardinality) = runtime_index_cardinality {
+            log::info!(
+                "strict count source request_id={} table={} source=runtime_index cardinality={} bootstrap_done={}",
+                request.request_id,
+                read_plan.table_id,
+                cardinality,
+                runtime_bootstrap_done,
+            );
+        } else if runtime_bootstrap_done {
+            log::info!(
+                "strict count source request_id={} table={} source=wal_scan reason=runtime_index_missing",
+                request.request_id,
+                read_plan.table_id,
+            );
+        } else {
+            log::info!(
+                "strict count source request_id={} table={} source=wal_scan reason=runtime_index_bootstrap_incomplete",
+                request.request_id,
+                read_plan.table_id,
+            );
+        }
+
+        let total_ms = request_started_at.elapsed().as_millis() as u64;
+
+        Some(ConnectorResponse::applied(
+            request.request_id.clone(),
+            ConnectorResult::Query(QueryResult {
+                columns: vec![FieldDef {
+                    seqno: 1,
+                    field_name: output_name,
+                    field_type: FieldType::UInt(64),
+                    nullable: false,
+                    indexed: FieldIndex::None,
+                    default_value: None,
+                    metadata: None,
+                }],
+                rows: vec![vec![matched_rows.to_string().into_bytes()]],
+                timings: QueryTimings {
+                    server_parse_ms: parse_ms,
+                    server_execute_ms: total_ms.saturating_sub(parse_ms),
+                    server_total_ms: total_ms,
+                    network_round_trip_ms: None,
+                    cache: None,
+                },
+            }),
+        ))
+
+    }
+
+    fn try_handle_show_indexes_read_only_query(
+        &self,
+        request: &ConnectorRequest,
+        query: &connector::DataQuery,
+        parsed_requests: &[SqlRequest],
+        parse_ms: u64,
+        request_started_at: Instant,
+    ) -> Option<ConnectorResponse> {
+
+        let statement = parsed_requests.first()?;
+        let statement_sql_lower = statement.sql.trim().to_ascii_lowercase();
+
+        if !(statement_sql_lower.starts_with("show index")
+            || statement_sql_lower.starts_with("show indexes")
+            || statement_sql_lower.starts_with("show keys"))
+        {
+            return None;
+        }
+
+        let object_name = statement.object_name.as_deref()?;
+        let (catalog, normalized_table_id) = if query.database_id.trim().is_empty() {
+            let (database_name, object_id) = object_name.rsplit_once('.')?;
+            let catalog = self.resolve_catalog_by_name(database_name)?;
+            (catalog, common::normalize_identifier!(object_id))
+        } else if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+            let catalog = self.resolve_catalog_by_name(database_name)?;
+            (catalog, common::normalize_identifier!(object_id))
+        } else {
+            let catalog = self.resolve_catalog_by_name(query.database_id.as_str())?;
+            (catalog, common::normalize_identifier!(object_name))
+        };
+
+        let table = catalog.table(&normalized_table_id)?;
+        let result = show_indexes_result(table.indexes.values().map(|index| {
+            (
+                normalized_table_id.clone(),
+                index.index_id.0.clone(),
+                format!("{:?}", index.kind).to_ascii_lowercase(),
+                format!("{:?}", index.origin).to_ascii_lowercase(),
+                index.field_names.join(","),
+            )
+        }));
+
+        let total_ms = request_started_at.elapsed().as_millis() as u64;
+
+        Some(ConnectorResponse::applied(
+            request.request_id.clone(),
+            ConnectorResult::Query(QueryResult {
+                columns: result
+                    .columns
+                    .into_iter()
+                    .map(|field| FieldDef {
+                        seqno: field.seqno,
+                        field_name: field.field_name,
+                        field_type: field.field_type,
+                        nullable: field.nullable,
+                        indexed: field.indexed,
+                        default_value: field.default_value,
+                        metadata: field.metadata,
+                    })
+                    .collect(),
+                rows: result.rows,
+                timings: QueryTimings {
+                    server_parse_ms: parse_ms,
+                    server_execute_ms: total_ms.saturating_sub(parse_ms),
+                    server_total_ms: total_ms,
+                    network_round_trip_ms: None,
+                    cache: None,
+                },
+            }),
+        ))
+
+    }
+
+    fn resolve_catalog_by_name(&self, database_name: &str) -> Option<&DatabaseCatalog> {
+        self.catalogs.get(database_name).or_else(|| {
+            DatabaseId::from_database_name(database_name)
+                .ok()
+                .and_then(|database_id| self.catalogs.get(&database_id.0))
+        })
     }
 
     fn handle_query_command_for_session_with_preparsed(
@@ -1919,4 +2190,54 @@ impl ServerApp {
 
     }
     
+}
+
+fn strict_count_star_projection_output_name(read_plan: &SelectReadPlan) -> Option<String> {
+
+    if read_plan.projection_items.len() != 1 || !read_plan.group_by.is_empty() {
+        return None;
+    }
+
+    let SelectProjectionItem::InbuiltFunction {
+        output_name,
+        function,
+    } = read_plan.projection_items.first()?
+    else {
+        return None;
+    };
+
+    if !function.name.to_string().eq_ignore_ascii_case("count") || !function_is_count_star(function) {
+        return None;
+    }
+
+    Some(output_name.clone())
+
+}
+
+fn strict_count_star_is_full_table(read_plan: &SelectReadPlan) -> bool {
+
+    read_plan.where_condition.is_none()
+        && read_plan.joins.is_empty()
+        && read_plan.ctes.is_empty()
+        && read_plan.group_by.is_empty()
+        && read_plan.having_condition.is_none()
+        && !read_plan.distinct
+        && read_plan.order_by.is_empty()
+        && read_plan.limit_by.is_none()
+        && read_plan.limit.is_none()
+        && read_plan.offset.is_none()
+        && !read_plan.is_explain
+
+}
+
+fn function_is_count_star(function: &impl std::fmt::Display) -> bool {
+
+    let rendered = function.to_string();
+    let compact = rendered
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>();
+
+    compact.eq_ignore_ascii_case("COUNT(*)") || compact.eq_ignore_ascii_case("(*)")
+
 }

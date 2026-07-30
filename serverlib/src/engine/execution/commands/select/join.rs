@@ -72,7 +72,7 @@ where
             columns: vec![FieldDef {
                 seqno: 1,
                 field_name: output_name.clone(),
-                field_type: FieldType::Text,
+                field_type: FieldType::UInt(64),
                 nullable: false,
                 indexed: FieldIndex::None,
                 default_value: None,
@@ -342,7 +342,7 @@ where
             columns: vec![FieldDef {
                 seqno: 1,
                 field_name: output_name.clone(),
-                field_type: FieldType::Text,
+                field_type: FieldType::UInt(64),
                 nullable: false,
                 indexed: FieldIndex::None,
                 default_value: None,

@@ -198,6 +198,52 @@ fn execute_joined_select_plan_projects_null_extended_rows() {
 }
 
 #[test]
+fn execute_joined_select_plan_supports_count_star_projection() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select count(*) from users u left join profiles p on u.id = p.user_id",
+    )
+    .expect("join count plan should parse");
+
+    let result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &read_plan,
+        &mut evaluate_inbuilt_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+        &mut |row_tuple, nested_condition| {
+            row_matches_select_condition_result(
+                row_tuple,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("joined count select should succeed");
+
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].field_name, "count");
+    assert_eq!(result.columns[0].field_type, FieldType::UInt(64));
+    assert_eq!(result.rows, vec![vec![b"2".to_vec()]]);
+}
+
+#[test]
 fn execute_projection_only_select_plan_returns_inbuilt_row() {
     let read_plan = parse_select_read_plan_from_statement("select concat('sa', 'm')")
         .expect("projection-only plan should parse");
@@ -307,6 +353,7 @@ fn execute_relation_select_plan_supports_count_star_projection() {
 
     assert_eq!(result.columns.len(), 1);
     assert_eq!(result.columns[0].field_name, "count");
+    assert_eq!(result.columns[0].field_type, FieldType::UInt(64));
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0], vec![b"2".to_vec()]);
 }
@@ -383,6 +430,7 @@ fn execute_relation_select_plan_count_star_uses_live_row_count_when_full_table()
     )
     .expect("count select should execute from live row count");
 
+    assert_eq!(result.columns[0].field_type, FieldType::UInt(64));
     assert_eq!(result.rows, vec![vec![b"3".to_vec()]]);
     
 }
@@ -443,6 +491,7 @@ fn execute_relation_select_plan_count_star_falls_back_when_pk_cardinality_is_zer
 
     assert_eq!(result.rows, vec![vec![b"2".to_vec()]]);
 
+    assert_eq!(result.columns[0].field_type, FieldType::UInt(64));
 }
 
 #[test]
@@ -2253,6 +2302,61 @@ fn execute_joined_select_plan_returns_explain_rows_when_requested() {
     assert_eq!(result.columns[7].field_name, "complexity_reasons");
     assert_eq!(result.rows[0][6], b"adaptive_materialize".to_vec());
     assert_eq!(result.rows[0][7], b"joins".to_vec());
+}
+
+#[test]
+fn explain_select_plan_lists_indexed_equality_filters_for_equality_probe() {
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let places_schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+        ("country_code", 3, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("places", places_schema.clone())
+        .expect("places table should register");
+
+    let table = catalog.table("places").expect("places table should exist");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "explain select * from places where display_name='Cologne' and country_code='GM'",
+    )
+    .expect("explain relation plan should parse");
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::EqualityProbe {
+            field_name: "display_name".to_string(),
+            lookup_value: b"Cologne".to_vec(),
+            source: crate::EqualityProbeSource::ExistingIndex,
+            equality_filters: std::collections::HashMap::from([
+                ("display_name".to_string(), b"Cologne".to_vec()),
+                ("country_code".to_string(), b"GM".to_vec()),
+            ]),
+        },
+    };
+
+    let result = explain_select_plan_result(
+        "places",
+        2,
+        Some(&access_plan),
+        None,
+        &runtime_indexes,
+        &read_plan,
+        Some(&table),
+    );
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][1], b"equality_probe".to_vec());
+
+    let index_ids = String::from_utf8(result.rows[0][2].clone())
+        .expect("index ids should be UTF-8 text");
+
+    assert!(index_ids.contains("ind:places:display_name"));
+    assert!(index_ids.contains("ind:places:country_code"));
 }
 
 #[test]

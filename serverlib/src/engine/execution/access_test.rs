@@ -309,8 +309,67 @@ fn plan_relation_access_selects_equality_probe_and_full_scan() {
     let short_circuit_plan = plan_relation_access(&table, true, filters, None);
     assert!(matches!(
         short_circuit_plan.strategy,
+        RelationAccessStrategy::EqualityProbe {
+            source: EqualityProbeSource::ExistingIndex,
+            ..
+        }
+    ));
+
+    let pk_short_circuit_plan = plan_relation_access(
+        &table,
+        true,
+        HashMap::from([("id".to_string(), b"1".to_vec())]),
+        None,
+    );
+    assert!(matches!(
+        pk_short_circuit_plan.strategy,
         RelationAccessStrategy::RuntimeIndexLookup { .. }
     ));
+}
+
+#[test]
+fn plan_relation_access_prefers_equality_probe_for_multi_filter_non_unique_indexes() {
+    let schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+        ("country_code", 3, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+    let table = catalog.table("places").expect("places table should exist");
+
+    let plan = plan_relation_access(
+        &table,
+        true,
+        HashMap::from([
+            ("display_name".to_string(), b"Cologne".to_vec()),
+            ("country_code".to_string(), b"GM".to_vec()),
+        ]),
+        None,
+    );
+
+    assert!(matches!(
+        plan.strategy,
+        RelationAccessStrategy::EqualityProbe {
+            source: EqualityProbeSource::ExistingIndex,
+            ..
+        }
+    ));
+
+    let RelationAccessStrategy::EqualityProbe {
+        equality_filters,
+        ..
+    } = plan.strategy else {
+        unreachable!("plan should be equality probe");
+    };
+
+    assert_eq!(equality_filters.len(), 2);
+    assert_eq!(equality_filters.get("display_name"), Some(&b"Cologne".to_vec()));
+    assert_eq!(equality_filters.get("country_code"), Some(&b"GM".to_vec()));
 }
 
 #[test]
@@ -711,6 +770,10 @@ fn materialize_relation_rows_supports_full_scan_and_equality_probe() {
                 field_name: "email".to_string(),
                 lookup_value: b"sam@example.com".to_vec(),
                 source: EqualityProbeSource::TemporaryIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
             },
         },
     );

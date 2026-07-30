@@ -995,6 +995,58 @@ fn rows_for_field_value(
 
 }
 
+fn rows_for_field_values(
+    entry: &EqualityTableCacheEntry,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    let mut seed_row_ids = None::<Vec<u64>>;
+
+    for (field_name, lookup_value) in equality_filters {
+        let Some(row_ids_by_value) = entry.row_ids_by_field_value.get(field_name.as_str()) else {
+            return Vec::new();
+        };
+
+        let Some(row_ids) = row_ids_by_value.get(lookup_value.as_slice()) else {
+            return Vec::new();
+        };
+
+        let should_replace = seed_row_ids
+            .as_ref()
+            .map(|existing| row_ids.len() < existing.len())
+            .unwrap_or(true);
+
+        if should_replace {
+            seed_row_ids = Some(row_ids.clone());
+        }
+    }
+
+    let Some(seed_row_ids) = seed_row_ids else {
+        return Vec::new();
+    };
+
+    seed_row_ids
+        .into_iter()
+        .filter_map(|row_id| {
+            let row_map = entry.rows_by_id.get(&row_id)?;
+
+            let matches_all_filters = equality_filters.iter().all(|(field_name, lookup_value)| {
+                row_map
+                    .get(field_name.as_str())
+                    .map(|value| value.as_slice() == lookup_value.as_slice())
+                    .unwrap_or(false)
+            });
+
+            if !matches_all_filters {
+                return None;
+            }
+
+            Some((row_id, row_map.clone()))
+        })
+        .collect()
+
+}
+
 pub fn warm_equality_cache_from_live_rows(
     cache_scope_id: usize,
     table_id: &str,
@@ -1228,6 +1280,7 @@ pub enum RelationAccessStrategy {
         field_name: String,
         lookup_value: Vec<u8>,
         source: EqualityProbeSource,
+        equality_filters: HashMap<String, Vec<u8>>,
     },
     
     PrefixLikeProbe {
@@ -1863,6 +1916,24 @@ pub fn load_live_rows_by_equality(
     lookup_value: &[u8],
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
+    let mut equality_filters = HashMap::with_capacity(1);
+    equality_filters.insert(field_name.to_string(), lookup_value.to_vec());
+
+    load_live_rows_by_equality_filters(wal, table_id, schema, &equality_filters)
+
+}
+
+pub fn load_live_rows_by_equality_filters(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if equality_filters.is_empty() {
+        return Vec::new();
+    }
+
     let cache_scope_id = wal.cache_scope_id();
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
@@ -1871,14 +1942,11 @@ pub fn load_live_rows_by_equality(
         && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
         && cache_entry_matches_loaded_wal_head(wal, table_id, entry.latest_tx_id)
     {
-        if !entry.row_ids_by_field_value.contains_key(field_name) {
-            entry.row_ids_by_field_value.insert(
-                field_name.to_string(),
-                build_postings_for_field(&entry.rows_by_id, field_name),
-            );
+        for field_name in equality_filters.keys() {
+            ensure_field_postings(entry, field_name);
         }
 
-        return rows_for_field_value(entry, field_name, lookup_value);
+        return rows_for_field_values(entry, equality_filters);
     }
 
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(wal, table_id, schema);
@@ -1886,9 +1954,11 @@ pub fn load_live_rows_by_equality(
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
 
         let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
-        ensure_field_postings(&mut entry, field_name);
+        for field_name in equality_filters.keys() {
+            ensure_field_postings(&mut entry, field_name);
+        }
 
-        let result = rows_for_field_value(&entry, field_name, lookup_value);
+        let result = rows_for_field_values(&entry, equality_filters);
 
         if let Ok(mut cache_guard) = cache.lock() {
             insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
@@ -1897,13 +1967,18 @@ pub fn load_live_rows_by_equality(
         return result;
     }
 
+    let warm_fields = equality_filters
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
     let entry = build_cold_accessor_cache_entry(
         latest_tx_id,
         live_rows,
-        &[field_name.to_string()],
+        &warm_fields,
     );
 
-    let result = rows_for_field_value(&entry, field_name, lookup_value);
+    let result = rows_for_field_values(&entry, equality_filters);
 
     if let Ok(mut cache_guard) = cache.lock() {
         insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
@@ -2428,6 +2503,7 @@ where
 
     if allow_index_short_circuit
         && let Some((index, lookup_key)) = choose_index_lookup(table, &index_filter_map)
+        && runtime_index_lookup_allowed(index)
     {
         return RelationAccessPlan {
             strategy: RelationAccessStrategy::RuntimeIndexLookup {
@@ -2437,24 +2513,15 @@ where
         };
     }
 
-    if index_filter_map.len() == 1 {
-
-        let (field_name, lookup_value) = index_filter_map
-            .into_iter()
-            .next()
-            .expect("single entry should exist");
-
-        let source = if field_has_single_column_index(table, &field_name) {
-            EqualityProbeSource::ExistingIndex
-        } else {
-            EqualityProbeSource::TemporaryIndex
-        };
-
+    if let Some((field_name, lookup_value, source)) =
+        choose_equality_probe_filter(table, &index_filter_map)
+    {
         return RelationAccessPlan {
             strategy: RelationAccessStrategy::EqualityProbe {
                 field_name,
                 lookup_value,
                 source,
+                equality_filters: index_filter_map,
             },
         };
 
@@ -2555,7 +2622,6 @@ where
                 );
 
             } else {
-
                 log::debug!(
                     "relation runtime index lookup table={} index_id={} state_missing -> fallback_scan",
                     table.table_id,
@@ -2601,6 +2667,7 @@ where
             field_name,
             lookup_value,
             source,
+            equality_filters,
         } => {
 
             log::debug!(
@@ -2613,13 +2680,22 @@ where
                 }
             );
 
-            load_live_rows_by_equality(
-                wal,
-                table_stream_id,
-                schema,
-                field_name,
-                lookup_value,
-            )
+            if equality_filters.len() > 1 {
+                load_live_rows_by_equality_filters(
+                    wal,
+                    table_stream_id,
+                    schema,
+                    equality_filters,
+                )
+            } else {
+                load_live_rows_by_equality(
+                    wal,
+                    table_stream_id,
+                    schema,
+                    field_name,
+                    lookup_value,
+                )
+            }
 
         },
 
@@ -2861,6 +2937,44 @@ fn index_lookup_priority(index: &DatabaseIndex) -> u8 {
 
     1
 
+}
+
+fn runtime_index_lookup_allowed(index: &DatabaseIndex) -> bool {
+    index.is_unique_key() || index.is_relationship_driven()
+}
+
+fn choose_equality_probe_filter<T>(
+    table: T,
+    filters: &HashMap<String, Vec<u8>>,
+) -> Option<(String, Vec<u8>, EqualityProbeSource)>
+where
+    T: Borrow<DatabaseTable>,
+{
+    let table = table.borrow();
+
+    let mut selected: Option<(String, Vec<u8>, EqualityProbeSource)> = None;
+
+    for (field_name, lookup_value) in filters {
+        let source = if field_has_single_column_index(table, field_name) {
+            EqualityProbeSource::ExistingIndex
+        } else {
+            EqualityProbeSource::TemporaryIndex
+        };
+
+        let should_replace = selected.as_ref().is_none_or(|(best_field_name, _, best_source)| {
+            matches!(source, EqualityProbeSource::ExistingIndex)
+                && matches!(best_source, EqualityProbeSource::TemporaryIndex)
+                || (matches!(source, EqualityProbeSource::ExistingIndex)
+                    == matches!(best_source, EqualityProbeSource::ExistingIndex)
+                    && field_name < best_field_name)
+        });
+
+        if should_replace {
+            selected = Some((field_name.clone(), lookup_value.clone(), source));
+        }
+    }
+
+    selected
 }
 
 

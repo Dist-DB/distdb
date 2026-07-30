@@ -1,5 +1,5 @@
 use crate::{
-    DatabaseIndex, FieldDef, FieldIndex, FieldType, RelationAccessPlan,
+    DatabaseIndex, DatabaseTable, FieldDef, FieldIndex, FieldType, RelationAccessPlan,
     RelationAccessStrategy, RuntimeIndexStore, SelectCondition,
     SelectJoinKind, SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation,
 };
@@ -15,6 +15,7 @@ pub fn explain_select_plan_result(
     index_lookup: Option<(&DatabaseIndex, &[Vec<u8>])>,
     runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
+    table: Option<&DatabaseTable>,
 ) -> SelectExecutionResult {
     
     let columns = vec![
@@ -112,7 +113,7 @@ pub fn explain_select_plan_result(
 
     let advice = advise_select_execution(read_plan);
 
-    let (access_path, index_id, lookup_key, cardinality, lookup_hit) =
+    let (access_path, mut index_id, lookup_key, cardinality, lookup_hit) =
 
         if let Some((index, key)) = index_lookup {
 
@@ -169,6 +170,19 @@ pub fn explain_select_plan_result(
 
         };
 
+    if index_id.is_empty()
+        && matches!(
+            access_plan.map(|plan| &plan.strategy),
+            Some(RelationAccessStrategy::EqualityProbe { .. })
+        )
+        && let (Some(table), Some(condition)) = (table, read_plan.where_condition.as_ref())
+    {
+        let indexed_ids = explain_index_ids_for_equality_filters(table, condition);
+        if !indexed_ids.is_empty() {
+            index_id = indexed_ids.join(",");
+        }
+    }
+
     let rows = vec![vec![
         table_id.as_bytes().to_vec(),
         access_path.into_bytes(),
@@ -183,6 +197,62 @@ pub fn explain_select_plan_result(
     ]];
 
     SelectExecutionResult { columns, rows }
+
+}
+
+fn explain_index_ids_for_equality_filters(
+    table: &DatabaseTable,
+    condition: &SelectCondition,
+) -> Vec<String> {
+
+    let mut fields = std::collections::BTreeSet::new();
+    collect_equality_filter_fields(condition, &mut fields);
+
+    let mut index_ids = fields
+        .into_iter()
+        .filter_map(|field_name| {
+            table
+                .indexes
+                .values()
+                .filter(|index| {
+                    (!index.field_names.is_empty()
+                        && index.field_names.len() == 1
+                        && index.field_names[0] == field_name)
+                        || (index.field_names.is_empty() && index.field_name == field_name)
+                })
+                .map(|index| index.index_id.0.clone())
+                .min()
+        })
+        .collect::<Vec<_>>();
+
+    index_ids.sort();
+    index_ids
+
+}
+
+fn collect_equality_filter_fields(
+    condition: &SelectCondition,
+    fields: &mut std::collections::BTreeSet<String>,
+) {
+
+    match condition {
+        SelectCondition::And(children) | SelectCondition::Or(children) => {
+            for child in children {
+                collect_equality_filter_fields(child, fields);
+            }
+        }
+        SelectCondition::Not(child) => {
+            collect_equality_filter_fields(child, fields);
+        }
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name,
+            op: crate::SelectComparisonOp::Eq,
+            ..
+        }) => {
+            fields.insert(field_name.clone());
+        }
+        SelectCondition::Predicate(_) => {}
+    }
 
 }
 

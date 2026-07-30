@@ -1768,6 +1768,7 @@ fn execute_select_read_plan_without_lock(
                     None,
                     runtime_indexes,
                     read_plan,
+                    None,
                 ),
             );
 
@@ -1927,6 +1928,7 @@ fn execute_select_read_plan_without_lock(
                 index_lookup,
                 runtime_indexes,
                 read_plan,
+                Some(&scoped_table),
             ),
         );
     }
