@@ -294,19 +294,19 @@ fn plan_relation_access_selects_equality_probe_and_full_scan() {
     let mut filters = HashMap::new();
     filters.insert("email".to_string(), b"sam@example.com".to_vec());
 
-    let equality_plan = plan_relation_access(&table, false, filters.clone(), None);
+    let equality_plan = plan_relation_access(&table, false, filters.clone(), Vec::new(), None);
     assert!(matches!(
         equality_plan.strategy,
         RelationAccessStrategy::EqualityProbe { .. }
     ));
 
-    let full_scan_plan = plan_relation_access(&table, false, HashMap::new(), None);
+    let full_scan_plan = plan_relation_access(&table, false, HashMap::new(), Vec::new(), None);
     assert!(matches!(
         full_scan_plan.strategy,
         RelationAccessStrategy::FullScan
     ));
 
-    let short_circuit_plan = plan_relation_access(&table, true, filters, None);
+    let short_circuit_plan = plan_relation_access(&table, true, filters, Vec::new(), None);
     assert!(matches!(
         short_circuit_plan.strategy,
         RelationAccessStrategy::EqualityProbe {
@@ -319,6 +319,7 @@ fn plan_relation_access_selects_equality_probe_and_full_scan() {
         &table,
         true,
         HashMap::from([("id".to_string(), b"1".to_vec())]),
+        Vec::new(),
         None,
     );
     assert!(matches!(
@@ -349,6 +350,7 @@ fn plan_relation_access_prefers_equality_probe_for_multi_filter_non_unique_index
             ("display_name".to_string(), b"Cologne".to_vec()),
             ("country_code".to_string(), b"GM".to_vec()),
         ]),
+        Vec::new(),
         None,
     );
 
@@ -406,12 +408,151 @@ fn plan_relation_access_selects_prefix_like_probe_when_available() {
         &table,
         false,
         HashMap::new(),
+        Vec::new(),
         Some(("email".to_string(), b"sam".to_vec(), false)),
     );
 
     assert!(matches!(
         prefix_plan.strategy,
         RelationAccessStrategy::PrefixLikeProbe { .. }
+    ));
+}
+
+#[test]
+fn collect_indexable_range_filter_for_schema_extracts_bounds() {
+    let schema = table_schema(vec![
+        ("latitude", 1, FieldType::Float(64), FieldIndex::Indexed, false),
+    ]);
+
+    let condition = SelectCondition::And(vec![
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name: "latitude".to_string(),
+            op: SelectComparisonOp::GtEq,
+            value: b"50.0".to_vec(),
+        }),
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name: "latitude".to_string(),
+            op: SelectComparisonOp::LtEq,
+            value: b"51.0".to_vec(),
+        }),
+    ]);
+
+    let probe = collect_indexable_range_filter_for_schema(&schema, &condition)
+        .expect("range predicate should be extracted");
+
+    assert_eq!(probe.0, "latitude");
+    assert!(probe.1.as_ref().map(|(_, inclusive)| *inclusive).unwrap_or(false));
+    assert!(probe.2.as_ref().map(|(_, inclusive)| *inclusive).unwrap_or(false));
+}
+
+#[test]
+fn collect_indexable_range_filter_for_schema_keeps_single_probe_for_multi_field_ranges() {
+    let schema = table_schema(vec![
+        ("latitude", 1, FieldType::Float(64), FieldIndex::Indexed, false),
+        ("longitude", 2, FieldType::Float(64), FieldIndex::Indexed, false),
+    ]);
+
+    let condition = SelectCondition::And(vec![
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name: "latitude".to_string(),
+            op: SelectComparisonOp::GtEq,
+            value: b"50.0".to_vec(),
+        }),
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name: "latitude".to_string(),
+            op: SelectComparisonOp::LtEq,
+            value: b"51.0".to_vec(),
+        }),
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name: "longitude".to_string(),
+            op: SelectComparisonOp::GtEq,
+            value: b"6.8".to_vec(),
+        }),
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name: "longitude".to_string(),
+            op: SelectComparisonOp::LtEq,
+            value: b"7.0".to_vec(),
+        }),
+    ]);
+
+    let probes = collect_indexable_range_filters_for_schema(&schema, &condition);
+
+    assert_eq!(probes.len(), 2);
+    assert!(probes.iter().any(|(field, lower, upper)| {
+        field == "latitude" && lower.is_some() && upper.is_some()
+    }));
+    assert!(probes.iter().any(|(field, lower, upper)| {
+        field == "longitude" && lower.is_some() && upper.is_some()
+    }));
+}
+
+#[test]
+fn plan_relation_access_selects_range_probe_when_available() {
+    let schema = table_schema(vec![
+        ("latitude", 1, FieldType::Float(64), FieldIndex::Indexed, false),
+    ]);
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+    let table = catalog.table("places").expect("places table should exist");
+
+    let range_plan = plan_relation_access(
+        &table,
+        false,
+        HashMap::new(),
+        vec![(
+            "latitude".to_string(),
+            Some((b"50.0".to_vec(), true)),
+            Some((b"51.0".to_vec(), true)),
+        )],
+        None,
+    );
+
+    assert!(matches!(
+        range_plan.strategy,
+        RelationAccessStrategy::RangeProbe { .. }
+    ));
+}
+
+#[test]
+fn plan_relation_access_selects_range_intersection_probe_when_multiple_ranges_available() {
+    let schema = table_schema(vec![
+        ("latitude", 1, FieldType::Float(64), FieldIndex::Indexed, false),
+        ("longitude", 2, FieldType::Float(64), FieldIndex::Indexed, false),
+    ]);
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+    let table = catalog.table("places").expect("places table should exist");
+
+    let range_plan = plan_relation_access(
+        &table,
+        false,
+        HashMap::new(),
+        vec![
+            (
+                "latitude".to_string(),
+                Some((b"50.0".to_vec(), true)),
+                Some((b"51.0".to_vec(), true)),
+            ),
+            (
+                "longitude".to_string(),
+                Some((b"6.8".to_vec(), true)),
+                Some((b"7.0".to_vec(), true)),
+            ),
+        ],
+        None,
+    );
+
+    assert!(matches!(
+        range_plan.strategy,
+        RelationAccessStrategy::RangeIntersectionProbe { .. }
     ));
 }
 
@@ -423,7 +564,7 @@ fn load_live_rows_filters_deleted_records() {
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
     let schema = seed_users_table(&mut catalog, &wal);
 
-    let rows = load_live_rows(&wal, "users", &schema);
+    let rows = load_live_rows(&wal, "users", "users", &schema);
     
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, 1);
@@ -472,7 +613,7 @@ fn load_live_rows_tracks_latest_version_chain_and_delete() {
     )
     .expect("updated version should append");
 
-    let rows = load_live_rows(&wal, "users", &schema);
+    let rows = load_live_rows(&wal, "users", "users", &schema);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, 5);
     assert_eq!(rows[0].1.get("email"), Some(&b"sam+updated@example.com".to_vec()));
@@ -490,7 +631,7 @@ fn load_live_rows_tracks_latest_version_chain_and_delete() {
     )
     .expect("delete latest version should append");
 
-    assert!(load_live_rows(&wal, "users", &schema).is_empty());
+    assert!(load_live_rows(&wal, "users", "users", &schema).is_empty());
 
 }
 
@@ -691,7 +832,7 @@ fn load_live_rows_ignores_uncommitted_write_group() {
     )
     .expect("grouped insert should append");
 
-    assert!(load_live_rows(&wal, "users", &schema).is_empty());
+    assert!(load_live_rows(&wal, "users", "users", &schema).is_empty());
 
 }
 
@@ -734,7 +875,7 @@ fn load_live_rows_applies_committed_write_group() {
         wal.append("users", record).expect("record should append");
     }
 
-    let rows = load_live_rows(&wal, "users", &schema);
+    let rows = load_live_rows(&wal, "users", "users", &schema);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, 2);
 

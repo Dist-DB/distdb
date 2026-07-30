@@ -6,7 +6,10 @@ use crate::{
     SelectRelation,
 };
 
-use super::super::sql::{compare_like_value, compare_regex_value, compare_row_value};
+use super::super::sql::{
+    compare_like_value, compare_regex_value, compare_row_value,
+    evaluate_expression_sql_to_bytes, evaluate_sql_function_with_lookup,
+};
 
 #[derive(Debug, Clone)]
 pub struct MaterializedRelationRow {
@@ -227,6 +230,36 @@ pub fn row_matches_condition_with_result(
     subquery_scalar: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<bool, String> {
 
+    row_matches_condition_with_result_and_expression(
+        provider,
+        condition,
+        subquery_values,
+        subquery_exists,
+        subquery_scalar,
+        &mut |provider, expression_sql| {
+            evaluate_expression_sql_to_bytes(
+                expression_sql,
+                &mut |field_name| provider.value(field_name).cloned(),
+                &mut |function, lookup| {
+                    evaluate_sql_function_with_lookup(function, lookup)
+                        .map_err(|err| err.to_string())
+                },
+            )
+            .map(Some)
+        },
+    )
+
+}
+
+pub fn row_matches_condition_with_result_and_expression(
+    provider: &dyn ConditionValueProvider,
+    condition: Option<&SelectCondition>,
+    subquery_values: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Result<HashSet<Vec<u8>>, String>,
+    subquery_exists: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Result<bool, String>,
+    subquery_scalar: &mut impl FnMut(&dyn ConditionValueProvider, &SelectReadPlan) -> Result<Option<Vec<u8>>, String>,
+    evaluate_expression: &mut impl FnMut(&dyn ConditionValueProvider, &str) -> Result<Option<Vec<u8>>, String>,
+) -> Result<bool, String> {
+
     let Some(condition) = condition else {
         return Ok(true);
     };
@@ -235,12 +268,13 @@ pub fn row_matches_condition_with_result(
 
         SelectCondition::And(children) => {
             for child in children {
-                if !row_matches_condition_with_result(
+                if !row_matches_condition_with_result_and_expression(
                     provider,
                     Some(child),
                     subquery_values,
                     subquery_exists,
                     subquery_scalar,
+                    evaluate_expression,
                 )? {
                     return Ok(false);
                 }
@@ -251,12 +285,13 @@ pub fn row_matches_condition_with_result(
 
         SelectCondition::Or(children) => {
             for child in children {
-                if row_matches_condition_with_result(
+                if row_matches_condition_with_result_and_expression(
                     provider,
                     Some(child),
                     subquery_values,
                     subquery_exists,
                     subquery_scalar,
+                    evaluate_expression,
                 )? {
                     return Ok(true);
                 }
@@ -265,14 +300,15 @@ pub fn row_matches_condition_with_result(
             Ok(false)
         },
 
-        SelectCondition::Not(child) => row_matches_condition_with_result(
-                provider,
-                Some(child),
-                subquery_values,
-                subquery_exists,
-                subquery_scalar,
-            )
-            .map(|matched| !matched),
+        SelectCondition::Not(child) => row_matches_condition_with_result_and_expression(
+            provider,
+            Some(child),
+            subquery_values,
+            subquery_exists,
+            subquery_scalar,
+            evaluate_expression,
+        )
+        .map(|matched| !matched),
 
         SelectCondition::Predicate(predicate) => Ok(match predicate {
 
@@ -283,6 +319,17 @@ pub fn row_matches_condition_with_result(
             } => match provider.value(field_name) {
                 Some(actual) => compare_row_value(actual, value, op),
                 None => false,
+            },
+
+            SelectPredicate::ExpressionComparison {
+                expression_sql,
+                op,
+                value,
+            } => {
+                let Some(actual) = evaluate_expression(provider, expression_sql)? else {
+                    return Ok(false);
+                };
+                compare_expression_predicate_value(&actual, value, op)
             },
 
             SelectPredicate::Like {
@@ -434,6 +481,52 @@ pub fn row_matches_condition_with_result(
 
         }),
 
+    }
+
+}
+
+fn compare_expression_predicate_value(
+    actual: &[u8],
+    expected: &[u8],
+    op: &SelectComparisonOp,
+) -> bool {
+
+    if let (Some(left), Some(right)) = (
+        parse_numeric_text_for_expression_compare(actual),
+        parse_numeric_text_for_expression_compare(expected),
+    ) {
+        return compare_numeric_expression_values(left, right, op);
+    }
+
+    compare_row_value(actual, expected, op)
+
+}
+
+fn parse_numeric_text_for_expression_compare(value: &[u8]) -> Option<f64> {
+
+    let text = std::str::from_utf8(value).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let lowered = text.to_ascii_lowercase();
+    if lowered == "nan" || lowered == "inf" || lowered == "+inf" || lowered == "-inf" {
+        return None;
+    }
+
+    text.parse::<f64>().ok()
+
+}
+
+fn compare_numeric_expression_values(left: f64, right: f64, op: &SelectComparisonOp) -> bool {
+
+    match op {
+        SelectComparisonOp::Eq => left == right,
+        SelectComparisonOp::NotEq => left != right,
+        SelectComparisonOp::Gt => left > right,
+        SelectComparisonOp::GtEq => left >= right,
+        SelectComparisonOp::Lt => left < right,
+        SelectComparisonOp::LtEq => left <= right,
     }
 
 }

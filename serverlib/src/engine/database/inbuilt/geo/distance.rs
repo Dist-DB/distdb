@@ -45,7 +45,7 @@ impl InbuiltServerCommand for DistanceCommand {
         };
 
         // Great-circle distance in meters.
-        let earth_radius_m = 6_371_000.0_f64;
+        let earth_radius_m = 6_371.0_f64;
 
         let lat1_rad = lat1.to_radians();
         let lat2_rad = lat2.to_radians();
@@ -61,7 +61,7 @@ impl InbuiltServerCommand for DistanceCommand {
 
         let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
 
-        Ok(float_result(earth_radius_m * c))
+        Ok(float_result(earth_radius_m * c)) // result in kilometers
         
     }
 

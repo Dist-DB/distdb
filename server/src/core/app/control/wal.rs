@@ -216,7 +216,7 @@ impl ServerApp {
             return Ok(());
         }
 
-        let live_rows = serverlib::load_live_rows(&self.wal, table_id, schema);
+        let live_rows = serverlib::load_live_rows(&self.wal, table_id, table_id, schema);
         if live_rows.is_empty() {
             return Ok(());
         }

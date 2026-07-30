@@ -222,7 +222,7 @@ fn apply_top_with_ties_post_filter(
 
     let mut order_indexes = Vec::with_capacity(order_by.len());
     for item in order_by {
-        let Some(index) = columns.iter().position(|column| column.field_name == item.field_name) else {
+        let Some(index) = resolve_order_by_projection_index(columns, item.field_name.as_str()) else {
             return Err(format!(
                 "select failed: TOP WITH TIES ORDER BY column '{}' is not present in result projection",
                 item.field_name
@@ -232,6 +232,32 @@ fn apply_top_with_ties_post_filter(
     }
 
     Ok(apply_with_ties_rows(rows, &order_indexes, top_with_ties_limit))
+
+}
+
+fn resolve_order_by_projection_index(columns: &[FieldDef], field_name: &str) -> Option<usize> {
+
+    if let Some(index) = columns
+        .iter()
+        .position(|column| column.field_name.eq_ignore_ascii_case(field_name))
+    {
+        return Some(index);
+    }
+
+    let (_, unqualified) = field_name.split_once('.')?;
+
+    let mut matches = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.field_name.eq_ignore_ascii_case(unqualified))
+        .map(|(index, _)| index);
+
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+
+    Some(first)
 
 }
 

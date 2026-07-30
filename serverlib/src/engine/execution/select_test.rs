@@ -2497,6 +2497,91 @@ fn execute_relation_select_plan_supports_not_exists_predicates() {
 }
 
 #[test]
+fn execute_relation_select_plan_supports_computed_where_comparison() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select email from users where concat(email, '') = 'sam@example.com'",
+    )
+    .expect("computed where select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("computed where select should execute");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], b"sam@example.com".to_vec());
+}
+
+#[test]
+fn execute_relation_select_plan_expression_numeric_comparison_uses_numeric_ordering() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select u.email from users u where 12.5 <= 100",
+    )
+    .expect("constant numeric comparison should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("constant numeric comparison should execute");
+
+    assert_eq!(result.rows.len(), 2);
+}
+
+#[test]
 fn execute_relation_select_plan_supports_exists_predicates_with_inbuilt_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
@@ -3143,4 +3228,106 @@ fn execute_relation_select_plan_supports_passthrough_derived_wrapper_with_outer_
         String::from_utf8(result.rows[0][0].clone()).expect("utf8"),
         "sam@example.com"
     );
+}
+
+#[test]
+fn execute_relation_select_plan_top_with_ties_accepts_qualified_order_by_projection_alias() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select top 1 with ties e.email from (select email from users) e order by e.email",
+    )
+    .expect("qualified top-with-ties select should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::FullScan,
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("qualified top-with-ties select should execute");
+
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].field_name, "email");
+    assert!(!result.rows.is_empty());
+}
+
+#[test]
+fn execute_sql_function_with_lookup_supports_begin_set_return_body() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    catalog
+        .register_stored_procedure(
+            "fndistance",
+            "create FUNCTION `fndistance`(lon1 DECIMAL(10,7), lat1 DECIMAL(10,7), lon2 DECIMAL(10,7), lat2 DECIMAL(10,7)) RETURNS decimal(15,7)\n            DETERMINISTIC\n        BEGIN\n        SET @dlat = (lat2-lat1) * 0.0174532925;\n        SET @dlon = (lon2-lon1) * 0.0174532925;\n        SET @lat1 = lat1 * 0.0174532925;\n        SET @lat2 = lat2 * 0.0174532925;\n        SET @a = SIN(@dlat/2) * SIN(@dlat/2) + SIN(@dlon/2) * SIN(@dlon/2) * COS(@lat1) * COS(@lat2);\n        SET @c = 2 * ATAN2(SQRT(@a), SQRT(1-@a));\n        SET @d = 6371 * @c;\n        RETURN @d;\n        END",
+            vec![],
+        )
+        .expect("function should register");
+
+    let statements = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::MySqlDialect {},
+        "select fndistance(6.95, 50.93, 6.96, 50.94)",
+    )
+    .expect("select should parse");
+
+    let Some(sqlparser::ast::Statement::Query(query)) = statements.into_iter().next() else {
+        panic!("query statement should be present");
+    };
+
+    let sqlparser::ast::SetExpr::Select(select) = *query.body else {
+        panic!("query should contain select body");
+    };
+
+    let Some(sqlparser::ast::SelectItem::UnnamedExpr(sqlparser::ast::Expr::Function(function))) =
+        select.projection.into_iter().next()
+    else {
+        panic!("projection should contain function call");
+    };
+
+    let result = execute_sql_function_with_lookup(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &function,
+        &mut |_| None,
+    )
+    .expect("function execution should succeed")
+    .expect("function should return a value");
+
+    let text = String::from_utf8(result).expect("function result should be utf8");
+    let distance = text
+        .parse::<f64>()
+        .expect("function result should parse as f64");
+
+    assert!(distance.is_finite());
+    assert!(distance > 0.0);
 }

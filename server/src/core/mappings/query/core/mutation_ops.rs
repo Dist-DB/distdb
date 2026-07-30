@@ -22,6 +22,7 @@ type MutationRowMap = Arc<HashMap<String, Vec<u8>>>;
 static MUTATION_RUNTIME_INDEX_REBUILD_COUNT: AtomicU64 = AtomicU64::new(0);
 static INSERT_FALLBACK_LIVE_ROW_LOAD_COUNT: AtomicU64 = AtomicU64::new(0);
 static INSERT_FALLBACK_LIVE_ROW_MATERIALIZED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INSERT_SELECT_SOURCE_MATERIALIZATION_COUNT: AtomicU64 = AtomicU64::new(0);
 const INSERT_VALUE_BLOCK_MAX_ROWS: usize = 64;
 
 fn should_emit_diagnostics(counter: u64, first_n: u64, interval: u64) -> bool {
@@ -70,6 +71,27 @@ fn record_insert_fallback_live_row_load(
                 detail,
             );
         }
+    }
+}
+
+fn record_insert_select_source_materialization(
+    table_id: &str,
+    rows: usize,
+    columns: usize,
+    elapsed_ms: u128,
+) {
+    let count = INSERT_SELECT_SOURCE_MATERIALIZATION_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let should_log = should_emit_diagnostics(count, 5, 32) || elapsed_ms >= 500 || rows == 0;
+
+    if should_log {
+        log::info!(
+            "mutation diagnostics: insert select source materialized table={} count={} rows={} columns={} elapsed_ms={}",
+            table_id,
+            count,
+            rows,
+            columns,
+            elapsed_ms,
+        );
     }
 }
 
@@ -439,7 +461,13 @@ fn execute_insert_locked(
     }
 
     let insert_rows =
-        match materialize_insert_source_rows(catalog, wal, runtime_indexes, &plan.source) {
+        match materialize_insert_source_rows(
+            catalog,
+            wal,
+            runtime_indexes,
+            &plan.source,
+            &plan.table_id,
+        ) {
             Ok(rows) => rows,
             Err(message) => return ConnectorResponse::rejected(request_id.to_string(), message),
         };
@@ -2169,10 +2197,11 @@ fn execute_insert_locked(
 
 #[expect(clippy::type_complexity, reason="this function is complex due to the nature of insert execution and row materialization")]
 fn materialize_insert_source_rows<'a>(
-    catalog: &DatabaseCatalog,
+    catalog: &mut DatabaseCatalog,
     wal: &ConcurrentWalManager,
-    runtime_indexes: &RuntimeIndexStore,
+    runtime_indexes: &mut RuntimeIndexStore,
     source: &'a serverlib::InsertRowsSource,
+    target_table_id: &str,
 ) -> Result<Cow<'a, [Vec<Option<Vec<u8>>>]>, String> {
 
     match source {
@@ -2180,129 +2209,26 @@ fn materialize_insert_source_rows<'a>(
         serverlib::InsertRowsSource::Values(rows) => Ok(Cow::Borrowed(rows.as_slice())),
 
         serverlib::InsertRowsSource::Select(read_plan) => {
-
-            let select_result = if !read_plan.joins.is_empty() {
-
-                serverlib::execute_joined_select_plan(
-                    catalog,
-                    wal,
-                    runtime_indexes,
-                    read_plan,
-                    &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
-                        serverlib::execute_sql_function_with_lookup(
-                            catalog,
-                            wal,
-                            runtime_indexes,
-                            function,
-                            lookup,
-                        )
-                    }),
-                    &mut |row_map, condition| {
-                        Ok(serverlib::row_matches_select_condition(
-                            row_map,
-                            condition,
-                            catalog,
-                            wal,
-                            runtime_indexes,
-                        ))
-                    },
-                    &mut |row_tuple, condition| {
-                        Ok(serverlib::row_matches_select_condition(
-                            row_tuple,
-                            condition,
-                            catalog,
-                            wal,
-                            runtime_indexes,
-                        ))
-                    },
-                )
-
-            } else if read_plan.table_id.is_empty() {
-                
-                serverlib::execute_projection_only_select_plan(read_plan, &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
-                    serverlib::execute_sql_function_with_lookup(
-                        catalog,
-                        wal,
-                        runtime_indexes,
-                        function,
-                        lookup,
-                    )
-                }))
-
-            } else {
-                
-                let table_id = read_plan.table_id.as_str();
-
-                let schema = catalog.table_schema(table_id).ok_or_else(|| {
-                    format!("insert select failed: table '{}' not found", table_id)
-                })?;
-
-                let table = catalog.table(table_id).ok_or_else(|| {
-                    format!("insert select failed: table '{}' not found", table_id)
-                })?;
-
-                let mut scoped_table = table.clone();
-                if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
-                    scoped_table.entity_id = stream_id;
-                }
-
-                let mut index_filter_map = HashMap::new();
-                let like_filter = read_plan
-                    .where_condition
-                    .as_ref()
-                    .and_then(|condition| {
-                        collect_indexable_like_filter_for_schema(&schema, condition)
-                    });
-
-                let allow_index_short_circuit = read_plan
-                    .where_condition
-                    .as_ref()
-                    .map(|condition| {
-                        collect_indexable_equality_filters_for_schema(
-                            &schema,
-                            condition,
-                            &mut index_filter_map,
-                        )
-                    })
-                    .unwrap_or(true);
-
-                let access_plan =
-                    plan_relation_access(
-                        &scoped_table,
-                        allow_index_short_circuit,
-                        index_filter_map,
-                        like_filter,
-                    );
-
-                serverlib::execute_relation_select_plan(
-                    wal,
-                    &scoped_table,
-                    &schema,
-                    runtime_indexes,
-                    read_plan,
-                    &access_plan,
-                    &mut serverlib::with_lookup_sql_function_evaluator(|function, lookup| {
-                        serverlib::execute_sql_function_with_lookup(
-                            catalog,
-                            wal,
-                            runtime_indexes,
-                            function,
-                            lookup,
-                        )
-                    }),
-                    &mut |row_map, condition| {
-                        Ok(serverlib::row_matches_select_condition(
-                            row_map,
-                            condition,
-                            catalog,
-                            wal,
-                            runtime_indexes,
-                        ))
-                    },
-                )
-
-            }
+            let source_materialize_started_at = std::time::Instant::now();
+            let select_result = execute_select_with_ctes(
+                catalog,
+                wal,
+                runtime_indexes,
+                read_plan,
+                None,
+            )
             .map_err(|message| format!("insert select failed: {message}"))?;
+
+            let source_rows = select_result.rows.len();
+            let source_columns = select_result.columns.len();
+            let source_elapsed_ms = source_materialize_started_at.elapsed().as_millis();
+
+            record_insert_select_source_materialization(
+                target_table_id,
+                source_rows,
+                source_columns,
+                source_elapsed_ms,
+            );
 
             let rows =
                 select_result

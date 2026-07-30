@@ -830,6 +830,11 @@ pub enum SelectPredicate {
         op: SelectComparisonOp,
         value: Vec<u8>,
     },
+    ExpressionComparison {
+        expression_sql: String,
+        op: SelectComparisonOp,
+        value: Vec<u8>,
+    },
     Like {
         field_name: String,
         pattern: Vec<u8>,

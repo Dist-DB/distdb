@@ -544,6 +544,39 @@ pub fn parse_create_procedure_action_statements(
 
 }
 
+pub fn parse_create_function_action_statements(
+    statement: &str,
+) -> Result<Vec<String>, SqlParseError> {
+
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if !lowered.starts_with("create function") {
+        return Err(SqlParseError::UnsupportedStatement(
+            "statement is not CREATE FUNCTION".to_string(),
+        ));
+    }
+
+    if find_keyword_boundary_index(&lowered, "begin").is_none() {
+        let Some(return_expression) = extract_create_function_return_expression(statement)? else {
+            return Err(SqlParseError::UnsupportedStatement(
+                "CREATE FUNCTION must contain RETURN or BEGIN".to_string(),
+            ));
+        };
+
+        return Ok(vec![format!("return {return_expression}")]);
+    }
+
+    let body = extract_create_function_action_sql(statement)?;
+
+    Ok(split_top_level_statement_sql(body.as_str())
+        .into_iter()
+        .map(|statement_sql| statement_sql.trim().trim_end_matches(';').trim().to_string())
+        .filter(|statement_sql| !statement_sql.is_empty())
+        .collect::<Vec<_>>())
+
+}
+
 fn extract_create_procedure_body(statement: &str) -> Result<&str, SqlParseError> {
 
     let trimmed = statement.trim().trim_end_matches(';').trim();

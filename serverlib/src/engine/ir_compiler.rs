@@ -1,5 +1,6 @@
 use crate::engine::sql::{
-    parse_create_procedure_action_statements, parse_if_else_end_plan_from_create_procedure_statement,
+    parse_create_function_action_statements, parse_create_procedure_action_statements,
+    parse_if_else_end_plan_from_create_procedure_statement,
     parse_mysql8_sql_requests,
     parse_select_read_plan_from_statement, IfElseEndPlan, SelectProjectionItem, SelectReadPlan,
     SqlDirective, SqlOperation,
@@ -184,6 +185,7 @@ pub struct StoredProcedureCompilationArtifact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredProcedureAnalysisArtifact {
     pub if_else_end_plan: Option<IfElseEndPlan>,
+    pub procedure_action_statements: Option<Vec<String>>,
     pub resources: StoredProcedureResourceManifest,
     pub result_sets: Vec<StoredProcedureResultSetShape>,
 }
@@ -525,10 +527,18 @@ where
         let database_id = self.database_id();
         let routine = self.routine().cloned();
         let inbound_parameters = self.context.inbound_parameters().to_vec();
+        let inferred_routine_kind = routine
+            .as_ref()
+            .map(|routine| routine.kind)
+            .or_else(|| infer_routine_kind_from_sql(sql));
 
         let if_else_end_plan = parse_if_else_end_plan_from_create_procedure_statement(sql)
             .ok()
             .flatten();
+        let procedure_action_statements = match inferred_routine_kind {
+            Some(RoutineKind::Function) => parse_create_function_action_statements(sql).ok(),
+            Some(RoutineKind::Procedure) | None => parse_create_procedure_action_statements(sql).ok(),
+        };
 
         let resources = collect_compilation_resources(
             sql,
@@ -548,6 +558,7 @@ where
 
         StoredProcedureAnalysisArtifact {
             if_else_end_plan,
+            procedure_action_statements,
             resources,
             result_sets,
         }
@@ -560,11 +571,17 @@ where
     }
 
     pub fn lower_ir_from_analysis(&self, analysis: &StoredProcedureAnalysisArtifact) -> StoredProcedureIr {
-        analysis
-            .if_else_end_plan
-            .clone()
-            .map(StoredProcedureIr::IfElseEnd)
-            .unwrap_or(StoredProcedureIr::PassthroughSql)
+        if let Some(plan) = analysis.if_else_end_plan.clone() {
+            return StoredProcedureIr::IfElseEnd(plan);
+        }
+
+        if let Some(action_statements) = analysis.procedure_action_statements.clone()
+            && !action_statements.is_empty()
+        {
+            return StoredProcedureIr::ActionStatements(action_statements);
+        }
+
+        StoredProcedureIr::PassthroughSql
     }
 
     pub fn compile_artifact(&self, sql: &str) -> StoredProcedureCompilationArtifact {
@@ -628,6 +645,22 @@ fn normalize_compilation_resources(
 
 }
 
+fn infer_routine_kind_from_sql(sql: &str) -> Option<RoutineKind> {
+
+    let lowered = sql.trim_start().to_ascii_lowercase();
+
+    if lowered.starts_with("create function") {
+        return Some(RoutineKind::Function);
+    }
+
+    if lowered.starts_with("create procedure") {
+        return Some(RoutineKind::Procedure);
+    }
+
+    None
+
+}
+
 fn resource_kind_sort_key(kind: StoredProcedureResourceKind) -> u8 {
 
     match kind {
@@ -667,6 +700,7 @@ fn resource_direction_sort_key(direction: StoredProcedureResourceDirection) -> u
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoredProcedureIr {
     IfElseEnd(IfElseEndPlan),
+    ActionStatements(Vec<String>),
     PassthroughSql,
 }
 
@@ -771,7 +805,15 @@ impl StoredProcedureIr {
     pub fn if_else_end_plan(&self) -> Option<&IfElseEndPlan> {
         match self {
             StoredProcedureIr::IfElseEnd(plan) => Some(plan),
+            StoredProcedureIr::ActionStatements(_) | StoredProcedureIr::PassthroughSql => None,
+        }
+    }
+
+    pub fn action_statements(&self) -> Option<&[String]> {
+        match self {
+            StoredProcedureIr::ActionStatements(statements) => Some(statements.as_slice()),
             StoredProcedureIr::PassthroughSql => None,
+            StoredProcedureIr::IfElseEnd(_) => None,
         }
     }
 
@@ -1096,6 +1138,15 @@ fn collect_resources_from_predicate(
                 kind: StoredProcedureResourceKind::Variable,
                 direction: StoredProcedureResourceDirection::Ref,
                 detail: Some("condition reference".to_string()),
+            });
+        },
+
+        ExpressionComparison { .. } => {
+            resources.push(StoredProcedureResourceEntry {
+                name: "__expression__".to_string(),
+                kind: StoredProcedureResourceKind::Variable,
+                direction: StoredProcedureResourceDirection::Ref,
+                detail: Some("computed condition expression".to_string()),
             });
         },
 

@@ -1479,6 +1479,16 @@ fn rewrite_passthrough_outer_predicate(
             value: value.clone(),
         }),
 
+        SelectPredicate::ExpressionComparison {
+            expression_sql,
+            op,
+            value,
+        } => Ok(SelectPredicate::ExpressionComparison {
+            expression_sql: expression_sql.clone(),
+            op: op.clone(),
+            value: value.clone(),
+        }),
+
         SelectPredicate::Like {
             field_name,
             pattern,
@@ -2439,9 +2449,26 @@ fn parse_select_condition_expression(
                         }
                     },
 
-                    (Err(_), Err(_)) => Err(SqlParseError::UnsupportedStatement(
-                        "WHERE comparison requires a column reference on at least one side".to_string(),
-                    )),
+                    (Err(_), Err(_)) => {
+                        if let Ok(value) = parse_condition_literal_value(right) {
+                            Ok(SelectCondition::Predicate(SelectPredicate::ExpressionComparison {
+                                expression_sql: left.to_string(),
+                                op,
+                                value,
+                            }))
+                        } else if let Ok(value) = parse_condition_literal_value(left) {
+                            Ok(SelectCondition::Predicate(SelectPredicate::ExpressionComparison {
+                                expression_sql: right.to_string(),
+                                op: reverse_select_comparison_op(&op),
+                                value,
+                            }))
+                        } else {
+                            Err(SqlParseError::UnsupportedStatement(
+                                "WHERE comparison requires a column reference on at least one side"
+                                    .to_string(),
+                            ))
+                        }
+                    },
 
                 }
             
@@ -3169,7 +3196,11 @@ fn parse_relation_binding_from_factor(
         ));
     };
 
-    let table_id = common::normalize_identifier!(&name.to_string());
+    let table_id = name
+        .0
+        .last()
+        .map(|ident| common::normalize_identifier!(&ident.value))
+        .unwrap_or_default();
 
     if table_id.is_empty() {
         return Err(SqlParseError::MissingIdentifier {

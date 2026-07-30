@@ -113,6 +113,27 @@ fn select_projection_only_order_by_unknown_alias_is_rejected() {
 }
 
 #[test]
+fn select_where_computed_expression_comparison_parses() {
+    let plan = parse_select_read_plan_from_statement(
+        "select id from users where abs(id) <= 10",
+    )
+    .expect("computed WHERE comparison should parse");
+
+    let Some(SelectCondition::Predicate(SelectPredicate::ExpressionComparison {
+        expression_sql,
+        op,
+        value,
+    })) = plan.where_condition
+    else {
+        panic!("expected expression comparison predicate");
+    };
+
+    assert_eq!(common::normalize_identifier!(expression_sql.as_str()), "abs(id)");
+    assert_eq!(op, SelectComparisonOp::LtEq);
+    assert_eq!(value, b"10".to_vec());
+}
+
+#[test]
 fn create_view_dependency_extraction_collects_base_table() {
 
     let dependencies = parse_create_view_dependencies_from_sql(
@@ -1257,6 +1278,19 @@ fn select_alias_qualified_wildcard_is_valid() {
             if relation.as_deref() == Some("ac")
     ));
     assert!(!plan.projection_is_wildcard);
+}
+
+#[test]
+fn select_qualified_from_name_normalizes_table_id_to_leaf_name() {
+    let plan = parse_select_read_plan_from_statement(
+        "select p.uid from main.__account p where p.uid = 1",
+    )
+    .expect("qualified from name should parse");
+
+    assert_eq!(plan.table_id, "__account");
+    assert_eq!(plan.relations.len(), 1);
+    assert_eq!(plan.relations[0].table_id, "__account");
+    assert_eq!(plan.relations[0].alias.as_deref(), Some("p"));
 }
 
 #[test]

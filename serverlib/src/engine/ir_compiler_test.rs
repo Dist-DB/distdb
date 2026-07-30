@@ -47,10 +47,10 @@ fn compiles_if_else_end_procedure_to_ir() {
 }
 
 #[test]
-fn compiles_non_if_else_procedure_to_passthrough_sql_ir() {
+fn compiles_non_if_else_procedure_to_action_list_ir() {
     let ir = compile_sql_programatic_sql("create procedure p() begin select 1; end");
 
-    assert!(matches!(ir, StoredProcedureIr::PassthroughSql));
+    assert!(matches!(ir, StoredProcedureIr::ActionStatements(_)));
 }
 
 #[test]
@@ -273,14 +273,58 @@ fn compile_with_context_setup_only_procedure_remains_passthrough() {
         context,
     );
 
-    assert!(matches!(ir, StoredProcedureIr::PassthroughSql));
+    assert!(matches!(ir, StoredProcedureIr::ActionStatements(_)));
 
 }
 
 #[test]
 fn compile_routine_artifact_matches_procedure_compiler_entry_point() {
     let artifact = compile_sql_programatic_artifact("create procedure p() begin select 1; end");
-    assert!(matches!(artifact.ir, StoredProcedureIr::PassthroughSql));
+    assert!(matches!(artifact.ir, StoredProcedureIr::ActionStatements(_)));
+}
+
+#[test]
+fn compile_sp_placesnearby_style_procedure_lowers_to_action_list_ir() {
+    let sql = "create procedure sp_placesnearby(in longitude decimal(25,20), in latitude decimal(25,20), in limitto int(4), in offset decimal(10,7)) begin set @offset = offset; set @limitto = limitto; set @longitude = longitude; set @latitude = latitude; set @longitude_min = longitude - offset; set @latitude_min = latitude - offset; set @longitude_max = longitude + offset; set @latitude_max = latitude + offset; drop temporary table if exists __placesfound; create temporary table __placesfound (index(distance_km)) engine = memory as ( select place.uid, place.longitude, place.latitude, fndistance(@longitude, @latitude, place.longitude, place.latitude) as distance_km from locations.places place where (place.latitude between @latitude_min and @latitude_max) and (place.longitude between @longitude_min and @longitude_max) ); select distinct place.*, e.distance_km from __placesfound e inner join locations.places as place on place.uid = e.uid and place.type='N' order by e.distance_km asc limit 0, limitto; end";
+
+    let artifact = compile_sql_programatic_artifact(sql);
+
+    let StoredProcedureIr::ActionStatements(action_statements) = artifact.ir else {
+        panic!("expected action-list IR for sp_placesnearby-style procedure");
+    };
+
+    assert_eq!(action_statements.len(), 11);
+    assert!(action_statements
+        .iter()
+        .any(|statement| statement.to_ascii_lowercase().starts_with("create temporary table __placesfound")));
+    assert!(action_statements
+        .iter()
+        .any(|statement| statement.to_ascii_lowercase().starts_with("select distinct place.*")));
+}
+
+#[test]
+fn compile_function_body_lowers_to_action_list_ir() {
+    let artifact = compile_sql_programatic_artifact(
+        "create function f_total() returns int begin set @v = 1; select @v; end",
+    );
+
+    let StoredProcedureIr::ActionStatements(action_statements) = artifact.ir else {
+        panic!("expected action-list IR for function-style routine");
+    };
+
+    assert_eq!(action_statements.len(), 2);
+    assert!(action_statements
+        .iter()
+        .any(|statement| statement.to_ascii_lowercase().starts_with("set @v = 1")));
+    assert!(action_statements
+        .iter()
+        .any(|statement| statement.to_ascii_lowercase().starts_with("select @v")));
+}
+
+#[test]
+fn compile_non_procedure_statement_still_falls_back_to_passthrough_ir() {
+    let ir = compile_sql_programatic_sql("select 1");
+    assert!(matches!(ir, StoredProcedureIr::PassthroughSql));
 }
 
 #[test]

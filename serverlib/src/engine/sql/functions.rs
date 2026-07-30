@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+    UnaryOperator, Value,
+};
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 
@@ -265,14 +268,46 @@ fn expression_to_argument_bytes(
 
         Expr::Value(value) => value_to_argument_bytes(value),
 
-        Expr::UnaryOp { op, expr } => match (op, expr.as_ref()) {
-            (UnaryOperator::Plus, Expr::Value(Value::Number(value, _))) => {
-                Ok(value.clone().into_bytes())
+        Expr::UnaryOp { op, expr } => {
+            let operand = expression_to_argument_bytes(expr, lookup, evaluate_nested_function)?;
+            let operand_number = parse_numeric_bytes_for_expression(operand.as_slice())?;
+
+            match op {
+                UnaryOperator::Plus => Ok(format_numeric_expression_result(operand_number)),
+                UnaryOperator::Minus => Ok(format_numeric_expression_result(-operand_number)),
+                _ => Err("unsupported function unary argument".to_string()),
             }
-            (UnaryOperator::Minus, Expr::Value(Value::Number(value, _))) => {
-                Ok(format!("-{value}").into_bytes())
+        },
+
+        Expr::BinaryOp { left, op, right } => {
+            let left_value = expression_to_argument_bytes(left, lookup, evaluate_nested_function)?;
+            let right_value = expression_to_argument_bytes(right, lookup, evaluate_nested_function)?;
+
+            match op {
+                BinaryOperator::Plus
+                | BinaryOperator::Minus
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide => {
+                    let left_number = parse_numeric_bytes_for_expression(left_value.as_slice())?;
+                    let right_number = parse_numeric_bytes_for_expression(right_value.as_slice())?;
+
+                    let result = match op {
+                        BinaryOperator::Plus => left_number + right_number,
+                        BinaryOperator::Minus => left_number - right_number,
+                        BinaryOperator::Multiply => left_number * right_number,
+                        BinaryOperator::Divide => {
+                            if right_number == 0.0 {
+                                return Err("unsupported function binary argument: division by zero".to_string());
+                            }
+                            left_number / right_number
+                        }
+                        _ => unreachable!("guarded by operator match"),
+                    };
+
+                    Ok(format_numeric_expression_result(result))
+                }
+                _ => Err(format!("unsupported function binary argument operator '{op}'")),
             }
-            _ => Err("unsupported function unary argument".to_string()),
         },
 
         Expr::Identifier(identifier) => lookup(&common::normalize_identifier!(&identifier.value))
@@ -299,6 +334,30 @@ fn expression_to_argument_bytes(
 
         _ => Err(format!("unsupported function argument expression '{expression}'")),
 
+    }
+
+}
+
+fn parse_numeric_bytes_for_expression(value: &[u8]) -> Result<f64, String> {
+
+    let text = std::str::from_utf8(value)
+        .map_err(|_| "unsupported function numeric argument: non-utf8 value".to_string())?;
+
+    text.trim().parse::<f64>().map_err(|_| {
+        format!(
+            "unsupported function numeric argument '{}': expected numeric value",
+            text.trim(),
+        )
+    })
+
+}
+
+fn format_numeric_expression_result(value: f64) -> Vec<u8> {
+
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{value:.0}").into_bytes()
+    } else {
+        value.to_string().into_bytes()
     }
 
 }

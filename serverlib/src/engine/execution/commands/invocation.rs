@@ -32,6 +32,18 @@ where
             return execute_if_else_end_plan(provider, plan, execute_action);
         }
 
+    if let Some(ir) = procedure.compiled_ir()
+        && let Some(action_statements) = ir.action_statements()
+    {
+        let mut last_result = None;
+
+        for action_sql in action_statements {
+            last_result = Some(execute_action(action_sql)?);
+        }
+
+        return Ok(last_result);
+    }
+
     if let Some(result) =
         execute_if_else_end_from_create_procedure_sql(provider, &procedure.sql, execute_action)?
     {

@@ -132,6 +132,14 @@ fn join_condition() -> SelectCondition {
     })
 }
 
+fn join_condition_reversed() -> SelectCondition {
+    SelectCondition::Predicate(SelectPredicate::FieldComparison {
+        left_field_name: "p.user_id".to_string(),
+        op: SelectComparisonOp::Eq,
+        right_field_name: "u.id".to_string(),
+    })
+}
+
 #[test]
 fn build_joined_row_tuples_supports_all_join_kinds() {
     let wal = ConcurrentWalManager::in_memory();
@@ -263,6 +271,38 @@ fn build_joined_row_tuples_supports_non_field_comparison_join_conditions() {
             .map(|value| render_stored_field_value(value))
             == Some(b"1".to_vec())
     }));
+}
+
+#[test]
+fn build_joined_row_tuples_supports_reversed_field_comparison_operands() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_rows(&mut catalog, &wal);
+    let runtime_indexes = RuntimeIndexStore::new();
+
+    let relations = vec![relation("users", "u")];
+    let join = SelectJoin {
+        kind: SelectJoinKind::Inner,
+        relation: relation("profiles", "p"),
+        on_condition: join_condition_reversed(),
+    };
+
+    let rows = build_joined_row_tuples(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &relations,
+        &[None, None],
+        &[join],
+        &mut |_, _| Ok(true),
+    )
+    .expect("reversed field-comparison join should succeed");
+
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .all(|row| row.value("u.id").is_some() && row.value("p.user_id").is_some()));
 }
 
 #[test]

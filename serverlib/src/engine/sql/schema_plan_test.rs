@@ -38,6 +38,26 @@ fn create_table_plan_detects_temporary_flag() {
 }
 
 #[test]
+fn create_table_plan_infers_columns_from_as_select_projection() {
+    let plan = create_table_plan_from_statement(
+        "create temporary table tmp_places (index(longitude), index(latitude)) engine = memory as (select place.uid, place.longitude, place.latitude from places place)",
+    )
+    .expect("temporary CTAS plan should parse");
+
+    assert_eq!(plan.table_id, "tmp_places");
+    assert!(plan.temporary);
+
+    let field_names = plan
+        .schema
+        .fields
+        .iter()
+        .map(|field| field.field_name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(field_names, vec!["uid", "longitude", "latitude"]);
+}
+
+#[test]
 fn create_table_schema_maps_varchar_with_length() {
     let (_, schema) =
         create_table_schema_from_statement("create table users (email varchar(34) not null)")

@@ -79,6 +79,13 @@ pub(super) fn execute_select_plan_result(
     }
 
     let mut index_filter_map = HashMap::new();
+    let range_filters = read_plan
+        .where_condition
+        .as_ref()
+        .map(|condition| {
+            serverlib::collect_indexable_range_filters_for_schema(&schema, condition)
+        })
+        .unwrap_or_default();
     let like_filter = read_plan
         .where_condition
         .as_ref()
@@ -102,6 +109,7 @@ pub(super) fn execute_select_plan_result(
         &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
+        range_filters,
         like_filter,
     );
 
@@ -1886,6 +1894,14 @@ fn execute_select_read_plan_without_lock(
 
     let mut index_filter_map = HashMap::new();
 
+    let range_filters = read_plan
+        .where_condition
+        .as_ref()
+        .map(|condition| {
+            serverlib::collect_indexable_range_filters_for_schema(&schema, condition)
+        })
+        .unwrap_or_default();
+
     let like_filter = read_plan
         .where_condition
         .as_ref()
@@ -1909,6 +1925,7 @@ fn execute_select_read_plan_without_lock(
         &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
+        range_filters,
         like_filter,
     );
 

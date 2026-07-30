@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    ConcurrentWalManager, DatabaseCatalog, SqlCursorFrame, TableSchema, WalStreamMode,
+    ConcurrentWalManager, DatabaseCatalog, DatabaseStoredProcedure, SqlCursorFrame, TableSchema, WalStreamMode,
     TriggerEventKind, TriggerTiming,
     VecSqlCursorSource,
 };
@@ -67,6 +67,45 @@ fn execute_stored_procedure_invocation_executes_non_if_top_level_actions_in_orde
         .expect("procedure should exist");
 
     let mut executed = Vec::new();
+
+    let result = execute_stored_procedure_invocation(
+        &HashMap::new(),
+        &procedure,
+        EntityInvocationSource::DirectedUser,
+        &mut |sql| {
+            executed.push(sql.to_string());
+            Ok(sql.to_string())
+        },
+    )
+    .expect("stored procedure invocation should succeed");
+
+    assert_eq!(
+        executed,
+        vec![
+            "set @phase = 'boot'".to_string(),
+            "select 1".to_string(),
+            "select 2".to_string(),
+        ]
+    );
+
+    assert_eq!(result, Some("select 2".to_string()));
+
+}
+
+#[test]
+fn execute_stored_procedure_invocation_prefers_compiled_action_list_ir_over_raw_sql_fallback() {
+
+    let mut procedure = DatabaseStoredProcedure::new(
+        "refresh_accounts".to_string(),
+        "create procedure refresh_accounts() begin set @phase = 'boot'; select 1; select 2; end"
+            .to_string(),
+        vec!["accounts".to_string()],
+    );
+
+    let mut executed = Vec::new();
+
+    // Deliberately corrupt raw SQL text after compilation to ensure invocation uses cached IR.
+    procedure.sql = "create procedure refresh_accounts() begin select".to_string();
 
     let result = execute_stored_procedure_invocation(
         &HashMap::new(),

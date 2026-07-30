@@ -6419,6 +6419,511 @@ fn call_procedure_temp_table_insert_and_select_returns_rows_and_cleans_up() {
 }
 
 #[test]
+fn call_procedure_temp_table_ctas_geobox_returns_rows_and_cleans_up() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .create_table(
+            "places".to_string(),
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "uid".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: FieldIndex::PrimaryKey,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "latitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "longitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("places table should be created");
+
+    catalog
+        .register_stored_procedure(
+            "p_places",
+            "create procedure p_places(in longitude decimal(25,20), in latitude decimal(25,20), in limitto int(4), in offset decimal(10,7)) begin set @offset = offset; set @limitto = limitto; set @longitude = longitude; set @latitude = latitude; set @longitude_min = longitude - offset; set @latitude_min = latitude - offset; set @longitude_max = longitude + offset; set @latitude_max = latitude + offset; drop temporary table if exists __placesfound; create temporary table __placesfound (index(longitude), index(latitude)) engine = memory as ( select place.uid, place.longitude, place.latitude from places place where (place.latitude between @latitude_min and @latitude_max) and (place.longitude between @longitude_min and @longitude_max) ); select uid from __placesfound order by uid asc limit 0, limitto; end",
+            vec!["places".to_string()],
+        )
+        .expect("procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    for sql in [
+        "insert into places (uid, latitude, longitude) values (1, 50.9300, 6.9500)",
+        "insert into places (uid, latitude, longitude) values (2, 50.9800, 6.9900)",
+        "insert into places (uid, latitude, longitude) values (3, 52.0000, 6.9500)",
+        "insert into places (uid, latitude, longitude) values (4, 50.9300, 8.0000)",
+    ] {
+        let response = handle_query_command(
+            "req-seed-places",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &test_node_data_dir(),
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "seed insert should succeed: {:?}",
+            response
+        );
+    }
+
+    let response = handle_query_command(
+        "req-call-p-places",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "call p_places(6.95, 50.93, 100, 0.1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "call response should be applied: {:?}",
+        response
+    );
+
+    let rows = query_result_rows(response);
+    assert_eq!(rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+
+    let catalog = catalogs
+        .values()
+        .next()
+        .expect("catalog should be present after call");
+
+    assert!(catalog
+        .table_ids()
+        .into_iter()
+        .all(|table_id| !table_id.contains("__placesfound")));
+}
+
+#[test]
+fn call_procedure_sp_placesnearby_shape_returns_rows() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .create_table(
+            "places".to_string(),
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "uid".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: FieldIndex::PrimaryKey,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "type".to_string(),
+                    field_type: FieldType::StringFixed(1),
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "latitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 4,
+                    field_name: "longitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("places table should be created");
+
+    catalog
+        .register_stored_procedure(
+            "fndistance",
+            "create FUNCTION `fndistance`(lon1 DECIMAL(10,7), lat1 DECIMAL(10,7), lon2 DECIMAL(10,7), lat2 DECIMAL(10,7)) RETURNS decimal(15,7)\n            DETERMINISTIC\n        BEGIN\n        SET @dlat = (lat2-lat1) * 0.0174532925;\n        SET @dlon = (lon2-lon1) * 0.0174532925;\n        SET @lat1 = lat1 * 0.0174532925;\n        SET @lat2 = lat2 * 0.0174532925;\n        SET @a = SIN(@dlat/2) * SIN(@dlat/2) + SIN(@dlon/2) * SIN(@dlon/2) * COS(@lat1) * COS(@lat2);\n        SET @c = 2 * ATAN2(SQRT(@a), SQRT(1-@a));\n        SET @d = 6371 * @c;\n        RETURN @d;\n        END",
+            Vec::new(),
+        )
+        .expect("fndistance function should register");
+
+    catalog
+        .register_stored_procedure(
+            "sp_placesnearby",
+            "create procedure sp_placesnearby(in longitude decimal(25,20), in latitude decimal(25,20), in limitto int(4), in offset decimal(10,7)) begin set @offset = offset; set @limitto = limitto; set @longitude = longitude; set @latitude = latitude; set @longitude_min = longitude - offset; set @latitude_min = latitude - offset; set @longitude_max = longitude + offset; set @latitude_max = latitude + offset; drop temporary table if exists __placesfound; create temporary table __placesfound (index(distance_km)) engine = memory as ( select place.uid, place.longitude, place.latitude, fndistance(@longitude, @latitude, place.longitude, place.latitude) as distance_km from locations.places place where (place.latitude between @latitude_min and @latitude_max) and (place.longitude between @longitude_min and @longitude_max) ); select distinct place.*, e.distance_km from __placesfound e inner join locations.places as place on place.uid = e.uid and place.type='N' order by e.distance_km asc limit 0, limitto; end",
+            vec!["places".to_string()],
+        )
+        .expect("sp_placesnearby should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    for sql in [
+        "insert into places (uid, type, latitude, longitude) values (1, 'N', 50.9300, 6.9500)",
+        "insert into places (uid, type, latitude, longitude) values (2, 'N', 50.9800, 6.9900)",
+        "insert into places (uid, type, latitude, longitude) values (3, 'V', 50.9400, 6.9600)",
+        "insert into places (uid, type, latitude, longitude) values (4, 'N', 52.0000, 8.0000)",
+    ] {
+        let response = handle_query_command(
+            "req-seed-places-nearby",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &test_node_data_dir(),
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "seed insert should succeed: {:?}",
+            response
+        );
+    }
+
+    let response = handle_query_command(
+        "req-call-sp-placesnearby-shape",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "call sp_placesnearby(6.95, 50.93, 100, 0.1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "call response should be applied: {:?}",
+        response
+    );
+
+    let rows = query_result_rows(response);
+    assert!(!rows.is_empty(), "expected nearby results, got no rows");
+
+    let uids = rows
+        .iter()
+        .filter_map(|row| row.first().cloned())
+        .collect::<Vec<_>>();
+    assert!(uids.contains(&"1".to_string()));
+    assert!(uids.contains(&"2".to_string()));
+    assert!(!uids.contains(&"3".to_string()));
+}
+
+#[test]
+fn call_procedure_sp_placesnearby_two_step_insert_returns_rows() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .create_table(
+            "places".to_string(),
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "uid".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: FieldIndex::PrimaryKey,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "type".to_string(),
+                    field_type: FieldType::StringFixed(1),
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "latitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 4,
+                    field_name: "longitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("places table should be created");
+
+    catalog
+        .register_stored_procedure(
+            "fndistance",
+            "create FUNCTION `fndistance`(lon1 DECIMAL(10,7), lat1 DECIMAL(10,7), lon2 DECIMAL(10,7), lat2 DECIMAL(10,7)) RETURNS decimal(15,7)\n            DETERMINISTIC\n        BEGIN\n        SET @dlat = (lat2-lat1) * 0.0174532925;\n        SET @dlon = (lon2-lon1) * 0.0174532925;\n        SET @lat1 = lat1 * 0.0174532925;\n        SET @lat2 = lat2 * 0.0174532925;\n        SET @a = SIN(@dlat/2) * SIN(@dlat/2) + SIN(@dlon/2) * SIN(@dlon/2) * COS(@lat1) * COS(@lat2);\n        SET @c = 2 * ATAN2(SQRT(@a), SQRT(1-@a));\n        SET @d = 6371 * @c;\n        RETURN @d;\n        END",
+            Vec::new(),
+        )
+        .expect("fndistance function should register");
+
+    catalog
+        .register_stored_procedure(
+            "sp_placesnearby",
+            "create procedure sp_placesnearby(in longitude decimal(25,20), in latitude decimal(25,20), in limitto int(4), in offset decimal(10,7)) begin drop temporary table if exists __placesfound; create temporary table __placesfound (`uid` varchar(34) not null, `longitude` decimal(11,7) not null default '0.0', `latitude` decimal(11,7) not null default '0.0', `distance_km` decimal(20,7) not null default '0.0000000', key `uid` (`uid`), key `distance_km` (`distance_km`), key `position` (`longitude`, `latitude`)) engine = memory; set @offset = offset; set @limitto = limitto; set @longitude = longitude; set @latitude = latitude; set @longitude_min = longitude - offset; set @latitude_min = latitude - offset; set @longitude_max = longitude + offset; set @latitude_max = latitude + offset; insert into __placesfound (uid, longitude, latitude, distance_km) select plc.uid, plc.longitude, plc.latitude, fndistance(@longitude, @latitude, plc.longitude, plc.latitude) as distance_km from places plc where (plc.latitude between @latitude_min and @latitude_max) and (plc.longitude between @longitude_min and @longitude_max); select distinct places.*, e.distance_km from __placesfound e inner join locations.places as places on places.uid = e.uid where places.type='N' order by e.distance_km asc limit 0, limitto; end",
+            vec!["places".to_string()],
+        )
+        .expect("sp_placesnearby should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    for sql in [
+        "insert into places (uid, type, latitude, longitude) values (1, 'N', 50.9300, 6.9500)",
+        "insert into places (uid, type, latitude, longitude) values (2, 'N', 50.9800, 6.9900)",
+        "insert into places (uid, type, latitude, longitude) values (3, 'V', 50.9400, 6.9600)",
+        "insert into places (uid, type, latitude, longitude) values (4, 'N', 52.0000, 8.0000)",
+    ] {
+        let response = handle_query_command(
+            "req-seed-places-nearby-two-step",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &test_node_data_dir(),
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "seed insert should succeed: {:?}",
+            response
+        );
+    }
+
+    let response = handle_query_command(
+        "req-call-sp-placesnearby-two-step",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "call sp_placesnearby(6.95, 50.93, 100, 0.1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "call response should be applied: {:?}",
+        response
+    );
+
+    let rows = query_result_rows(response);
+    assert!(!rows.is_empty(), "expected nearby results, got no rows");
+}
+
+#[test]
+fn call_procedure_sp_placesnearby_two_step_insert_populates_temp_table() {
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let db_id = catalog.database_id.0.clone();
+
+    catalog
+        .create_table(
+            "places".to_string(),
+            TableSchema::new(vec![
+                FieldDef {
+                    seqno: 1,
+                    field_name: "uid".to_string(),
+                    field_type: FieldType::Int(64),
+                    nullable: false,
+                    indexed: FieldIndex::PrimaryKey,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 2,
+                    field_name: "type".to_string(),
+                    field_type: FieldType::StringFixed(1),
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 3,
+                    field_name: "latitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+                FieldDef {
+                    seqno: 4,
+                    field_name: "longitude".to_string(),
+                    field_type: FieldType::Text,
+                    nullable: false,
+                    indexed: FieldIndex::Indexed,
+                    default_value: None,
+                    metadata: None,
+                },
+            ]),
+        )
+        .expect("places table should be created");
+
+    catalog
+        .register_stored_procedure(
+            "fndistance",
+            "create FUNCTION `fndistance`(lon1 DECIMAL(10,7), lat1 DECIMAL(10,7), lon2 DECIMAL(10,7), lat2 DECIMAL(10,7)) RETURNS decimal(15,7)\n            DETERMINISTIC\n        BEGIN\n        SET @dlat = (lat2-lat1) * 0.0174532925;\n        SET @dlon = (lon2-lon1) * 0.0174532925;\n        SET @lat1 = lat1 * 0.0174532925;\n        SET @lat2 = lat2 * 0.0174532925;\n        SET @a = SIN(@dlat/2) * SIN(@dlat/2) + SIN(@dlon/2) * SIN(@dlon/2) * COS(@lat1) * COS(@lat2);\n        SET @c = 2 * ATAN2(SQRT(@a), SQRT(1-@a));\n        SET @d = 6371 * @c;\n        RETURN @d;\n        END",
+            Vec::new(),
+        )
+        .expect("fndistance function should register");
+
+    catalog
+        .register_stored_procedure(
+            "sp_placesnearby_probe_insert",
+            "create procedure sp_placesnearby_probe_insert(in longitude decimal(25,20), in latitude decimal(25,20), in limitto int(4), in offset decimal(10,7)) begin drop temporary table if exists __placesfound; create temporary table __placesfound (`uid` varchar(34) not null, `longitude` decimal(11,7) not null default '0.0', `latitude` decimal(11,7) not null default '0.0', `distance_km` decimal(20,7) not null default '0.0000000', key `uid` (`uid`), key `distance_km` (`distance_km`), key `position` (`longitude`, `latitude`)) engine = memory; set @offset = offset; set @limitto = limitto; set @longitude = longitude; set @latitude = latitude; set @longitude_min = longitude - offset; set @latitude_min = latitude - offset; set @longitude_max = longitude + offset; set @latitude_max = latitude + offset; insert into __placesfound (uid, longitude, latitude, distance_km) select plc.uid, plc.longitude, plc.latitude, fndistance(@longitude, @latitude, plc.longitude, plc.latitude) as distance_km from places plc where (plc.latitude between @latitude_min and @latitude_max) and (plc.longitude between @longitude_min and @longitude_max); select uid from __placesfound order by uid asc limit 0, limitto; end",
+            vec!["places".to_string()],
+        )
+        .expect("probe procedure should register");
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(db_id.clone(), catalog);
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    for sql in [
+        "insert into places (uid, type, latitude, longitude) values (1, 'N', 50.9300, 6.9500)",
+        "insert into places (uid, type, latitude, longitude) values (2, 'N', 50.9800, 6.9900)",
+        "insert into places (uid, type, latitude, longitude) values (3, 'V', 50.9400, 6.9600)",
+        "insert into places (uid, type, latitude, longitude) values (4, 'N', 52.0000, 8.0000)",
+    ] {
+        let response = handle_query_command(
+            "req-seed-places-nearby-two-step-probe",
+            &DataQuery {
+                database_id: "main".to_string(),
+                sql: sql.to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &test_node_data_dir(),
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "seed insert should succeed: {:?}",
+            response
+        );
+    }
+
+    let response = handle_query_command(
+        "req-call-sp-placesnearby-probe-insert",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "call sp_placesnearby_probe_insert(6.95, 50.93, 100, 0.1)".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &test_node_data_dir(),
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(response.status, connector::ResponseStatus::Applied),
+        "call response should be applied: {:?}",
+        response
+    );
+
+    let rows = query_result_rows(response);
+    assert!(
+        rows.len() >= 2,
+        "expected at least two temp rows from geobox insert, got {:?}",
+        rows
+    );
+}
+
+#[test]
 fn call_procedure_argument_bindings_do_not_bleed_between_calls() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");

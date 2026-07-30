@@ -2,21 +2,28 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::{
     ConcurrentWalManager, DatabaseCatalog, RuntimeIndexStore, SelectCondition, SelectJoin,
     SelectJoinKind, SelectRelation,
+    render_stored_field_value,
 };
 
 use super::access::{
     build_relation_probe_index, collect_indexable_equality_filters_for_schema,
-    collect_indexable_like_filter_for_schema,
-    field_has_single_column_index, materialize_relation_rows, plan_relation_access,
+    collect_indexable_like_filter_for_schema, collect_indexable_range_filters_for_schema,
+    field_has_single_column_index, load_live_rows_by_equality, materialize_relation_rows,
+    plan_relation_access,
     EqualityProbeSource,
 };
 use super::{
-    join_condition_field_names, join_condition_matches_provider, JoinedRowCandidateProvider,
+    join_condition_field_names, join_condition_matches_provider, relation_qualifier,
+    JoinedRowCandidateProvider,
     JoinedRowTuple, MaterializedRelationRow, row_matches_condition_with_result,
 };
+
+const INNER_JOIN_KEY_PROBE_MAX_LEFT_ROWS: usize = 4096;
+const INNER_JOIN_KEY_PROBE_MAX_DISTINCT_KEYS: usize = 8192;
 
 pub fn build_joined_row_tuples<F>(
     catalog: &DatabaseCatalog,
@@ -58,6 +65,10 @@ where
     let primary_like_filter = primary_condition
         .as_ref()
         .and_then(|condition| collect_indexable_like_filter_for_schema(primary_schema, condition));
+    let primary_range_filters = primary_condition
+        .as_ref()
+        .map(|condition| collect_indexable_range_filters_for_schema(primary_schema, condition))
+        .unwrap_or_default();
 
     let primary_allow_index_short_circuit = primary_condition
         .as_ref()
@@ -76,6 +87,7 @@ where
         scoped_primary_table,
         primary_allow_index_short_circuit,
         primary_filter_map,
+        primary_range_filters,
         primary_like_filter,
     );
 
@@ -132,6 +144,10 @@ where
         let right_like_filter = right_condition
             .as_ref()
             .and_then(|condition| collect_indexable_like_filter_for_schema(right_schema, condition));
+        let right_range_filters = right_condition
+            .as_ref()
+            .map(|condition| collect_indexable_range_filters_for_schema(right_schema, condition))
+            .unwrap_or_default();
         
         let right_allow_index_short_circuit = right_condition
             .as_ref()
@@ -150,29 +166,155 @@ where
             scoped_right_table,
             right_allow_index_short_circuit,
             right_filter_map,
+            right_range_filters,
             right_like_filter,
         );
 
-        let right_rows = materialize_relation_rows(
-            wal,
-            scoped_right_table,
-            right_schema,
-            runtime_indexes,
-            &right_access_plan,
-        )
-        .into_iter()
-        .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+        let simple_join = join_condition_field_names(join).and_then(
+            |(left_join_field_name, right_join_field_name)| {
+                normalize_simple_join_field_orientation(
+                    left_join_field_name,
+                    right_join_field_name,
+                    &join.relation,
+                )
+            },
+        );
+        let right_field_name = simple_join
+            .map(|(_, right_join_field_name)| join_field_column_name(right_join_field_name));
 
-            if row_matches(&row_map, right_condition)? {
-                acc.push(MaterializedRelationRow {
-                    row_id,
-                    row_map: Arc::new(row_map),
-                });
+        let right_rows = if matches!(join.kind, SelectJoinKind::Inner)
+            && let Some((left_join_field_name, _)) = simple_join
+            && let Some(right_join_field_name) = right_field_name
+            && field_has_single_column_index(scoped_right_table, right_join_field_name)
+            && joined_rows.len() <= INNER_JOIN_KEY_PROBE_MAX_LEFT_ROWS
+        {
+
+            let mut left_join_keys = HashSet::new();
+
+            for left_row in &joined_rows {
+                if let Some(left_value) = left_row.value(left_join_field_name) {
+                    left_join_keys.insert(left_value.to_vec());
+
+                    if left_join_keys.len() > INNER_JOIN_KEY_PROBE_MAX_DISTINCT_KEYS {
+                        break;
+                    }
+                }
             }
 
-            Ok::<_, String>(acc)
+            if !left_join_keys.is_empty() && left_join_keys.len() <= INNER_JOIN_KEY_PROBE_MAX_DISTINCT_KEYS {
+                let right_table_stream_id = if scoped_right_table.entity_id.is_empty() {
+                    scoped_right_table.table_id.as_str()
+                } else if wal.data_dir_path().is_none()
+                    && wal
+                        .latest_transaction_id_if_loaded(&scoped_right_table.entity_id)
+                        .is_none()
+                    && wal
+                        .latest_transaction_id_if_loaded(&scoped_right_table.table_id)
+                        .is_some()
+                {
+                    scoped_right_table.table_id.as_str()
+                } else {
+                    scoped_right_table.entity_id.as_str()
+                };
 
-        })?;
+                let mut seen_right_row_ids = HashSet::new();
+                let mut materialized = Vec::new();
+
+                for lookup_key in left_join_keys {
+                    let rendered_lookup_key = render_stored_field_value(&lookup_key);
+
+                    let mut probe_keys = vec![lookup_key];
+                    if rendered_lookup_key != probe_keys[0] {
+                        probe_keys.push(rendered_lookup_key);
+                    }
+
+                    if let Some(field) = right_schema.field(right_join_field_name)
+                        && let Ok(normalized_probe_key) = convert_value_to_field_type(
+                            &probe_keys[0],
+                            &field.field_type,
+                            TypeConversionPolicy::Safe,
+                        )
+                        && !probe_keys.iter().any(|candidate| *candidate == normalized_probe_key)
+                    {
+                        probe_keys.push(normalized_probe_key);
+                    }
+
+                    for probe_key in probe_keys {
+                        for (row_id, row_map) in load_live_rows_by_equality(
+                            wal,
+                            right_table_stream_id,
+                            &scoped_right_table.table_id,
+                            right_schema,
+                            right_join_field_name,
+                            &probe_key,
+                        ) {
+                            if !seen_right_row_ids.insert(row_id) {
+                                continue;
+                            }
+
+                            if row_matches(&row_map, right_condition)? {
+                                materialized.push(MaterializedRelationRow {
+                                    row_id,
+                                    row_map: Arc::new(row_map),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                log::debug!(
+                    "select join right-side key probe relation={} key_field={} distinct_keys={} rows={} strategy=inner_probe",
+                    join.relation.table_id,
+                    right_join_field_name,
+                    seen_right_row_ids.len(),
+                    materialized.len(),
+                );
+
+                materialized
+            } else {
+                materialize_relation_rows(
+                    wal,
+                    scoped_right_table,
+                    right_schema,
+                    runtime_indexes,
+                    &right_access_plan,
+                )
+                .into_iter()
+                .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+
+                    if row_matches(&row_map, right_condition)? {
+                        acc.push(MaterializedRelationRow {
+                            row_id,
+                            row_map: Arc::new(row_map),
+                        });
+                    }
+
+                    Ok::<_, String>(acc)
+
+                })?
+            }
+        } else {
+            materialize_relation_rows(
+                wal,
+                scoped_right_table,
+                right_schema,
+                runtime_indexes,
+                &right_access_plan,
+            )
+            .into_iter()
+            .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+
+                if row_matches(&row_map, right_condition)? {
+                    acc.push(MaterializedRelationRow {
+                        row_id,
+                        row_map: Arc::new(row_map),
+                    });
+                }
+
+                Ok::<_, String>(acc)
+
+            })?
+        };
 
         if matches!(join.kind, SelectJoinKind::Cross) {
             
@@ -189,10 +331,6 @@ where
 
         }
 
-        let simple_join = join_condition_field_names(join);
-        let right_field_name = simple_join
-            .map(|(_, right_join_field_name)| join_field_column_name(right_join_field_name));
-        
         let probe_source = right_access_plan.equality_probe_source().unwrap_or_else(|| {
             right_field_name
                 .map(|field_name| {
@@ -207,6 +345,11 @@ where
 
         let right_probe_index = right_field_name
             .map(|right_field_name| build_relation_probe_index(&right_rows, right_field_name));
+
+        let right_probe_index_rendered = right_field_name
+            .map(|right_field_name| {
+                build_rendered_relation_probe_index(&right_rows, right_field_name)
+            });
 
         log::debug!(
             "select join relation={} field={} strategy= {}",
@@ -232,7 +375,21 @@ where
                     continue;
                 };
 
-                if let Some(matches) = right_probe_index.as_ref().and_then(|index| index.get(left_value)) {
+                let direct_matches = right_probe_index
+                    .as_ref()
+                    .and_then(|index| index.get(left_value));
+
+                let rendered_left_value;
+                let rendered_matches = if direct_matches.is_none() {
+                    rendered_left_value = render_stored_field_value(left_value);
+                    right_probe_index_rendered
+                        .as_ref()
+                        .and_then(|index| index.get(&rendered_left_value))
+                } else {
+                    None
+                };
+
+                if let Some(matches) = direct_matches.or(rendered_matches) {
                     
                     for right_row_index in matches {
                         
@@ -311,6 +468,46 @@ where
 
     Ok(joined_rows)
     
+}
+
+fn normalize_simple_join_field_orientation<'a>(
+    left_field_name: &'a str,
+    right_field_name: &'a str,
+    right_relation: &SelectRelation,
+) -> Option<(&'a str, &'a str)> {
+    let right_qualifier = relation_qualifier(right_relation);
+
+    let left_qualifier = left_field_name.split_once('.').map(|(qualifier, _)| qualifier);
+    let right_qualifier_in_predicate =
+        right_field_name.split_once('.').map(|(qualifier, _)| qualifier);
+
+    let left_is_right_relation = left_qualifier.is_some_and(|qualifier| qualifier == right_qualifier);
+    let right_is_right_relation = right_qualifier_in_predicate
+        .is_some_and(|qualifier| qualifier == right_qualifier);
+
+    match (left_is_right_relation, right_is_right_relation) {
+        (false, true) => Some((left_field_name, right_field_name)),
+        (true, false) => Some((right_field_name, left_field_name)),
+        _ => None,
+    }
+}
+
+fn build_rendered_relation_probe_index(
+    right_rows: &[MaterializedRelationRow],
+    right_field_name: &str,
+) -> HashMap<Vec<u8>, Vec<usize>> {
+    let mut index: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+
+    for (row_index, row) in right_rows.iter().enumerate() {
+        if let Some(value) = row.row_map.get(right_field_name) {
+            index
+                .entry(render_stored_field_value(value))
+                .or_default()
+                .push(row_index);
+        }
+    }
+
+    index
 }
 
 fn join_field_column_name(field_name: &str) -> &str {

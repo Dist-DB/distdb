@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr, FunctionArguments};
 
@@ -25,6 +26,18 @@ use super::post_processing::{
     apply_select_post_processing, column_metadata_with_visibility, strip_hidden_output_columns,
 };
 
+fn select_stage_diagnostics_enabled() -> bool {
+    std::env::var("DISTDB_SELECT_STAGE_DIAGNOSTICS")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub fn execute_joined_select_plan<E, RM, RJ>(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -43,6 +56,9 @@ where
     if read_plan.is_explain {
         return Ok(explain_joined_select_plan_result(read_plan));
     }
+
+    let diagnostics_enabled = select_stage_diagnostics_enabled();
+    let query_started = Instant::now();
 
     let count_star_projection = count_star_projection(read_plan);
     
@@ -195,6 +211,8 @@ where
         row_matches_relation,
     )?;
 
+    let joined_candidates = row_tuples.len();
+
     let mut rows = Vec::new();
     
     for row_tuple in row_tuples {
@@ -268,8 +286,28 @@ where
 
     }
 
+    let projected_rows = rows.len();
+    let post_processing_started = Instant::now();
+
     let rows = apply_select_post_processing(rows, &columns, read_plan, &projection_items)?;
+    let post_processed_rows = rows.len();
+    let post_processing_elapsed_ms = post_processing_started.elapsed().as_millis();
     let (columns, rows) = strip_hidden_output_columns(columns, rows);
+
+    if diagnostics_enabled {
+        log::info!(
+            "select diagnostics: kind=joined relations={} joins={} distinct={} order_by={} candidates={} projected_rows={} post_rows={} post_ms={} total_ms={}",
+            read_plan.relations.len(),
+            read_plan.joins.len(),
+            read_plan.distinct,
+            !read_plan.order_by.is_empty(),
+            joined_candidates,
+            projected_rows,
+            post_processed_rows,
+            post_processing_elapsed_ms,
+            query_started.elapsed().as_millis(),
+        );
+    }
 
     Ok(SelectExecutionResult {
         columns,
@@ -297,6 +335,9 @@ where
 {
     let table = table.borrow();
     let schema = schema.borrow();
+
+    let diagnostics_enabled = select_stage_diagnostics_enabled();
+    let query_started = Instant::now();
 
     let count_star_projection = count_star_projection(read_plan);
 
@@ -528,8 +569,26 @@ where
 
     }
 
+    let projected_rows = rows.len();
+    let post_processing_started = Instant::now();
+
     let rows = apply_select_post_processing(rows, &columns, read_plan, &projection_items)?;
+    let post_processed_rows = rows.len();
+    let post_processing_elapsed_ms = post_processing_started.elapsed().as_millis();
     let (columns, rows) = strip_hidden_output_columns(columns, rows);
+
+    if diagnostics_enabled {
+        log::info!(
+            "select diagnostics: kind=relation table={} distinct={} order_by={} projected_rows={} post_rows={} post_ms={} total_ms={}",
+            table.table_id,
+            read_plan.distinct,
+            !read_plan.order_by.is_empty(),
+            projected_rows,
+            post_processed_rows,
+            post_processing_elapsed_ms,
+            query_started.elapsed().as_millis(),
+        );
+    }
 
     Ok(SelectExecutionResult {
         columns,
@@ -669,6 +728,7 @@ fn collect_condition_field_names_recursive(condition: &SelectCondition, fields: 
                 fields.push(left_field_name.clone());
                 fields.push(right_field_name.clone());
             }
+            crate::SelectPredicate::ExpressionComparison { .. } => {}
             crate::SelectPredicate::Exists { .. } => {}
         },
     }

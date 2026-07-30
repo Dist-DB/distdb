@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 
 use common::schema::FieldMetadata;
-use sqlparser::ast::{AlterTableOperation, ColumnOption, DataType, Statement, TableConstraint};
+use sqlparser::ast::{
+    AlterTableOperation, ColumnOption, DataType, Expr, Query, SelectItem, SetExpr, Statement,
+    TableConstraint,
+};
 
 use crate::{FieldDef, FieldIndex, FieldType, TableSchema};
 
@@ -101,6 +104,43 @@ pub fn create_table_plan_from_statement(
 
     }
 
+    if fields.is_empty()
+        && let Some(query) = create_table.query.as_ref()
+    {
+        let projection_names = infer_ctas_projection_names(query.as_ref())?;
+
+        for (idx, output_name) in projection_names.into_iter().enumerate() {
+
+            let normalized_output_name = common::normalize_identifier!(&output_name);
+            let metadata = if unique_fields.contains(&normalized_output_name) {
+                Some(common::schema::FieldMetadata {
+                    unique: true,
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+
+            let indexed = if primary_key_fields.contains(&normalized_output_name) {
+                FieldIndex::PrimaryKey
+            } else if indexed_fields.contains(&normalized_output_name) {
+                FieldIndex::Indexed
+            } else {
+                FieldIndex::None
+            };
+
+            fields.push(FieldDef {
+                seqno: (idx + 1) as u32,
+                field_name: output_name,
+                field_type: FieldType::Text,
+                nullable: true,
+                indexed,
+                default_value: None,
+                metadata,
+            });
+        }
+    }
+
     let schema = TableSchema::new(fields);
 
     schema.validate().map_err(|err| {
@@ -114,6 +154,61 @@ pub fn create_table_plan_from_statement(
         composite_unique_indexes,
     })
 
+}
+
+fn infer_ctas_projection_names(query: &Query) -> Result<Vec<String>, SqlParseError> {
+    let select = match query.body.as_ref() {
+        SetExpr::Select(select) => select,
+        SetExpr::Query(nested_query) => {
+            return infer_ctas_projection_names(nested_query.as_ref());
+        }
+        _ => {
+            return Err(SqlParseError::UnsupportedStatement(
+                "CREATE TABLE AS SELECT currently supports only SELECT projection sources"
+                    .to_string(),
+            ));
+        }
+    };
+
+    let mut names = Vec::with_capacity(select.projection.len());
+
+    for projection in &select.projection {
+        let output_name = match projection {
+            SelectItem::UnnamedExpr(expression) => match expression {
+                Expr::Identifier(ident) => ident.value.clone(),
+                Expr::CompoundIdentifier(parts) => parts
+                    .last()
+                    .map(|part| part.value.clone())
+                    .unwrap_or_else(|| expression.to_string()),
+                _ => expression.to_string(),
+            },
+            SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => {
+                return Err(SqlParseError::UnsupportedStatement(
+                    "CREATE TABLE AS SELECT wildcard projection requires explicit target columns"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let normalized = common::normalize_identifier!(&output_name);
+        if normalized.is_empty() {
+            return Err(SqlParseError::UnsupportedStatement(
+                "CREATE TABLE AS SELECT projection contains an empty output column"
+                    .to_string(),
+            ));
+        }
+
+        names.push(normalized);
+    }
+
+    if names.is_empty() {
+        return Err(SqlParseError::UnsupportedStatement(
+            "CREATE TABLE AS SELECT requires at least one projected column".to_string(),
+        ));
+    }
+
+    Ok(names)
 }
 
 pub fn parse_alter_table_change_plan_from_statement(

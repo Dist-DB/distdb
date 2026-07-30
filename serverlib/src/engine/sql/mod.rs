@@ -48,6 +48,7 @@ pub use routine_plan::{
     bind_call_procedure_arguments,
     extract_create_function_action_sql,
     extract_create_function_return_expression,
+    parse_create_function_action_statements,
     parse_create_procedure_parameter_declarations_from_statement,
     parse_create_procedure_parameter_names_from_statement,
     parse_create_function_parameter_names_from_statement,

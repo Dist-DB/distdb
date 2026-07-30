@@ -212,6 +212,19 @@ fn extract_create_function_action_sql_converts_return_expression_to_select() {
 }
 
 #[test]
+fn parse_create_function_action_statements_splits_begin_body() {
+    let statements = parse_create_function_action_statements(
+        "create function f_sync(arg_user_id int) returns int begin set @x = arg_user_id + 1; return @x; end",
+    )
+    .expect("function action statements should parse");
+
+    assert_eq!(
+        statements,
+        vec!["set @x = arg_user_id + 1".to_string(), "return @x".to_string()]
+    );
+}
+
+#[test]
 fn bind_call_procedure_arguments_maps_values_by_parameter_name() {
     let call_statement = sqlparser::parser::Parser::parse_sql(
         &sqlparser::dialect::MySqlDialect {},

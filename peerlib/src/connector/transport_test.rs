@@ -185,18 +185,22 @@
     #[test]
     fn connector_timeout_env_values_are_clamped_and_defaulted() {
         unsafe {
+            std::env::set_var(CONNECTOR_STREAM_TIMEOUT_SECS_ENV, "2");
             std::env::set_var(CONNECTOR_CONNECT_TIMEOUT_SECS_ENV, "99");
             std::env::set_var(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV, "0");
         }
 
+        assert_eq!(connector_stream_timeout_secs(), 5);
         assert_eq!(connector_connect_timeout_secs(), 30);
         assert_eq!(connector_handshake_timeout_secs(), 1);
 
         unsafe {
+            std::env::remove_var(CONNECTOR_STREAM_TIMEOUT_SECS_ENV);
             std::env::remove_var(CONNECTOR_CONNECT_TIMEOUT_SECS_ENV);
             std::env::remove_var(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV);
         }
 
+        assert_eq!(connector_stream_timeout_secs(), 300);
         assert_eq!(connector_connect_timeout_secs(), 1);
         assert_eq!(connector_handshake_timeout_secs(), 1);
     }

@@ -15,6 +15,8 @@ pub use access::{
     build_relation_probe_index, choose_index_lookup, collect_indexable_equality_filters,
     collect_indexable_equality_filters_for_schema,
     collect_indexable_like_filter_for_schema,
+    collect_indexable_range_filters_for_schema,
+    collect_indexable_range_filter_for_schema,
     collect_indexable_prefix_like_filter_for_schema, count_condition_predicates,
     field_has_single_column_index, load_live_row_count,
     load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows,
@@ -65,6 +67,7 @@ pub use select::{
 pub use runtime::{
     compare_provider_fields, join_condition_field_names, join_condition_matches_provider,
     relation_qualifier, row_matches_condition_with, row_matches_condition_with_result,
+    row_matches_condition_with_result_and_expression,
     ConditionValueProvider,
     JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 };

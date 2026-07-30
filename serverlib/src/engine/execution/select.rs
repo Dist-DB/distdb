@@ -4,7 +4,6 @@ use sqlparser::ast::Function;
 
 use crate::engine::sql::{
     evaluate_expression_sql_to_bytes, evaluate_inbuilt_sql_function_with_lookup,
-    extract_create_function_action_sql, extract_create_function_return_expression,
     function_argument_values, parse_create_function_parameter_names_from_statement,
     parse_select_read_plan_from_statement,
     SqlFunctionEvaluationStrategy, with_lookup_sql_function_evaluator,
@@ -22,8 +21,9 @@ use crate::engine::sql::SelectExpression;
 
 use super::{
     build_joined_row_tuples, collect_indexable_equality_filters_for_schema,
-    collect_indexable_like_filter_for_schema, materialize_relation_rows,
-    plan_relation_access, relation_qualifier, row_matches_condition_with_result,
+    collect_indexable_like_filter_for_schema, collect_indexable_range_filters_for_schema,
+    materialize_relation_rows,
+    plan_relation_access, relation_qualifier, row_matches_condition_with_result_and_expression,
     ConditionValueProvider, JoinedRowTuple,
 };
 
@@ -87,7 +87,7 @@ fn row_matches_select_condition_with_outer_result(
         fallback: &normalized_outer_provider,
     };
 
-    row_matches_condition_with_result(
+    row_matches_condition_with_result_and_expression(
         &chained_provider,
         condition,
         &mut |current_provider, subquery| {
@@ -116,6 +116,16 @@ fn row_matches_select_condition_with_outer_result(
                 current_provider,
                 subquery,
             )
+        },
+        &mut |current_provider, expression_sql| {
+            evaluate_expression_sql_to_bytes(
+                expression_sql,
+                &mut |field_name| current_provider.value(field_name).cloned(),
+                &mut |function, lookup| {
+                    execute_sql_function_with_lookup(catalog, wal, runtime_indexes, function, lookup)
+                },
+            )
+            .map(Some)
         },
     )
 
@@ -159,6 +169,11 @@ fn collect_subquery_exists_with_outer(
         let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
         let mut index_filter_map = HashMap::new();
+        let range_filters = subquery
+            .where_condition
+            .as_ref()
+            .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
+            .unwrap_or_default();
         let like_filter = subquery
             .where_condition
             .as_ref()
@@ -179,6 +194,7 @@ fn collect_subquery_exists_with_outer(
             scoped_table,
             allow_index_short_circuit,
             index_filter_map,
+            range_filters,
             like_filter,
         );
 
@@ -305,6 +321,11 @@ fn collect_subquery_projection_values_with_outer(
         let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
         let mut index_filter_map = HashMap::new();
+        let range_filters = subquery
+            .where_condition
+            .as_ref()
+            .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
+            .unwrap_or_default();
 
         let like_filter = subquery
             .where_condition
@@ -327,6 +348,7 @@ fn collect_subquery_projection_values_with_outer(
             scoped_table,
             allow_index_short_circuit,
             index_filter_map,
+            range_filters,
             like_filter,
         );
 
@@ -430,6 +452,11 @@ fn collect_subquery_scalar_value_with_outer(
         let schema = &table.schema;
 
         let mut index_filter_map = HashMap::new();
+        let range_filters = subquery
+            .where_condition
+            .as_ref()
+            .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
+            .unwrap_or_default();
         let like_filter = subquery
             .where_condition
             .as_ref()
@@ -450,6 +477,7 @@ fn collect_subquery_scalar_value_with_outer(
             &table,
             allow_index_short_circuit,
             index_filter_map,
+            range_filters,
             like_filter,
         );
 
@@ -609,6 +637,11 @@ where
     let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
     let mut index_filter_map = HashMap::new();
+    let range_filters = read_plan
+        .where_condition
+        .as_ref()
+        .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
+        .unwrap_or_default();
     let like_filter = read_plan
         .where_condition
         .as_ref()
@@ -629,6 +662,7 @@ where
         scoped_table,
         allow_index_short_circuit,
         index_filter_map,
+        range_filters,
         like_filter,
     );
 
@@ -720,36 +754,214 @@ fn execute_local_sql_function_with_lookup(
         )
     })?;
 
-    if let Some(return_expression) = extract_create_function_return_expression(&local_function.sql)
-        .map_err(|err| format!("function '{}' return extraction failed: {err}", local_function.procedure_id))?
-    {
-        let value = evaluate_expression_sql_to_bytes(
-            &return_expression,
-            &mut |field_name| inbound_provider.get(field_name).cloned(),
-            &mut |nested, nested_lookup| {
-                execute_sql_function_with_lookup(catalog, wal, runtime_indexes, nested, nested_lookup)
-            },
-        )?;
+    let action_statements = if let Some(plan) = artifact.ir.if_else_end_plan() {
+        let Some(action_sql) = super::commands::execute_if_else_end_plan(
+            &inbound_provider,
+            plan,
+            &mut |sql| Ok(sql.to_string()),
+        )? else {
+            return Ok(None);
+        };
+        vec![action_sql]
+    } else if let Some(action_statements) = artifact.ir.action_statements() {
+        action_statements.to_vec()
+    } else {
+        return Err(format!(
+            "function '{}' compiled action statements are unavailable",
+            local_function.procedure_id,
+        ));
+    };
 
-        return Ok(Some(value));
+    let mut local_scope = HashMap::new();
+    let mut fallback_value = None;
+
+    for action_sql in action_statements {
+        match execute_local_function_action_statement(
+            catalog,
+            wal,
+            runtime_indexes,
+            &local_function.procedure_id,
+            action_sql.as_str(),
+            &inbound_provider,
+            &mut local_scope,
+        )? {
+            LocalFunctionActionOutcome::Continue => {}
+            LocalFunctionActionOutcome::Scalar(value) => {
+                fallback_value = Some(value);
+            }
+            LocalFunctionActionOutcome::Return(value) => {
+                return Ok(Some(value));
+            }
+        }
     }
 
-    let action_sql = if let Some(plan) = artifact.ir.if_else_end_plan() {
-        super::commands::execute_if_else_end_plan(&inbound_provider, plan, &mut |sql| {
-            Ok(sql.to_string())
-        })?
-    } else {
-        Some(extract_create_function_action_sql(&local_function.sql).map_err(|err| {
-            format!("function '{}' action extraction failed: {err}", local_function.procedure_id)
-        })?)
-    };
+    Ok(fallback_value)
 
-    let Some(action_sql) = action_sql else {
-        return Ok(None);
-    };
+}
 
-    let read_plan = parse_select_read_plan_from_statement(&action_sql)
-        .map_err(|err| format!("function '{}' action parse failed: {err}", local_function.procedure_id))?;
+enum LocalFunctionActionOutcome {
+    Continue,
+    Scalar(Vec<u8>),
+    Return(Vec<u8>),
+}
+
+fn execute_local_function_action_statement(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    function_id: &str,
+    action_sql: &str,
+    inbound_provider: &HashMap<String, Vec<u8>>,
+    local_scope: &mut HashMap<String, Vec<u8>>,
+) -> Result<LocalFunctionActionOutcome, String> {
+
+    let statement = action_sql.trim().trim_end_matches(';').trim();
+    if statement.is_empty() {
+        return Ok(LocalFunctionActionOutcome::Continue);
+    }
+
+    let lowered = statement.to_ascii_lowercase();
+
+    if lowered.starts_with("set ") {
+        let (target, expression) = parse_local_function_set_assignment(statement)?;
+        let value = evaluate_local_function_expression_to_value(
+            catalog,
+            wal,
+            runtime_indexes,
+            function_id,
+            expression,
+            inbound_provider,
+            local_scope,
+        )?;
+        local_scope.insert(target, value);
+        return Ok(LocalFunctionActionOutcome::Continue);
+    }
+
+    if lowered.starts_with("return ") {
+        let expression = statement["return".len()..].trim();
+        if expression.is_empty() {
+            return Err(format!(
+                "function '{}' action parse failed: RETURN expression is empty",
+                function_id,
+            ));
+        }
+
+        let value = evaluate_local_function_expression_to_value(
+            catalog,
+            wal,
+            runtime_indexes,
+            function_id,
+            expression,
+            inbound_provider,
+            local_scope,
+        )?;
+
+        return Ok(LocalFunctionActionOutcome::Return(value));
+    }
+
+    if lowered.starts_with("select ") {
+        let value = execute_local_function_scalar_select(
+            catalog,
+            wal,
+            runtime_indexes,
+            function_id,
+            statement,
+            inbound_provider,
+            local_scope,
+        )?
+        .unwrap_or_else(|| b"NULL".to_vec());
+
+        return Ok(LocalFunctionActionOutcome::Scalar(value));
+    }
+
+    Err(format!(
+        "function '{}' action parse failed: unsupported statement '{}'",
+        function_id,
+        statement,
+    ))
+
+}
+
+fn parse_local_function_set_assignment(statement: &str) -> Result<(String, &str), String> {
+
+    let body = statement["set".len()..].trim();
+    let eq_index = body.find('=').ok_or_else(|| {
+        "local function assignment parse failed: SET statement is missing '='".to_string()
+    })?;
+
+    let target = body[..eq_index]
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_start_matches('@')
+        .trim();
+
+    if target.is_empty() {
+        return Err("local function assignment parse failed: assignment target is empty".to_string());
+    }
+
+    let expression = body[(eq_index + 1)..].trim();
+    if expression.is_empty() {
+        return Err("local function assignment parse failed: assignment value is empty".to_string());
+    }
+
+    Ok((common::normalize_identifier!(target), expression))
+
+}
+
+fn evaluate_local_function_expression_to_value(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    function_id: &str,
+    expression: &str,
+    inbound_provider: &HashMap<String, Vec<u8>>,
+    local_scope: &HashMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+
+    let rewritten_expression = rewrite_local_function_expression_literals(
+        expression,
+        &mut |identifier| {
+            local_scope
+                .get(identifier)
+                .or_else(|| inbound_provider.get(identifier))
+                .map(|value| local_sql_literal_for_bytes(value.as_slice()))
+        },
+    )?;
+
+    evaluate_expression_sql_to_bytes(
+        rewritten_expression.as_str(),
+        &mut |_| None,
+        &mut |nested, nested_lookup| {
+            execute_sql_function_with_lookup(catalog, wal, runtime_indexes, nested, nested_lookup)
+        },
+    )
+    .map_err(|err| format!("function '{}' expression evaluation failed: {err}", function_id))
+
+}
+
+fn execute_local_function_scalar_select(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    function_id: &str,
+    scalar_sql: &str,
+    inbound_provider: &HashMap<String, Vec<u8>>,
+    local_scope: &HashMap<String, Vec<u8>>,
+) -> Result<Option<Vec<u8>>, String> {
+
+    let rewritten_sql = rewrite_local_function_expression_literals(
+        scalar_sql,
+        &mut |identifier| {
+            local_scope
+                .get(identifier)
+                .or_else(|| inbound_provider.get(identifier))
+                .map(|value| local_sql_literal_for_bytes(value.as_slice()))
+        },
+    )?;
+
+    let read_plan = parse_select_read_plan_from_statement(&rewritten_sql)
+        .map_err(|err| format!("function '{}' action parse failed: {err}", function_id))?;
 
     let result = execute_select_plan_result_with_function_evaluator(
         catalog,
@@ -764,13 +976,152 @@ fn execute_local_sql_function_with_lookup(
     if result.columns.len() > 1 {
         return Err(format!(
             "function '{}' returned more than one column",
-            local_function.procedure_id,
+            function_id,
         ));
     }
 
     single_scalar_value(result).map_err(|err| {
-        format!("function '{}' scalar evaluation failed: {err}", local_function.procedure_id)
+        format!("function '{}' scalar evaluation failed: {err}", function_id)
     })
+
+}
+
+fn rewrite_local_function_expression_literals(
+    input: &str,
+    resolve_literal: &mut dyn FnMut(&str) -> Option<String>,
+) -> Result<String, String> {
+
+    let mut output = String::with_capacity(input.len());
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut i = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            output.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            output.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if in_single_quote || in_double_quote {
+            output.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if ch == '@' {
+            let start = i + 1;
+            let mut end = start;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+
+            if end == start {
+                output.push(ch);
+                i += 1;
+                continue;
+            }
+
+            let identifier = chars[start..end].iter().collect::<String>();
+            let normalized = common::normalize_identifier!(identifier.as_str());
+
+            if let Some(literal) = resolve_literal(normalized.as_str()) {
+                output.push_str(literal.as_str());
+            } else {
+                output.push('@');
+                output.push_str(identifier.as_str());
+            }
+
+            i = end;
+            continue;
+        }
+
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let start = i;
+            let mut end = i + 1;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+
+            let identifier = chars[start..end].iter().collect::<String>();
+            let normalized = common::normalize_identifier!(identifier.as_str());
+
+            if let Some(literal) = resolve_literal(normalized.as_str()) {
+                output.push_str(literal.as_str());
+            } else {
+                output.push_str(identifier.as_str());
+            }
+
+            i = end;
+            continue;
+        }
+
+        output.push(ch);
+        i += 1;
+    }
+
+    if in_single_quote || in_double_quote {
+        return Err("local function expression rewrite failed: unclosed quote".to_string());
+    }
+
+    Ok(output)
+
+}
+
+fn local_sql_literal_for_bytes(value: &[u8]) -> String {
+
+    if let Ok(text) = std::str::from_utf8(value) {
+        let trimmed = text.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+
+        if lowered == "true" || lowered == "false" || lowered == "null" {
+            return lowered;
+        }
+
+        let mut saw_digit = false;
+        let mut saw_dot = false;
+        let is_numeric = trimmed.chars().enumerate().all(|(idx, ch)| {
+            if ch.is_ascii_digit() {
+                saw_digit = true;
+                return true;
+            }
+
+            if (ch == '-' || ch == '+') && idx == 0 {
+                return true;
+            }
+
+            if ch == '.' && !saw_dot {
+                saw_dot = true;
+                return true;
+            }
+
+            false
+        });
+
+        if is_numeric && saw_digit {
+            return trimmed.to_string();
+        }
+
+        return format!("'{}'", trimmed.replace('\\', "\\\\").replace('\'', "\\'"));
+    }
+
+    let hex = value
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    format!("x'{hex}'")
 
 }
 

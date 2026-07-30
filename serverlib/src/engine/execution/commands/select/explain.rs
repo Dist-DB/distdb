@@ -154,6 +154,10 @@ pub fn explain_select_plan_result(
 
                 Some(RelationAccessStrategy::StringLikeProbe { .. })    => "string_like_probe",
 
+                Some(RelationAccessStrategy::RangeProbe { .. })         => "range_probe",
+
+                Some(RelationAccessStrategy::RangeIntersectionProbe { .. }) => "range_intersection_probe",
+
                 Some(RelationAccessStrategy::RuntimeIndexLookup { .. }) => "index_lookup_then_scan",
 
                 None => "full_scan",

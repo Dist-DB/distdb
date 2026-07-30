@@ -6,6 +6,7 @@ use crate::engine::execution::{
 };
 use crate::{
     collect_indexable_equality_filters_for_schema, collect_indexable_like_filter_for_schema,
+    collect_indexable_range_filters_for_schema,
     execute_joined_select_plan,
     execute_projection_only_select_plan, execute_relation_select_plan,
     plan_relation_access,
@@ -120,6 +121,13 @@ impl SelectReadPlanCursorSource {
             let schema = &table.schema;
 
             let mut index_filter_map = HashMap::new();
+            let range_filters = read_plan
+                .where_condition
+                .as_ref()
+                .and_then(|condition| {
+                    Some(collect_indexable_range_filters_for_schema(schema, condition))
+                })
+                .unwrap_or_default();
             let like_filter = read_plan
                 .where_condition
                 .as_ref()
@@ -143,6 +151,7 @@ impl SelectReadPlanCursorSource {
                 scoped_table,
                 allow_index_short_circuit,
                 index_filter_map,
+                range_filters,
                 like_filter,
             );
 

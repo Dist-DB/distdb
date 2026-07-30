@@ -22,7 +22,8 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
-const CONNECTOR_STREAM_TIMEOUT_SECS: u64 = 120;
+const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 300;
+const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
 const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 1;
@@ -37,6 +38,14 @@ fn connector_connect_timeout_secs() -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(|value| value.clamp(1, 30))
         .unwrap_or(CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT)
+}
+
+fn connector_stream_timeout_secs() -> u64 {
+    std::env::var(CONNECTOR_STREAM_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(5, 3600))
+        .unwrap_or(CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT)
 }
 
 fn connector_handshake_timeout_secs() -> u64 {
@@ -844,9 +853,10 @@ fn ensure_live_connection(
     });
 
     if let Some(live) = connection.as_mut() {
+        let stream_timeout_secs = connector_stream_timeout_secs();
         live.stream.set_timeouts(
-            Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)),
-            Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)),
+            Some(std::time::Duration::from_secs(stream_timeout_secs)),
+            Some(std::time::Duration::from_secs(stream_timeout_secs)),
         )?;
     }
 
@@ -1023,11 +1033,12 @@ fn connect_tls_stream(
 fn connect_plain_stream(socket_addr: &str) -> Result<ConnectorWireStream, ConnectorError> {
 
     let tcp = connect_tcp_with_timeout(socket_addr)?;
+    let stream_timeout_secs = connector_stream_timeout_secs();
 
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(stream_timeout_secs)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
     
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(CONNECTOR_STREAM_TIMEOUT_SECS)))
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(stream_timeout_secs)))
         .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
 
     tcp.set_nodelay(true)

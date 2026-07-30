@@ -13,7 +13,7 @@ use crate::engine::database::runtime_index::{
     load_live_row_checkpoint_rows,
 };
 use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
-use crate::engine::sql::compare_like_value;
+use crate::engine::sql::{compare_like_value, compare_row_value};
 use crate::{
     TransactionPayloadContext,
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
@@ -25,6 +25,7 @@ use super::MaterializedRelationRow;
 
 type LiveRowCountTableMap = HashMap<String, (u64, usize)>;
 type LiveRowCountScopeMap = HashMap<usize, LiveRowCountTableMap>;
+pub type RangeFilterBounds = (String, Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>);
 
 static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<LiveRowCountScopeMap>> =
     OnceLock::new();
@@ -167,6 +168,20 @@ fn accessor_cold_direct_scan_min_rows() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS)
+
+}
+
+fn range_intersection_diagnostics_enabled() -> bool {
+
+    std::env::var("DISTDB_RANGE_INTERSECTION_DIAGNOSTICS")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 
 }
 
@@ -1282,6 +1297,17 @@ pub enum RelationAccessStrategy {
         source: EqualityProbeSource,
         equality_filters: HashMap<String, Vec<u8>>,
     },
+
+    RangeProbe {
+        field_name: String,
+        lower_bound: Option<(Vec<u8>, bool)>,
+        upper_bound: Option<(Vec<u8>, bool)>,
+        source: EqualityProbeSource,
+    },
+
+    RangeIntersectionProbe {
+        filters: Vec<RangeFilterBounds>,
+    },
     
     PrefixLikeProbe {
         field_name: String,
@@ -1429,6 +1455,157 @@ pub fn collect_indexable_like_filter_for_schema(
     } else {
         None
     }
+
+}
+
+pub fn collect_indexable_range_filters_for_schema(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+
+) -> Vec<RangeFilterBounds> {
+
+    let mut range_filters: HashMap<String, (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>)> =
+        HashMap::new();
+
+    if !collect_indexable_range_filter_into(schema, condition, &mut range_filters) {
+        return Vec::new();
+    }
+
+    let mut result = range_filters
+        .into_iter()
+        .filter_map(|(field_name, (lower_bound, upper_bound))| {
+            if lower_bound.is_none() && upper_bound.is_none() {
+                None
+            } else {
+                Some((field_name, lower_bound, upper_bound))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+
+}
+
+pub fn collect_indexable_range_filter_for_schema(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+) -> Option<RangeFilterBounds> {
+
+    collect_indexable_range_filters_for_schema(schema, condition)
+        .into_iter()
+        .next()
+
+}
+
+fn collect_indexable_range_filter_into(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+    range_filters: &mut HashMap<String, (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>)>,
+) -> bool {
+
+    match condition {
+
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| collect_indexable_range_filter_into(schema, child, range_filters)),
+
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name,
+            op,
+            value,
+        }) => {
+
+            let (is_lower, inclusive) = match op {
+                SelectComparisonOp::Gt => (true, false),
+                SelectComparisonOp::GtEq => (true, true),
+                SelectComparisonOp::Lt => (false, false),
+                SelectComparisonOp::LtEq => (false, true),
+                _ => return true,
+            };
+
+            let resolved_field_name = if schema.field(field_name).is_some() {
+                field_name.clone()
+            } else {
+                field_name
+                    .rsplit('.')
+                    .next()
+                    .filter(|candidate| schema.field(candidate).is_some())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| field_name.clone())
+            };
+
+            let normalized_value = schema
+                .field(&resolved_field_name)
+                .and_then(|field| {
+                    convert_value_to_field_type(
+                        value,
+                        &field.field_type,
+                        TypeConversionPolicy::Safe,
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| value.clone());
+
+            merge_range_probe(
+                range_filters,
+                resolved_field_name,
+                normalized_value,
+                is_lower,
+                inclusive,
+            )
+        },
+
+        SelectCondition::Predicate(_) => true,
+
+        SelectCondition::Or(_) |
+        SelectCondition::Not(_) => false,
+
+    }
+
+}
+
+fn merge_range_probe(
+    slot: &mut HashMap<String, (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>)>,
+    field_name: String,
+    value: Vec<u8>,
+    is_lower: bool,
+    inclusive: bool,
+) -> bool {
+
+    let (lower, upper) = slot.entry(field_name).or_insert((None, None));
+
+    if is_lower {
+        match lower {
+            Some((existing_value, existing_inclusive)) => {
+                if compare_row_value(&value, existing_value, &SelectComparisonOp::Gt) {
+                    *existing_value = value;
+                    *existing_inclusive = inclusive;
+                } else if compare_row_value(&value, existing_value, &SelectComparisonOp::Eq) {
+                    *existing_inclusive = *existing_inclusive && inclusive;
+                }
+            }
+            None => {
+                *lower = Some((value, inclusive));
+            }
+        }
+    } else {
+        match upper {
+            Some((existing_value, existing_inclusive)) => {
+                if compare_row_value(&value, existing_value, &SelectComparisonOp::Lt) {
+                    *existing_value = value;
+                    *existing_inclusive = inclusive;
+                } else if compare_row_value(&value, existing_value, &SelectComparisonOp::Eq) {
+                    *existing_inclusive = *existing_inclusive && inclusive;
+                }
+            }
+            None => {
+                *upper = Some((value, inclusive));
+            }
+        }
+    }
+
+    true
 
 }
 
@@ -1678,27 +1855,28 @@ pub fn build_relation_probe_index(
 
 pub fn load_live_rows(
     wal: &ConcurrentWalManager,
+    table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
-    load_live_rows_in_place(wal, table_id, schema)
+    load_live_rows_for_accessor_miss(wal, table_stream_id, table_id, schema).1
 
 }
 
 pub fn load_live_rows_in_place(
     wal: &ConcurrentWalManager,
-    table_id: &str,
+    table_stream_id: &str,
     schema: &TableSchema,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     let started_at = Instant::now();
     let wal_fetch_started_at = Instant::now();
 
-    wal.with_records(table_id, |records| {
+    wal.with_records(table_stream_id, |records| {
         let wal_fetch_elapsed_ms = wal_fetch_started_at.elapsed().as_millis();
         collect_live_rows_from_records(
-            table_id,
+            table_stream_id,
             schema,
             records,
             wal_fetch_elapsed_ms,
@@ -1910,6 +2088,7 @@ pub fn load_live_rows_with_context(
 
 pub fn load_live_rows_by_equality(
     wal: &ConcurrentWalManager,
+    table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
     field_name: &str,
@@ -1919,12 +2098,19 @@ pub fn load_live_rows_by_equality(
     let mut equality_filters = HashMap::with_capacity(1);
     equality_filters.insert(field_name.to_string(), lookup_value.to_vec());
 
-    load_live_rows_by_equality_filters(wal, table_id, schema, &equality_filters)
+    load_live_rows_by_equality_filters(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        &equality_filters,
+    )
 
 }
 
 pub fn load_live_rows_by_equality_filters(
     wal: &ConcurrentWalManager,
+    table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
     equality_filters: &HashMap<String, Vec<u8>>,
@@ -1939,8 +2125,8 @@ pub fn load_live_rows_by_equality_filters(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_id, entry.latest_tx_id)
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
+        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
     {
         for field_name in equality_filters.keys() {
             ensure_field_postings(entry, field_name);
@@ -1949,7 +2135,12 @@ pub fn load_live_rows_by_equality_filters(
         return rows_for_field_values(entry, equality_filters);
     }
 
-    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(wal, table_id, schema);
+    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+    );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
 
@@ -1961,7 +2152,7 @@ pub fn load_live_rows_by_equality_filters(
         let result = rows_for_field_values(&entry, equality_filters);
 
         if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
         }
 
         return result;
@@ -1981,7 +2172,7 @@ pub fn load_live_rows_by_equality_filters(
     let result = rows_for_field_values(&entry, equality_filters);
 
     if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
     }
 
     result
@@ -1990,6 +2181,7 @@ pub fn load_live_rows_by_equality_filters(
 
 pub fn load_live_rows_by_prefix(
     wal: &ConcurrentWalManager,
+    table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
     field_name: &str,
@@ -2002,8 +2194,8 @@ pub fn load_live_rows_by_prefix(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_id, entry.latest_tx_id)
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
+        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
     {
         if !entry.row_ids_by_field_value.contains_key(field_name) {
             entry.row_ids_by_field_value.insert(
@@ -2017,7 +2209,12 @@ pub fn load_live_rows_by_prefix(
         return rows_for_field_prefix(entry, field_name, prefix, case_insensitive);
     }
 
-    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(wal, table_id, schema);
+    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+    );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
 
@@ -2028,7 +2225,7 @@ pub fn load_live_rows_by_prefix(
         let result = rows_for_field_prefix(&entry, field_name, prefix, case_insensitive);
 
         if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
         }
 
         return result;
@@ -2045,7 +2242,7 @@ pub fn load_live_rows_by_prefix(
     let result = rows_for_field_prefix(&entry, field_name, prefix, case_insensitive);
 
     if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
     }
 
     result
@@ -2054,6 +2251,7 @@ pub fn load_live_rows_by_prefix(
 
 pub fn load_live_rows_by_string_like(
     wal: &ConcurrentWalManager,
+    table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
     field_name: &str,
@@ -2062,7 +2260,7 @@ pub fn load_live_rows_by_string_like(
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     if case_insensitive {
-        return load_live_rows(wal, table_id, schema)
+        return load_live_rows(wal, table_stream_id, table_id, schema)
             .into_iter()
             .filter(|(_, row_map)| {
                 row_map
@@ -2078,8 +2276,8 @@ pub fn load_live_rows_by_string_like(
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
     if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_id, entry.latest_tx_id)
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
+        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
     {
         ensure_string_like_index(entry, field_name, false);
 
@@ -2099,7 +2297,12 @@ pub fn load_live_rows_by_string_like(
         }
     }
 
-    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(wal, table_id, schema);
+    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+    );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
 
@@ -2129,7 +2332,7 @@ pub fn load_live_rows_by_string_like(
             .unwrap_or_default();
 
         if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
         }
 
         return result;
@@ -2165,7 +2368,140 @@ pub fn load_live_rows_by_string_like(
         .unwrap_or_default();
 
     if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_id, entry);
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
+    }
+
+    result
+
+}
+
+pub fn load_live_rows_by_range(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    lower_bound: Option<&(Vec<u8>, bool)>,
+    upper_bound: Option<&(Vec<u8>, bool)>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if lower_bound.is_none() && upper_bound.is_none() {
+        return load_live_rows(wal, table_stream_id, table_id, schema);
+    }
+
+    let cache_scope_id = wal.cache_scope_id();
+
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
+        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
+    {
+        ensure_field_postings(entry, field_name);
+        return rows_for_field_range(entry, field_name, lower_bound, upper_bound);
+    }
+
+    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+    );
+
+    if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
+
+        let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
+        ensure_field_postings(&mut entry, field_name);
+
+        let result = rows_for_field_range(&entry, field_name, lower_bound, upper_bound);
+
+        if let Ok(mut cache_guard) = cache.lock() {
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
+        }
+
+        return result;
+
+    }
+
+    let entry = build_cold_accessor_cache_entry(
+        latest_tx_id,
+        live_rows,
+        &[field_name.to_string()],
+    );
+
+    let result = rows_for_field_range(&entry, field_name, lower_bound, upper_bound);
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
+    }
+
+    result
+
+}
+
+pub fn load_live_rows_by_range_intersection(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    filters: &[RangeFilterBounds],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if filters.is_empty() {
+        return load_live_rows(wal, table_stream_id, table_id, schema);
+    }
+
+    let cache_scope_id = wal.cache_scope_id();
+
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
+        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
+    {
+        for (field_name, _, _) in filters {
+            ensure_field_postings(entry, field_name);
+        }
+        return rows_for_range_filters(entry, filters);
+    }
+
+    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+    );
+
+    if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
+        let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
+        for (field_name, _, _) in filters {
+            ensure_field_postings(&mut entry, field_name);
+        }
+
+        let result = rows_for_range_filters(&entry, filters);
+
+        if let Ok(mut cache_guard) = cache.lock() {
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
+        }
+
+        return result;
+    }
+
+    let warm_fields = filters
+        .iter()
+        .map(|(field_name, _, _)| field_name.clone())
+        .collect::<Vec<_>>();
+
+    let entry = build_cold_accessor_cache_entry(
+        latest_tx_id,
+        live_rows,
+        &warm_fields,
+    );
+
+    let result = rows_for_range_filters(&entry, filters);
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
     }
 
     result
@@ -2246,26 +2582,163 @@ fn rows_for_field_prefix(
 
 }
 
+fn rows_for_field_range(
+    entry: &EqualityTableCacheEntry,
+    field_name: &str,
+    lower_bound: Option<&(Vec<u8>, bool)>,
+    upper_bound: Option<&(Vec<u8>, bool)>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    let Some(postings) = entry.row_ids_by_field_value.get(field_name) else {
+        return Vec::new();
+    };
+
+    postings
+        .iter()
+        .filter(|(value, _)| value_within_range(value, lower_bound, upper_bound))
+        .flat_map(|(_, row_ids)| row_ids.iter().copied())
+        .filter_map(|row_id| {
+            entry
+                .rows_by_id
+                .get(&row_id)
+                .cloned()
+                .map(|row_map| (row_id, row_map))
+        })
+        .collect()
+
+}
+
+fn rows_for_range_filters(
+    entry: &EqualityTableCacheEntry,
+    filters: &[RangeFilterBounds],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    let Some((anchor_field_name, anchor_lower_bound, anchor_upper_bound)) = filters.first() else {
+        return entry
+            .rows_by_id
+            .iter()
+            .map(|(row_id, row_map)| (*row_id, row_map.clone()))
+            .collect();
+    };
+
+    let anchor_rows = rows_for_field_range(
+        entry,
+        anchor_field_name,
+        anchor_lower_bound.as_ref(),
+        anchor_upper_bound.as_ref(),
+    );
+
+    let diagnostics_enabled = range_intersection_diagnostics_enabled();
+    let anchor_row_count = anchor_rows.len();
+
+    if filters.len() == 1 {
+        if diagnostics_enabled {
+            log::info!(
+                "range intersection diagnostics: fields={} anchor_field={} anchor_rows={} output_rows={}",
+                anchor_field_name,
+                anchor_field_name,
+                anchor_row_count,
+                anchor_row_count,
+            );
+        }
+        return anchor_rows;
+    }
+
+    let remaining_filters = &filters[1..];
+
+    let filtered_rows = anchor_rows
+        .into_iter()
+        .filter(|(_, row_map)| {
+            remaining_filters.iter().all(|(field_name, lower_bound, upper_bound)| {
+                row_map
+                    .get(field_name)
+                    .map(|value| {
+                        value_within_range(
+                            value,
+                            lower_bound.as_ref(),
+                            upper_bound.as_ref(),
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if diagnostics_enabled {
+        let field_list = filters
+            .iter()
+            .map(|(field_name, _, _)| field_name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        log::info!(
+            "range intersection diagnostics: fields={} anchor_field={} anchor_rows={} output_rows={}",
+            field_list,
+            anchor_field_name,
+            anchor_row_count,
+            filtered_rows.len(),
+        );
+    }
+
+    filtered_rows
+
+}
+
+fn value_within_range(
+    value: &[u8],
+    lower_bound: Option<&(Vec<u8>, bool)>,
+    upper_bound: Option<&(Vec<u8>, bool)>,
+) -> bool {
+
+    if let Some((lower_value, inclusive)) = lower_bound {
+        let lower_op = if *inclusive {
+            SelectComparisonOp::GtEq
+        } else {
+            SelectComparisonOp::Gt
+        };
+
+        if !compare_row_value(value, lower_value, &lower_op) {
+            return false;
+        }
+    }
+
+    if let Some((upper_value, inclusive)) = upper_bound {
+        let upper_op = if *inclusive {
+            SelectComparisonOp::LtEq
+        } else {
+            SelectComparisonOp::Lt
+        };
+
+        if !compare_row_value(value, upper_value, &upper_op) {
+            return false;
+        }
+    }
+
+    true
+
+}
+
 #[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
 fn load_live_rows_for_accessor_miss(
     wal: &ConcurrentWalManager,
+    table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
 ) -> (u64, Vec<(u64, HashMap<String, Vec<u8>>)>) {
 
     if let Some(data_dir) = wal.data_dir_path()
         && let Some((latest_tx_id, live_rows)) =
-            load_live_row_checkpoint_rows(&data_dir, table_id, table_id, schema)
+            load_live_row_checkpoint_rows(&data_dir, table_stream_id, table_id, schema)
     {
         return (latest_tx_id, live_rows);
     }
 
     let latest_tx_id = wal
-        .latest_transaction_id(table_id)
+        .latest_transaction_id(table_stream_id)
         .map(|tx| tx.0)
         .unwrap_or(0);
 
-    (latest_tx_id, load_live_rows(wal, table_id, schema))
+    (latest_tx_id, load_live_rows_in_place(wal, table_stream_id, schema))
 
 }
 
@@ -2493,6 +2966,7 @@ pub fn plan_relation_access<T>(
     table: T,
     allow_index_short_circuit: bool,
     index_filter_map: HashMap<String, Vec<u8>>,
+    range_filters: Vec<RangeFilterBounds>,
     like_filter: Option<(String, Vec<u8>, bool)>,
 ) -> RelationAccessPlan
 where
@@ -2522,6 +2996,38 @@ where
                 lookup_value,
                 source,
                 equality_filters: index_filter_map,
+            },
+        };
+
+    }
+
+    if !range_filters.is_empty() {
+
+        if range_filters.len() > 1 {
+            return RelationAccessPlan {
+                strategy: RelationAccessStrategy::RangeIntersectionProbe {
+                    filters: range_filters,
+                },
+            };
+        }
+
+        let (field_name, lower_bound, upper_bound) = range_filters
+            .into_iter()
+            .next()
+            .expect("range filters are checked as non-empty");
+
+        let source = if field_has_single_column_index(table, &field_name) {
+            EqualityProbeSource::ExistingIndex
+        } else {
+            EqualityProbeSource::TemporaryIndex
+        };
+
+        return RelationAccessPlan {
+            strategy: RelationAccessStrategy::RangeProbe {
+                field_name,
+                lower_bound,
+                upper_bound,
+                source,
             },
         };
 
@@ -2628,7 +3134,7 @@ where
                     index_id,
                 );
 
-                return load_live_rows(wal, table_stream_id, schema);
+                return load_live_rows(wal, table_stream_id, &table.table_id, schema);
 
             }
 
@@ -2651,6 +3157,7 @@ where
                     return load_live_rows_by_equality(
                         wal,
                         table_stream_id,
+                        &table.table_id,
                         schema,
                         single_field_name,
                         &lookup_key[0],
@@ -2659,7 +3166,7 @@ where
 
             }
 
-            load_live_rows(wal, table_stream_id, schema)
+            load_live_rows(wal, table_stream_id, &table.table_id, schema)
 
         },
 
@@ -2684,6 +3191,7 @@ where
                 load_live_rows_by_equality_filters(
                     wal,
                     table_stream_id,
+                    &table.table_id,
                     schema,
                     equality_filters,
                 )
@@ -2691,11 +3199,81 @@ where
                 load_live_rows_by_equality(
                     wal,
                     table_stream_id,
+                    &table.table_id,
                     schema,
                     field_name,
                     lookup_value,
                 )
             }
+
+        },
+
+        RelationAccessStrategy::RangeProbe {
+            field_name,
+            lower_bound,
+            upper_bound,
+            source,
+        } => {
+
+            log::debug!(
+                "relation access table={} field={} strategy={} range_lower={} range_upper={}",
+                table.table_id,
+                field_name,
+                match source {
+                    EqualityProbeSource::ExistingIndex => "existing_index",
+                    EqualityProbeSource::TemporaryIndex => "temporary_index",
+                },
+                lower_bound
+                    .as_ref()
+                    .map(|(value, inclusive)| {
+                        format!(
+                            "{}{}",
+                            if *inclusive { ">=" } else { ">" },
+                            String::from_utf8_lossy(value),
+                        )
+                    })
+                    .unwrap_or_else(|| "none".to_string()),
+                upper_bound
+                    .as_ref()
+                    .map(|(value, inclusive)| {
+                        format!(
+                            "{}{}",
+                            if *inclusive { "<=" } else { "<" },
+                            String::from_utf8_lossy(value),
+                        )
+                    })
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+
+            load_live_rows_by_range(
+                wal,
+                table_stream_id,
+                &table.table_id,
+                schema,
+                field_name,
+                lower_bound.as_ref(),
+                upper_bound.as_ref(),
+            )
+
+        },
+
+        RelationAccessStrategy::RangeIntersectionProbe {
+            filters,
+        } => {
+
+            log::debug!(
+                "relation access table={} strategy=range_intersection filters={}",
+                table.table_id,
+                filters.len(),
+            );
+
+            load_live_rows_by_range_intersection(
+                wal,
+                table_stream_id,
+                &table.table_id,
+                schema,
+                filters,
+            )
 
         },
 
@@ -2721,6 +3299,7 @@ where
             load_live_rows_by_prefix(
                 wal,
                 table_stream_id,
+                &table.table_id,
                 schema,
                 field_name,
                 prefix,
@@ -2751,6 +3330,7 @@ where
             load_live_rows_by_string_like(
                 wal,
                 table_stream_id,
+                &table.table_id,
                 schema,
                 field_name,
                 pattern,
@@ -2759,7 +3339,9 @@ where
 
         },
 
-        RelationAccessStrategy::FullScan => load_live_rows(wal, table_stream_id, schema),
+        RelationAccessStrategy::FullScan => {
+            load_live_rows(wal, table_stream_id, &table.table_id, schema)
+        },
 
     }
 

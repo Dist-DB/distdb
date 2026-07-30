@@ -1139,7 +1139,17 @@ fn rewrite_sql_with_call_aliases(
     local_entities: &serverlib::ProcedureLocalEntityScope,
 ) -> Result<String, String> {
 
-    if !local_entities.has_temporary_tables() {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum NumericClauseState {
+        None,
+        LimitExpectValue,
+        LimitAfterValue,
+        OffsetExpectValue,
+    }
+
+    let has_local_values = !local_entities.materialize_value_bindings().is_empty();
+
+    if !local_entities.has_temporary_tables() && !has_local_values {
         return Ok(sql.to_string());
     }
 
@@ -1149,6 +1159,7 @@ fn rewrite_sql_with_call_aliases(
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut in_backtick = false;
+    let mut numeric_clause_state = NumericClauseState::None;
 
     while i < chars.len() {
 
@@ -1181,6 +1192,64 @@ fn rewrite_sql_with_call_aliases(
             continue;
         }
 
+        if c == '@' {
+            let start = i;
+            i += 1;
+
+            while i < chars.len() {
+                let next = chars[i];
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+
+            let token = chars[start..i].iter().collect::<String>();
+
+            if let Some(value) = local_entities
+                .resolve_value(token.as_str())
+                .or_else(|| token.strip_prefix('@').and_then(|name| local_entities.resolve_value(name)))
+            {
+                if matches!(
+                    numeric_clause_state,
+                    NumericClauseState::LimitExpectValue | NumericClauseState::OffsetExpectValue
+                ) {
+                    let clause = if matches!(numeric_clause_state, NumericClauseState::LimitExpectValue) {
+                        "LIMIT"
+                    } else {
+                        "OFFSET"
+                    };
+
+                    let numeric = local_unsigned_numeric_literal_for_bytes(value).ok_or_else(|| {
+                        format!(
+                            "call action rewrite failed: {clause} local '{}' is not an unsigned numeric value",
+                            token,
+                        )
+                    })?;
+                    out.push_str(numeric.as_str());
+                    numeric_clause_state = if matches!(numeric_clause_state, NumericClauseState::LimitExpectValue) {
+                        NumericClauseState::LimitAfterValue
+                    } else {
+                        NumericClauseState::None
+                    };
+                } else {
+                    out.push_str(local_sql_literal_for_bytes(value).as_str());
+                }
+            } else {
+                out.push_str(&token);
+                numeric_clause_state = if matches!(numeric_clause_state, NumericClauseState::LimitExpectValue) {
+                    NumericClauseState::LimitAfterValue
+                } else if matches!(numeric_clause_state, NumericClauseState::OffsetExpectValue) {
+                    NumericClauseState::None
+                } else {
+                    numeric_clause_state
+                };
+            }
+
+            continue;
+        }
+
         if c.is_ascii_alphabetic() || c == '_' {
 
             let start = i;
@@ -1196,6 +1265,39 @@ fn rewrite_sql_with_call_aliases(
             }
 
             let token = chars[start..i].iter().collect::<String>();
+            let lowered = token.to_ascii_lowercase();
+
+            if matches!(
+                numeric_clause_state,
+                NumericClauseState::LimitExpectValue | NumericClauseState::OffsetExpectValue
+            ) {
+                let resolved = local_entities
+                    .resolve_value(token.as_str())
+                    .or_else(|| local_entities.resolve_value(format!("@{token}").as_str()));
+
+                if let Some(value) = resolved {
+                    let clause = if matches!(numeric_clause_state, NumericClauseState::LimitExpectValue) {
+                        "LIMIT"
+                    } else {
+                        "OFFSET"
+                    };
+                    let numeric = local_unsigned_numeric_literal_for_bytes(value).ok_or_else(|| {
+                        format!(
+                            "call action rewrite failed: {clause} local '{}' is not an unsigned numeric value",
+                            token,
+                        )
+                    })?;
+
+                    out.push_str(numeric.as_str());
+                    numeric_clause_state = if matches!(numeric_clause_state, NumericClauseState::LimitExpectValue) {
+                        NumericClauseState::LimitAfterValue
+                    } else {
+                        NumericClauseState::None
+                    };
+                    continue;
+                }
+            }
+
             if let Some(mapped) = local_entities.resolve_temporary_table_id_checked(token.as_str())? {
                 out.push('`');
                 out.push_str(mapped);
@@ -1203,9 +1305,56 @@ fn rewrite_sql_with_call_aliases(
             } else {
                 out.push_str(&token);
             }
+
+            numeric_clause_state = match lowered.as_str() {
+                "limit" => NumericClauseState::LimitExpectValue,
+                "offset" => NumericClauseState::OffsetExpectValue,
+                _ if matches!(numeric_clause_state, NumericClauseState::LimitExpectValue) => {
+                    NumericClauseState::LimitAfterValue
+                }
+                _ if matches!(numeric_clause_state, NumericClauseState::OffsetExpectValue) => {
+                    NumericClauseState::None
+                }
+                _ => numeric_clause_state,
+            };
             
             continue;
 
+        }
+
+        if c.is_ascii_digit()
+            && matches!(
+                numeric_clause_state,
+                NumericClauseState::LimitExpectValue | NumericClauseState::OffsetExpectValue
+            )
+        {
+            out.push(c);
+            i += 1;
+
+            while i < chars.len() {
+                let next = chars[i];
+                if next.is_ascii_digit() || next == '.' {
+                    out.push(next);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+
+            numeric_clause_state = if matches!(numeric_clause_state, NumericClauseState::LimitExpectValue) {
+                NumericClauseState::LimitAfterValue
+            } else {
+                NumericClauseState::None
+            };
+
+            continue;
+        }
+
+        if c == ',' && matches!(numeric_clause_state, NumericClauseState::LimitAfterValue) {
+            out.push(c);
+            i += 1;
+            numeric_clause_state = NumericClauseState::LimitExpectValue;
+            continue;
         }
 
         out.push(c);
@@ -1214,6 +1363,77 @@ fn rewrite_sql_with_call_aliases(
     }
 
     Ok(out)
+
+}
+
+fn local_unsigned_numeric_literal_for_bytes(value: &[u8]) -> Option<String> {
+
+    let text = std::str::from_utf8(value).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    if let Ok(parsed) = text.parse::<usize>() {
+        return Some(parsed.to_string());
+    }
+
+    let parsed = text.parse::<f64>().ok()?;
+    if !parsed.is_finite() || parsed < 0.0 || parsed.fract() != 0.0 {
+        return None;
+    }
+
+    let parsed_usize = parsed as usize;
+    if (parsed_usize as f64 - parsed).abs() > f64::EPSILON {
+        return None;
+    }
+
+    Some(parsed_usize.to_string())
+
+}
+
+fn local_sql_literal_for_bytes(value: &[u8]) -> String {
+
+    if let Ok(text) = std::str::from_utf8(value) {
+        let trimmed = text.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+
+        if lowered == "true" || lowered == "false" {
+            return lowered;
+        }
+
+        let mut saw_digit = false;
+        let mut saw_dot = false;
+        let is_numeric = trimmed.chars().enumerate().all(|(idx, ch)| {
+            if ch.is_ascii_digit() {
+                saw_digit = true;
+                return true;
+            }
+
+            if (ch == '-' || ch == '+') && idx == 0 {
+                return true;
+            }
+
+            if ch == '.' && !saw_dot {
+                saw_dot = true;
+                return true;
+            }
+
+            false
+        });
+
+        if is_numeric && saw_digit {
+            return trimmed.to_string();
+        }
+
+        return format!("'{}'", trimmed.replace('\\', "\\\\").replace('\'', "\\'"));
+    }
+
+    let hex = value
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    format!("x'{hex}'")
 
 }
 
@@ -1905,7 +2125,83 @@ fn execute_call_action_statement(
                 return Err(format!("database '{}' not found", database_id));
             };
 
-            local_entities.create_temporary_table(catalog, ctx.wal, plan.table_id, plan.schema)?;
+            local_entities.create_temporary_table(
+                catalog,
+                ctx.wal,
+                plan.table_id.clone(),
+                plan.schema.clone(),
+            )?;
+
+            let create_table_query = extract_create_table_as_select_query_sql(
+                parsed_statement.sql.as_str(),
+            );
+
+            if let Some(select_sql) = create_table_query {
+                if plan.schema.fields.is_empty() {
+                    return Err(format!(
+                        "call action create temporary table as select failed: '{}' resolved to empty schema",
+                        plan.table_id,
+                    ));
+                }
+
+                let columns = plan
+                    .schema
+                    .fields
+                    .iter()
+                    .map(|field| field.field_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let insert_sql = format!(
+                    "insert into {} ({}) {}",
+                    plan.table_id,
+                    columns,
+                    select_sql,
+                );
+
+                let rewritten_insert_sql = rewrite_sql_with_call_aliases(insert_sql.as_str(), local_entities)?;
+                let rewritten_insert = serverlib::parse_mysql8_sql_requests(
+                    rewritten_insert_sql.as_str(),
+                    database_id,
+                )
+                .map_err(|err| {
+                    format!("call action create temporary table as select parse failed: {err}")
+                })?;
+
+                if rewritten_insert.len() != 1 {
+                    return Err(
+                        "call action create temporary table as select produced unsupported multi-statement execution"
+                            .to_string(),
+                    );
+                }
+
+                let response = execute_parsed_query_with_session_parts(
+                    request_id,
+                    database_id,
+                    ctx.catalogs,
+                    ctx.wal,
+                    ctx.node_data_dir,
+                    ctx.runtime_indexes,
+                    rewritten_insert,
+                    ctx.external_write_group_id,
+                    None,
+                    ctx.session_state,
+                    ctx.session_state.session_variable_overrides_snapshot(),
+                );
+
+                if matches!(response.status, connector::ResponseStatus::Rejected) {
+                    let message = match response.result {
+                        ConnectorResult::Error(message) => message,
+                        _ => {
+                            "call action create temporary table as select execution failed".to_string()
+                        }
+                    };
+                    return Err(message);
+                }
+
+                *last_response = Some(response);
+                return Ok(serverlib::LoopControlDirective::None);
+            }
 
             *last_response = Some(ConnectorResponse::applied(
                 request_id.to_string(),
@@ -1958,6 +2254,26 @@ fn execute_call_action_statement(
     
     Ok(serverlib::LoopControlDirective::None)
 
+}
+
+fn extract_create_table_as_select_query_sql(sql: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    let as_index = lowered.find(" as ")?;
+    let query_sql = trimmed[(as_index + " as ".len())..].trim();
+
+    let normalized_query = if query_sql.starts_with('(') && query_sql.ends_with(')') {
+        query_sql[1..(query_sql.len() - 1)].trim()
+    } else {
+        query_sql
+    };
+
+    if normalized_query.to_ascii_lowercase().starts_with("select ") {
+        Some(normalized_query.to_string())
+    } else {
+        None
+    }
 }
 
 
@@ -2403,9 +2719,7 @@ fn parse_local_scalar_value(
         return Ok(lowered.into_bytes());
     }
 
-    if value.chars().all(|ch| ch.is_ascii_digit() || ch == '-' || ch == '+')
-        && value.chars().any(|ch| ch.is_ascii_digit())
-    {
+    if is_local_numeric_literal(value) {
         return Ok(value.as_bytes().to_vec());
     }
 
@@ -2414,10 +2728,231 @@ fn parse_local_scalar_value(
         return Ok(local_value.clone());
     }
 
+    if let Some((left, operator, right)) = split_local_binary_expression(value) {
+        let left_value = resolve_local_numeric_operand(left, local_entities)?;
+        let right_value = resolve_local_numeric_operand(right, local_entities)?;
+
+        let result = match operator {
+            '+' => left_value + right_value,
+            '-' => left_value - right_value,
+            '*' => left_value * right_value,
+            '/' => {
+                if right_value == 0.0 {
+                    return Err("local assignment parse failed: division by zero".to_string());
+                }
+                left_value / right_value
+            }
+            _ => unreachable!("operator is guarded by split_local_binary_expression"),
+        };
+
+        return Ok(format_local_numeric_result(result));
+    }
+
     Err(format!(
         "local assignment parse failed: unsupported value expression '{}'",
         value
     ))
     
+}
+
+fn is_local_numeric_literal(value: &str) -> bool {
+
+    let mut saw_digit = false;
+    let mut saw_dot = false;
+
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            continue;
+        }
+
+        if (ch == '-' || ch == '+') && index == 0 {
+            continue;
+        }
+
+        if ch == '.' && !saw_dot {
+            saw_dot = true;
+            continue;
+        }
+
+        return false;
+    }
+
+    saw_digit
+
+}
+
+fn split_local_binary_expression(expression: &str) -> Option<(&str, char, &str)> {
+
+    let tokens = expression.split_whitespace().collect::<Vec<_>>();
+
+    if tokens.len() == 3
+        && tokens[1].len() == 1
+        && let Some(operator) = tokens[1].chars().next()
+        && matches!(operator, '+' | '-' | '*' | '/')
+    {
+        return Some((tokens[0], operator, tokens[2]));
+    }
+
+    for (index, ch) in expression.char_indices() {
+        if !matches!(ch, '+' | '-' | '*' | '/') {
+            continue;
+        }
+
+        if index == 0 {
+            continue;
+        }
+
+        let left = expression[..index].trim();
+        let right = expression[(index + ch.len_utf8())..].trim();
+
+        if left.is_empty() || right.is_empty() {
+            continue;
+        }
+
+        return Some((left, ch, right));
+    }
+
+    None
+
+}
+
+fn resolve_local_numeric_operand(
+    operand: &str,
+    local_entities: &serverlib::ProcedureLocalEntityScope,
+) -> Result<f64, String> {
+
+    let trimmed = operand.trim();
+
+    let ident = common::normalize_identifier!(trimmed.trim_matches('`').trim_matches('"'));
+    let resolved = if let Some(local_value) = local_entities.resolve_value(&ident) {
+        std::str::from_utf8(local_value)
+            .map_err(|_| {
+                format!(
+                    "local assignment parse failed: variable '{}' is not utf8",
+                    trimmed,
+                )
+            })?
+            .trim()
+            .to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    resolved.parse::<f64>().map_err(|_| {
+        format!(
+            "local assignment parse failed: unsupported numeric operand '{}'",
+            trimmed,
+        )
+    })
+
+}
+
+fn format_local_numeric_result(value: f64) -> Vec<u8> {
+
+    if !value.is_finite() {
+        return value.to_string().into_bytes();
+    }
+
+    let rounded = value.round();
+    if (value - rounded).abs() <= 1e-12 {
+        return format!("{rounded:.0}").into_bytes();
+    }
+
+    let mut text = format!("{value:.12}");
+
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+
+    if text.ends_with('.') {
+        text.pop();
+    }
+
+    text.into_bytes()
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_local_scalar_value_supports_argument_arithmetic_expression() {
+        let mut locals = serverlib::ProcedureLocalEntityScope::new("proc-test");
+        locals.set_argument("longitude", b"6.95".to_vec());
+        locals.set_argument("offset", b"0.1".to_vec());
+
+        let lower = parse_local_scalar_value("longitude - offset", &locals)
+            .expect("subtraction expression should parse");
+        assert_eq!(String::from_utf8(lower).expect("utf8 value"), "6.85");
+
+        let upper = parse_local_scalar_value("longitude + offset", &locals)
+            .expect("addition expression should parse");
+        assert_eq!(String::from_utf8(upper).expect("utf8 value"), "7.05");
+    }
+
+    #[test]
+    fn apply_local_set_statement_supports_arithmetic_assignment() {
+        let mut locals = serverlib::ProcedureLocalEntityScope::new("proc-test");
+        locals.set_argument("latitude", b"50.93".to_vec());
+        locals.set_argument("offset", b"0.1".to_vec());
+
+        apply_local_set_statement("set @latitude_min = latitude - offset", &mut locals)
+            .expect("set assignment should parse");
+
+        let stored = locals
+            .variable_value("@latitude_min")
+            .expect("variable should be assigned");
+
+        assert_eq!(stored, &b"50.83".to_vec());
+    }
+
+    #[test]
+    fn rewrite_sql_with_call_aliases_substitutes_local_variables() {
+        let mut locals = serverlib::ProcedureLocalEntityScope::new("proc-test");
+        locals.set_variable("@latitude_min", b"50.83".to_vec());
+        locals.set_variable("@latitude_max", b"51.03".to_vec());
+
+        let rewritten = rewrite_sql_with_call_aliases(
+            "select * from places where latitude between @latitude_min and @latitude_max",
+            &locals,
+        )
+        .expect("rewrite should succeed");
+
+        assert_eq!(
+            rewritten,
+            "select * from places where latitude between 50.83 and 51.03"
+        );
+    }
+
+    #[test]
+    fn rewrite_sql_with_call_aliases_substitutes_limit_identifier_with_local_value() {
+        let mut locals = serverlib::ProcedureLocalEntityScope::new("proc-test");
+        locals.set_argument("max_results", b"100".to_vec());
+
+        let rewritten = rewrite_sql_with_call_aliases(
+            "select id from places order by id limit max_results",
+            &locals,
+        )
+        .expect("rewrite should succeed");
+
+        assert_eq!(rewritten, "select id from places order by id limit 100");
+    }
+
+    #[test]
+    fn rewrite_sql_with_call_aliases_normalizes_limit_offset_decimal_locals() {
+        let mut locals = serverlib::ProcedureLocalEntityScope::new("proc-test");
+        locals.set_argument("max_results", b"100.0".to_vec());
+        locals.set_variable("@skip", b"10.0".to_vec());
+
+        let rewritten = rewrite_sql_with_call_aliases(
+            "select id from places limit max_results offset @skip",
+            &locals,
+        )
+        .expect("rewrite should succeed");
+
+        assert_eq!(rewritten, "select id from places limit 100 offset 10");
+    }
 }
 

@@ -119,6 +119,8 @@ pub use engine::execution::{
 	collect_indexable_equality_filters_for_schema,
 	collect_indexable_prefix_like_filter_for_schema,
 	collect_indexable_like_filter_for_schema,
+	collect_indexable_range_filters_for_schema,
+	collect_indexable_range_filter_for_schema,
 		describe_sql_object_result,
 		describe_table_result,
 	condition_matches_provider, evaluate_case_projection,

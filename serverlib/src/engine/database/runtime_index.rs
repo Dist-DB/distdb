@@ -1375,7 +1375,11 @@ fn load_bootstrap_live_rows(
     }
 
     let live_rows_started_at = Instant::now();
-    let live_rows = load_live_rows_in_place(wal, table_stream_id, &table.schema);
+    let live_rows = load_live_rows_in_place(
+        wal,
+        table_stream_id,
+        &table.schema,
+    );
     let live_rows_elapsed_ms = live_rows_started_at.elapsed().as_millis();
 
     (
