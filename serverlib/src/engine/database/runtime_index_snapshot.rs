@@ -21,6 +21,7 @@ use crate::{
 
 const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtix";
 const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
+const LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrcnt";
 const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -56,6 +57,16 @@ pub(crate) struct TableLiveRowCheckpoint {
     pub(crate) wal_size_bytes: u64,
     pub(crate) wal_modified_epoch_ms: u64,
     pub(crate) live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TableLiveRowCountCheckpoint {
+    pub(crate) table_id: String,
+    pub(crate) latest_tx_id: u64,
+    pub(crate) schema_fingerprint: String,
+    pub(crate) wal_size_bytes: u64,
+    pub(crate) wal_modified_epoch_ms: u64,
+    pub(crate) live_row_count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -220,6 +231,42 @@ impl RuntimeIndexSnapshotService {
 
     }
 
+    pub(crate) fn load_live_row_count_checkpoint(
+        data_dir: &Path,
+        table_stream_id: &str,
+        table_id: &str,
+        schema: &TableSchema,
+    ) -> Option<(u64, usize)> {
+
+        let checkpoint_path = Self::live_row_count_checkpoint_path(data_dir, table_stream_id);
+        let bytes = read_bytes(&checkpoint_path).ok()?;
+
+        if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
+            return None;
+        }
+
+        let (checkpoint, _legacy_plain_encoding): (TableLiveRowCountCheckpoint, bool) =
+            decode_snapshot_payload(&bytes[HEADER_SIZE..])?;
+
+        let schema_fingerprint = table_schema_fingerprint_for_parts(table_id, schema)?;
+
+        if checkpoint.table_id != table_id || checkpoint.schema_fingerprint != schema_fingerprint {
+            return None;
+        }
+
+        let (wal_size_bytes, wal_modified_epoch_ms) =
+            Self::wal_stream_fingerprint(data_dir, table_stream_id)?;
+
+        if checkpoint.wal_size_bytes != wal_size_bytes
+            || checkpoint.wal_modified_epoch_ms != wal_modified_epoch_ms
+        {
+            return None;
+        }
+
+        Some((checkpoint.latest_tx_id, checkpoint.live_row_count))
+
+    }
+
     pub(crate) fn load_accessor_cache_snapshot(
         data_dir: &Path,
         table: &DatabaseTable,
@@ -358,6 +405,62 @@ impl RuntimeIndexSnapshotService {
             return Err("wal fingerprint changed after live-row checkpoint write".to_string());
         }
 
+        Self::save_live_row_count_checkpoint(
+            data_dir,
+            table,
+            table_stream_id,
+            latest_tx_id,
+            wal_fingerprint,
+            live_rows.len(),
+        )?;
+
+        Ok(())
+
+    }
+
+    pub(crate) fn save_live_row_count_checkpoint(
+        data_dir: &Path,
+        table: &DatabaseTable,
+        table_stream_id: &str,
+        latest_tx_id: u64,
+        wal_fingerprint: Option<(u64, u64)>,
+        live_row_count: usize,
+    ) -> Result<(), String> {
+
+        let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
+            .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
+
+        let expected_wal_fingerprint = (wal_size_bytes, wal_modified_epoch_ms);
+
+        if Self::wal_stream_fingerprint(data_dir, table_stream_id) != Some(expected_wal_fingerprint) {
+            return Err("wal fingerprint changed before live-row count checkpoint write".to_string());
+        }
+
+        let schema_fingerprint = table_schema_fingerprint(table)
+            .ok_or_else(|| "schema fingerprint serialization failed".to_string())?;
+
+        let checkpoint = TableLiveRowCountCheckpoint {
+            table_id: table.table_id.clone(),
+            latest_tx_id,
+            schema_fingerprint,
+            wal_size_bytes,
+            wal_modified_epoch_ms,
+            live_row_count,
+        };
+
+        let mut content = make_header(FileKind::Entity).to_vec();
+        let payload = encode_snapshot_payload(&checkpoint)?;
+        content.extend_from_slice(&payload);
+
+        let checkpoint_path = Self::live_row_count_checkpoint_path(data_dir, table_stream_id);
+        write_bytes_atomic(&checkpoint_path, &content)
+            .map_err(|err| format!("live-row count checkpoint write failed: {err}"))?;
+
+        if Self::wal_stream_fingerprint(data_dir, table_stream_id) != Some(expected_wal_fingerprint) {
+            let _ = fs::remove_file(&checkpoint_path);
+            return Err("wal fingerprint changed after live-row count checkpoint write".to_string());
+        }
+
         Ok(())
 
     }
@@ -436,6 +539,15 @@ impl RuntimeIndexSnapshotService {
     fn live_row_checkpoint_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
         let table_key = stable_id(&[table_stream_id]);
         let stem = format!("{}_{}", LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX, table_key);
+
+        data_dir
+            .join("live-rows")
+            .join(FileKind::Entity.file_name(stem))
+    }
+
+    fn live_row_count_checkpoint_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
+        let table_key = stable_id(&[table_stream_id]);
+        let stem = format!("{}_{}", LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX, table_key);
 
         data_dir
             .join("live-rows")

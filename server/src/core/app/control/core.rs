@@ -12,6 +12,7 @@ use serverlib::{
     RuntimeIndexStore, SelectProjectionItem, SelectReadPlan, SqlRequest, TransactionId,
     UserCredential, UserId,
     current_runtime_index_bootstrap_progress, primary_key_index,
+    load_live_row_count_checkpoint,
     load_live_row_count, parse_select_read_plan_from_statement,
     parse_mysql8_sql_requests,
 };
@@ -1125,7 +1126,21 @@ impl ServerApp {
                     .cardinality_for_table(&table_stream_id, &index.index_id.0)
             });
 
+        let checkpoint_count = self
+            .wal
+            .data_dir_path()
+            .and_then(|data_dir| {
+                load_live_row_count_checkpoint(
+                    &data_dir,
+                    &table_stream_id,
+                    &table.table_id,
+                    table.schema(),
+                )
+            })
+            .map(|(_, count)| count);
+
         let matched_rows = runtime_index_cardinality
+            .or(checkpoint_count)
             .unwrap_or_else(|| load_live_row_count(&self.wal, &table_stream_id));
 
         if let Some(cardinality) = runtime_index_cardinality {
@@ -1134,6 +1149,14 @@ impl ServerApp {
                 request.request_id,
                 read_plan.table_id,
                 cardinality,
+                runtime_bootstrap_done,
+            );
+        } else if let Some(count) = checkpoint_count {
+            log::info!(
+                "strict count source request_id={} table={} source=live_row_count_checkpoint count={} bootstrap_done={}",
+                request.request_id,
+                read_plan.table_id,
+                count,
                 runtime_bootstrap_done,
             );
         } else if runtime_bootstrap_done {

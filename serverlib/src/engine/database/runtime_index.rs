@@ -1432,6 +1432,15 @@ pub fn load_live_row_checkpoint_rows(
     RuntimeIndexSnapshotService::load_live_row_checkpoint_rows(data_dir, table_stream_id, table_id, schema)
 }
 
+pub fn load_live_row_count_checkpoint(
+    data_dir: &std::path::Path,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &crate::TableSchema,
+) -> Option<(u64, usize)> {
+    RuntimeIndexSnapshotService::load_live_row_count_checkpoint(data_dir, table_stream_id, table_id, schema)
+}
+
 #[expect(clippy::too_many_arguments, reason="this is a utility function for persisting runtime index snapshots")]
 fn persist_runtime_index_snapshot(
     store: &RuntimeIndexStore,
@@ -1454,6 +1463,15 @@ fn persist_runtime_index_snapshot(
         live_row_count,
         wal_fingerprint,
         indexes,
+    )?;
+
+    RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
+        data_dir,
+        table,
+        table_stream_id,
+        latest_tx_id,
+        wal_fingerprint,
+        live_row_count,
     )
     
 }

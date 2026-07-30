@@ -108,6 +108,7 @@ pub use engine::ir_compiler::{
 pub use engine::database::runtime_index::{
 	current_runtime_index_bootstrap_progress,
 	index_value_tuple,
+	load_live_row_count_checkpoint,
 	primary_key_index,
 	RuntimeIndexBootstrapProgress,
 	RuntimeIndexStore,
