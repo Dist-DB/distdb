@@ -14,7 +14,9 @@ use crate::engine::database::entity::object_ref::DatabaseObjectRef;
 use crate::engine::database::entity::object_type::DatabaseObjectType;
 use crate::engine::database::id::DatabaseId;
 use crate::engine::database::index_id::IndexId;
-use crate::engine::database::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin};
+use crate::engine::database::databaseindex::{
+    DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin,
+};
 use crate::engine::database::index_lifecycle_payload::{IndexLifecycleAction, IndexLifecyclePayload};
 use crate::engine::database::relationship::DatabaseRelationship;
 use crate::engine::database::schema::change_tx::SchemaChangeTx;

@@ -361,7 +361,7 @@ pub(super) fn execute_create_table_impl(
     let table_id = create_table_plan.table_id;
     let schema = create_table_plan.schema;
     let is_temporary = create_table_plan.temporary;
-    let composite_unique_indexes = create_table_plan.composite_unique_indexes;
+    let composite_indexes = create_table_plan.composite_indexes;
 
     let normalized_table_id = common::normalize_identifier!(table_id);
 
@@ -409,20 +409,20 @@ pub(super) fn execute_create_table_impl(
 
     }
 
-    for field_names in &composite_unique_indexes {
+    for (index_kind, field_names) in &composite_indexes {
 
         let created_index_id = match catalog.create_index_with_kind_and_origin(
             &normalized_table_id,
             None,
             field_names.clone(),
-            serverlib::DatabaseIndexKind::Unique,
+            *index_kind,
             serverlib::DatabaseIndexOrigin::Derived,
         ) {
             Ok(index_id) => index_id,
             Err(err) => {
                 return ConnectorResponse::rejected(
                     request_id.to_string(),
-                    format!("create table failed: composite unique index create failed: {err}"),
+                    format!("create table failed: composite index create failed: {err}"),
                 );
             }
         };
@@ -435,7 +435,7 @@ pub(super) fn execute_create_table_impl(
                 None => {
                     return ConnectorResponse::rejected(
                         request_id.to_string(),
-                        "create table failed: composite unique index metadata missing".to_string(),
+                        "create table failed: composite index metadata missing".to_string(),
                     );
                 }
             };

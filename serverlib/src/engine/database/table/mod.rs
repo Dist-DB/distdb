@@ -9,6 +9,7 @@ use crate::engine::database::entity::aspect::DatabaseEntityAspect;
 use crate::engine::database::entity::kind::DatabaseEntityKind;
 use crate::engine::database::entity::metadata::EntityMetadata;
 use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::databaseindex::DatabaseIndex;
 
 use std::collections::HashMap;
 
@@ -20,7 +21,7 @@ pub struct DatabaseTable {
     pub status: ObjectStatus,
     pub schema_revision: u64,
     pub schema: TableSchema,
-    pub indexes: HashMap<String, super::index::DatabaseIndex>,
+    pub indexes: HashMap<String, DatabaseIndex>,
     #[serde(default)]
     pub temporary: bool,
     pub metadata: EntityMetadata,
@@ -31,7 +32,7 @@ impl DatabaseTable {
     pub fn new(
         table_id: String,
         schema: TableSchema,
-        indexes: HashMap<String, super::index::DatabaseIndex>,
+        indexes: HashMap<String, DatabaseIndex>,
     ) -> Self {
         Self {
             entity_id: common::helpers::utils::unique_id(),
@@ -110,7 +111,7 @@ impl DatabaseTable {
         &mut self,
         revision: u64,
         schema: TableSchema,
-        indexes: HashMap<String, super::index::DatabaseIndex>,
+        indexes: HashMap<String, DatabaseIndex>,
     ) {
         self.schema_revision = revision;
         self.schema = schema;

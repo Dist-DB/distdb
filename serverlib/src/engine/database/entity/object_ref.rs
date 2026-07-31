@@ -1,6 +1,6 @@
 
 use crate::engine::database::entity::object_type::DatabaseObjectType;
-use crate::engine::database::index::DatabaseIndex;
+use crate::engine::database::databaseindex::DatabaseIndex;
 use crate::engine::database::olap_view::DatabaseOlapView;
 use crate::engine::database::relationship::DatabaseRelationship;
 use crate::engine::database::stored_procedure::DatabaseStoredProcedure;

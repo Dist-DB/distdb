@@ -6,7 +6,7 @@ use sqlparser::ast::{
     TableConstraint,
 };
 
-use crate::{FieldDef, FieldIndex, FieldType, TableSchema};
+use crate::{DatabaseIndexKind, FieldDef, FieldIndex, FieldType, TableSchema};
 
 use super::literals::parse_default_value;
 use super::{parse_mysql_statements, AlterTableChangeOp, AlterTableChangePlan, SqlParseError};
@@ -16,7 +16,7 @@ pub struct CreateTablePlan {
     pub table_id: String,
     pub schema: TableSchema,
     pub temporary: bool,
-    pub composite_unique_indexes: Vec<Vec<String>>,
+    pub composite_indexes: Vec<(DatabaseIndexKind, Vec<String>)>,
 }
 
 pub fn create_table_schema_from_statement(
@@ -43,7 +43,7 @@ pub fn create_table_plan_from_statement(
 
     let table_id = common::normalize_identifier!(create_table.name.to_string());
     
-    let (primary_key_fields, indexed_fields, unique_fields, composite_unique_indexes) =
+    let (primary_key_fields, indexed_fields, unique_fields, composite_indexes) =
         derive_indexed_fields_from_constraints(&create_table.constraints);
 
     let mut fields = Vec::with_capacity(create_table.columns.len());
@@ -151,7 +151,7 @@ pub fn create_table_plan_from_statement(
         table_id,
         schema,
         temporary: create_table.temporary,
-        composite_unique_indexes,
+        composite_indexes,
     })
 
 }
@@ -357,12 +357,17 @@ fn parse_modify_column_change_op(
 
 fn derive_indexed_fields_from_constraints(
     constraints: &[TableConstraint],
-) -> (Vec<String>, HashSet<String>, HashSet<String>, Vec<Vec<String>>) {
+) -> (
+    Vec<String>,
+    HashSet<String>,
+    HashSet<String>,
+    Vec<(DatabaseIndexKind, Vec<String>)>,
+) {
 
     let mut primary = Vec::new();
     let mut indexed = HashSet::new();
     let mut unique = HashSet::new();
-    let mut composite_unique_indexes = Vec::new();
+    let mut composite_indexes = Vec::new();
 
     for constraint in constraints {
 
@@ -389,7 +394,7 @@ fn derive_indexed_fields_from_constraints(
             if columns.len() == 1 {
                 unique.extend(columns.iter().cloned());
             } else {
-                composite_unique_indexes.push(columns.clone());
+                composite_indexes.push((DatabaseIndexKind::Unique, columns.clone()));
             }
             indexed.extend(columns);
             continue;
@@ -398,12 +403,15 @@ fn derive_indexed_fields_from_constraints(
         if lowered.starts_with("key ")
             || lowered.starts_with("index ")
         {
+            if columns.len() > 1 {
+                composite_indexes.push((DatabaseIndexKind::Indexed, columns.clone()));
+            }
             indexed.extend(columns);
         }
 
     }
 
-    (primary, indexed, unique, composite_unique_indexes)
+    (primary, indexed, unique, composite_indexes)
 
 }
 

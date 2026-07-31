@@ -14,7 +14,9 @@ pub use crate::engine::database::entity::aspect::DatabaseEntityAspect;
 pub use crate::engine::database::entity::kind::DatabaseEntityKind;
 pub use crate::engine::database::entity::object_ref::DatabaseObjectRef;
 pub use crate::engine::database::entity::object_type::DatabaseObjectType;
-pub use crate::engine::database::index::{DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin, IndexId};
+pub use crate::engine::database::databaseindex::{
+	DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin, IndexId,
+};
 pub use crate::engine::database::relationship::DatabaseRelationship;
 
 pub use crate::engine::database::row_payload::{

@@ -6,6 +6,7 @@ use crate::engine::execution::{
 };
 use crate::{
     collect_indexable_equality_filters_for_schema, collect_indexable_like_filter_for_schema,
+    collect_indexable_in_list_filter_for_schema,
     collect_indexable_range_filters_for_schema,
     execute_joined_select_plan,
     execute_projection_only_select_plan, execute_relation_select_plan,
@@ -116,6 +117,7 @@ impl SelectReadPlanCursorSource {
                 table_with_stream.entity_id = stream_id;
                 table_with_stream
             });
+            
             let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
             let schema = &table.schema;
@@ -124,10 +126,15 @@ impl SelectReadPlanCursorSource {
             let range_filters = read_plan
                 .where_condition
                 .as_ref()
-                .and_then(|condition| {
-                    Some(collect_indexable_range_filters_for_schema(schema, condition))
-                })
+                .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
                 .unwrap_or_default();
+            let in_list_filter = read_plan
+                .where_condition
+                .as_ref()
+                .and_then(|condition| {
+                    collect_indexable_in_list_filter_for_schema(schema, condition)
+                });
+            
             let like_filter = read_plan
                 .where_condition
                 .as_ref()
@@ -151,6 +158,7 @@ impl SelectReadPlanCursorSource {
                 scoped_table,
                 allow_index_short_circuit,
                 index_filter_map,
+                in_list_filter,
                 range_filters,
                 like_filter,
             );

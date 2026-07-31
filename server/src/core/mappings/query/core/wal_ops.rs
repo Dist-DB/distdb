@@ -52,6 +52,25 @@ fn should_rebuild_runtime_indexes_after_statement_rejection(response: &Connector
     message.contains("wal append failed")
 }
 
+fn log_statement_write_batch_timing(
+    table_id: &str,
+    applied: bool,
+    persist_ms: u128,
+    total_ms: u128,
+) {
+    if persist_ms == 0 && total_ms < 500 {
+        return;
+    }
+
+    log::info!(
+        "mutation diagnostics: write_batch table={} applied={} persist_snapshot_ms={} total_ms={}",
+        table_id,
+        applied,
+        persist_ms,
+        total_ms,
+    );
+}
+
 fn apply_runtime_index_and_equality_batch<R>(
     runtime_indexes: &mut RuntimeIndexStore,
     cache_scope_id: usize,
@@ -346,6 +365,11 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
             .or(decoded_row_map.as_ref())
             .ok_or_else(|| "row payload decode failed: missing row map for index mutation".to_string())?;
 
+        let equality_cache_row_id = match kind {
+            TransactionKind::Delete => refid.map(|tx| tx.0).unwrap_or(next_id.0),
+            _ => next_id.0,
+        };
+
         runtime_indexes.apply_table_row_mutation(&stream_id, derived_indexes, kind, row_map);
         
         serverlib::apply_equality_cache_row_mutation(
@@ -353,7 +377,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
             &stream_id,
             latest_tx_id,
             kind,
-            next_id.0,
+            equality_cache_row_id,
             row_map,
         );
 
@@ -623,6 +647,7 @@ pub(super) fn with_statement_write_batch<F>(
 where
     F: FnOnce(Option<TransactionId>, &mut RuntimeIndexStore) -> ConnectorResponse,
 {
+    let batch_started = Instant::now();
 
     let sql_summary = summarize_sql_for_error_log(statement_sql);
 
@@ -637,8 +662,10 @@ where
     }
 
     let response = execute(None, runtime_indexes);
+    let applied = matches!(response.status, connector::ResponseStatus::Applied);
 
-    if matches!(response.status, connector::ResponseStatus::Applied) {
+    if applied {
+        let persist_started = Instant::now();
         if let Err(err) = runtime_indexes.persist_table_snapshot_on_commit(table, &table_stream_id, wal) {
             log::warn!(
                 "runtime index incremental persistence skipped table={} stream={} reason={}",
@@ -647,6 +674,13 @@ where
                 err,
             );
         }
+
+        log_statement_write_batch_timing(
+            &table.table_id,
+            applied,
+            persist_started.elapsed().as_millis(),
+            batch_started.elapsed().as_millis(),
+        );
 
         response
 
@@ -672,6 +706,13 @@ where
                 request_id,
             );
         }
+
+        log_statement_write_batch_timing(
+            &table.table_id,
+            applied,
+            0,
+            batch_started.elapsed().as_millis(),
+        );
 
         response
     

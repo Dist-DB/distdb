@@ -1,4 +1,4 @@
-use crate::engine::database::index::DatabaseIndex;
+use crate::engine::database::databaseindex::DatabaseIndex;
 use crate::engine::database::transaction::payload::TransactionPayloadCodec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

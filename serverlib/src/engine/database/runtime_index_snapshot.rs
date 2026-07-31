@@ -11,7 +11,7 @@ use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 
-use super::index::DatabaseIndex;
+use super::databaseindex::DatabaseIndex;
 use super::table::DatabaseTable;
 use crate::{
     EqualityTableCacheSnapshot,

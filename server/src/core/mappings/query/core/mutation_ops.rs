@@ -20,6 +20,9 @@ const ORDER_EXPR_ROUND_SCALE_PREFIX: &str = serverlib::ORDER_EXPR_ROUND_SCALE_PR
 type MutationRowMap = Arc<HashMap<String, Vec<u8>>>;
 
 static MUTATION_RUNTIME_INDEX_REBUILD_COUNT: AtomicU64 = AtomicU64::new(0);
+static MUTATION_ACCESS_PLAN_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static MUTATION_EXECUTION_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static MUTATION_WRITE_GUARD_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static INSERT_FALLBACK_LIVE_ROW_LOAD_COUNT: AtomicU64 = AtomicU64::new(0);
 static INSERT_FALLBACK_LIVE_ROW_MATERIALIZED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INSERT_SELECT_SOURCE_MATERIALIZATION_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -40,6 +43,134 @@ fn record_mutation_runtime_index_rebuild(table_id: &str, reason: &str) {
             count,
         );
     }
+}
+
+fn record_mutation_access_plan(
+    mutation_kind: &str,
+    table_id: &str,
+    matched_rows: usize,
+    diagnostics: &serverlib::RelationAccessPlanDiagnostics,
+) {
+    let count = MUTATION_ACCESS_PLAN_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+
+    if !should_emit_diagnostics(count, 10, 64) {
+        return;
+    }
+
+    let chosen_index = diagnostics
+        .candidates
+        .first()
+        .map(|candidate| {
+            if candidate.index_hint.is_empty() {
+                "-".to_string()
+            } else {
+                candidate.index_hint.clone()
+            }
+        })
+        .unwrap_or_else(|| "-".to_string());
+
+    let prioritization = diagnostics
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(position, candidate)| {
+            let index_hint = if candidate.index_hint.is_empty() {
+                "-".to_string()
+            } else {
+                candidate.index_hint.clone()
+            };
+
+            format!(
+                "{}.{}(score={},index={})",
+                position + 1,
+                candidate.access_path,
+                candidate.score,
+                index_hint,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" > ");
+
+    log::info!(
+        "mutation diagnostics: kind={} table={} access_path={} planner_score={} index_hint={} matched_rows={} candidates={} prioritization={}",
+        mutation_kind,
+        table_id,
+        diagnostics.chosen_access_path,
+        diagnostics.chosen_score,
+        chosen_index,
+        matched_rows,
+        diagnostics.candidates.len(),
+        prioritization,
+    );
+}
+
+#[expect(clippy::too_many_arguments, reason="diagnostic stage breakdown is explicit by design")]
+fn record_mutation_execution_breakdown(
+    mutation_kind: &str,
+    table_id: &str,
+    candidate_rows: usize,
+    affected_rows: u64,
+    target_load_ms: u128,
+    order_limit_ms: u128,
+    predicate_recheck_ms: u128,
+    row_prepare_ms: u128,
+    wal_delete_ms: u128,
+    wal_insert_ms: u128,
+    total_ms: u128,
+    uses_joins: bool,
+) {
+    let count = MUTATION_EXECUTION_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let should_log = should_emit_diagnostics(count, 10, 64) || total_ms >= 500;
+
+    if !should_log {
+        return;
+    }
+
+    log::info!(
+        "mutation diagnostics: kind={} table={} candidates={} affected_rows={} target_load_ms={} order_limit_ms={} predicate_recheck_ms={} row_prepare_ms={} wal_delete_ms={} wal_insert_ms={} total_ms={} joins={}",
+        mutation_kind,
+        table_id,
+        candidate_rows,
+        affected_rows,
+        target_load_ms,
+        order_limit_ms,
+        predicate_recheck_ms,
+        row_prepare_ms,
+        wal_delete_ms,
+        wal_insert_ms,
+        total_ms,
+        uses_joins,
+    );
+}
+
+fn record_mutation_write_guard_timing(
+    table_id: &str,
+    defer_finalize: bool,
+    already_locked: bool,
+    applied: bool,
+    lock_ms: u128,
+    execute_ms: u128,
+    finalize_ms: u128,
+    total_ms: u128,
+) {
+    let count = MUTATION_WRITE_GUARD_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let should_log = should_emit_diagnostics(count, 10, 64) || total_ms >= 500;
+
+    if !should_log {
+        return;
+    }
+
+    log::info!(
+        "mutation diagnostics: table_write_guard table={} applied={} defer_finalize={} already_locked={} lock_ms={} execute_ms={} finalize_ms={} total_ms={}",
+        table_id,
+        applied,
+        defer_finalize,
+        already_locked,
+        lock_ms,
+        execute_ms,
+        finalize_ms,
+        total_ms,
+    );
 }
 
 fn record_insert_fallback_live_row_load(
@@ -2332,6 +2463,7 @@ fn execute_update_locked(
     touched_write_tables: Option<&mut HashSet<String>>,
     plan: &serverlib::UpdateRowsPlan,
 ) -> ConnectorResponse {
+    let statement_started = std::time::Instant::now();
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
         return ConnectorResponse::rejected(
@@ -2366,7 +2498,9 @@ fn execute_update_locked(
 
     let mutation_uses_joins = !plan.joins.is_empty();
 
+    let target_load_started = std::time::Instant::now();
     let mut current_live_rows = match load_mutation_rows(
+        "update",
         catalog,
         wal,
         runtime_indexes,
@@ -2383,7 +2517,9 @@ fn execute_update_locked(
             return ConnectorResponse::rejected(request_id.to_string(), message);
         }
     };
+    let target_load_ms = target_load_started.elapsed().as_millis();
 
+    let order_limit_started = std::time::Instant::now();
     if !plan.order_by.is_empty() {
         apply_delete_order_by_items(&mut current_live_rows, &plan.order_by);
     }
@@ -2391,6 +2527,8 @@ fn execute_update_locked(
     if let Some(limit) = plan.limit {
         current_live_rows.truncate(limit);
     }
+    let order_limit_ms = order_limit_started.elapsed().as_millis();
+    let candidate_rows = current_live_rows.len();
 
     let primary_key = primary_key_index(&table);
     let primary_key_fields = primary_key.map(|pk_index| {
@@ -2425,7 +2563,13 @@ fn execute_update_locked(
         .map(|(row_id, _)| *row_id)
         .collect::<HashSet<_>>();
 
-    with_statement_write_batch(
+    let mut predicate_recheck_ms = 0u128;
+    let mut row_prepare_ms = 0u128;
+    let mut wal_delete_ms = 0u128;
+    let mut wal_insert_ms = 0u128;
+    let mut affected_rows_logged = 0u64;
+
+    let response = with_statement_write_batch(
         request_id,
         statement_sql,
         catalog,
@@ -2444,6 +2588,7 @@ fn execute_update_locked(
             };
 
             for (row_id, row_map) in current_live_rows {
+                let predicate_started = std::time::Instant::now();
 
                 if !mutation_uses_joins
                     && !serverlib::row_matches_select_condition(
@@ -2454,8 +2599,12 @@ fn execute_update_locked(
                         runtime_indexes,
                     )
                 {
+                    predicate_recheck_ms += predicate_started.elapsed().as_millis();
                     continue;
                 }
+                predicate_recheck_ms += predicate_started.elapsed().as_millis();
+
+                let row_prepare_started = std::time::Instant::now();
 
                 let delete_payload = match encode_row_payload(&schema, row_map.as_ref()) {
 
@@ -2616,7 +2765,9 @@ fn execute_update_locked(
                     pk_keys.insert(new_pk);
 
                 }
+                row_prepare_ms += row_prepare_started.elapsed().as_millis();
 
+                let wal_delete_started = std::time::Instant::now();
                 if let Err(err) = append_row_payload_record_with_live_row_ids_and_prepared_row_map(
                     catalog,
                     wal,
@@ -2636,7 +2787,9 @@ fn execute_update_locked(
                         format!("update delete WAL append failed: {err}"),
                     );
                 }
+                wal_delete_ms += wal_delete_started.elapsed().as_millis();
 
+                let wal_insert_started = std::time::Instant::now();
                 if let Err(err) = append_row_payload_record_with_prepared_row_map(
                     catalog,
                     wal,
@@ -2655,6 +2808,7 @@ fn execute_update_locked(
                         format!("update insert WAL append failed: {err}"),
                     );
                 }
+                wal_insert_ms += wal_insert_started.elapsed().as_millis();
 
                 if plan.returning.is_some() {
                     returning_rows.push(canonical_row.expect(
@@ -2663,6 +2817,7 @@ fn execute_update_locked(
                 }
 
                 affected_rows = affected_rows.saturating_add(1);
+                affected_rows_logged = affected_rows;
 
             }
 
@@ -2676,7 +2831,24 @@ fn execute_update_locked(
             )
 
         },
-    )
+    );
+
+    record_mutation_execution_breakdown(
+        "update",
+        &plan.table_id,
+        candidate_rows,
+        affected_rows_logged,
+        target_load_ms,
+        order_limit_ms,
+        predicate_recheck_ms,
+        row_prepare_ms,
+        wal_delete_ms,
+        wal_insert_ms,
+        statement_started.elapsed().as_millis(),
+        mutation_uses_joins,
+    );
+
+    response
 
 }
 
@@ -2754,6 +2926,7 @@ fn execute_delete_locked(
     touched_write_tables: Option<&mut HashSet<String>>,
     plan: &serverlib::DeleteRowsPlan,
 ) -> ConnectorResponse {
+    let statement_started = std::time::Instant::now();
 
     let Some(schema) = catalog.table_schema(&plan.table_id) else {
 
@@ -2783,7 +2956,9 @@ fn execute_delete_locked(
 
     let mutation_uses_joins = !plan.joins.is_empty();
 
+    let target_load_started = std::time::Instant::now();
     let mut current_live_rows = match load_mutation_rows(
+        "delete",
         catalog,
         wal,
         runtime_indexes,
@@ -2800,7 +2975,9 @@ fn execute_delete_locked(
             return ConnectorResponse::rejected(request_id.to_string(), message);
         }
     };
+    let target_load_ms = target_load_started.elapsed().as_millis();
 
+    let order_limit_started = std::time::Instant::now();
     if !plan.order_by.is_empty() {
         apply_delete_order_by_items(&mut current_live_rows, &plan.order_by);
     }
@@ -2808,13 +2985,19 @@ fn execute_delete_locked(
     if let Some(limit) = plan.limit {
         current_live_rows.truncate(limit);
     }
+    let order_limit_ms = order_limit_started.elapsed().as_millis();
+    let candidate_rows = current_live_rows.len();
 
     let current_live_row_ids = current_live_rows
         .iter()
         .map(|(row_id, _)| *row_id)
         .collect::<HashSet<_>>();
 
-    with_statement_write_batch(
+    let mut predicate_recheck_ms = 0u128;
+    let mut wal_delete_ms = 0u128;
+    let mut affected_rows_logged = 0u64;
+
+    let response = with_statement_write_batch(
         request_id,
         statement_sql,
         catalog,
@@ -2833,6 +3016,7 @@ fn execute_delete_locked(
             };
 
             for (row_id, row_map) in current_live_rows {
+                let predicate_started = std::time::Instant::now();
 
                 if !mutation_uses_joins
                     && !serverlib::row_matches_select_condition(
@@ -2843,8 +3027,10 @@ fn execute_delete_locked(
                         runtime_indexes,
                     )
                 {
+                    predicate_recheck_ms += predicate_started.elapsed().as_millis();
                     continue;
                 }
+                predicate_recheck_ms += predicate_started.elapsed().as_millis();
 
                 let delete_payload = match encode_row_payload(&schema, row_map.as_ref()) {
                     Ok(encoded) => encoded,
@@ -2856,6 +3042,7 @@ fn execute_delete_locked(
                     }
                 };
 
+                let wal_delete_started = std::time::Instant::now();
                 if let Err(err) = append_row_payload_record_with_live_row_ids_and_prepared_row_map(
                     catalog,
                     wal,
@@ -2875,12 +3062,14 @@ fn execute_delete_locked(
                         format!("delete WAL append failed: {err}"),
                     );
                 }
+                wal_delete_ms += wal_delete_started.elapsed().as_millis();
 
                 if plan.returning.is_some() {
                     returning_rows.push(row_map);
                 }
 
                 affected_rows = affected_rows.saturating_add(1);
+                affected_rows_logged = affected_rows;
             
             }
 
@@ -2894,7 +3083,24 @@ fn execute_delete_locked(
             )
 
         },
-    )
+    );
+
+    record_mutation_execution_breakdown(
+        "delete",
+        &plan.table_id,
+        candidate_rows,
+        affected_rows_logged,
+        target_load_ms,
+        order_limit_ms,
+        predicate_recheck_ms,
+        0,
+        wal_delete_ms,
+        0,
+        statement_started.elapsed().as_millis(),
+        mutation_uses_joins,
+    );
+
+    response
 
 }
 
@@ -3277,6 +3483,7 @@ fn with_table_write_guard<F>(
 where
     F: FnOnce(&mut DatabaseCatalog) -> ConnectorResponse,
 {
+    let guard_started = std::time::Instant::now();
     
     let Some((catalog, table_id)) = resolve_catalog_for_table_reference_mut(
         catalogs,
@@ -3304,6 +3511,8 @@ where
         .table(&table_id)
         .is_some_and(|table| table.status() == ObjectStatus::Lock);
 
+    let lock_started = std::time::Instant::now();
+
     if !already_locked
         && let Err(err) = catalog.begin_table_write(&table_id)
     {
@@ -3313,20 +3522,58 @@ where
         );
     }
 
-    let response = execute(catalog);
+    let lock_ms = lock_started.elapsed().as_millis();
 
-    if matches!(response.status, connector::ResponseStatus::Applied) {
+    let execute_started = std::time::Instant::now();
+    let response = execute(catalog);
+    let execute_ms = execute_started.elapsed().as_millis();
+    let applied = matches!(response.status, connector::ResponseStatus::Applied);
+
+    if applied {
 
         if defer_finalize {
+            record_mutation_write_guard_timing(
+                &table_id,
+                defer_finalize,
+                already_locked,
+                applied,
+                lock_ms,
+                execute_ms,
+                0,
+                guard_started.elapsed().as_millis(),
+            );
             return response;
         }
 
+        let finalize_started = std::time::Instant::now();
         match catalog.finalize_table_write(&table_id) {
 
-            Ok(()) => response,
+            Ok(()) => {
+                record_mutation_write_guard_timing(
+                    &table_id,
+                    defer_finalize,
+                    already_locked,
+                    applied,
+                    lock_ms,
+                    execute_ms,
+                    finalize_started.elapsed().as_millis(),
+                    guard_started.elapsed().as_millis(),
+                );
+                response
+            },
 
             Err(err) => {
                 let _ = catalog.abort_table_write(&table_id);
+                record_mutation_write_guard_timing(
+                    &table_id,
+                    defer_finalize,
+                    already_locked,
+                    false,
+                    lock_ms,
+                    execute_ms,
+                    finalize_started.elapsed().as_millis(),
+                    guard_started.elapsed().as_millis(),
+                );
                 ConnectorResponse::rejected(
                     request_id.to_string(),
                     format!("table write finalize failed: {err}"),
@@ -3339,12 +3586,23 @@ where
         if !already_locked {
             let _ = catalog.abort_table_write(&table_id);
         }
+        record_mutation_write_guard_timing(
+            &table_id,
+            defer_finalize,
+            already_locked,
+            applied,
+            lock_ms,
+            execute_ms,
+            0,
+            guard_started.elapsed().as_millis(),
+        );
         response
     }
 
 }
 
 fn load_mutation_rows(
+    mutation_kind: &str,
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
     runtime_indexes: &RuntimeIndexStore,
@@ -3357,15 +3615,81 @@ fn load_mutation_rows(
     where_condition: Option<&SelectCondition>,
 ) -> Result<Vec<(u64, MutationRowMap)>, String> {
 
-    let payload_context = payload_context_for_table(catalog, table_id);
-
     if joins.is_empty() {
-        return load_live_rows_with_context(wal, table_stream_id, schema, &payload_context)
-            .map(|rows| {
-                rows.into_iter()
-                    .map(|(row_id, row_map)| (row_id, Arc::new(row_map)))
-                    .collect()
+
+        let Some(table) = catalog.table(table_id) else {
+            return Err(format!(
+                "mutation failed: table '{}' not found",
+                table_id,
+            ));
+        };
+
+        let mut scoped_table = table.clone();
+        if !table_stream_id.is_empty() {
+            scoped_table.entity_id = table_stream_id.to_string();
+        }
+
+        let mut index_filter_map = HashMap::new();
+        let range_filters = where_condition
+            .map(|condition| {
+                serverlib::collect_indexable_range_filters_for_schema(schema, condition)
+            })
+            .unwrap_or_default();
+        let in_list_filter = where_condition
+            .and_then(|condition| {
+                serverlib::collect_indexable_in_list_filter_for_schema(schema, condition)
             });
+        let like_filter = where_condition
+            .and_then(|condition| {
+                serverlib::collect_indexable_like_filter_for_schema(schema, condition)
+            });
+        let allow_index_short_circuit = where_condition
+            .map(|condition| {
+                serverlib::collect_indexable_equality_filters_for_schema(
+                    schema,
+                    condition,
+                    &mut index_filter_map,
+                )
+            })
+            .unwrap_or(true);
+
+        let access_plan = serverlib::plan_relation_access(
+            &scoped_table,
+            allow_index_short_circuit,
+            index_filter_map.clone(),
+            in_list_filter.clone(),
+            range_filters.clone(),
+            like_filter.clone(),
+        );
+
+        let diagnostics = serverlib::relation_access_plan_diagnostics(
+            &scoped_table,
+            allow_index_short_circuit,
+            index_filter_map,
+            in_list_filter,
+            range_filters,
+            like_filter,
+        );
+
+        let rows = serverlib::materialize_relation_rows(
+            wal,
+            &scoped_table,
+            schema,
+            runtime_indexes,
+            &access_plan,
+        );
+
+        record_mutation_access_plan(
+            mutation_kind,
+            table_id,
+            rows.len(),
+            &diagnostics,
+        );
+
+        return Ok(rows
+        .into_iter()
+        .map(|(row_id, row_map)| (row_id, Arc::new(row_map)))
+        .collect());
     }
 
     serverlib::select_mutation_target_rows(

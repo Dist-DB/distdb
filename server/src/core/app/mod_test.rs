@@ -9875,6 +9875,140 @@ fn show_indexes_reports_user_defined_index_after_restart() {
 }
 
 #[test]
+fn show_indexes_reports_composite_non_unique_index_from_create_table() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-show-indexes-composite-non-unique-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-db-composite-non-unique",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-table-composite-non-unique",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table geo_points (uid bigint not null primary key, latitude double not null, longitude double not null, key idx_lat_lon (latitude, longitude))"
+                        .to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    let response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-show-indexes-composite-non-unique",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show indexes from geo_points".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = response.result else {
+        panic!("expected query result");
+    };
+
+    let has_composite = result.rows.iter().any(|row| {
+        let kind = String::from_utf8(row[2].clone()).expect("index kind should be utf8");
+        let fields = String::from_utf8(row[4].clone()).expect("fields should be utf8");
+        kind == "indexed" && fields == "latitude,longitude"
+    });
+
+    assert!(
+        has_composite,
+        "show indexes should include composite non-unique index with fields latitude,longitude"
+    );
+}
+
+#[test]
+fn show_indexes_reports_composite_unique_index_from_create_table() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-show-indexes-composite-unique-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-db-composite-unique",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    assert_eq!(
+        app.handle_connector_request(&ConnectorRequest::new(
+            "req-create-table-composite-unique",
+            ConnectorCommand::Query {
+                query: connector::DataQuery {
+                    database_id: "main".to_string(),
+                    sql: "create table places (uid bigint not null primary key, uni_id bigint not null, form varchar(3) not null default '', unique key uq_uni_id_form (uni_id, form))"
+                        .to_string(),
+                },
+            },
+        ))
+        .status,
+        ResponseStatus::Applied
+    );
+
+    let response = app.handle_connector_request(&ConnectorRequest::new(
+        "req-show-indexes-composite-unique",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "show indexes from places".to_string(),
+            },
+        },
+    ));
+
+    assert_eq!(response.status, ResponseStatus::Applied);
+
+    let ConnectorResult::Query(result) = response.result else {
+        panic!("expected query result");
+    };
+
+    let has_composite_unique = result.rows.iter().any(|row| {
+        let kind = String::from_utf8(row[2].clone()).expect("index kind should be utf8");
+        let fields = String::from_utf8(row[4].clone()).expect("fields should be utf8");
+        kind == "unique" && fields == "uni_id,form"
+    });
+
+    assert!(
+        has_composite_unique,
+        "show indexes should include composite unique index with fields uni_id,form"
+    );
+}
+
+#[test]
 fn connector_client_path_can_query_show_tables_without_simulation() {
     let unique_suffix = common::epoch_nanos!();
 

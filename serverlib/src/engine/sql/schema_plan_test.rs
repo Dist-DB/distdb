@@ -1,6 +1,6 @@
 
 use super::*;
-use crate::{FieldIndex, FieldType};
+use crate::{DatabaseIndexKind, FieldIndex, FieldType};
 
 #[test]
 fn create_table_schema_helper_maps_fields() {
@@ -256,6 +256,38 @@ fn create_table_schema_does_not_mark_composite_unique_columns_as_individually_un
         .as_ref()
         .map(|metadata| metadata.unique)
         .unwrap_or(false));
+}
+
+#[test]
+fn create_table_plan_captures_composite_unique_index_definition() {
+    let plan = create_table_plan_from_statement(
+        "create table places (uid bigint primary key, uni_id bigint not null, form varchar(3) not null default '', unique key uq_uni_id_form (uni_id, form))",
+    )
+    .expect("schema should parse");
+
+    assert!(plan
+        .composite_indexes
+        .iter()
+        .any(|(kind, fields)| {
+            *kind == DatabaseIndexKind::Unique
+                && fields == &vec!["uni_id".to_string(), "form".to_string()]
+        }));
+}
+
+#[test]
+fn create_table_plan_captures_composite_non_unique_index_definition() {
+    let plan = create_table_plan_from_statement(
+        "create table geo_points (uid bigint primary key, latitude double not null, longitude double not null, key idx_lat_lon (latitude, longitude))",
+    )
+    .expect("schema should parse");
+
+    assert!(plan
+        .composite_indexes
+        .iter()
+        .any(|(kind, fields)| {
+            *kind == DatabaseIndexKind::Indexed
+                && fields == &vec!["latitude".to_string(), "longitude".to_string()]
+        }));
 }
 
 #[test]

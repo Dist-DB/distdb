@@ -11,6 +11,7 @@ use crate::{
 
 use super::access::{
     build_relation_probe_index, collect_indexable_equality_filters_for_schema,
+    collect_indexable_in_list_filter_for_schema,
     collect_indexable_like_filter_for_schema, collect_indexable_range_filters_for_schema,
     field_has_single_column_index, load_live_rows_by_equality, materialize_relation_rows,
     plan_relation_access,
@@ -65,6 +66,9 @@ where
     let primary_like_filter = primary_condition
         .as_ref()
         .and_then(|condition| collect_indexable_like_filter_for_schema(primary_schema, condition));
+    let primary_in_list_filter = primary_condition
+        .as_ref()
+        .and_then(|condition| collect_indexable_in_list_filter_for_schema(primary_schema, condition));
     let primary_range_filters = primary_condition
         .as_ref()
         .map(|condition| collect_indexable_range_filters_for_schema(primary_schema, condition))
@@ -87,6 +91,7 @@ where
         scoped_primary_table,
         primary_allow_index_short_circuit,
         primary_filter_map,
+        primary_in_list_filter,
         primary_range_filters,
         primary_like_filter,
     );
@@ -144,6 +149,9 @@ where
         let right_like_filter = right_condition
             .as_ref()
             .and_then(|condition| collect_indexable_like_filter_for_schema(right_schema, condition));
+        let right_in_list_filter = right_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_in_list_filter_for_schema(right_schema, condition));
         let right_range_filters = right_condition
             .as_ref()
             .map(|condition| collect_indexable_range_filters_for_schema(right_schema, condition))
@@ -166,6 +174,7 @@ where
             scoped_right_table,
             right_allow_index_short_circuit,
             right_filter_map,
+            right_in_list_filter,
             right_range_filters,
             right_like_filter,
         );

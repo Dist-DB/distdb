@@ -2351,12 +2351,19 @@ fn explain_select_plan_lists_indexed_equality_filters_for_equality_probe() {
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][1], b"equality_probe".to_vec());
+    assert_eq!(result.columns[10].field_name, "planner_score");
+    assert_eq!(result.columns[11].field_name, "index_prioritization");
 
     let index_ids = String::from_utf8(result.rows[0][2].clone())
         .expect("index ids should be UTF-8 text");
 
     assert!(index_ids.contains("ind:places:display_name"));
     assert!(index_ids.contains("ind:places:country_code"));
+
+    let prioritization = String::from_utf8(result.rows[0][11].clone())
+        .expect("index prioritization should be UTF-8 text");
+    assert!(prioritization.contains("equality_probe"));
+    assert!(prioritization.contains("full_scan"));
 }
 
 #[test]

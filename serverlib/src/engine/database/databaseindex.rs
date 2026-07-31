@@ -262,5 +262,5 @@ impl DatabaseIndex {
 
 
 #[cfg(test)]
-#[path = "index_test.rs"]
+#[path = "databaseindex_test.rs"]
 mod tests;

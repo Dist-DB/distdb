@@ -616,7 +616,7 @@ fn remove_case_insensitive_word_outside_quotes(input: &str, word: &str) -> Strin
 
     let bytes = input.as_bytes();
     let word_bytes = word.as_bytes();
-    let mut output = String::with_capacity(input.len());
+    let mut output = Vec::<u8>::with_capacity(input.len());
 
     let mut index = 0usize;
     let mut in_single_quote = false;
@@ -625,7 +625,7 @@ fn remove_case_insensitive_word_outside_quotes(input: &str, word: &str) -> Strin
     let mut escape_next = false;
 
     while index < bytes.len() {
-        let current = bytes[index] as char;
+        let current = bytes[index];
 
         if (in_single_quote || in_double_quote) && escape_next {
             escape_next = false;
@@ -634,28 +634,28 @@ fn remove_case_insensitive_word_outside_quotes(input: &str, word: &str) -> Strin
             continue;
         }
 
-        if (in_single_quote || in_double_quote) && current == '\\' {
+        if (in_single_quote || in_double_quote) && current == b'\\' {
             escape_next = true;
             output.push(current);
             index += 1;
             continue;
         }
 
-        if !in_double_quote && !in_backtick_quote && current == '\'' {
+        if !in_double_quote && !in_backtick_quote && current == b'\'' {
             in_single_quote = !in_single_quote;
             output.push(current);
             index += 1;
             continue;
         }
 
-        if !in_single_quote && !in_backtick_quote && current == '"' {
+        if !in_single_quote && !in_backtick_quote && current == b'"' {
             in_double_quote = !in_double_quote;
             output.push(current);
             index += 1;
             continue;
         }
 
-        if !in_single_quote && !in_double_quote && current == '`' {
+        if !in_single_quote && !in_double_quote && current == b'`' {
             in_backtick_quote = !in_backtick_quote;
             output.push(current);
             index += 1;
@@ -684,7 +684,7 @@ fn remove_case_insensitive_word_outside_quotes(input: &str, word: &str) -> Strin
         index += 1;
     }
 
-    output
+    String::from_utf8(output).unwrap_or_else(|_| input.to_string())
 }
 
 fn is_identifier_byte(ch: u8) -> bool {

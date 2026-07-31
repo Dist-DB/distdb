@@ -2,6 +2,11 @@ use crate::{
     DatabaseIndex, DatabaseTable, FieldDef, FieldIndex, FieldType, RelationAccessPlan,
     RelationAccessStrategy, RuntimeIndexStore, SelectCondition,
     SelectJoinKind, SelectPredicate, SelectProjectionItem, SelectReadPlan, SelectRelation,
+    collect_indexable_equality_filters_for_schema,
+    collect_indexable_in_list_filter_for_schema,
+    collect_indexable_like_filter_for_schema,
+    collect_indexable_range_filters_for_schema,
+    relation_access_plan_diagnostics,
 };
 
 use crate::engine::execution::{
@@ -109,6 +114,24 @@ pub fn explain_select_plan_result(
             default_value: None,
             metadata: None,
         },
+        FieldDef {
+            seqno: 11,
+            field_name: "planner_score".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 12,
+            field_name: "index_prioritization".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
     ];
 
     let advice = advise_select_execution(read_plan);
@@ -150,6 +173,8 @@ pub fn explain_select_plan_result(
 
                 Some(RelationAccessStrategy::EqualityProbe { .. })      => "equality_probe",
 
+                Some(RelationAccessStrategy::InListProbe { .. })        => "in_list_probe",
+
                 Some(RelationAccessStrategy::PrefixLikeProbe { .. })    => "prefix_like_probe",
 
                 Some(RelationAccessStrategy::StringLikeProbe { .. })    => "string_like_probe",
@@ -178,6 +203,7 @@ pub fn explain_select_plan_result(
         && matches!(
             access_plan.map(|plan| &plan.strategy),
             Some(RelationAccessStrategy::EqualityProbe { .. })
+                | Some(RelationAccessStrategy::InListProbe { .. })
         )
         && let (Some(table), Some(condition)) = (table, read_plan.where_condition.as_ref())
     {
@@ -185,6 +211,90 @@ pub fn explain_select_plan_result(
         if !indexed_ids.is_empty() {
             index_id = indexed_ids.join(",");
         }
+    }
+
+    let (planner_score, index_prioritization, chosen_index_hint) = if let Some(table) = table {
+
+        let schema = &table.schema;
+        let mut index_filter_map = std::collections::HashMap::new();
+        let range_filters = read_plan
+            .where_condition
+            .as_ref()
+            .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
+            .unwrap_or_default();
+        let in_list_filter = read_plan
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_in_list_filter_for_schema(schema, condition));
+        let like_filter = read_plan
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+
+        let allow_index_short_circuit = read_plan
+            .where_condition
+            .as_ref()
+            .map(|condition| {
+                collect_indexable_equality_filters_for_schema(
+                    schema,
+                    condition,
+                    &mut index_filter_map,
+                )
+            })
+            .unwrap_or(true);
+
+        let diagnostics = relation_access_plan_diagnostics(
+            table,
+            allow_index_short_circuit,
+            index_filter_map,
+            in_list_filter,
+            range_filters,
+            like_filter,
+        );
+
+        let prioritization = diagnostics
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(position, candidate)| {
+                let index_text = if candidate.index_hint.is_empty() {
+                    "-".to_string()
+                } else {
+                    candidate.index_hint.clone()
+                };
+
+                format!(
+                    "{}.{}(score={},index={},reason={})",
+                    position + 1,
+                    candidate.access_path,
+                    candidate.score,
+                    index_text,
+                    candidate.reason,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" > ");
+
+        let chosen_index_hint = diagnostics
+            .candidates
+            .first()
+            .map(|candidate| candidate.index_hint.clone())
+            .unwrap_or_default();
+
+        (
+            diagnostics.chosen_score.to_string(),
+            prioritization,
+            chosen_index_hint,
+        )
+
+    } else {
+
+        ("n/a".to_string(), "n/a".to_string(), String::new())
+
+    };
+
+    if index_id.is_empty() && !chosen_index_hint.is_empty() {
+        index_id = chosen_index_hint;
     }
 
     let rows = vec![vec![
@@ -198,6 +308,8 @@ pub fn explain_select_plan_result(
         advice.score.to_string().into_bytes(),
         advice.execution_mode.as_bytes().to_vec(),
         advice.reasons.into_bytes(),
+        planner_score.into_bytes(),
+        index_prioritization.into_bytes(),
     ]];
 
     SelectExecutionResult { columns, rows }

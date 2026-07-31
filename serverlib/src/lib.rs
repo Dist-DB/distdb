@@ -117,6 +117,7 @@ pub use engine::execution::{
 	build_joined_row_tuples, build_relation_probe_index, choose_index_lookup,
 	collect_indexable_equality_filters, compare_row_value, count_condition_predicates,
 	collect_indexable_equality_filters_for_schema,
+	collect_indexable_in_list_filter_for_schema,
 	collect_indexable_prefix_like_filter_for_schema,
 	collect_indexable_like_filter_for_schema,
 	collect_indexable_range_filters_for_schema,
@@ -154,9 +155,11 @@ pub use engine::execution::{
 	ScopedEphemeralTableHandle, ScopedEphemeralTableScope,
 	SqlCursorFrame, SqlCursorSource, VecSqlCursorSource,
 	EqualityProbeSource,
+	RelationAccessCandidateDiagnostic, RelationAccessPlanDiagnostics,
 	JoinedRowCandidateProvider, JoinedRowMember, JoinedRowTuple, MaterializedRelationRow,
 		RelationAccessPlan, RelationAccessStrategy, SelectExecutionResult, show_databases_result,
 		show_indexes_result, show_privileges_result, show_tables_result, show_variables_result,
+	relation_access_plan_diagnostics,
 };
 
 pub use engine::database::table::schema::{FieldDef, FieldType, SchemaError, SchemaResult, TableSchema};

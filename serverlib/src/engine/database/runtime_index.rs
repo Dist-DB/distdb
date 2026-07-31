@@ -1322,16 +1322,30 @@ impl RuntimeIndexStore {
             return Ok(());
         }
 
-        persist_runtime_index_snapshot(
-            self,
-            &data_dir,
-            table,
-            table_stream_id,
-            latest_tx_id,
-            live_row_count,
-            wal_fingerprint,
-            &tracked_indexes,
-        )?;
+        let snapshot_store = runtime_index_store_for_table(self, table_stream_id, &tracked_indexes);
+        let table_owned = table.clone();
+        let table_stream_id_owned = table_stream_id.to_string();
+        let data_dir_owned = data_dir.clone();
+        let tracked_indexes_owned = tracked_indexes.clone();
+
+        std::thread::spawn(move || {
+            if let Err(err) = persist_runtime_index_snapshot(
+                &snapshot_store,
+                &data_dir_owned,
+                &table_owned,
+                &table_stream_id_owned,
+                latest_tx_id,
+                live_row_count,
+                wal_fingerprint,
+                &tracked_indexes_owned,
+            ) {
+                log::warn!(
+                    "runtime index snapshot save skipped table={} reason={}",
+                    table_owned.table_id,
+                    err,
+                );
+            }
+        });
 
         self.incremental_persist_last_saved_ms
             .insert(table_stream_id.to_string(), now_ms);
@@ -1339,6 +1353,37 @@ impl RuntimeIndexStore {
         Ok(())
 
     }
+
+}
+
+fn runtime_index_store_for_table(
+    store: &RuntimeIndexStore,
+    table_stream_id: &str,
+    tracked_indexes: &[DatabaseIndex],
+) -> RuntimeIndexStore {
+
+    let mut scoped = RuntimeIndexStore {
+        indexes: AHashMap::new(),
+        materialize_non_primary: store.materialize_non_primary,
+        non_primary_field_allowlist: store.non_primary_field_allowlist.clone(),
+        non_primary_index_allowlist: store.non_primary_index_allowlist.clone(),
+        incremental_persist_last_saved_ms: AHashMap::new(),
+    };
+
+    for index in tracked_indexes {
+        let scoped_id = scoped_index_id(table_stream_id, &index.index_id.0);
+
+        if let Some(state) = store.index_for_table(table_stream_id, &index.index_id.0) {
+            scoped.indexes.insert(scoped_id, state.clone());
+            continue;
+        }
+
+        if let Some(state) = store.index(&index.index_id.0) {
+            scoped.indexes.insert(scoped_id, state.clone());
+        }
+    }
+
+    scoped
 
 }
 

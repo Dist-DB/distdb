@@ -21,6 +21,7 @@ use crate::engine::sql::SelectExpression;
 
 use super::{
     build_joined_row_tuples, collect_indexable_equality_filters_for_schema,
+    collect_indexable_in_list_filter_for_schema,
     collect_indexable_like_filter_for_schema, collect_indexable_range_filters_for_schema,
     materialize_relation_rows,
     plan_relation_access, relation_qualifier, row_matches_condition_with_result_and_expression,
@@ -174,6 +175,10 @@ fn collect_subquery_exists_with_outer(
             .as_ref()
             .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
             .unwrap_or_default();
+        let in_list_filter = subquery
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_in_list_filter_for_schema(schema, condition));
         let like_filter = subquery
             .where_condition
             .as_ref()
@@ -194,6 +199,7 @@ fn collect_subquery_exists_with_outer(
             scoped_table,
             allow_index_short_circuit,
             index_filter_map,
+            in_list_filter,
             range_filters,
             like_filter,
         );
@@ -326,6 +332,10 @@ fn collect_subquery_projection_values_with_outer(
             .as_ref()
             .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
             .unwrap_or_default();
+        let in_list_filter = subquery
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_in_list_filter_for_schema(schema, condition));
 
         let like_filter = subquery
             .where_condition
@@ -348,6 +358,7 @@ fn collect_subquery_projection_values_with_outer(
             scoped_table,
             allow_index_short_circuit,
             index_filter_map,
+            in_list_filter,
             range_filters,
             like_filter,
         );
@@ -457,6 +468,10 @@ fn collect_subquery_scalar_value_with_outer(
             .as_ref()
             .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
             .unwrap_or_default();
+        let in_list_filter = subquery
+            .where_condition
+            .as_ref()
+            .and_then(|condition| collect_indexable_in_list_filter_for_schema(schema, condition));
         let like_filter = subquery
             .where_condition
             .as_ref()
@@ -477,6 +492,7 @@ fn collect_subquery_scalar_value_with_outer(
             &table,
             allow_index_short_circuit,
             index_filter_map,
+            in_list_filter,
             range_filters,
             like_filter,
         );
@@ -642,6 +658,10 @@ where
         .as_ref()
         .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
         .unwrap_or_default();
+    let in_list_filter = read_plan
+        .where_condition
+        .as_ref()
+        .and_then(|condition| collect_indexable_in_list_filter_for_schema(schema, condition));
     let like_filter = read_plan
         .where_condition
         .as_ref()
@@ -662,6 +682,7 @@ where
         scoped_table,
         allow_index_short_circuit,
         index_filter_map,
+        in_list_filter,
         range_filters,
         like_filter,
     );

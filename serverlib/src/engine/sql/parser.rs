@@ -396,7 +396,7 @@ fn normalize_mysql_compat_hints(sql: &str) -> String {
 fn strip_optimizer_hint_comments(sql: &str) -> String {
 
     let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
+    let mut out = Vec::<u8>::with_capacity(sql.len());
     let mut i = 0usize;
     let mut in_single = false;
     let mut in_double = false;
@@ -423,7 +423,7 @@ fn strip_optimizer_hint_comments(sql: &str) -> String {
                 i += 2;
             }
 
-            out.push(' ');
+            out.push(b' ');
             continue;
         }
 
@@ -434,19 +434,19 @@ fn strip_optimizer_hint_comments(sql: &str) -> String {
             _ => {}
         }
 
-        out.push(byte as char);
+        out.push(byte);
         i += 1;
     
     }
 
-    out
+    String::from_utf8(out).unwrap_or_else(|_| sql.to_string())
 
 }
 
 fn strip_table_index_hints(sql: &str) -> String {
 
     let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
+    let mut out = Vec::<u8>::with_capacity(sql.len());
     let mut i = 0usize;
     let mut in_single = false;
     let mut in_double = false;
@@ -462,7 +462,7 @@ fn strip_table_index_hints(sql: &str) -> String {
             && byte.is_ascii_whitespace()
             && let Some(end) = consume_table_index_hint(bytes, i)
         {
-            out.push(' ');
+            out.push(b' ');
             i = end;
             continue;
         }
@@ -474,13 +474,34 @@ fn strip_table_index_hints(sql: &str) -> String {
             _ => {}
         }
 
-        out.push(byte as char);
+        out.push(byte);
         i += 1;
 
     }
 
-    out
+    String::from_utf8(out).unwrap_or_else(|_| sql.to_string())
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{strip_optimizer_hint_comments, strip_table_index_hints};
+
+    #[test]
+    fn strip_optimizer_hints_preserves_utf8_literals() {
+        let sql = "select /*+ NO_BKA(t) */ 'H\u{00f6}henberg' as n";
+        let normalized = strip_optimizer_hint_comments(sql);
+        assert!(normalized.contains("H\u{00f6}henberg"));
+        assert!(!normalized.contains("/*+"));
+    }
+
+    #[test]
+    fn strip_index_hints_preserves_utf8_literals() {
+        let sql = "select 'Bocklem\u{00fc}nd' from places use index (idx_name)";
+        let normalized = strip_table_index_hints(sql);
+        assert!(normalized.contains("Bocklem\u{00fc}nd"));
+        assert!(!normalized.to_ascii_lowercase().contains("use index"));
+    }
 }
 
 fn consume_table_index_hint(bytes: &[u8], start: usize) -> Option<usize> {

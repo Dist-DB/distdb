@@ -25,7 +25,19 @@ use super::MaterializedRelationRow;
 
 type LiveRowCountTableMap = HashMap<String, (u64, usize)>;
 type LiveRowCountScopeMap = HashMap<usize, LiveRowCountTableMap>;
-pub type RangeFilterBounds = (String, Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeBound {
+    pub value: Vec<u8>,
+    pub inclusive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeFilterBounds {
+    pub field_name: String,
+    pub lower_bound: Option<RangeBound>,
+    pub upper_bound: Option<RangeBound>,
+}
 
 static LIVE_ROW_COUNT_CACHE: OnceLock<Mutex<LiveRowCountScopeMap>> =
     OnceLock::new();
@@ -1290,6 +1302,12 @@ pub enum RelationAccessStrategy {
         index_id: String,
         lookup_key: Vec<Vec<u8>>,
     },
+
+    InListProbe {
+        field_name: String,
+        lookup_values: Vec<Vec<u8>>,
+        source: EqualityProbeSource,
+    },
     
     EqualityProbe {
         field_name: String,
@@ -1300,8 +1318,8 @@ pub enum RelationAccessStrategy {
 
     RangeProbe {
         field_name: String,
-        lower_bound: Option<(Vec<u8>, bool)>,
-        upper_bound: Option<(Vec<u8>, bool)>,
+        lower_bound: Option<RangeBound>,
+        upper_bound: Option<RangeBound>,
         source: EqualityProbeSource,
     },
 
@@ -1325,6 +1343,102 @@ pub enum RelationAccessStrategy {
 
 }
 
+pub fn collect_indexable_in_list_filter_for_schema(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+) -> Option<(String, Vec<Vec<u8>>)> {
+
+    let mut in_list_filter: Option<(String, Vec<Vec<u8>>)> = None;
+
+    if collect_indexable_in_list_filter_into(schema, condition, &mut in_list_filter) {
+        in_list_filter
+    } else {
+        None
+    }
+
+}
+
+fn collect_indexable_in_list_filter_into(
+    schema: &TableSchema,
+    condition: &SelectCondition,
+    in_list_filter: &mut Option<(String, Vec<Vec<u8>>)>,
+) -> bool {
+
+    match condition {
+
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| collect_indexable_in_list_filter_into(schema, child, in_list_filter)),
+
+        SelectCondition::Predicate(SelectPredicate::InList {
+            field_name,
+            values,
+            negated,
+        }) => {
+
+            if *negated || values.is_empty() {
+                return true;
+            }
+
+            let resolved_field_name = if schema.field(field_name).is_some() {
+                field_name.clone()
+            } else {
+                field_name
+                    .rsplit('.')
+                    .next()
+                    .filter(|candidate| schema.field(candidate).is_some())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| field_name.clone())
+            };
+
+            let normalized_values = schema
+                .field(&resolved_field_name)
+                .map(|field| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            convert_value_to_field_type(
+                                value,
+                                &field.field_type,
+                                TypeConversionPolicy::Safe,
+                            )
+                            .unwrap_or_else(|_| value.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| values.clone());
+
+            if normalized_values.is_empty() {
+                return true;
+            }
+
+            if let Some((existing_field, existing_values)) = in_list_filter {
+                if *existing_field != resolved_field_name {
+                    return false;
+                }
+
+                for value in normalized_values {
+                    if !existing_values.iter().any(|candidate| candidate == &value) {
+                        existing_values.push(value);
+                    }
+                }
+
+                true
+            } else {
+                *in_list_filter = Some((resolved_field_name, normalized_values));
+                true
+            }
+        },
+
+        SelectCondition::Predicate(_) => true,
+
+        SelectCondition::Or(_) |
+        SelectCondition::Not(_) => false,
+
+    }
+
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum EqualityProbeSource {
     ExistingIndex,
@@ -1334,6 +1448,21 @@ pub enum EqualityProbeSource {
 #[derive(Debug, Clone)]
 pub struct RelationAccessPlan {
     pub strategy: RelationAccessStrategy,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationAccessCandidateDiagnostic {
+    pub access_path: String,
+    pub score: u32,
+    pub index_hint: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationAccessPlanDiagnostics {
+    pub chosen_access_path: String,
+    pub chosen_score: u32,
+    pub candidates: Vec<RelationAccessCandidateDiagnostic>,
 }
 
 impl RelationAccessPlan {
@@ -1372,6 +1501,37 @@ impl RelationAccessPlan {
 
         Some(source)
     }
+
+}
+
+fn rows_for_field_in_list(
+    entry: &EqualityTableCacheEntry,
+    field_name: &str,
+    lookup_values: &[Vec<u8>],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    let Some(row_ids_by_value) = entry.row_ids_by_field_value.get(field_name) else {
+        return Vec::new();
+    };
+
+    let mut seen = AHashSet::new();
+    let mut out = Vec::new();
+
+    for lookup_value in lookup_values {
+        let Some(row_ids) = row_ids_by_value.get(lookup_value.as_slice()) else {
+            continue;
+        };
+
+        for row_id in row_ids {
+            if seen.insert(*row_id)
+                && let Some(row_map) = entry.rows_by_id.get(row_id).cloned()
+            {
+                out.push((*row_id, row_map));
+            }
+        }
+    }
+
+    out
 
 }
 
@@ -1428,6 +1588,66 @@ pub fn collect_indexable_equality_filters_for_schema(
 
 }
 
+pub fn load_live_rows_by_in_list(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    lookup_values: &[Vec<u8>],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if lookup_values.is_empty() {
+        return Vec::new();
+    }
+
+    let cache_scope_id = wal.cache_scope_id();
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock()
+        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
+        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
+    {
+        ensure_field_postings(entry, field_name);
+        return rows_for_field_in_list(entry, field_name, lookup_values);
+    }
+
+    let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+    );
+
+    if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
+
+        let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
+        ensure_field_postings(&mut entry, field_name);
+        let result = rows_for_field_in_list(&entry, field_name, lookup_values);
+
+        if let Ok(mut cache_guard) = cache.lock() {
+            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
+        }
+
+        return result;
+    }
+
+    let entry = build_cold_accessor_cache_entry(
+        latest_tx_id,
+        live_rows,
+        &[field_name.to_string()],
+    );
+
+    let result = rows_for_field_in_list(&entry, field_name, lookup_values);
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
+    }
+
+    result
+
+}
+
 pub fn collect_indexable_prefix_like_filter_for_schema(
     schema: &TableSchema,
     condition: &SelectCondition,
@@ -1464,7 +1684,7 @@ pub fn collect_indexable_range_filters_for_schema(
 
 ) -> Vec<RangeFilterBounds> {
 
-    let mut range_filters: HashMap<String, (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>)> =
+    let mut range_filters: HashMap<String, (Option<RangeBound>, Option<RangeBound>)> =
         HashMap::new();
 
     if !collect_indexable_range_filter_into(schema, condition, &mut range_filters) {
@@ -1477,12 +1697,16 @@ pub fn collect_indexable_range_filters_for_schema(
             if lower_bound.is_none() && upper_bound.is_none() {
                 None
             } else {
-                Some((field_name, lower_bound, upper_bound))
+                Some(RangeFilterBounds {
+                    field_name,
+                    lower_bound,
+                    upper_bound,
+                })
             }
         })
         .collect::<Vec<_>>();
 
-    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result.sort_by(|a, b| a.field_name.cmp(&b.field_name));
     result
 
 }
@@ -1501,7 +1725,7 @@ pub fn collect_indexable_range_filter_for_schema(
 fn collect_indexable_range_filter_into(
     schema: &TableSchema,
     condition: &SelectCondition,
-    range_filters: &mut HashMap<String, (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>)>,
+    range_filters: &mut HashMap<String, (Option<RangeBound>, Option<RangeBound>)>,
 ) -> bool {
 
     match condition {
@@ -1566,7 +1790,7 @@ fn collect_indexable_range_filter_into(
 }
 
 fn merge_range_probe(
-    slot: &mut HashMap<String, (Option<(Vec<u8>, bool)>, Option<(Vec<u8>, bool)>)>,
+    slot: &mut HashMap<String, (Option<RangeBound>, Option<RangeBound>)>,
     field_name: String,
     value: Vec<u8>,
     is_lower: bool,
@@ -1577,30 +1801,30 @@ fn merge_range_probe(
 
     if is_lower {
         match lower {
-            Some((existing_value, existing_inclusive)) => {
-                if compare_row_value(&value, existing_value, &SelectComparisonOp::Gt) {
-                    *existing_value = value;
-                    *existing_inclusive = inclusive;
-                } else if compare_row_value(&value, existing_value, &SelectComparisonOp::Eq) {
-                    *existing_inclusive = *existing_inclusive && inclusive;
+            Some(existing) => {
+                if compare_row_value(&value, &existing.value, &SelectComparisonOp::Gt) {
+                    existing.value = value;
+                    existing.inclusive = inclusive;
+                } else if compare_row_value(&value, &existing.value, &SelectComparisonOp::Eq) {
+                    existing.inclusive = existing.inclusive && inclusive;
                 }
             }
             None => {
-                *lower = Some((value, inclusive));
+                *lower = Some(RangeBound { value, inclusive });
             }
         }
     } else {
         match upper {
-            Some((existing_value, existing_inclusive)) => {
-                if compare_row_value(&value, existing_value, &SelectComparisonOp::Lt) {
-                    *existing_value = value;
-                    *existing_inclusive = inclusive;
-                } else if compare_row_value(&value, existing_value, &SelectComparisonOp::Eq) {
-                    *existing_inclusive = *existing_inclusive && inclusive;
+            Some(existing) => {
+                if compare_row_value(&value, &existing.value, &SelectComparisonOp::Lt) {
+                    existing.value = value;
+                    existing.inclusive = inclusive;
+                } else if compare_row_value(&value, &existing.value, &SelectComparisonOp::Eq) {
+                    existing.inclusive = existing.inclusive && inclusive;
                 }
             }
             None => {
-                *upper = Some((value, inclusive));
+                *upper = Some(RangeBound { value, inclusive });
             }
         }
     }
@@ -2381,8 +2605,8 @@ pub fn load_live_rows_by_range(
     table_id: &str,
     schema: &TableSchema,
     field_name: &str,
-    lower_bound: Option<&(Vec<u8>, bool)>,
-    upper_bound: Option<&(Vec<u8>, bool)>,
+    lower_bound: Option<&RangeBound>,
+    upper_bound: Option<&RangeBound>,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     if lower_bound.is_none() && upper_bound.is_none() {
@@ -2459,8 +2683,8 @@ pub fn load_live_rows_by_range_intersection(
         && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
         && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
     {
-        for (field_name, _, _) in filters {
-            ensure_field_postings(entry, field_name);
+        for filter in filters {
+            ensure_field_postings(entry, &filter.field_name);
         }
         return rows_for_range_filters(entry, filters);
     }
@@ -2474,8 +2698,8 @@ pub fn load_live_rows_by_range_intersection(
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
         let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
-        for (field_name, _, _) in filters {
-            ensure_field_postings(&mut entry, field_name);
+        for filter in filters {
+            ensure_field_postings(&mut entry, &filter.field_name);
         }
 
         let result = rows_for_range_filters(&entry, filters);
@@ -2489,7 +2713,7 @@ pub fn load_live_rows_by_range_intersection(
 
     let warm_fields = filters
         .iter()
-        .map(|(field_name, _, _)| field_name.clone())
+        .map(|filter| filter.field_name.clone())
         .collect::<Vec<_>>();
 
     let entry = build_cold_accessor_cache_entry(
@@ -2585,8 +2809,8 @@ fn rows_for_field_prefix(
 fn rows_for_field_range(
     entry: &EqualityTableCacheEntry,
     field_name: &str,
-    lower_bound: Option<&(Vec<u8>, bool)>,
-    upper_bound: Option<&(Vec<u8>, bool)>,
+    lower_bound: Option<&RangeBound>,
+    upper_bound: Option<&RangeBound>,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     let Some(postings) = entry.row_ids_by_field_value.get(field_name) else {
@@ -2613,7 +2837,7 @@ fn rows_for_range_filters(
     filters: &[RangeFilterBounds],
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
-    let Some((anchor_field_name, anchor_lower_bound, anchor_upper_bound)) = filters.first() else {
+    let Some(anchor_filter) = filters.first() else {
         return entry
             .rows_by_id
             .iter()
@@ -2623,9 +2847,9 @@ fn rows_for_range_filters(
 
     let anchor_rows = rows_for_field_range(
         entry,
-        anchor_field_name,
-        anchor_lower_bound.as_ref(),
-        anchor_upper_bound.as_ref(),
+        &anchor_filter.field_name,
+        anchor_filter.lower_bound.as_ref(),
+        anchor_filter.upper_bound.as_ref(),
     );
 
     let diagnostics_enabled = range_intersection_diagnostics_enabled();
@@ -2635,8 +2859,8 @@ fn rows_for_range_filters(
         if diagnostics_enabled {
             log::info!(
                 "range intersection diagnostics: fields={} anchor_field={} anchor_rows={} output_rows={}",
-                anchor_field_name,
-                anchor_field_name,
+                anchor_filter.field_name,
+                anchor_filter.field_name,
                 anchor_row_count,
                 anchor_row_count,
             );
@@ -2649,14 +2873,14 @@ fn rows_for_range_filters(
     let filtered_rows = anchor_rows
         .into_iter()
         .filter(|(_, row_map)| {
-            remaining_filters.iter().all(|(field_name, lower_bound, upper_bound)| {
+            remaining_filters.iter().all(|filter| {
                 row_map
-                    .get(field_name)
+                    .get(&filter.field_name)
                     .map(|value| {
                         value_within_range(
                             value,
-                            lower_bound.as_ref(),
-                            upper_bound.as_ref(),
+                            filter.lower_bound.as_ref(),
+                            filter.upper_bound.as_ref(),
                         )
                     })
                     .unwrap_or(false)
@@ -2667,14 +2891,14 @@ fn rows_for_range_filters(
     if diagnostics_enabled {
         let field_list = filters
             .iter()
-            .map(|(field_name, _, _)| field_name.as_str())
+            .map(|filter| filter.field_name.as_str())
             .collect::<Vec<_>>()
             .join(",");
 
         log::info!(
             "range intersection diagnostics: fields={} anchor_field={} anchor_rows={} output_rows={}",
             field_list,
-            anchor_field_name,
+            anchor_filter.field_name,
             anchor_row_count,
             filtered_rows.len(),
         );
@@ -2686,30 +2910,30 @@ fn rows_for_range_filters(
 
 fn value_within_range(
     value: &[u8],
-    lower_bound: Option<&(Vec<u8>, bool)>,
-    upper_bound: Option<&(Vec<u8>, bool)>,
+    lower_bound: Option<&RangeBound>,
+    upper_bound: Option<&RangeBound>,
 ) -> bool {
 
-    if let Some((lower_value, inclusive)) = lower_bound {
-        let lower_op = if *inclusive {
+    if let Some(lower_bound) = lower_bound {
+        let lower_op = if lower_bound.inclusive {
             SelectComparisonOp::GtEq
         } else {
             SelectComparisonOp::Gt
         };
 
-        if !compare_row_value(value, lower_value, &lower_op) {
+        if !compare_row_value(value, &lower_bound.value, &lower_op) {
             return false;
         }
     }
 
-    if let Some((upper_value, inclusive)) = upper_bound {
-        let upper_op = if *inclusive {
+    if let Some(upper_bound) = upper_bound {
+        let upper_op = if upper_bound.inclusive {
             SelectComparisonOp::LtEq
         } else {
             SelectComparisonOp::Lt
         };
 
-        if !compare_row_value(value, upper_value, &upper_op) {
+        if !compare_row_value(value, &upper_bound.value, &upper_op) {
             return false;
         }
     }
@@ -2966,6 +3190,7 @@ pub fn plan_relation_access<T>(
     table: T,
     allow_index_short_circuit: bool,
     index_filter_map: HashMap<String, Vec<u8>>,
+    in_list_filter: Option<(String, Vec<Vec<u8>>)>,
     range_filters: Vec<RangeFilterBounds>,
     like_filter: Option<(String, Vec<u8>, bool)>,
 ) -> RelationAccessPlan
@@ -2974,74 +3199,222 @@ where
 {
 
     let table = table.borrow();
+    let candidates = collect_relation_access_candidates(
+        table,
+        allow_index_short_circuit,
+        &index_filter_map,
+        in_list_filter.as_ref(),
+        &range_filters,
+        like_filter.as_ref(),
+    );
 
-    if allow_index_short_circuit
-        && let Some((index, lookup_key)) = choose_index_lookup(table, &index_filter_map)
-        && runtime_index_lookup_allowed(index)
-    {
-        return RelationAccessPlan {
-            strategy: RelationAccessStrategy::RuntimeIndexLookup {
-                index_id: index.index_id.0.clone(),
-                lookup_key,
-            },
+    candidates
+        .first()
+        .map(|candidate| candidate.plan.clone())
+        .unwrap_or(RelationAccessPlan {
+            strategy: RelationAccessStrategy::FullScan,
+        })
+
+}
+
+pub fn relation_access_plan_diagnostics<T>(
+    table: T,
+    allow_index_short_circuit: bool,
+    index_filter_map: HashMap<String, Vec<u8>>,
+    in_list_filter: Option<(String, Vec<Vec<u8>>)>,
+    range_filters: Vec<RangeFilterBounds>,
+    like_filter: Option<(String, Vec<u8>, bool)>,
+) -> RelationAccessPlanDiagnostics
+where
+    T: Borrow<DatabaseTable>,
+{
+
+    let table = table.borrow();
+
+    let candidates = collect_relation_access_candidates(
+        table,
+        allow_index_short_circuit,
+        &index_filter_map,
+        in_list_filter.as_ref(),
+        &range_filters,
+        like_filter.as_ref(),
+    );
+
+    if candidates.is_empty() {
+        return RelationAccessPlanDiagnostics {
+            chosen_access_path: "full_scan".to_string(),
+            chosen_score: 0,
+            candidates: Vec::new(),
         };
     }
 
-    if let Some((field_name, lookup_value, source)) =
-        choose_equality_probe_filter(table, &index_filter_map)
+    let chosen = &candidates[0];
+    let serialized_candidates = candidates
+        .iter()
+        .map(|candidate| RelationAccessCandidateDiagnostic {
+            access_path: access_path_name(&candidate.plan.strategy).to_string(),
+            score: candidate.score,
+            index_hint: candidate.index_hint.clone(),
+            reason: candidate.reason.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    RelationAccessPlanDiagnostics {
+        chosen_access_path: access_path_name(&chosen.plan.strategy).to_string(),
+        chosen_score: chosen.score,
+        candidates: serialized_candidates,
+    }
+
+}
+
+#[derive(Debug, Clone)]
+struct ScoredRelationAccessCandidate {
+    score: u32,
+    rank: u8,
+    plan: RelationAccessPlan,
+    reason: String,
+    index_hint: String,
+}
+
+fn collect_relation_access_candidates(
+    table: &DatabaseTable,
+    allow_index_short_circuit: bool,
+    index_filter_map: &HashMap<String, Vec<u8>>,
+    in_list_filter: Option<&(String, Vec<Vec<u8>>)>,
+    range_filters: &[RangeFilterBounds],
+    like_filter: Option<&(String, Vec<u8>, bool)>,
+) -> Vec<ScoredRelationAccessCandidate> {
+
+    let mut candidates = Vec::new();
+
+    if allow_index_short_circuit
+        && let Some((index, lookup_key)) = choose_index_lookup(table, index_filter_map)
+        && runtime_index_lookup_allowed(index)
     {
-        return RelationAccessPlan {
-            strategy: RelationAccessStrategy::EqualityProbe {
-                field_name,
-                lookup_value,
-                source,
-                equality_filters: index_filter_map,
+        consider_relation_access_candidate(
+            &mut candidates,
+            RelationAccessPlan {
+                strategy: RelationAccessStrategy::RuntimeIndexLookup {
+                    index_id: index.index_id.0.clone(),
+                    lookup_key,
+                },
             },
+            score_runtime_index_lookup(index),
+            format!("runtime lookup for index {}", index.index_id.0),
+            index.index_id.0.clone(),
+        );
+    }
+
+    if let Some((field_name, lookup_value, source)) =
+        choose_equality_probe_filter(table, index_filter_map)
+    {
+        let index_hint = single_field_index_id(table, &field_name).unwrap_or_default();
+
+        consider_relation_access_candidate(
+            &mut candidates,
+            RelationAccessPlan {
+                strategy: RelationAccessStrategy::EqualityProbe {
+                    field_name,
+                    lookup_value,
+                    source,
+                    equality_filters: index_filter_map.clone(),
+                },
+            },
+            score_equality_probe(source, index_filter_map.len()),
+            match source {
+                EqualityProbeSource::ExistingIndex => "equality filter matched indexed field".to_string(),
+                EqualityProbeSource::TemporaryIndex => "equality filter requires temporary postings".to_string(),
+            },
+            index_hint,
+        );
+    }
+
+    if let Some((field_name, lookup_values)) = in_list_filter
+        && !lookup_values.is_empty()
+    {
+
+        let source = if field_has_single_column_index(table, field_name) {
+            EqualityProbeSource::ExistingIndex
+        } else {
+            EqualityProbeSource::TemporaryIndex
         };
 
+        let index_hint = single_field_index_id(table, field_name).unwrap_or_default();
+
+        consider_relation_access_candidate(
+            &mut candidates,
+            RelationAccessPlan {
+                strategy: RelationAccessStrategy::InListProbe {
+                    field_name: field_name.clone(),
+                    lookup_values: lookup_values.clone(),
+                    source,
+                },
+            },
+            score_in_list_probe(source, lookup_values.len()),
+            format!("IN-list on field '{}'", field_name),
+            index_hint,
+        );
     }
 
     if !range_filters.is_empty() {
 
         if range_filters.len() > 1 {
-            return RelationAccessPlan {
-                strategy: RelationAccessStrategy::RangeIntersectionProbe {
-                    filters: range_filters,
+            let range_indexes = range_filters
+                .iter()
+                .filter_map(|filter| single_field_index_id(table, &filter.field_name))
+                .collect::<Vec<_>>()
+                .join(",");
+
+            consider_relation_access_candidate(
+                &mut candidates,
+                RelationAccessPlan {
+                    strategy: RelationAccessStrategy::RangeIntersectionProbe {
+                        filters: range_filters.to_vec(),
+                    },
                 },
-            };
+                score_range_intersection_probe(table, range_filters),
+                "multiple range filters can be intersected".to_string(),
+                range_indexes,
+            );
         }
 
-        let (field_name, lower_bound, upper_bound) = range_filters
-            .into_iter()
-            .next()
-            .expect("range filters are checked as non-empty");
+        for range_filter in range_filters {
+            let source = if field_has_single_column_index(table, &range_filter.field_name) {
+                EqualityProbeSource::ExistingIndex
+            } else {
+                EqualityProbeSource::TemporaryIndex
+            };
 
-        let source = if field_has_single_column_index(table, &field_name) {
-            EqualityProbeSource::ExistingIndex
-        } else {
-            EqualityProbeSource::TemporaryIndex
-        };
+            let index_hint = single_field_index_id(table, &range_filter.field_name).unwrap_or_default();
 
-        return RelationAccessPlan {
-            strategy: RelationAccessStrategy::RangeProbe {
-                field_name,
-                lower_bound,
-                upper_bound,
-                source,
-            },
-        };
-
+            consider_relation_access_candidate(
+                &mut candidates,
+                RelationAccessPlan {
+                    strategy: RelationAccessStrategy::RangeProbe {
+                        field_name: range_filter.field_name.clone(),
+                        lower_bound: range_filter.lower_bound.clone(),
+                        upper_bound: range_filter.upper_bound.clone(),
+                        source,
+                    },
+                },
+                score_range_probe(source),
+                format!("range filter on field '{}'", range_filter.field_name),
+                index_hint,
+            );
+        }
     }
 
     if let Some((field_name, pattern, case_insensitive)) = like_filter {
 
-        let source = if field_has_single_column_index(table, &field_name) {
+        let source = if field_has_single_column_index(table, field_name) {
             EqualityProbeSource::ExistingIndex
         } else {
             EqualityProbeSource::TemporaryIndex
         };
 
-        if let Some(prefix) = simple_like_prefix(&pattern)
+        let index_hint = single_field_index_id(table, field_name).unwrap_or_default();
+
+        if let Some(prefix) = simple_like_prefix(pattern)
             .or_else(|| {
                 if pattern.iter().all(|ch| *ch != b'%' && *ch != b'_') {
                     Some(pattern.clone())
@@ -3050,29 +3423,211 @@ where
                 }
             })
         {
-            return RelationAccessPlan {
-                strategy: RelationAccessStrategy::PrefixLikeProbe {
-                    field_name,
-                    prefix,
-                    case_insensitive,
-                    source,
+            consider_relation_access_candidate(
+                &mut candidates,
+                RelationAccessPlan {
+                    strategy: RelationAccessStrategy::PrefixLikeProbe {
+                        field_name: field_name.clone(),
+                        prefix,
+                        case_insensitive: *case_insensitive,
+                        source,
+                    },
                 },
-            };
+                score_prefix_like_probe(source),
+                format!("LIKE predicate has indexable prefix on '{}'", field_name),
+                index_hint.clone(),
+            );
         }
 
-        return RelationAccessPlan {
-            strategy: RelationAccessStrategy::StringLikeProbe {
-                field_name,
-                pattern,
-                case_insensitive,
-                source,
+        consider_relation_access_candidate(
+            &mut candidates,
+            RelationAccessPlan {
+                strategy: RelationAccessStrategy::StringLikeProbe {
+                    field_name: field_name.clone(),
+                    pattern: pattern.clone(),
+                    case_insensitive: *case_insensitive,
+                    source,
+                },
             },
-        };
-
+            score_string_like_probe(source),
+            format!("LIKE predicate on field '{}'", field_name),
+            index_hint,
+        );
     }
 
-    RelationAccessPlan {
-        strategy: RelationAccessStrategy::FullScan,
+    consider_relation_access_candidate(
+        &mut candidates,
+        RelationAccessPlan {
+            strategy: RelationAccessStrategy::FullScan,
+        },
+        0,
+        "fallback when no candidate can beat scan".to_string(),
+        String::new(),
+    );
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.rank.cmp(&right.rank))
+            .then_with(|| access_path_name(&left.plan.strategy).cmp(access_path_name(&right.plan.strategy)))
+            .then_with(|| left.index_hint.cmp(&right.index_hint))
+    });
+
+    candidates
+
+}
+
+fn consider_relation_access_candidate(
+    candidates: &mut Vec<ScoredRelationAccessCandidate>,
+    plan: RelationAccessPlan,
+    score: u32,
+    reason: String,
+    index_hint: String,
+) {
+
+    let rank = relation_access_strategy_rank(&plan.strategy);
+
+    candidates.push(ScoredRelationAccessCandidate {
+        score,
+        rank,
+        plan,
+        reason,
+        index_hint,
+    });
+
+}
+
+fn access_path_name(strategy: &RelationAccessStrategy) -> &'static str {
+
+    match strategy {
+        RelationAccessStrategy::FullScan => "full_scan",
+        RelationAccessStrategy::EqualityProbe { .. } => "equality_probe",
+        RelationAccessStrategy::InListProbe { .. } => "in_list_probe",
+        RelationAccessStrategy::PrefixLikeProbe { .. } => "prefix_like_probe",
+        RelationAccessStrategy::StringLikeProbe { .. } => "string_like_probe",
+        RelationAccessStrategy::RangeProbe { .. } => "range_probe",
+        RelationAccessStrategy::RangeIntersectionProbe { .. } => "range_intersection_probe",
+        RelationAccessStrategy::RuntimeIndexLookup { .. } => "index_lookup_then_scan",
+    }
+
+}
+
+fn single_field_index_id(table: &DatabaseTable, field_name: &str) -> Option<String> {
+
+    table
+        .indexes
+        .values()
+        .filter(|index| {
+            (!index.field_names.is_empty()
+                && index.field_names.len() == 1
+                && index.field_names[0] == field_name)
+                || (index.field_names.is_empty() && index.field_name == field_name)
+        })
+        .map(|index| index.index_id.0.clone())
+        .min()
+
+}
+
+fn relation_access_strategy_rank(strategy: &RelationAccessStrategy) -> u8 {
+
+    match strategy {
+        RelationAccessStrategy::RuntimeIndexLookup { .. } => 0,
+        RelationAccessStrategy::EqualityProbe { .. } => 1,
+        RelationAccessStrategy::InListProbe { .. } => 2,
+        RelationAccessStrategy::RangeIntersectionProbe { .. } => 3,
+        RelationAccessStrategy::RangeProbe { .. } => 4,
+        RelationAccessStrategy::PrefixLikeProbe { .. } => 5,
+        RelationAccessStrategy::StringLikeProbe { .. } => 6,
+        RelationAccessStrategy::FullScan => 7,
+    }
+
+}
+
+fn score_runtime_index_lookup(index: &DatabaseIndex) -> u32 {
+
+    let base = if index.is_primary_key() {
+        1000
+    } else if index.is_unique_key() {
+        950
+    } else if index.is_relationship_driven() {
+        900
+    } else {
+        850
+    };
+
+    let width = if !index.field_names.is_empty() {
+        index.field_names.len() as u32
+    } else if !index.field_name.is_empty() {
+        1
+    } else {
+        0
+    };
+
+    base + width.saturating_mul(10)
+
+}
+
+fn score_equality_probe(source: EqualityProbeSource, filter_count: usize) -> u32 {
+
+    let base = match source {
+        EqualityProbeSource::ExistingIndex => 760,
+        EqualityProbeSource::TemporaryIndex => 620,
+    };
+
+    base + (filter_count.min(8) as u32).saturating_mul(20)
+
+}
+
+fn score_in_list_probe(source: EqualityProbeSource, value_count: usize) -> u32 {
+
+    let base = match source {
+        EqualityProbeSource::ExistingIndex => 710,
+        EqualityProbeSource::TemporaryIndex => 570,
+    };
+
+    let value_bonus = 120u32.saturating_sub(value_count.min(120) as u32);
+    base + value_bonus
+
+}
+
+fn score_range_probe(source: EqualityProbeSource) -> u32 {
+
+    match source {
+        EqualityProbeSource::ExistingIndex => 640,
+        EqualityProbeSource::TemporaryIndex => 510,
+    }
+
+}
+
+fn score_range_intersection_probe(
+    table: &DatabaseTable,
+    range_filters: &[RangeFilterBounds],
+) -> u32 {
+
+    let indexed_count = range_filters
+        .iter()
+        .filter(|filter| field_has_single_column_index(table, &filter.field_name))
+        .count() as u32;
+
+    660 + indexed_count.saturating_mul(35) + (range_filters.len() as u32).saturating_mul(10)
+
+}
+
+fn score_prefix_like_probe(source: EqualityProbeSource) -> u32 {
+
+    match source {
+        EqualityProbeSource::ExistingIndex => 560,
+        EqualityProbeSource::TemporaryIndex => 430,
+    }
+
+}
+
+fn score_string_like_probe(source: EqualityProbeSource) -> u32 {
+
+    match source {
+        EqualityProbeSource::ExistingIndex => 500,
+        EqualityProbeSource::TemporaryIndex => 370,
     }
 
 }
@@ -3208,6 +3763,34 @@ where
 
         },
 
+        RelationAccessStrategy::InListProbe {
+            field_name,
+            lookup_values,
+            source,
+        } => {
+
+            log::debug!(
+                "relation access table={} field={} strategy={} values={}",
+                table.table_id,
+                field_name,
+                match source {
+                    EqualityProbeSource::ExistingIndex => "existing_index",
+                    EqualityProbeSource::TemporaryIndex => "temporary_index",
+                },
+                lookup_values.len(),
+            );
+
+            load_live_rows_by_in_list(
+                wal,
+                table_stream_id,
+                &table.table_id,
+                schema,
+                field_name,
+                lookup_values,
+            )
+
+        },
+
         RelationAccessStrategy::RangeProbe {
             field_name,
             lower_bound,
@@ -3225,21 +3808,21 @@ where
                 },
                 lower_bound
                     .as_ref()
-                    .map(|(value, inclusive)| {
+                    .map(|bound| {
                         format!(
                             "{}{}",
-                            if *inclusive { ">=" } else { ">" },
-                            String::from_utf8_lossy(value),
+                            if bound.inclusive { ">=" } else { ">" },
+                            String::from_utf8_lossy(&bound.value),
                         )
                     })
                     .unwrap_or_else(|| "none".to_string()),
                 upper_bound
                     .as_ref()
-                    .map(|(value, inclusive)| {
+                    .map(|bound| {
                         format!(
                             "{}{}",
-                            if *inclusive { "<=" } else { "<" },
-                            String::from_utf8_lossy(value),
+                            if bound.inclusive { "<=" } else { "<" },
+                            String::from_utf8_lossy(&bound.value),
                         )
                     })
                     .unwrap_or_else(|| "none".to_string()),

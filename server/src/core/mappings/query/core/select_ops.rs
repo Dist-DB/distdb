@@ -86,6 +86,12 @@ pub(super) fn execute_select_plan_result(
             serverlib::collect_indexable_range_filters_for_schema(&schema, condition)
         })
         .unwrap_or_default();
+    let in_list_filter = read_plan
+        .where_condition
+        .as_ref()
+        .and_then(|condition| {
+            serverlib::collect_indexable_in_list_filter_for_schema(&schema, condition)
+        });
     let like_filter = read_plan
         .where_condition
         .as_ref()
@@ -109,6 +115,7 @@ pub(super) fn execute_select_plan_result(
         &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
+        in_list_filter,
         range_filters,
         like_filter,
     );
@@ -1901,6 +1908,12 @@ fn execute_select_read_plan_without_lock(
             serverlib::collect_indexable_range_filters_for_schema(&schema, condition)
         })
         .unwrap_or_default();
+    let in_list_filter = read_plan
+        .where_condition
+        .as_ref()
+        .and_then(|condition| {
+            serverlib::collect_indexable_in_list_filter_for_schema(&schema, condition)
+        });
 
     let like_filter = read_plan
         .where_condition
@@ -1925,6 +1938,7 @@ fn execute_select_read_plan_without_lock(
         &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
+        in_list_filter,
         range_filters,
         like_filter,
     );

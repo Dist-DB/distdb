@@ -1064,8 +1064,8 @@ fn index_lifecycle_replay_recreates_user_defined_index() {
 
     let index = DatabaseIndex::from_table_fields_with_origin(
         "users",
-        crate::engine::database::index::DatabaseIndexKind::Indexed,
-        crate::engine::database::index::DatabaseIndexOrigin::UserDefined,
+        crate::engine::database::databaseindex::DatabaseIndexKind::Indexed,
+        crate::engine::database::databaseindex::DatabaseIndexOrigin::UserDefined,
         None,
         vec!["email".to_string()],
     );

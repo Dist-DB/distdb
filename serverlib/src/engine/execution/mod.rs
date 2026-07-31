@@ -14,6 +14,7 @@ mod mutation_test;
 pub use access::{
     build_relation_probe_index, choose_index_lookup, collect_indexable_equality_filters,
     collect_indexable_equality_filters_for_schema,
+    collect_indexable_in_list_filter_for_schema,
     collect_indexable_like_filter_for_schema,
     collect_indexable_range_filters_for_schema,
     collect_indexable_range_filter_for_schema,
@@ -22,8 +23,9 @@ pub use access::{
     load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows,
     snapshot_equality_cache, restore_equality_cache_from_snapshot, EqualityTableCacheSnapshot,
     apply_equality_cache_row_mutation, apply_equality_cache_row_mutation_batch,
-    materialize_relation_rows, plan_relation_access, EqualityProbeSource,
-    RelationAccessPlan, RelationAccessStrategy,
+    materialize_relation_rows, plan_relation_access, relation_access_plan_diagnostics,
+    EqualityProbeSource, RelationAccessCandidateDiagnostic, RelationAccessPlan,
+    RelationAccessPlanDiagnostics, RelationAccessStrategy,
 };
 
 pub use join::build_joined_row_tuples;
