@@ -14,7 +14,7 @@ fn normalize_longitude_delta_degrees(delta: f64) -> f64 {
     (delta + 180.0).rem_euclid(360.0) - 180.0
 }
 
-// returns the distance between two points in meters given 2 points in the format, long, lat
+// returns the distance between two points in kilometers given 2 points in the format, long, lat
 
 impl InbuiltServerCommand for DistanceCommand {
 
@@ -44,8 +44,8 @@ impl InbuiltServerCommand for DistanceCommand {
             return Ok(None);
         };
 
-        // Great-circle distance in meters.
-        let earth_radius_m = 6_371.0_f64;
+        // Great-circle distance in kilometers.
+        let earth_radius_km = 6_371.0_f64;
 
         let lat1_rad = lat1.to_radians();
         let lat2_rad = lat2.to_radians();
@@ -61,7 +61,7 @@ impl InbuiltServerCommand for DistanceCommand {
 
         let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
 
-        Ok(float_result(earth_radius_m * c)) // result in kilometers
+        Ok(float_result(earth_radius_km * c))
         
     }
 

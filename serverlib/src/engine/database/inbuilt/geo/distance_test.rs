@@ -42,14 +42,14 @@ fn distance_returns_zero_for_identical_points() {
 }
 
 #[test]
-fn distance_returns_expected_meters_for_known_points() {
+fn distance_returns_expected_kilometers_for_known_points() {
     let value = evaluate_expression("distance(2.3522, 48.8566, -0.1276, 51.5074)")
         .expect("distance should return a value")
         .parse::<f64>()
         .expect("distance should be numeric");
 
-    // Paris -> London ~= 343.5 km (343,500 meters), allow tolerance.
-    assert!((value - 343_500.0).abs() < 6_000.0, "value was {value}");
+    // Paris -> London ~= 343.5 km, allow tolerance.
+    assert!((value - 343.5).abs() < 6.0, "value was {value}");
 }
 
 #[test]
@@ -60,5 +60,5 @@ fn distance_handles_antimeridian_crossing() {
         .expect("distance should be numeric");
 
     // Around 0.2 degrees on equator ~= 22.24km.
-    assert!((value - 22_239.0).abs() < 1_500.0, "value was {value}");
+    assert!((value - 22.239).abs() < 1.5, "value was {value}");
 }
