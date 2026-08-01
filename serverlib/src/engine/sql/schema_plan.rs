@@ -355,6 +355,7 @@ fn parse_modify_column_change_op(
 
 }
 
+#[expect(clippy::type_complexity, reason="this function returns multiple collections of indexed fields derived from table constraints")]
 fn derive_indexed_fields_from_constraints(
     constraints: &[TableConstraint],
 ) -> (

@@ -84,7 +84,7 @@ This is why internal projection shape can be wider than the client-visible resul
 ### CTEs
 
 - CTEs use scoped ephemeral materialization,
-- recursive CTEs are not supported yet,
+- recursive CTEs are supported in a first-pass frontier/rematerialization model with bounded execution safeguards,
 - materialized/not-materialized modifiers are not supported yet.
 
 ### Set queries
@@ -110,7 +110,7 @@ This is a deliberate tradeoff to keep first-pass semantics explicit.
 
 - full window-function runtime semantics,
 - `QUALIFY`,
-- locking clauses such as `FOR UPDATE` and `FOR SHARE`,
+- full MySQL lock-clause parity (`FOR UPDATE` / `FOR SHARE`) outside the currently implemented table-backed relation graph enforcement model,
 - full expression-ordering parity,
 - full MySQL type and collation precedence edge cases.
 

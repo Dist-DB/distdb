@@ -39,6 +39,7 @@ For design constraints and implementation ownership:
 
 - [architecture-boundaries.md](architecture-boundaries.md)
 - [select-architecture.md](select-architecture.md)
+- [indexor-vs-hashmap.md](indexor-vs-hashmap.md)
 - [at-rest-encryption.md](at-rest-encryption.md)
 - [consistency-isolation.md](consistency-isolation.md)
 - [node-failure-matrix.md](node-failure-matrix.md)
@@ -144,6 +145,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 
 - [architecture-boundaries.md](architecture-boundaries.md): ownership rules between `serverlib` and `server`.
 - [select-architecture.md](select-architecture.md): SELECT planning and execution decisions.
+- [indexor-vs-hashmap.md](indexor-vs-hashmap.md): when to use `DatabaseIndexor` instead of plain `HashMap` postings.
 - [at-rest-encryption.md](at-rest-encryption.md): current at-rest encryption direction and constraints.
 - [consistency-isolation.md](consistency-isolation.md): current beta-ready consistency and isolation contract.
 - [node-failure-matrix.md](node-failure-matrix.md): node/network failure expectations and evidence status.

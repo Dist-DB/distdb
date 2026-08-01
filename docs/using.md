@@ -215,7 +215,7 @@ call p_sync(1);
 - `IF / ELSEIF / ELSE / END IF` is supported.
 - searched and simple `CASE` control-flow forms are supported.
 - local routine bindings are checked before row/global structures during condition resolution.
-- invocation-scoped temporary resources are cleaned up after each call.
+- invocation-scoped temporary resources are cleaned up after each call and are not retained as catalog-visible temporary tables.
 
 ### Routine debug introspection
 
