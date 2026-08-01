@@ -210,18 +210,18 @@ pub fn release_scoped_ephemeral_table(
     if wal.stream_mode(&handle.stream_id) == WalStreamMode::Ephemeral {
         wal.clear_stream_records(&handle.stream_id)
             .map_err(|err| format!("scoped table release failed: {err}"))?;
+    }
 
-        if handle.stream_id != handle.table_id {
-            let _ = wal.delete_stream(&handle.table_id);
-        }
-    } else {
-        match catalog.drop_table(&handle.table_id) {
-            Ok(()) | Err(crate::DatabaseError::TableNotFound) => {}
-            Err(err) => return Err(format!("scoped table release failed: {err}")),
-        }
+    match catalog.drop_table(&handle.table_id) {
+        Ok(()) | Err(crate::DatabaseError::TableNotFound) => {}
+        Err(err) => return Err(format!("scoped table release failed: {err}")),
+    }
 
-        wal.delete_stream(&handle.stream_id)
-            .map_err(|err| format!("scoped table release failed: {err}"))?;
+    wal.delete_stream(&handle.stream_id)
+        .map_err(|err| format!("scoped table release failed: {err}"))?;
+
+    if handle.stream_id != handle.table_id {
+        let _ = wal.delete_stream(&handle.table_id);
     }
 
     handle.released = true;

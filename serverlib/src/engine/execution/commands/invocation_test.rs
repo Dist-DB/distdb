@@ -417,7 +417,7 @@ fn execute_stored_procedure_invocation_over_cursor_with_cleanup_runs_cleanup() {
 }
 
 #[test]
-fn execute_stored_procedure_invocation_with_scoped_teardown_preserves_owned_tables_for_reuse() {
+fn execute_stored_procedure_invocation_with_scoped_teardown_cleans_owned_tables() {
 
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
@@ -462,7 +462,7 @@ fn execute_stored_procedure_invocation_with_scoped_teardown_preserves_owned_tabl
     assert!(catalog
         .table_ids()
         .into_iter()
-        .any(|table_id| table_id.contains("tmp_users")));
+        .all(|table_id| !table_id.contains("tmp_users")));
 
 }
 

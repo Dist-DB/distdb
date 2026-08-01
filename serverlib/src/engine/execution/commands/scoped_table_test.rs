@@ -64,7 +64,7 @@ fn create_scoped_ephemeral_table_registers_table_and_marks_stream_ephemeral() {
 }
 
 #[test]
-fn release_scoped_ephemeral_table_clears_wal_and_preserves_temporary_table() {
+fn release_scoped_ephemeral_table_clears_wal_and_drops_temporary_table() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
     let wal = ConcurrentWalManager::new();
@@ -101,7 +101,7 @@ fn release_scoped_ephemeral_table_clears_wal_and_preserves_temporary_table() {
         .expect("scoped table should release");
 
     assert!(handle.released());
-    assert!(catalog.table("tmp_users").is_some_and(|table| table.is_temporary()));
+    assert!(catalog.table("tmp_users").is_none());
     assert!(wal.since(&stream_id, None).is_empty());
 }
 
@@ -128,7 +128,7 @@ fn release_scoped_ephemeral_table_is_idempotent() {
 }
 
 #[test]
-fn temporary_table_recreate_reuses_stream_identity_and_worker() {
+fn temporary_table_recreate_reuses_stream_identity_after_release() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
     let wal = ConcurrentWalManager::new();
