@@ -4424,7 +4424,7 @@ fn bootstrap_replays_security_change_password_from_wal() {
         unique_suffix
     ));
 
-    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
     let mut app = ServerApp::new(config).expect("server app should initialize");
 
     configure_bootstrap_crypto_context(app.node_id().to_string(), None);
@@ -4478,7 +4478,7 @@ fn bootstrap_acl_replay_prefers_latest_wal_snapshot_for_user() {
         unique_suffix
     ));
 
-    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
     let mut app = ServerApp::new(config).expect("server app should initialize");
 
     let mut old_acl = serverlib::AccountAclEntry::new(serverlib::UserId("alice".to_string()), "main");
@@ -4563,7 +4563,7 @@ fn bootstrap_replays_latest_schema_from_wal() {
         unique_suffix
     ));
 
-    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
     let mut app = ServerApp::new(config).expect("server app should initialize");
 
     let database_name = "schema_bootstrap";
@@ -4629,7 +4629,7 @@ fn bootstrap_replays_latest_schema_from_wal() {
         .get(&catalog.database_id.0)
         .expect("catalog should be loaded");
 
-    assert_eq!(loaded.table_schema("users"), Some(schema.clone()));
+    assert_eq!(loaded.table_schema("users"), Some(schema));
     assert_eq!(loaded.table_schema_revision("users"), Some(2));
     let email_index_id = DatabaseIndex::from_table_fields(
         "users",
@@ -4656,7 +4656,7 @@ fn bootstrap_replays_sql_definition_and_metadata_from_wal() {
         unique_suffix
     ));
 
-    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
     let mut app = ServerApp::new(config).expect("server app should initialize");
 
     let database_name = "sql_definition_bootstrap";
@@ -9074,7 +9074,7 @@ fn drop_database_query_removes_catalog() {
         unique_suffix
     ));
 
-    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root.clone());
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
 
     let mut app = ServerApp::new(config).expect("server app should initialize");
 

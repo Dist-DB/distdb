@@ -6305,7 +6305,7 @@ fn call_procedure_tears_down_scoped_temporary_tables() {
         .expect("procedure should register");
 
     let mut catalogs = HashMap::new();
-    catalogs.insert(db_id.clone(), catalog);
+    catalogs.insert(db_id, catalog);
 
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -6358,7 +6358,7 @@ fn call_procedure_temp_table_insert_and_select_returns_rows_and_cleans_up() {
         .expect("procedure should register");
 
     let mut catalogs = HashMap::new();
-    catalogs.insert(db_id.clone(), catalog);
+    catalogs.insert(db_id, catalog);
 
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -6468,7 +6468,7 @@ fn call_procedure_temp_table_ctas_geobox_returns_rows_and_cleans_up() {
         .expect("procedure should register");
 
     let mut catalogs = HashMap::new();
-    catalogs.insert(db_id.clone(), catalog);
+    catalogs.insert(db_id, catalog);
 
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -6603,7 +6603,7 @@ fn call_procedure_sp_placesnearby_shape_returns_rows() {
         .expect("sp_placesnearby should register");
 
     let mut catalogs = HashMap::new();
-    catalogs.insert(db_id.clone(), catalog);
+    catalogs.insert(db_id, catalog);
 
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -6736,7 +6736,7 @@ fn call_procedure_sp_placesnearby_two_step_insert_returns_rows() {
         .expect("sp_placesnearby should register");
 
     let mut catalogs = HashMap::new();
-    catalogs.insert(db_id.clone(), catalog);
+    catalogs.insert(db_id, catalog);
 
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -6861,7 +6861,7 @@ fn call_procedure_sp_placesnearby_two_step_insert_populates_temp_table() {
         .expect("probe procedure should register");
 
     let mut catalogs = HashMap::new();
-    catalogs.insert(db_id.clone(), catalog);
+    catalogs.insert(db_id, catalog);
 
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
@@ -7794,7 +7794,7 @@ fn append_row_payload_record_rejects_missing_refid() {
     let table = catalog
         .table("users")
         .expect("users table should exist")
-        .clone();
+        ;
 
     let mut row = HashMap::new();
     row.insert("id".to_string(), b"1".to_vec());
@@ -10998,7 +10998,7 @@ fn append_row_payload_record_rejects_stale_refid() {
     let table = catalog
         .table("users")
         .expect("users table should exist")
-        .clone();
+        ;
 
     let mut row = HashMap::new();
     row.insert("id".to_string(), b"1".to_vec());

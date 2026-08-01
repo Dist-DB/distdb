@@ -5,6 +5,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedEphemeralTableHandle {
     table_id: String,
+    stream_id: String,
     released: bool,
 }
 
@@ -118,10 +119,9 @@ pub fn make_scoped_ephemeral_table_id(
     let normalized_logical_table_id = common::normalize_identifier!(logical_table_id.into());
 
     format!(
-        "__scope_{}_{}_{}",
+        "__scope_{}_{}",
         normalized_scope_id,
         normalized_logical_table_id,
-        common::helpers::utils::unique_id(),
     )
 
 }
@@ -135,17 +135,63 @@ pub fn create_scoped_ephemeral_table(
 
     let normalized_table_id = common::normalize_identifier!(table_id.into());
 
+    if let Some(existing_table) = catalog.table(&normalized_table_id) {
+        if !existing_table.is_temporary() {
+            return Err(format!(
+                "scoped table create failed: table '{}' already exists and is not temporary",
+                normalized_table_id,
+            ));
+        }
+
+        if existing_table.schema != schema {
+            return Err(format!(
+                "scoped table create failed: temporary table '{}' schema mismatch",
+                normalized_table_id,
+            ));
+        }
+
+        let stream_id = catalog
+            .entity_wal_stream_id(&normalized_table_id)
+            .unwrap_or_else(|| normalized_table_id.clone());
+
+        if let Err(err) = wal.set_stream_mode(&stream_id, WalStreamMode::Ephemeral) {
+            return Err(format!("scoped table create failed: {err}"));
+        }
+
+        if stream_id != normalized_table_id {
+            let _ = wal.delete_stream(&normalized_table_id);
+        }
+
+        wal.clear_stream_records(&stream_id)
+            .map_err(|err| format!("scoped table create failed: {err}"))?;
+
+        return Ok(ScopedEphemeralTableHandle {
+            table_id: normalized_table_id,
+            stream_id,
+            released: false,
+        });
+    }
+
     catalog
         .create_temporary_table(normalized_table_id.clone(), schema)
         .map_err(|err| format!("scoped table create failed: {err}"))?;
 
-    if let Err(err) = wal.set_stream_mode(&normalized_table_id, WalStreamMode::Ephemeral) {
+    let stream_id = catalog
+        .entity_wal_stream_id(&normalized_table_id)
+        .unwrap_or_else(|| normalized_table_id.clone());
+
+    if let Err(err) = wal.set_stream_mode(&stream_id, WalStreamMode::Ephemeral) {
         let _ = catalog.drop_table(&normalized_table_id);
         return Err(format!("scoped table create failed: {err}"));
     }
 
+    if stream_id != normalized_table_id {
+        let _ = wal.delete_stream(&normalized_table_id);
+    }
+
     Ok(ScopedEphemeralTableHandle {
         table_id: normalized_table_id,
+        stream_id,
         released: false,
     })
 
@@ -161,13 +207,22 @@ pub fn release_scoped_ephemeral_table(
         return Ok(());
     }
 
-    match catalog.drop_table(&handle.table_id) {
-        Ok(()) | Err(crate::DatabaseError::TableNotFound) => {}
-        Err(err) => return Err(format!("scoped table release failed: {err}")),
-    }
+    if wal.stream_mode(&handle.stream_id) == WalStreamMode::Ephemeral {
+        wal.clear_stream_records(&handle.stream_id)
+            .map_err(|err| format!("scoped table release failed: {err}"))?;
 
-    wal.delete_stream(&handle.table_id)
-        .map_err(|err| format!("scoped table release failed: {err}"))?;
+        if handle.stream_id != handle.table_id {
+            let _ = wal.delete_stream(&handle.table_id);
+        }
+    } else {
+        match catalog.drop_table(&handle.table_id) {
+            Ok(()) | Err(crate::DatabaseError::TableNotFound) => {}
+            Err(err) => return Err(format!("scoped table release failed: {err}")),
+        }
+
+        wal.delete_stream(&handle.stream_id)
+            .map_err(|err| format!("scoped table release failed: {err}"))?;
+    }
 
     handle.released = true;
 

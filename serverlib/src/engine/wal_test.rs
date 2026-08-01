@@ -35,7 +35,7 @@ fn compact_keeps_latest_schema_metadata_and_appends_truncate_marker() {
     wal.append("users", make_record(5, TransactionKind::Delete, &actor))
         .expect("append should succeed");
 
-    wal.compact_stream_to_latest_schema_and_metadata("users", actor.clone(), 99)
+    wal.compact_stream_to_latest_schema_and_metadata("users", actor, 99)
         .expect("compact should succeed");
 
     let records = wal.since("users", None);
@@ -151,6 +151,40 @@ fn delete_stream_removes_in_memory_and_disk_state() {
 }
 
 #[test]
+fn clear_stream_records_clears_durable_disk_state() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-wal-clear-stream-{}-{}",
+        std::process::id(),
+        common::epoch_nanos!()
+    ));
+
+    std::fs::create_dir_all(&temp_root).expect("temp wal dir should be created");
+
+    let wal = ConcurrentWalManager::with_data_dir(temp_root.clone());
+    let actor = UserId::from_username("tester");
+
+    wal.append("users", make_record(1, TransactionKind::Insert, &actor))
+        .expect("append should succeed");
+
+    assert_eq!(wal.since("users", None).len(), 1);
+
+    wal.clear_stream_records("users")
+        .expect("clear stream should succeed");
+
+    // The stream should remain empty after re-hydration from disk.
+    assert!(wal.since("users", None).is_empty());
+
+    wal.append("users", make_record(2, TransactionKind::Insert, &actor))
+        .expect("append after clear should succeed");
+
+    let records = wal.since("users", None);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, TransactionId(2));
+
+    let _ = std::fs::remove_dir_all(temp_root);
+}
+
+#[test]
 fn in_memory_mode_appends_without_filesystem_backing() {
     let wal = ConcurrentWalManager::in_memory();
     let actor = UserId::from_username("tester");
@@ -177,6 +211,29 @@ fn stream_mode_defaults_to_durable_and_can_be_set_ephemeral() {
 
     assert_eq!(wal.stream_mode("users"), WalStreamMode::Ephemeral);
     assert!(!wal.is_stream_replicable("users"));
+}
+
+#[test]
+fn stream_mode_flip_after_activity_updates_replication_state() {
+    let wal = ConcurrentWalManager::new();
+    let actor = UserId::from_username("tester");
+
+    wal.append("users", make_record(1, TransactionKind::Insert, &actor))
+        .expect("append should succeed");
+
+    assert!(wal.is_stream_replicable("users"));
+
+    wal.set_stream_mode("users", WalStreamMode::Ephemeral)
+        .expect("setting stream mode should succeed");
+
+    assert_eq!(wal.stream_mode("users"), WalStreamMode::Ephemeral);
+    assert!(!wal.is_stream_replicable("users"));
+
+    wal.set_stream_mode("users", WalStreamMode::Durable)
+        .expect("setting stream mode should succeed");
+
+    assert_eq!(wal.stream_mode("users"), WalStreamMode::Durable);
+    assert!(wal.is_stream_replicable("users"));
 }
 
 #[test]

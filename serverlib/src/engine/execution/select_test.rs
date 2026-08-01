@@ -2317,7 +2317,7 @@ fn explain_select_plan_lists_indexed_equality_filters_for_equality_probe() {
     ]);
 
     catalog
-        .register_table("places", places_schema.clone())
+        .register_table("places", places_schema)
         .expect("places table should register");
 
     let table = catalog.table("places").expect("places table should exist");
@@ -3337,4 +3337,168 @@ fn execute_sql_function_with_lookup_supports_begin_set_return_body() {
 
     assert!(distance.is_finite());
     assert!(distance > 0.0);
+}
+
+#[test]
+fn udf_predicate_alignment_across_relation_and_join_where() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let places_schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("lon", 2, FieldType::Text, FieldIndex::None, false),
+        ("lat", 3, FieldType::Text, FieldIndex::None, false),
+    ]);
+
+    let visits_schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("place_id", 2, FieldType::UInt(64), FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("places", places_schema.clone())
+        .expect("places table should register");
+    catalog
+        .register_table("visits", visits_schema.clone())
+        .expect("visits table should register");
+
+    catalog
+        .register_stored_procedure(
+            "fndistance",
+            "create FUNCTION `fndistance`(lon1 DECIMAL(10,7), lat1 DECIMAL(10,7), lon2 DECIMAL(10,7), lat2 DECIMAL(10,7)) RETURNS decimal(15,7)\n            DETERMINISTIC\n        BEGIN\n        SET @dlat = (lat2-lat1) * 0.0174532925;\n        SET @dlon = (lon2-lon1) * 0.0174532925;\n        SET @lat1 = lat1 * 0.0174532925;\n        SET @lat2 = lat2 * 0.0174532925;\n        SET @a = SIN(@dlat/2) * SIN(@dlat/2) + SIN(@dlon/2) * SIN(@dlon/2) * COS(@lat1) * COS(@lat2);\n        SET @c = 2 * ATAN2(SQRT(@a), SQRT(1-@a));\n        SET @d = 6371 * @c;\n        RETURN @d;\n        END",
+            vec![],
+        )
+        .expect("function should register");
+
+    let actor = UserId("test-user".to_string());
+
+    let mut near_place = std::collections::HashMap::new();
+    near_place.insert("id".to_string(), b"1".to_vec());
+    near_place.insert("lon".to_string(), b"6.95".to_vec());
+    near_place.insert("lat".to_string(), b"50.93".to_vec());
+
+    let mut far_place = std::collections::HashMap::new();
+    far_place.insert("id".to_string(), b"2".to_vec());
+    far_place.insert("lon".to_string(), b"7.8".to_vec());
+    far_place.insert("lat".to_string(), b"51.3".to_vec());
+
+    wal.append(
+        "places",
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&places_schema, &near_place).expect("near place row should encode"),
+        ),
+    )
+    .expect("near place row should append");
+
+    wal.append(
+        "places",
+        TransactionRecord::with_payload(
+            TransactionId(2),
+            None,
+            None,
+            2,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&places_schema, &far_place).expect("far place row should encode"),
+        ),
+    )
+    .expect("far place row should append");
+
+    let mut visit_row = std::collections::HashMap::new();
+    visit_row.insert("id".to_string(), b"10".to_vec());
+    visit_row.insert("place_id".to_string(), b"1".to_vec());
+
+    wal.append(
+        "visits",
+        TransactionRecord::with_payload(
+            TransactionId(10),
+            None,
+            None,
+            10,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&visits_schema, &visit_row).expect("visit row should encode"),
+        ),
+    )
+    .expect("visit row should append");
+
+    let relation_plan = parse_select_read_plan_from_statement(
+        "select id from places where fndistance(lon, lat, 6.95, 50.93) < 5",
+    )
+    .expect("relation UDF plan should parse");
+
+    let relation = catalog
+        .table(&relation_plan.table_id)
+        .expect("places table should exist");
+    let relation_schema = catalog
+        .table_schema(&relation_plan.table_id)
+        .expect("places schema should exist");
+
+    let relation_result = execute_relation_select_plan(
+        &wal,
+        relation,
+        relation_schema,
+        &runtime_indexes,
+        &relation_plan,
+        &crate::RelationAccessPlan {
+            strategy: crate::RelationAccessStrategy::FullScan,
+        },
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("relation UDF select should execute");
+
+    assert_eq!(relation_result.rows.len(), 1);
+    assert_eq!(relation_result.rows[0][0], b"1".to_vec());
+
+    let join_plan = parse_select_read_plan_from_statement(
+        "select p.id from places p inner join visits v on p.id = v.place_id where fndistance(p.lon, p.lat, 6.95, 50.93) < 5",
+    )
+    .expect("join UDF plan should parse");
+
+    let join_result = execute_joined_select_plan(
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &join_plan,
+        &mut evaluate_inbuilt_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(
+                row_map,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+        &mut |row_tuple, nested_condition| {
+            row_matches_select_condition_result(
+                row_tuple,
+                nested_condition,
+                &catalog,
+                &wal,
+                &runtime_indexes,
+            )
+        },
+    )
+    .expect("join UDF select should execute");
+
+    assert_eq!(join_result.rows.len(), 1);
+    assert_eq!(join_result.rows[0][0], b"1".to_vec());
 }

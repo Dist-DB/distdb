@@ -1,1 +1,1 @@
-DISTDB_RANGE_INTERSECTION_DIAGNOSTICS=1 DISTDB_SELECT_STAGE_DIAGNOSTICS=1 RUST_LOG="info" RUST_BACKTRACE=1 cargo run datadir=./data -- wss=on
+RUST_LOG="info" RUST_BACKTRACE=1 cargo run datadir=./data -- wss=on

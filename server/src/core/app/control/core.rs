@@ -475,7 +475,7 @@ impl ServerApp {
             );
 
             let mut entry = AccountAclEntry::new(UserId(user_id.clone()), database_name.clone());
-            entry.database_id = database_name.clone();
+            entry.database_id.clone_from(&database_name);
 
             if let Err(err) = self.append_user_credential_change_record(
                 &database_name,
@@ -710,7 +710,7 @@ impl ServerApp {
                         AccountAclEntry::new(UserId(plan.grantee.clone()), database_name.clone())
                     });
 
-                entry.database_id = database_name.clone();
+                entry.database_id.clone_from(&database_name);
 
                 match plan.kind {
 
@@ -2159,7 +2159,7 @@ impl ServerApp {
             self.seed_sandbox_wal_from_source(&sandbox_catalogs, source_wal, &sandbox_wal)
                 .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
     
-            snapshot_runtime_indexes.clone()
+            snapshot_runtime_indexes
 
         };
 

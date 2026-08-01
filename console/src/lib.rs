@@ -1,7 +1,7 @@
 
 use connector::{
     ConnectorCommand, ConnectorRequest,
-    ConnectorResult, ConnectorError,
+    ConnectorResult, ConnectorError, ConnectorResponse,
     DataQuery, ResponseStatus, ConnectorTransport,
 };
 use peerlib::{
@@ -264,7 +264,10 @@ impl ConsoleSession {
                     },
                 );
 
-                self.runtime.transport().request(&probe_request)?;
+                let probe_response = self.runtime.transport().request(&probe_request)?;
+
+                validate_use_database_probe_response(&database, &probe_response)
+                    .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
 
                 self.current_database = Some(database);
 
@@ -1005,6 +1008,31 @@ impl ConsoleSession {
         for entry in &self.log_entries {
             log::info!("[{}] {}", entry.seqno, entry.message);
         }
+
+    }
+
+}
+
+fn validate_use_database_probe_response(
+    database: &str,
+    response: &ConnectorResponse,
+) -> Result<(), String> {
+
+    if response.status != ResponseStatus::Rejected {
+        return Ok(());
+    }
+
+    match &response.result {
+        ConnectorResult::Error(message) => Err(format!(
+            "database switch to '{}' rejected: {}",
+            database,
+            message,
+        )),
+
+        _ => Err(format!(
+            "database switch to '{}' rejected",
+            database,
+        )),
 
     }
 

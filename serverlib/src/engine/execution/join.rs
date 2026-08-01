@@ -138,6 +138,7 @@ where
             table_with_stream.entity_id = stream_id;
             table_with_stream
         });
+
         let scoped_right_table = scoped_right_table_owned.as_ref().unwrap_or(&right_table);
 
         let right_condition = pushdown_conditions
@@ -149,9 +150,11 @@ where
         let right_like_filter = right_condition
             .as_ref()
             .and_then(|condition| collect_indexable_like_filter_for_schema(right_schema, condition));
+
         let right_in_list_filter = right_condition
             .as_ref()
             .and_then(|condition| collect_indexable_in_list_filter_for_schema(right_schema, condition));
+
         let right_range_filters = right_condition
             .as_ref()
             .map(|condition| collect_indexable_range_filters_for_schema(right_schema, condition))
@@ -188,8 +191,34 @@ where
                 )
             },
         );
+
         let right_field_name = simple_join
             .map(|(_, right_join_field_name)| join_field_column_name(right_join_field_name));
+
+        let mut materialize_right_rows = || {
+            
+            materialize_relation_rows(
+                wal,
+                scoped_right_table,
+                right_schema,
+                runtime_indexes,
+                &right_access_plan,
+            )
+            .into_iter()
+            .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
+
+                if row_matches(&row_map, right_condition)? {
+                    acc.push(MaterializedRelationRow {
+                        row_id,
+                        row_map: Arc::new(row_map),
+                    });
+                }
+
+                Ok::<_, String>(acc)
+
+            })
+
+        };
 
         let right_rows = if matches!(join.kind, SelectJoinKind::Inner)
             && let Some((left_join_field_name, _)) = simple_join
@@ -211,16 +240,17 @@ where
             }
 
             if !left_join_keys.is_empty() && left_join_keys.len() <= INNER_JOIN_KEY_PROBE_MAX_DISTINCT_KEYS {
-                let right_table_stream_id = if scoped_right_table.entity_id.is_empty() {
-                    scoped_right_table.table_id.as_str()
-                } else if wal.data_dir_path().is_none()
-                    && wal
-                        .latest_transaction_id_if_loaded(&scoped_right_table.entity_id)
-                        .is_none()
-                    && wal
-                        .latest_transaction_id_if_loaded(&scoped_right_table.table_id)
-                        .is_some()
-                {
+                
+                let use_table_stream_id = scoped_right_table.entity_id.is_empty()
+                    || (wal.data_dir_path().is_none()
+                        && wal
+                            .latest_transaction_id_if_loaded(&scoped_right_table.entity_id)
+                            .is_none()
+                        && wal
+                            .latest_transaction_id_if_loaded(&scoped_right_table.table_id)
+                            .is_some());
+
+                let right_table_stream_id = if use_table_stream_id {
                     scoped_right_table.table_id.as_str()
                 } else {
                     scoped_right_table.entity_id.as_str()
@@ -230,9 +260,10 @@ where
                 let mut materialized = Vec::new();
 
                 for lookup_key in left_join_keys {
+                    
                     let rendered_lookup_key = render_stored_field_value(&lookup_key);
-
                     let mut probe_keys = vec![lookup_key];
+
                     if rendered_lookup_key != probe_keys[0] {
                         probe_keys.push(rendered_lookup_key);
                     }
@@ -243,12 +274,13 @@ where
                             &field.field_type,
                             TypeConversionPolicy::Safe,
                         )
-                        && !probe_keys.iter().any(|candidate| *candidate == normalized_probe_key)
+                        && !probe_keys.contains(&normalized_probe_key)
                     {
                         probe_keys.push(normalized_probe_key);
                     }
 
                     for probe_key in probe_keys {
+
                         for (row_id, row_map) in load_live_rows_by_equality(
                             wal,
                             right_table_stream_id,
@@ -268,7 +300,9 @@ where
                                 });
                             }
                         }
+                    
                     }
+
                 }
 
                 log::debug!(
@@ -281,48 +315,10 @@ where
 
                 materialized
             } else {
-                materialize_relation_rows(
-                    wal,
-                    scoped_right_table,
-                    right_schema,
-                    runtime_indexes,
-                    &right_access_plan,
-                )
-                .into_iter()
-                .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
-
-                    if row_matches(&row_map, right_condition)? {
-                        acc.push(MaterializedRelationRow {
-                            row_id,
-                            row_map: Arc::new(row_map),
-                        });
-                    }
-
-                    Ok::<_, String>(acc)
-
-                })?
+                materialize_right_rows()?
             }
         } else {
-            materialize_relation_rows(
-                wal,
-                scoped_right_table,
-                right_schema,
-                runtime_indexes,
-                &right_access_plan,
-            )
-            .into_iter()
-            .try_fold(Vec::new(), |mut acc, (row_id, row_map)| {
-
-                if row_matches(&row_map, right_condition)? {
-                    acc.push(MaterializedRelationRow {
-                        row_id,
-                        row_map: Arc::new(row_map),
-                    });
-                }
-
-                Ok::<_, String>(acc)
-
-            })?
+            materialize_right_rows()?
         };
 
         if matches!(join.kind, SelectJoinKind::Cross) {

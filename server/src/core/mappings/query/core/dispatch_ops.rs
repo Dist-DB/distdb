@@ -875,7 +875,6 @@ fn execute_call_stored_procedure(
     }
 
     let provider = local_entities.materialize_value_bindings();
-
     let invocation_result = serverlib::execute_stored_procedure_invocation(
         &provider,
         &procedure,

@@ -141,8 +141,8 @@ impl ServerApp {
 
         };
 
-        let mut sandbox_catalogs = snapshot_catalogs.clone();
-        let mut sandbox_indexes = snapshot_runtime_indexes.clone();
+        let mut sandbox_catalogs = snapshot_catalogs;
+        let mut sandbox_indexes = snapshot_runtime_indexes;
         let sandbox_wal = ConcurrentWalManager::new();
 
         if let Err(err) =

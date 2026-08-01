@@ -197,6 +197,17 @@ async fn finalize_service_message(
 
     session.mark_disconnect();
     rollback_active_session_transaction(app, p2p_runtime, local_node, &session.session_id).await;
+
+    let mut app_guard = app.write().await;
+    let cleaned_tables = app_guard.cleanup_scoped_temporary_tables_for_session(&session.session_id);
+    if cleaned_tables > 0 {
+        log::info!(
+            "session scoped temporary cleanup complete session_id={} tables_removed={}",
+            session.session_id,
+            cleaned_tables,
+        );
+    }
+
     Ok(())
 
 }
@@ -2022,9 +2033,7 @@ pub async fn handle_connector_stream(
                 err.kind(),
                 std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
             ) {
-                session.mark_disconnect();
-                rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                return Ok(());
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
             }
             
             rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
@@ -2099,9 +2108,7 @@ pub async fn handle_connector_stream(
             );
 
             session.mark_disconnect();
-            rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-            
-            return Ok(());
+            return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
 
         }
 

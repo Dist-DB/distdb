@@ -377,7 +377,7 @@ where
             Err(err) => {
                 let _ = source.close();
                 frame.diagnostics.closed = true;
-                frame.local_bindings = baseline_local_bindings.clone();
+                frame.local_bindings = baseline_local_bindings;
                 return Err(err);
             }
             
@@ -406,7 +406,7 @@ where
             Err(err) => {
                 let _ = source.close();
                 frame.diagnostics.closed = true;
-                frame.local_bindings = baseline_local_bindings.clone();
+                frame.local_bindings = baseline_local_bindings;
                 return Err(err);
             }
 

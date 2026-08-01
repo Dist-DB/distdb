@@ -141,7 +141,7 @@ impl ServerApp {
             ));
         };
 
-        entry.database_id = catalog.database_id.0.clone();
+        entry.database_id.clone_from(&catalog.database_id.0);
         catalog.upsert_account_acl_entry(entry);
 
         Ok(true)

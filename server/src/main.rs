@@ -336,6 +336,22 @@ async fn handle_wss_connection(
         guard.mark_disconnect();
     }
 
+    {
+        let session_id = {
+            let guard = session.lock().await;
+            guard.session_id.clone()
+        };
+        let mut app_guard = app.write().await;
+        let cleaned_tables = app_guard.cleanup_scoped_temporary_tables_for_session(&session_id);
+        if cleaned_tables > 0 {
+            log::info!(
+                "session scoped temporary cleanup complete session_id={} tables_removed={}",
+                session_id,
+                cleaned_tables,
+            );
+        }
+    }
+
     result.map_err(Into::into)
 }
 
@@ -514,7 +530,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tls.key_path = Some(auto_tls.key_path.clone());
         }
         if tls.ca_path.is_none() {
-            tls.ca_path = Some(auto_tls.ca_path.clone());
+            tls.ca_path = Some(auto_tls.ca_path);
         }
 
         log::info!(

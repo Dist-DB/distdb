@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -10,8 +11,10 @@ use common::helpers::tphashset::TPHashSet;
 use crate::engine::database::transaction::TransactionLog;
 use crate::engine::database::runtime_index::{
     derived_indexes_for_table,
+    load_live_row_count_checkpoint,
     load_live_row_checkpoint_rows,
 };
+use crate::engine::database::runtime_index_snapshot::RuntimeIndexSnapshotService;
 use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::engine::sql::{compare_like_value, compare_row_value};
 use crate::{
@@ -19,6 +22,7 @@ use crate::{
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
     SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
     TransactionRecord,
+    WalStreamMode,
 };
 
 use super::MaterializedRelationRow;
@@ -68,6 +72,8 @@ fn cache_live_row_count(
 const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_ROWS: usize = 250_000;
 const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_POSTINGS: usize = 50_000;
 const ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS: usize = 250_000;
+const ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS: usize = 150_000;
+const ACCESSOR_POSTINGS_PARALLEL_MIN_ROWS: usize = 200_000;
 
 #[derive(Debug, Default)]
 struct EqualityTableCacheEntry {
@@ -76,6 +82,7 @@ struct EqualityTableCacheEntry {
     row_ids_by_field_value: AHashMap<String, AHashMap<Vec<u8>, Vec<u64>>>,
     string_index_by_field: AHashMap<String, TPHashSet<Vec<u64>>>,
     string_index_ci_by_field: AHashMap<String, TPHashSet<Vec<u64>>>,
+    range_row_ids_cache: AHashMap<String, Vec<u64>>,
 }
 
 #[expect(clippy::type_complexity, reason="the types are complex but necessary for the cache structure")]
@@ -180,6 +187,16 @@ fn accessor_cold_direct_scan_min_rows() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS)
+
+}
+
+fn accessor_snapshot_max_live_rows() -> usize {
+
+    std::env::var("DISTDB_ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS)
 
 }
 
@@ -308,6 +325,7 @@ fn cache_entry_from_snapshot(snapshot: EqualityTableCacheSnapshot) -> EqualityTa
         row_ids_by_field_value,
         string_index_by_field,
         string_index_ci_by_field,
+        range_row_ids_cache: AHashMap::new(),
     }
 
 }
@@ -662,15 +680,74 @@ fn build_postings_for_field(
     field_name: &str,
 ) -> AHashMap<Vec<u8>, Vec<u64>> {
 
-    let mut row_ids_by_value = AHashMap::<Vec<u8>, Vec<u64>>::new();
+    if rows_by_id.len() < ACCESSOR_POSTINGS_PARALLEL_MIN_ROWS {
 
-    for (row_id, row_map) in rows_by_id {
-        if let Some(value) = row_map.get(field_name).cloned() {
-            row_ids_by_value.entry(value).or_default().push(*row_id);
+        let mut row_ids_by_value = AHashMap::<Vec<u8>, Vec<u64>>::new();
+
+        for (row_id, row_map) in rows_by_id {
+            if let Some(value) = row_map.get(field_name).cloned() {
+                row_ids_by_value.entry(value).or_default().push(*row_id);
+            }
+        }
+
+        return row_ids_by_value;
+    }
+
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let workers = std::cmp::min(available, equality_warm_max_workers());
+
+    if workers <= 1 {
+        let mut row_ids_by_value = AHashMap::<Vec<u8>, Vec<u64>>::new();
+        for (row_id, row_map) in rows_by_id {
+            if let Some(value) = row_map.get(field_name).cloned() {
+                row_ids_by_value.entry(value).or_default().push(*row_id);
+            }
+        }
+        return row_ids_by_value;
+    }
+
+    let rows = rows_by_id
+        .iter()
+        .map(|(row_id, row_map)| (*row_id, row_map))
+        .collect::<Vec<_>>();
+
+    let chunk_size = rows.len().div_ceil(workers);
+
+    let mut partials = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+
+        for chunk in rows.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                let mut local = AHashMap::<Vec<u8>, Vec<u64>>::new();
+                for (row_id, row_map) in chunk {
+                    if let Some(value) = row_map.get(field_name) {
+                        local.entry(value.clone()).or_default().push(*row_id);
+                    }
+                }
+                local
+            }));
+        }
+
+        let mut partials = Vec::with_capacity(handles.len());
+        for handle in handles {
+            if let Ok(partial) = handle.join() {
+                partials.push(partial);
+            }
+        }
+        partials
+    });
+
+    let mut merged = AHashMap::<Vec<u8>, Vec<u64>>::new();
+
+    for partial in partials.drain(..) {
+        for (value, mut row_ids) in partial {
+            merged.entry(value).or_default().append(&mut row_ids);
         }
     }
 
-    row_ids_by_value
+    merged
 }
 
 fn normalize_distinct_field_names(field_names: &[String]) -> Vec<String> {
@@ -730,6 +807,7 @@ fn build_warm_equality_cache_serial(
         row_ids_by_field_value,
         string_index_by_field: AHashMap::new(),
         string_index_ci_by_field: AHashMap::new(),
+        range_row_ids_cache: AHashMap::new(),
     }
 
 }
@@ -834,6 +912,7 @@ fn build_warm_equality_cache_parallel(
         row_ids_by_field_value,
         string_index_by_field: AHashMap::new(),
         string_index_ci_by_field: AHashMap::new(),
+        range_row_ids_cache: AHashMap::new(),
     }
 
 }
@@ -1152,6 +1231,8 @@ fn apply_cached_row_insert(
     row_map: &HashMap<String, Vec<u8>>,
 ) {
 
+    entry.range_row_ids_cache.clear();
+
     entry.rows_by_id.insert(row_id, row_map.clone());
 
     for (field_name, value) in row_map {
@@ -1187,6 +1268,8 @@ fn apply_cached_row_delete(
     row_id: u64,
     row_map: &HashMap<String, Vec<u8>>,
 ) {
+
+    entry.range_row_ids_cache.clear();
 
     entry.rows_by_id.remove(&row_id);
 
@@ -1617,6 +1700,7 @@ pub fn load_live_rows_by_in_list(
         table_stream_id,
         table_id,
         schema,
+        &[field_name.to_string()],
     );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
@@ -1624,10 +1708,21 @@ pub fn load_live_rows_by_in_list(
         let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
         ensure_field_postings(&mut entry, field_name);
         let result = rows_for_field_in_list(&entry, field_name, lookup_values);
+        let live_row_count = entry.rows_by_id.len();
 
         if let Ok(mut cache_guard) = cache.lock() {
             insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
         }
+
+        maybe_persist_accessor_snapshot_from_accessor_miss(
+            wal,
+            table_stream_id,
+            table_id,
+            schema,
+            latest_tx_id,
+            &[field_name.to_string()],
+            live_row_count,
+        );
 
         return result;
     }
@@ -1639,10 +1734,21 @@ pub fn load_live_rows_by_in_list(
     );
 
     let result = rows_for_field_in_list(&entry, field_name, lookup_values);
+    let live_row_count = entry.rows_by_id.len();
 
     if let Ok(mut cache_guard) = cache.lock() {
         insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
     }
+
+    maybe_persist_accessor_snapshot_from_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        latest_tx_id,
+        &[field_name.to_string()],
+        live_row_count,
+    );
 
     result
 
@@ -2084,7 +2190,7 @@ pub fn load_live_rows(
     schema: &TableSchema,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
-    load_live_rows_for_accessor_miss(wal, table_stream_id, table_id, schema).1
+    load_live_rows_for_accessor_miss(wal, table_stream_id, table_id, schema, &[]).1
 
 }
 
@@ -2359,11 +2465,17 @@ pub fn load_live_rows_by_equality_filters(
         return rows_for_field_values(entry, equality_filters);
     }
 
+    let warm_fields = equality_filters
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
         wal,
         table_stream_id,
         table_id,
         schema,
+        &warm_fields,
     );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
@@ -2374,18 +2486,24 @@ pub fn load_live_rows_by_equality_filters(
         }
 
         let result = rows_for_field_values(&entry, equality_filters);
+        let live_row_count = entry.rows_by_id.len();
 
         if let Ok(mut cache_guard) = cache.lock() {
             insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
         }
 
+        maybe_persist_accessor_snapshot_from_accessor_miss(
+            wal,
+            table_stream_id,
+            table_id,
+            schema,
+            latest_tx_id,
+            &warm_fields,
+            live_row_count,
+        );
+
         return result;
     }
-
-    let warm_fields = equality_filters
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
 
     let entry = build_cold_accessor_cache_entry(
         latest_tx_id,
@@ -2394,10 +2512,21 @@ pub fn load_live_rows_by_equality_filters(
     );
 
     let result = rows_for_field_values(&entry, equality_filters);
+    let live_row_count = entry.rows_by_id.len();
 
     if let Ok(mut cache_guard) = cache.lock() {
         insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
     }
+
+    maybe_persist_accessor_snapshot_from_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        latest_tx_id,
+        &warm_fields,
+        live_row_count,
+    );
 
     result
 
@@ -2438,6 +2567,7 @@ pub fn load_live_rows_by_prefix(
         table_stream_id,
         table_id,
         schema,
+        &[field_name.to_string()],
     );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
@@ -2526,6 +2656,7 @@ pub fn load_live_rows_by_string_like(
         table_stream_id,
         table_id,
         schema,
+        &[field_name.to_string()],
     );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
@@ -2630,6 +2761,7 @@ pub fn load_live_rows_by_range(
         table_stream_id,
         table_id,
         schema,
+        &[field_name.to_string()],
     );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
@@ -2637,7 +2769,7 @@ pub fn load_live_rows_by_range(
         let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
         ensure_field_postings(&mut entry, field_name);
 
-        let result = rows_for_field_range(&entry, field_name, lower_bound, upper_bound);
+        let result = rows_for_field_range(&mut entry, field_name, lower_bound, upper_bound);
 
         if let Ok(mut cache_guard) = cache.lock() {
             insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
@@ -2647,13 +2779,13 @@ pub fn load_live_rows_by_range(
 
     }
 
-    let entry = build_cold_accessor_cache_entry(
+    let mut entry = build_cold_accessor_cache_entry(
         latest_tx_id,
         live_rows,
         &[field_name.to_string()],
     );
 
-    let result = rows_for_field_range(&entry, field_name, lower_bound, upper_bound);
+    let result = rows_for_field_range(&mut entry, field_name, lower_bound, upper_bound);
 
     if let Ok(mut cache_guard) = cache.lock() {
         insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
@@ -2678,31 +2810,37 @@ pub fn load_live_rows_by_range_intersection(
     let cache_scope_id = wal.cache_scope_id();
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+    let anchor_field = filters.first().map(|filter| filter.field_name.as_str());
 
     if let Ok(mut cache_guard) = cache.lock()
         && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
         && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
     {
-        for filter in filters {
-            ensure_field_postings(entry, &filter.field_name);
+        if let Some(anchor_field) = anchor_field {
+            ensure_field_postings(entry, anchor_field);
         }
         return rows_for_range_filters(entry, filters);
     }
+
+    let warm_fields = anchor_field
+        .map(|field_name| vec![field_name.to_string()])
+        .unwrap_or_default();
 
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
         wal,
         table_stream_id,
         table_id,
         schema,
+        &warm_fields,
     );
 
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
         let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
-        for filter in filters {
-            ensure_field_postings(&mut entry, &filter.field_name);
+        if let Some(anchor_field) = anchor_field {
+            ensure_field_postings(&mut entry, anchor_field);
         }
 
-        let result = rows_for_range_filters(&entry, filters);
+        let result = rows_for_range_filters(&mut entry, filters);
 
         if let Ok(mut cache_guard) = cache.lock() {
             insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
@@ -2711,18 +2849,13 @@ pub fn load_live_rows_by_range_intersection(
         return result;
     }
 
-    let warm_fields = filters
-        .iter()
-        .map(|filter| filter.field_name.clone())
-        .collect::<Vec<_>>();
-
-    let entry = build_cold_accessor_cache_entry(
+    let mut entry = build_cold_accessor_cache_entry(
         latest_tx_id,
         live_rows,
         &warm_fields,
     );
 
-    let result = rows_for_range_filters(&entry, filters);
+    let result = rows_for_range_filters(&mut entry, filters);
 
     if let Ok(mut cache_guard) = cache.lock() {
         insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
@@ -2807,20 +2940,14 @@ fn rows_for_field_prefix(
 }
 
 fn rows_for_field_range(
-    entry: &EqualityTableCacheEntry,
+    entry: &mut EqualityTableCacheEntry,
     field_name: &str,
     lower_bound: Option<&RangeBound>,
     upper_bound: Option<&RangeBound>,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
-    let Some(postings) = entry.row_ids_by_field_value.get(field_name) else {
-        return Vec::new();
-    };
-
-    postings
-        .iter()
-        .filter(|(value, _)| value_within_range(value, lower_bound, upper_bound))
-        .flat_map(|(_, row_ids)| row_ids.iter().copied())
+    row_ids_for_field_range(entry, field_name, lower_bound, upper_bound)
+        .into_iter()
         .filter_map(|row_id| {
             entry
                 .rows_by_id
@@ -2832,8 +2959,73 @@ fn rows_for_field_range(
 
 }
 
+fn row_ids_for_field_range(
+    entry: &mut EqualityTableCacheEntry,
+    field_name: &str,
+    lower_bound: Option<&RangeBound>,
+    upper_bound: Option<&RangeBound>,
+) -> Vec<u64> {
+
+    let cache_key = range_bounds_cache_key(field_name, lower_bound, upper_bound);
+    if let Some(cached_row_ids) = entry.range_row_ids_cache.get(&cache_key) {
+        return cached_row_ids.clone();
+    }
+
+    let Some(postings) = entry.row_ids_by_field_value.get(field_name) else {
+        return Vec::new();
+    };
+
+    let row_ids = postings
+        .iter()
+        .filter(|(value, _)| value_within_range(value, lower_bound, upper_bound))
+        .flat_map(|(_, row_ids)| row_ids.iter().copied())
+        .collect::<Vec<_>>();
+
+    entry
+        .range_row_ids_cache
+        .insert(cache_key, row_ids.clone());
+
+    row_ids
+
+}
+
+fn range_bounds_cache_key(
+    field_name: &str,
+    lower_bound: Option<&RangeBound>,
+    upper_bound: Option<&RangeBound>,
+) -> String {
+
+    fn append_bound_key(
+        out: &mut String,
+        label: &str,
+        bound: Option<&RangeBound>,
+    ) {
+        out.push_str(label);
+        out.push('=');
+
+        if let Some(bound) = bound {
+            out.push(if bound.inclusive { '1' } else { '0' });
+            out.push(':');
+            for byte in &bound.value {
+                out.push_str(format!("{byte:02x}").as_str());
+            }
+        } else {
+            out.push('_');
+        }
+    }
+
+    let mut key = String::with_capacity(field_name.len() + 96);
+    key.push_str(field_name);
+    key.push('|');
+    append_bound_key(&mut key, "l", lower_bound);
+    key.push('|');
+    append_bound_key(&mut key, "u", upper_bound);
+    key
+
+}
+
 fn rows_for_range_filters(
-    entry: &EqualityTableCacheEntry,
+    entry: &mut EqualityTableCacheEntry,
     filters: &[RangeFilterBounds],
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
@@ -2845,7 +3037,7 @@ fn rows_for_range_filters(
             .collect();
     };
 
-    let anchor_rows = rows_for_field_range(
+    let anchor_row_ids = row_ids_for_field_range(
         entry,
         &anchor_filter.field_name,
         anchor_filter.lower_bound.as_ref(),
@@ -2853,9 +3045,20 @@ fn rows_for_range_filters(
     );
 
     let diagnostics_enabled = range_intersection_diagnostics_enabled();
-    let anchor_row_count = anchor_rows.len();
+    let anchor_row_count = anchor_row_ids.len();
 
     if filters.len() == 1 {
+        let rows = anchor_row_ids
+            .into_iter()
+            .filter_map(|row_id| {
+                entry
+                    .rows_by_id
+                    .get(&row_id)
+                    .cloned()
+                    .map(|row_map| (row_id, row_map))
+            })
+            .collect::<Vec<_>>();
+
         if diagnostics_enabled {
             log::info!(
                 "range intersection diagnostics: fields={} anchor_field={} anchor_rows={} output_rows={}",
@@ -2865,15 +3068,17 @@ fn rows_for_range_filters(
                 anchor_row_count,
             );
         }
-        return anchor_rows;
+        return rows;
     }
 
     let remaining_filters = &filters[1..];
 
-    let filtered_rows = anchor_rows
+    let filtered_rows = anchor_row_ids
         .into_iter()
-        .filter(|(_, row_map)| {
-            remaining_filters.iter().all(|filter| {
+        .filter_map(|row_id| {
+            let row_map = entry.rows_by_id.get(&row_id)?;
+
+            let matched = remaining_filters.iter().all(|filter| {
                 row_map
                     .get(&filter.field_name)
                     .map(|value| {
@@ -2884,7 +3089,13 @@ fn rows_for_range_filters(
                         )
                     })
                     .unwrap_or(false)
-            })
+            });
+
+            if matched {
+                Some((row_id, row_map.clone()))
+            } else {
+                None
+            }
         })
         .collect::<Vec<_>>();
 
@@ -2948,12 +3159,103 @@ fn load_live_rows_for_accessor_miss(
     table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
+    warm_fields: &[String],
 ) -> (u64, Vec<(u64, HashMap<String, Vec<u8>>)>) {
+
+    let started_at = Instant::now();
+    let accessor_snapshot_limit = accessor_snapshot_max_live_rows();
+
+    if !warm_fields.is_empty()
+        && let Some(data_dir) = wal.data_dir_path()
+    {
+        let snapshot_row_count = load_live_row_count_checkpoint(
+            &data_dir,
+            table_stream_id,
+            table_id,
+            schema,
+        )
+        .map(|(_, count)| count);
+
+        let should_try_accessor_snapshot = snapshot_row_count
+            .map(|count| count <= accessor_snapshot_limit)
+            .unwrap_or(true);
+
+        if should_try_accessor_snapshot
+            && let Some((latest_tx_id, live_rows)) = load_live_rows_from_accessor_snapshot(
+                &data_dir,
+                table_stream_id,
+                table_id,
+                schema,
+                warm_fields,
+            )
+        {
+            let elapsed_ms = started_at.elapsed().as_millis();
+            if elapsed_ms >= 100 {
+                log::info!(
+                    "accessor miss load source=accessor_snapshot table={} stream={} warm_fields={} live_rows={} elapsed_ms={}",
+                    table_id,
+                    table_stream_id,
+                    warm_fields.len(),
+                    live_rows.len(),
+                    elapsed_ms,
+                );
+            }
+            return (latest_tx_id, live_rows);
+        }
+
+        if let Some(row_count) = snapshot_row_count
+            && row_count > accessor_snapshot_limit
+        {
+            log::debug!(
+                "accessor miss load skipped source=accessor_snapshot table={} stream={} warm_fields={} live_rows={} max_live_rows={}",
+                table_id,
+                table_stream_id,
+                warm_fields.len(),
+                row_count,
+                accessor_snapshot_limit,
+            );
+        }
+    }
 
     if let Some(data_dir) = wal.data_dir_path()
         && let Some((latest_tx_id, live_rows)) =
             load_live_row_checkpoint_rows(&data_dir, table_stream_id, table_id, schema)
     {
+        let elapsed_ms = started_at.elapsed().as_millis();
+        if elapsed_ms >= 100 {
+            log::info!(
+                "accessor miss load source=live_row_checkpoint table={} stream={} warm_fields={} live_rows={} elapsed_ms={}",
+                table_id,
+                table_stream_id,
+                warm_fields.len(),
+                live_rows.len(),
+                elapsed_ms,
+            );
+        }
+        return (latest_tx_id, live_rows);
+    }
+
+    if warm_fields.is_empty()
+        && let Some(data_dir) = wal.data_dir_path()
+        && let Some((latest_tx_id, live_rows)) = load_live_rows_from_accessor_snapshot(
+            &data_dir,
+            table_stream_id,
+            table_id,
+            schema,
+            warm_fields,
+        )
+    {
+        let elapsed_ms = started_at.elapsed().as_millis();
+        if elapsed_ms >= 100 {
+            log::info!(
+                "accessor miss load source=accessor_snapshot table={} stream={} warm_fields={} live_rows={} elapsed_ms={}",
+                table_id,
+                table_stream_id,
+                warm_fields.len(),
+                live_rows.len(),
+                elapsed_ms,
+            );
+        }
         return (latest_tx_id, live_rows);
     }
 
@@ -2962,7 +3264,149 @@ fn load_live_rows_for_accessor_miss(
         .map(|tx| tx.0)
         .unwrap_or(0);
 
-    (latest_tx_id, load_live_rows_in_place(wal, table_stream_id, schema))
+    let live_rows = load_live_rows_in_place(wal, table_stream_id, schema);
+
+    maybe_persist_live_row_checkpoint_from_accessor_miss(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        latest_tx_id,
+        &live_rows,
+    );
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+    if elapsed_ms >= 100 {
+        log::info!(
+            "accessor miss load source=wal_scan table={} stream={} warm_fields={} live_rows={} elapsed_ms={}",
+            table_id,
+            table_stream_id,
+            warm_fields.len(),
+            live_rows.len(),
+            elapsed_ms,
+        );
+    }
+
+    (latest_tx_id, live_rows)
+
+}
+
+fn maybe_persist_live_row_checkpoint_from_accessor_miss(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    latest_tx_id: u64,
+    live_rows: &[(u64, HashMap<String, Vec<u8>>) ],
+) {
+
+    if wal.stream_mode(table_stream_id) != WalStreamMode::Durable {
+        return;
+    }
+
+    let Some(data_dir) = wal.data_dir_path() else {
+        return;
+    };
+
+    let wal_fingerprint =
+        RuntimeIndexSnapshotService::wal_stream_fingerprint(&data_dir, table_stream_id);
+
+    let table = DatabaseTable::new(table_id.to_string(), schema.clone(), HashMap::new());
+
+    if let Err(err) = RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        table_stream_id,
+        latest_tx_id,
+        wal_fingerprint,
+        live_rows,
+    ) {
+        log::debug!(
+            "accessor miss live-row checkpoint save skipped table={} reason={}",
+            table_id,
+            err,
+        );
+    }
+
+}
+
+fn maybe_persist_accessor_snapshot_from_accessor_miss(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    latest_tx_id: u64,
+    warm_fields: &[String],
+    live_row_count: usize,
+) {
+
+    if warm_fields.is_empty() {
+        return;
+    }
+
+    if wal.stream_mode(table_stream_id) != WalStreamMode::Durable {
+        return;
+    }
+
+    if live_row_count > accessor_snapshot_max_live_rows() {
+        return;
+    }
+
+    let Some(data_dir) = wal.data_dir_path() else {
+        return;
+    };
+
+    let wal_fingerprint =
+        RuntimeIndexSnapshotService::wal_stream_fingerprint(&data_dir, table_stream_id);
+
+    let table = DatabaseTable::new(table_id.to_string(), schema.clone(), HashMap::new());
+    let table_stream_id = table_stream_id.to_string();
+    let warm_fields = warm_fields.to_vec();
+    let cache_scope_id = wal.cache_scope_id();
+
+    std::thread::spawn(move || {
+        if let Err(err) = RuntimeIndexSnapshotService::save_accessor_cache_snapshot(
+            &data_dir,
+            &table,
+            &table_stream_id,
+            latest_tx_id,
+            wal_fingerprint,
+            &warm_fields,
+            cache_scope_id,
+        ) {
+            log::debug!(
+                "accessor miss accessor snapshot save skipped table={} reason={}",
+                table.table_id,
+                err,
+            );
+        }
+    });
+
+}
+
+#[expect(clippy::type_complexity, reason="returning a tuple of (latest_tx_id, live_rows)")]
+fn load_live_rows_from_accessor_snapshot(
+    data_dir: &Path,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    warm_fields: &[String],
+) -> Option<(u64, Vec<(u64, HashMap<String, Vec<u8>>)>)> {
+
+    let wal_fingerprint =
+        RuntimeIndexSnapshotService::wal_stream_fingerprint(data_dir, table_stream_id);
+
+    let table = DatabaseTable::new(table_id.to_string(), schema.clone(), HashMap::new());
+
+    let snapshot = RuntimeIndexSnapshotService::load_accessor_cache_snapshot(
+        data_dir,
+        &table,
+        table_stream_id,
+        wal_fingerprint,
+        warm_fields,
+    )?;
+
+    Some((snapshot.latest_tx_id, snapshot.cache.rows_by_id))
 
 }
 
@@ -2994,11 +3438,7 @@ fn build_rows_only_cache_entry(
     live_rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
 ) -> EqualityTableCacheEntry {
 
-    let mut rows_by_id = AHashMap::with_capacity(live_rows.len());
-
-    for (row_id, row_map) in live_rows {
-        rows_by_id.insert(row_id, row_map);
-    }
+    let rows_by_id = build_rows_by_id_from_snapshot(live_rows);
 
     EqualityTableCacheEntry {
         latest_tx_id,
@@ -3006,6 +3446,7 @@ fn build_rows_only_cache_entry(
         row_ids_by_field_value: AHashMap::new(),
         string_index_by_field: AHashMap::new(),
         string_index_ci_by_field: AHashMap::new(),
+        range_row_ids_cache: AHashMap::new(),
     }
 
 }

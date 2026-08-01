@@ -483,27 +483,6 @@ fn strip_table_index_hints(sql: &str) -> String {
 
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{strip_optimizer_hint_comments, strip_table_index_hints};
-
-    #[test]
-    fn strip_optimizer_hints_preserves_utf8_literals() {
-        let sql = "select /*+ NO_BKA(t) */ 'H\u{00f6}henberg' as n";
-        let normalized = strip_optimizer_hint_comments(sql);
-        assert!(normalized.contains("H\u{00f6}henberg"));
-        assert!(!normalized.contains("/*+"));
-    }
-
-    #[test]
-    fn strip_index_hints_preserves_utf8_literals() {
-        let sql = "select 'Bocklem\u{00fc}nd' from places use index (idx_name)";
-        let normalized = strip_table_index_hints(sql);
-        assert!(normalized.contains("Bocklem\u{00fc}nd"));
-        assert!(!normalized.to_ascii_lowercase().contains("use index"));
-    }
-}
-
 fn consume_table_index_hint(bytes: &[u8], start: usize) -> Option<usize> {
 
     if start >= bytes.len() || !bytes[start].is_ascii_whitespace() {
@@ -661,6 +640,29 @@ pub(super) fn parse_or_fallback(sql: &str) -> Result<ParsedOrFallback, SqlParseE
             }
         }
 
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    
+    use super::{strip_optimizer_hint_comments, strip_table_index_hints};
+
+    #[test]
+    fn strip_optimizer_hints_preserves_utf8_literals() {
+        let sql = "select /*+ NO_BKA(t) */ 'H\u{00f6}henberg' as n";
+        let normalized = strip_optimizer_hint_comments(sql);
+        assert!(normalized.contains("H\u{00f6}henberg"));
+        assert!(!normalized.contains("/*+"));
+    }
+
+    #[test]
+    fn strip_index_hints_preserves_utf8_literals() {
+        let sql = "select 'Bocklem\u{00fc}nd' from places use index (idx_name)";
+        let normalized = strip_table_index_hints(sql);
+        assert!(normalized.contains("Bocklem\u{00fc}nd"));
+        assert!(!normalized.to_ascii_lowercase().contains("use index"));
     }
 
 }

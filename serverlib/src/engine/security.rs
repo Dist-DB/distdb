@@ -31,7 +31,7 @@ impl UserCredential {
         let salt = salt_from_nonce(&password_nonce);
 
         Self {
-            user_id: user_id.clone(),
+            user_id,
             encrypted_password: aes_encrypt(password, &secret, &salt),
             password_nonce,
         }

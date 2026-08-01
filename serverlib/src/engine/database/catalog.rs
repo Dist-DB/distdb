@@ -408,7 +408,7 @@ impl DatabaseCatalog {
         }
 
         let indexes = Self::indexes_for_schema(&table_id, &schema);
-        let mut table = DatabaseTable::new(table_id.clone(), schema, indexes);
+        let mut table = DatabaseTable::new(table_id, schema, indexes);
 
         if let Some(entity_id) = entity_id {
             let normalized_entity_id = common::normalize_identifier!(entity_id);
@@ -1340,7 +1340,7 @@ impl DatabaseCatalog {
                         ));
                     }
 
-                    index.table_id = table_id.clone();
+                    index.table_id.clone_from(&table_id);
                     index.index_id = IndexId(index_id.clone());
                     index.refresh_index_id();
                     index.index_id = IndexId(index_id.clone());
@@ -1469,7 +1469,7 @@ impl DatabaseCatalog {
                         }
 
                         self.with_view_mut(&object_id, |view| {
-                            view.sql = payload.sql.clone();
+                            view.sql.clone_from(&payload.sql);
                             view.dependencies = normalized_dependencies;
                             Ok(())
                         })?;
@@ -1497,7 +1497,7 @@ impl DatabaseCatalog {
                         }
 
                         self.with_olap_view_mut(&object_id, |view| {
-                            view.sql = payload.sql.clone();
+                            view.sql.clone_from(&payload.sql);
                             view.dependencies = normalized_dependencies;
                             Ok(())
                         })?;
@@ -1909,15 +1909,16 @@ impl DatabaseCatalog {
             return Err(DatabaseError::DuplicateEntity);
         }
 
-        let view = DatabaseView::new(view_id.clone(), sql.into(), schema);
-        self.insert_entity_handle(DatabaseEntity::View(view))?;
+        let view = DatabaseView::new(view_id, sql.into(), schema);
 
+        self.insert_entity_handle(DatabaseEntity::View(view))?;
         self.bump_schema_epoch();
 
         Ok(())
     }
 
     pub fn view(&self, view_id: &str) -> Option<DatabaseView> {
+        
         self.with_entity_read(view_id, |entity| match entity {
             DatabaseEntity::View(view) => Some(view.clone()),
             _ => None,
@@ -1949,7 +1950,7 @@ impl DatabaseCatalog {
         }
 
         let view = DatabaseOlapView::new(
-            view_id.clone(),
+            view_id,
             sql.into(),
             z_dimension_columns,
             schema,
@@ -2014,7 +2015,7 @@ impl DatabaseCatalog {
             return Err(DatabaseError::DuplicateEntity);
         }
 
-        let trigger = DatabaseTrigger::new(trigger_id.clone(), sql.into(), dependencies);
+        let trigger = DatabaseTrigger::new(trigger_id, sql.into(), dependencies);
 
         self.insert_entity_handle(DatabaseEntity::Trigger(trigger))?;
         self.bump_schema_epoch();
@@ -2092,7 +2093,7 @@ impl DatabaseCatalog {
             return Err(DatabaseError::DuplicateEntity);
         }
 
-        let procedure = DatabaseStoredProcedure::new(procedure_id.clone(), sql.into(), dependencies);
+        let procedure = DatabaseStoredProcedure::new(procedure_id, sql.into(), dependencies);
         self.insert_entity_handle(DatabaseEntity::StoredProcedure(procedure))?;
 
         self.bump_schema_epoch();
@@ -2102,6 +2103,7 @@ impl DatabaseCatalog {
     }
 
     pub fn stored_procedure(&self, procedure_id: &str) -> Option<DatabaseStoredProcedure> {
+        
         self.with_entity_read(procedure_id, |entity| match entity {
             DatabaseEntity::StoredProcedure(procedure) => Some(procedure.clone()),
             _ => None,

@@ -219,14 +219,14 @@ fn choose_index_lookup_prioritizes_pk_then_uk_then_relationship() {
         DatabaseIndexKind::PrimaryKey,
         vec!["id".to_string()],
     );
-    indexes.insert(pk.index_id.0.clone(), pk.clone());
+    indexes.insert(pk.index_id.0.clone(), pk);
 
     let uk = DatabaseIndex::from_table_fields(
         "users",
         DatabaseIndexKind::Unique,
         vec!["email".to_string()],
     );
-    indexes.insert(uk.index_id.0.clone(), uk.clone());
+    indexes.insert(uk.index_id.0.clone(), uk);
 
     let rel = DatabaseIndex::from_table_fields_with_origin(
         "users",
@@ -235,14 +235,14 @@ fn choose_index_lookup_prioritizes_pk_then_uk_then_relationship() {
         None,
         vec!["account_id".to_string()],
     );
-    indexes.insert(rel.index_id.0.clone(), rel.clone());
+    indexes.insert(rel.index_id.0.clone(), rel);
 
     let sec = DatabaseIndex::from_table_fields(
         "users",
         DatabaseIndexKind::Indexed,
         vec!["status".to_string()],
     );
-    indexes.insert(sec.index_id.0.clone(), sec.clone());
+    indexes.insert(sec.index_id.0.clone(), sec);
 
     let table = crate::DatabaseTable::new(
         "users".to_string(),

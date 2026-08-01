@@ -139,7 +139,7 @@ pub fn build_database_schema_summaries_from_app(app: &ServerApp) -> Vec<Database
             );
 
             DatabaseSchemaSummary {
-                database_id: database_id.clone(),
+                database_id,
                 database_name: catalog.database_name().to_string(),
                 schema_identifier,
                 schema_hash: Some(schema_fingerprint),

@@ -331,7 +331,7 @@ pub fn ensure_or_generate_p2p_tls(
                     }
                 }
                 let _guard = CaLockGuard {
-                    path: ca_lock_path.clone(),
+                    path: ca_lock_path,
                 };
 
                 if ca_cert_path.exists() && ca_key_path.exists() {

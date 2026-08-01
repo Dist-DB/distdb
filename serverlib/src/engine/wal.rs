@@ -275,6 +275,13 @@ impl ConcurrentWalManager {
 
         let wal_path = data_dir.join(FileKind::Data.file_name(stream_key));
         if !wal_path.exists() {
+            if let Ok(mut store) = self.storage.lock() {
+                // Mark stream as hydrated with an empty record set to avoid
+                // repeated disk-existence checks on hot read paths.
+                store
+                    .entry(stream_key.to_string())
+                    .or_insert_with(Vec::new);
+            }
             return;
         }
 
@@ -331,7 +338,7 @@ impl ConcurrentWalManager {
         if let Ok(mut high_water) = self.write_high_water_by_stream.lock() {
             match max_ts {
                 Some(ts) => {
-                    high_water.insert(stream_key.clone(), ts);
+                    high_water.insert(stream_key, ts);
                 }
                 None => {
                     high_water.remove(&stream_key);
@@ -383,7 +390,13 @@ impl ConcurrentWalManager {
             .lock()
             .map_err(|_| "failed to lock WAL stream mode registry")?;
 
-        modes.insert(stream_key, mode);
+        let previous = modes.insert(stream_key.clone(), mode);
+
+        if previous != Some(mode)
+            && let Ok(mut workers) = self.workers.lock()
+            && let Some(sender) = workers.remove(&stream_key) {
+                let _ = sender.send(WalCommand::Shutdown);
+            }
 
         Ok(())
 
@@ -470,7 +483,7 @@ impl ConcurrentWalManager {
             match max_ts {
 
                 Some(ts) => {
-                    high_water.insert(stream_key.clone(), ts);
+                    high_water.insert(stream_key, ts);
                 },
 
                 None => {
@@ -532,6 +545,56 @@ impl ConcurrentWalManager {
                     return Err("failed to delete WAL file");
                 }
         }
+
+        Ok(())
+
+    }
+
+    pub fn clear_stream_records(&self, wal_id: &str) -> Result<(), &'static str> {
+
+        let stream_key = obfuscated_stream_key(wal_id)?;
+
+        let stream_mode = self
+            .stream_modes
+            .lock()
+            .ok()
+            .and_then(|modes| modes.get(&stream_key).copied())
+            .unwrap_or(WalStreamMode::Durable);
+
+        let sender = {
+            let mut workers = self
+                .workers
+                .lock()
+                .map_err(|_| "failed to lock WAL workers")?;
+            workers.remove(&stream_key)
+        };
+
+        if let Some(sender) = sender {
+            let _ = sender.send(WalCommand::Shutdown);
+        }
+
+        {
+            let mut storage = self
+                .storage
+                .lock()
+                .map_err(|_| "failed to lock WAL storage")?;
+            storage.remove(&stream_key);
+        }
+
+        {
+            let mut high_water = self
+                .write_high_water_by_stream
+                .lock()
+                .map_err(|_| "failed to lock WAL write high-water map")?;
+            high_water.remove(&stream_key);
+        }
+
+        if matches!(stream_mode, WalStreamMode::Durable)
+            && let Some(data_dir) = &self.data_dir {
+                let wal_path = data_dir.join(FileKind::Data.file_name(&stream_key));
+                write_bytes(&wal_path, &make_header(FileKind::Data))
+                    .map_err(|_| "failed to clear WAL file")?;
+            }
 
         Ok(())
 

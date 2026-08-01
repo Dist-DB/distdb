@@ -340,7 +340,7 @@ fn schema_can_be_retrieved_from_table() {
         .register_table("users", schema.clone())
         .expect("table register should succeed");
 
-    assert_eq!(catalog.table_schema("users"), Some(schema.clone()));
+    assert_eq!(catalog.table_schema("users"), Some(schema));
     assert_eq!(catalog.table_schema_revision("users"), Some(0));
 }
 
@@ -365,7 +365,7 @@ fn schema_change_payload_updates_existing_table() {
         .apply_schema_change(payload)
         .expect("schema change should apply");
 
-    assert_eq!(catalog.table_schema("users"), Some(updated_schema.clone()));
+    assert_eq!(catalog.table_schema("users"), Some(updated_schema));
     assert_eq!(catalog.table_schema_revision("users"), Some(3));
 }
 
@@ -452,7 +452,7 @@ fn schema_change_tx_abort_returns_table_to_ready_without_schema_change() {
     tx.abort(&mut catalog).expect("abort should release lock");
 
     assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
-    assert_eq!(catalog.table_schema("users"), Some(initial_schema.clone()));
+    assert_eq!(catalog.table_schema("users"), Some(initial_schema));
 }
 
 #[test]
@@ -548,7 +548,7 @@ fn schema_change_tx_commit_aborts_when_persist_fails() {
 
     assert!(result.is_err());
     assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
-    assert_eq!(catalog.table_schema("users"), Some(initial_schema.clone()));
+    assert_eq!(catalog.table_schema("users"), Some(initial_schema));
 }
 
 #[test]
@@ -860,7 +860,7 @@ fn schema_replay_uses_latest_transaction_payload() {
         .expect("schema replay should succeed");
 
     assert_eq!(applied, 2);
-    assert_eq!(catalog.table_schema("users"), Some(second_schema.clone()));
+    assert_eq!(catalog.table_schema("users"), Some(second_schema));
     assert_eq!(catalog.table_schema_revision("users"), Some(2));
 
     let email_index_id = DatabaseIndex::from_table_fields(

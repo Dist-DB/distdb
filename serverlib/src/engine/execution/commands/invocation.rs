@@ -1,13 +1,16 @@
 use crate::{
     ConcurrentWalManager, DatabaseCatalog, DatabaseError, DatabaseStoredProcedure,
-    DatabaseTrigger, TriggerEventKind, TriggerTiming,
+    DatabaseTrigger, RuntimeIndexStore, TriggerEventKind, TriggerTiming,
 };
-use crate::engine::sql::parse_create_procedure_action_statements;
+use crate::engine::sql::{
+    evaluate_expression_sql_to_bytes, parse_create_procedure_action_statements,
+    parse_if_else_end_plan_from_create_procedure_statement,
+};
 
 use super::scoped_table::ScopedEphemeralTableScope;
 use super::super::ConditionValueProvider;
 use super::control_flow::{
-    execute_if_else_end_from_create_procedure_sql, execute_if_else_end_plan,
+    condition_matches_provider, execute_if_else_end_block,
     execute_sql_cursor, CursorDirective, SqlCursorFrame, SqlCursorSource,
 };
 
@@ -15,6 +18,170 @@ use super::control_flow::{
 pub enum EntityInvocationSource {
     DirectedUser,
     AutomaticEvent,
+}
+
+fn execute_if_else_branch_block<R, E, P>(
+    provider: &dyn ConditionValueProvider,
+    plan: &crate::IfElseEndPlan,
+    predicate_matches: &mut P,
+    execute_action: &mut E,
+) -> Result<Option<R>, String>
+where
+    E: FnMut(&str) -> Result<R, String>,
+    P: FnMut(&dyn ConditionValueProvider, &crate::SelectCondition) -> Result<bool, String>,
+{
+
+    let block = super::control_flow::IfElseEndBlock {
+        branches: plan
+            .branches
+            .iter()
+            .map(|branch| super::control_flow::ControlFlowBranch {
+                condition: branch.condition.clone(),
+                action: branch.action_sql.as_str(),
+            })
+            .collect::<Vec<_>>(),
+        else_branch: plan.else_action_sql.as_deref(),
+    };
+
+    execute_if_else_end_block(
+        provider,
+        &block,
+        &mut |candidate, condition| predicate_matches(candidate, condition),
+        &mut |action_sql| execute_action(action_sql),
+    )
+
+}
+
+fn execute_action_sequence<'a, R, E>(
+    action_statements: impl Iterator<Item = &'a str>,
+    execute_action: &mut E,
+) -> Result<Option<R>, String>
+where
+    E: FnMut(&str) -> Result<R, String>,
+{
+
+    let mut last_result = None;
+
+    for action_sql in action_statements {
+        last_result = Some(execute_action(action_sql)?);
+    }
+
+    Ok(last_result)
+
+}
+
+fn execute_stored_procedure_invocation_with_predicate_matcher<R, E, P>(
+    provider: &dyn ConditionValueProvider,
+    procedure: &DatabaseStoredProcedure,
+    predicate_matches: &mut P,
+    execute_action: &mut E,
+) -> Result<Option<R>, String>
+where
+    E: FnMut(&str) -> Result<R, String>,
+    P: FnMut(&dyn ConditionValueProvider, &crate::SelectCondition) -> Result<bool, String>,
+{
+
+    if let Some(ir) = procedure.compiled_ir() {
+        if let Some(plan) = ir.if_else_end_plan() {
+            return execute_if_else_branch_block(provider, plan, predicate_matches, execute_action);
+        }
+
+        if let Some(action_statements) = ir.action_statements() {
+            return execute_action_sequence(
+                action_statements.iter().map(|statement| statement.as_str()),
+                execute_action,
+            );
+        }
+    }
+
+    if let Some(plan) = parse_if_else_end_plan_from_create_procedure_statement(&procedure.sql)
+        .map_err(|err| format!("IF/ELSE/END routine parse failed: {err}"))?
+    {
+        return execute_if_else_branch_block(provider, &plan, predicate_matches, execute_action);
+    }
+
+    let action_statements = parse_create_procedure_action_statements(&procedure.sql)
+        .map_err(|err| format!("stored procedure action parse failed: {err}"))?;
+
+    execute_action_sequence(
+        action_statements.iter().map(|statement| statement.as_str()),
+        execute_action,
+    )
+
+}
+
+fn combine_invocation_and_cleanup<T>(
+    invocation_result: Result<T, String>,
+    cleanup_result: Result<(), String>,
+    cleanup_failure_prefix: Option<&str>,
+) -> Result<T, String> {
+
+    match (invocation_result, cleanup_result) {
+
+        (Ok(result), Ok(())) => Ok(result),
+
+        (Err(err), Ok(())) => Err(err),
+
+        (Ok(_), Err(cleanup_err)) => {
+            if let Some(prefix) = cleanup_failure_prefix {
+                Err(format!("{prefix}: {cleanup_err}"))
+            } else {
+                Err(cleanup_err)
+            }
+        },
+
+        (Err(err), Err(cleanup_err)) => {
+            if let Some(prefix) = cleanup_failure_prefix {
+                Err(format!("{err}; {prefix}: {cleanup_err}"))
+            } else {
+                Err(format!("{err}; cleanup failed: {cleanup_err}"))
+            }
+        },
+
+    }
+
+}
+
+fn execute_with_cleanup<T, F, C>(execute: F, cleanup: &mut C) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+    C: FnMut() -> Result<(), String>,
+{
+    let invocation_result = execute();
+    let cleanup_result = cleanup();
+    combine_invocation_and_cleanup(invocation_result, cleanup_result, None)
+}
+
+fn with_scoped_ephemeral_teardown<T, F>(
+    catalog: &mut DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    procedure: &DatabaseStoredProcedure,
+    session_id: &str,
+    execute: F,
+) -> Result<T, String>
+where
+    F: FnOnce(
+        &mut ScopedEphemeralTableScope,
+        &mut DatabaseCatalog,
+        &ConcurrentWalManager,
+    ) -> Result<T, String>,
+{
+
+    let mut scope = ScopedEphemeralTableScope::new(format!(
+        "proc_{}_{}",
+        common::normalize_identifier!(session_id),
+        procedure.procedure_id,
+    ));
+
+    let invocation_result = execute(&mut scope, catalog, wal);
+    let cleanup_result = scope.cleanup(catalog, wal);
+
+    combine_invocation_and_cleanup(
+        invocation_result,
+        cleanup_result,
+        Some("temporary table scoped cleanup failed"),
+    )
+
 }
 
 pub fn execute_stored_procedure_invocation<R, E>(
@@ -27,39 +194,76 @@ where
     E: FnMut(&str) -> Result<R, String>,
 {
 
-    if let Some(ir) = procedure.compiled_ir()
-        && let Some(plan) = ir.if_else_end_plan() {
-            return execute_if_else_end_plan(provider, plan, execute_action);
-        }
+    execute_stored_procedure_invocation_with_predicate_matcher(
+        provider,
+        procedure,
+        &mut |candidate, condition| condition_matches_provider(candidate, condition),
+        execute_action,
+    )
 
-    if let Some(ir) = procedure.compiled_ir()
-        && let Some(action_statements) = ir.action_statements()
-    {
-        let mut last_result = None;
+}
 
-        for action_sql in action_statements {
-            last_result = Some(execute_action(action_sql)?);
-        }
+fn condition_matches_provider_with_sql_lookup(
+    provider: &dyn ConditionValueProvider,
+    condition: &crate::SelectCondition,
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+) -> Result<bool, String> {
 
-        return Ok(last_result);
-    }
+    crate::engine::execution::row_matches_condition_with_result_and_expression(
+        provider,
+        Some(condition),
+        &mut |_, _| Ok(std::collections::HashSet::new()),
+        &mut |_, _| Ok(false),
+        &mut |_, _| Ok(None),
+        &mut |candidate, expression_sql| {
+            evaluate_expression_sql_to_bytes(
+                expression_sql,
+                &mut |field_name| candidate.value(field_name).cloned(),
+                &mut |function, lookup| {
+                    crate::engine::execution::execute_sql_function_with_lookup(
+                        catalog,
+                        wal,
+                        runtime_indexes,
+                        function,
+                        lookup,
+                    )
+                },
+            )
+            .map(Some)
+        },
+    )
 
-    if let Some(result) =
-        execute_if_else_end_from_create_procedure_sql(provider, &procedure.sql, execute_action)?
-    {
-        return Ok(Some(result));
-    }
+}
 
-    let action_statements = parse_create_procedure_action_statements(&procedure.sql)
-        .map_err(|err| format!("stored procedure action parse failed: {err}"))?;
+pub fn execute_stored_procedure_invocation_with_sql_lookup_context<R, E>(
+    provider: &dyn ConditionValueProvider,
+    procedure: &DatabaseStoredProcedure,
+    _source: EntityInvocationSource,
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    execute_action: &mut E,
+) -> Result<Option<R>, String>
+where
+    E: FnMut(&str) -> Result<R, String>,
+{
 
-    let mut last_result = None;
-
-    for action_sql in action_statements {
-        last_result = Some(execute_action(&action_sql)?);
-    }
-
-    Ok(last_result)
+    execute_stored_procedure_invocation_with_predicate_matcher(
+        provider,
+        procedure,
+        &mut |candidate, condition| {
+            condition_matches_provider_with_sql_lookup(
+                candidate,
+                condition,
+                catalog,
+                wal,
+                runtime_indexes,
+            )
+        },
+        execute_action,
+    )
 
 }
 
@@ -80,6 +284,10 @@ pub fn cleanup_temporary_tables(
         .collect::<Vec<_>>();
 
     for table_id in temporary_tables {
+
+        let stream_id = catalog
+            .entity_wal_stream_id(&table_id)
+            .unwrap_or_else(|| table_id.clone());
         
         match catalog.drop_table(&table_id) {
             
@@ -91,7 +299,12 @@ pub fn cleanup_temporary_tables(
 
         }
 
-        wal.delete_stream(&table_id)
+        if wal.stream_mode(&stream_id) == crate::WalStreamMode::Ephemeral {
+            wal.clear_stream_records(&stream_id)
+                .map_err(|err| format!("temporary table cleanup failed: {err}"))?;
+        }
+
+        wal.delete_stream(&stream_id)
             .map_err(|err| format!("temporary table cleanup failed: {err}"))?;
     
     }
@@ -112,26 +325,10 @@ where
     C: FnMut() -> Result<(), String>,
 {
 
-    let invocation_result = execute_stored_procedure_invocation(
-        provider,
-        procedure,
-        source,
-        execute_action,
-    );
-
-    let cleanup_result = cleanup();
-
-    match (invocation_result, cleanup_result) {
-
-        (Ok(result), Ok(())) => Ok(result),
-
-        (Err(err), Ok(())) => Err(err),
-
-        (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
-
-        (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
-        
-    }
+    execute_with_cleanup(
+        || execute_stored_procedure_invocation(provider, procedure, source, execute_action),
+        cleanup,
+    )
 
 }
 
@@ -148,32 +345,14 @@ where
     E: FnMut(&str, &mut ScopedEphemeralTableScope, &mut DatabaseCatalog, &ConcurrentWalManager) -> Result<R, String>,
 {
 
-    let mut scope = ScopedEphemeralTableScope::new(format!(
-        "proc_{}_{}",
-        common::normalize_identifier!(session_id),
-        procedure.procedure_id,
-    ));
-
-    let invocation_result = execute_stored_procedure_invocation(
-        provider,
-        procedure,
-        source,
-        &mut |sql| execute_action(sql, &mut scope, catalog, wal),
-    );
-
-    let cleanup_result = scope.cleanup(catalog, wal);
-
-    match (invocation_result, cleanup_result) {
-
-        (Ok(result), Ok(())) => Ok(result),
-
-        (Err(err), Ok(())) => Err(err),
-
-        (Ok(_), Err(cleanup_err)) => Err(format!("temporary table scoped cleanup failed: {cleanup_err}")),
-
-        (Err(err), Err(cleanup_err)) => Err(format!("{err}; temporary table scoped cleanup failed: {cleanup_err}")),
-
-    }
+    with_scoped_ephemeral_teardown(catalog, wal, procedure, session_id, |scope, catalog, wal| {
+        execute_stored_procedure_invocation(
+            provider,
+            procedure,
+            source,
+            &mut |sql| execute_action(sql, scope, catalog, wal),
+        )
+    })
 
 }
 
@@ -224,27 +403,18 @@ where
     C: FnMut() -> Result<(), String>,
 {
 
-    let result = execute_stored_procedure_invocation_over_cursor(
-        cursor_source,
-        cursor_frame,
-        procedure,
-        source,
-        execute_action,
-    );
-
-    let cleanup_result = cleanup();
-
-    match (result, cleanup_result) {
-
-        (Ok(outcomes), Ok(())) => Ok(outcomes),
-
-        (Err(err), Ok(())) => Err(err),
-
-        (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
-
-        (Err(err), Err(cleanup_err)) => Err(format!("{err}; cleanup failed: {cleanup_err}")),
-
-    }
+    execute_with_cleanup(
+        || {
+            execute_stored_procedure_invocation_over_cursor(
+                cursor_source,
+                cursor_frame,
+                procedure,
+                source,
+                execute_action,
+            )
+        },
+        cleanup,
+    )
 
 }
 
@@ -270,33 +440,15 @@ where
     ) -> Result<R, String>,
 {
 
-    let mut scope = ScopedEphemeralTableScope::new(format!(
-        "proc_{}_{}",
-        common::normalize_identifier!(session_id),
-        procedure.procedure_id,
-    ));
-
-    let result = execute_stored_procedure_invocation_over_cursor(
-        cursor_source,
-        cursor_frame,
-        procedure,
-        source,
-        &mut |sql, frame| execute_action(sql, frame, &mut scope, catalog, wal),
-    );
-
-    let cleanup_result = scope.cleanup(catalog, wal);
-
-    match (result, cleanup_result) {
-        
-        (Ok(outcomes), Ok(())) => Ok(outcomes),
-
-        (Err(err), Ok(())) => Err(err),
-
-        (Ok(_), Err(cleanup_err)) => Err(format!("temporary table scoped cleanup failed: {cleanup_err}")),
-
-        (Err(err), Err(cleanup_err)) => Err(format!("{err}; temporary table scoped cleanup failed: {cleanup_err}")),
-
-    }
+    with_scoped_ephemeral_teardown(catalog, wal, procedure, session_id, |scope, catalog, wal| {
+        execute_stored_procedure_invocation_over_cursor(
+            cursor_source,
+            cursor_frame,
+            procedure,
+            source,
+            &mut |sql, frame| execute_action(sql, frame, scope, catalog, wal),
+        )
+    })
 
 }
 

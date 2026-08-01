@@ -176,7 +176,11 @@ impl DatabaseEntityAspect for DatabaseTable {
     }
 
     fn wal_stream_id(&self, database_wal_id: &str) -> String {
-        format!("{}:{}", database_wal_id, self.storage_key())
+        if self.is_temporary() {
+            format!("{}:{}", database_wal_id, self.table_id)
+        } else {
+            format!("{}:{}", database_wal_id, self.storage_key())
+        }
     }
 
     fn schema_revision(&self) -> Option<u64> {
@@ -190,13 +194,13 @@ impl DatabaseEntityAspect for DatabaseTable {
     fn normalize_in_place(&mut self) {
 
         let normalized_table_id = common::normalize_identifier!(&self.table_id);
-        self.table_id = normalized_table_id.clone();
+        self.table_id.clone_from(&normalized_table_id);
 
         let mut normalized_indexes = HashMap::with_capacity(self.indexes.len());
         
         for (_, mut index) in std::mem::take(&mut self.indexes) {
 
-            index.table_id = normalized_table_id.clone();
+            index.table_id.clone_from(&normalized_table_id);
 
             if index.field_names.is_empty() && !index.field_name.is_empty() {
                 index.field_names = vec![index.field_name.clone()];

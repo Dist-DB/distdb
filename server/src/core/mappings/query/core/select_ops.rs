@@ -73,7 +73,7 @@ pub(super) fn execute_select_plan_result(
         .table(table_id)
         .ok_or_else(|| format!("select failed: table '{}' not found", table_id))?;
 
-    let mut scoped_table = table.clone();
+    let mut scoped_table = table;
     if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
         scoped_table.entity_id = stream_id;
     }
@@ -335,7 +335,7 @@ fn handle_select_introspection_request(
                 let mut grantable_privileges = entry.grant_acl.iter().cloned().collect::<Vec<_>>();
                 grantable_privileges.sort();
 
-                (entry.user_id.0.clone(), privileges, grantable_privileges)
+                (entry.user_id.0, privileges, grantable_privileges)
             }),
         );
 
@@ -1814,7 +1814,7 @@ fn execute_select_read_plan_without_lock(
 
     let view_sql = catalog
         .view(table_id)
-        .map(|view| view.sql.clone());
+        .map(|view| view.sql);
 
     if let Some(view_sql) = view_sql {
 
@@ -2063,7 +2063,7 @@ fn collect_select_lock_target_relation(
         return Ok(());
     }
 
-    let Some(view_sql) = catalog.view(&normalized).map(|view| view.sql.clone()) else {
+    let Some(view_sql) = catalog.view(&normalized).map(|view| view.sql) else {
         return Ok(());
     };
 

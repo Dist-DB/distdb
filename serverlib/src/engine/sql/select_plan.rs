@@ -208,7 +208,7 @@ pub(super) fn parse_select_read_plan_from_query(
             if projection_is_wildcard {
                 return Err(SqlParseError::MissingIdentifier {
                     keyword: "from",
-                    statement: query_sql.clone(),
+                    statement: query_sql,
                 });
             }
 
@@ -1304,7 +1304,7 @@ fn parse_passthrough_derived_select_plan(
             table_id: alias_name
                 .clone()
                 .unwrap_or_else(|| "__derived".to_string()),
-            alias: alias_name.clone(),
+            alias: alias_name,
         };
 
         let outer_condition = parse_select_condition_from_expr(

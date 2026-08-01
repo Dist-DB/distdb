@@ -11,6 +11,7 @@ use super::{
     execute_stored_procedure_invocation, execute_stored_procedure_invocation_over_cursor,
     execute_stored_procedure_invocation_over_cursor_with_cleanup,
     execute_stored_procedure_invocation_over_cursor_with_scoped_teardown,
+    execute_stored_procedure_invocation_with_sql_lookup_context,
     execute_stored_procedure_invocation_with_cleanup, EntityInvocationSource,
     execute_stored_procedure_invocation_with_scoped_teardown,
 };
@@ -349,8 +350,7 @@ fn execute_stored_procedure_invocation_with_cleanup_runs_cleanup_even_on_success
 
     let procedure = catalog
         .stored_procedure("refresh_accounts")
-        .expect("procedure should exist")
-        .clone();
+        .expect("procedure should exist");
 
     let mut cleanup = || cleanup_temporary_tables(&mut catalog, &wal);
 
@@ -389,8 +389,7 @@ fn execute_stored_procedure_invocation_over_cursor_with_cleanup_runs_cleanup() {
 
     let procedure = catalog
         .stored_procedure("refresh_accounts")
-        .expect("procedure should exist")
-        .clone();
+        .expect("procedure should exist");
 
     let mut rows = Vec::new();
     let mut first = HashMap::new();
@@ -418,7 +417,7 @@ fn execute_stored_procedure_invocation_over_cursor_with_cleanup_runs_cleanup() {
 }
 
 #[test]
-fn execute_stored_procedure_invocation_with_scoped_teardown_cleans_up_owned_tables() {
+fn execute_stored_procedure_invocation_with_scoped_teardown_preserves_owned_tables_for_reuse() {
 
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
@@ -434,8 +433,7 @@ fn execute_stored_procedure_invocation_with_scoped_teardown_cleans_up_owned_tabl
 
     let procedure = catalog
         .stored_procedure("refresh_accounts")
-        .expect("procedure should exist")
-        .clone();
+        .expect("procedure should exist");
 
     let result = execute_stored_procedure_invocation_with_scoped_teardown(
         &mut catalog,
@@ -464,7 +462,7 @@ fn execute_stored_procedure_invocation_with_scoped_teardown_cleans_up_owned_tabl
     assert!(catalog
         .table_ids()
         .into_iter()
-        .all(|table_id| !table_id.contains("tmp_users")));
+        .any(|table_id| table_id.contains("tmp_users")));
 
 }
 
@@ -485,8 +483,7 @@ fn scoped_teardown_does_not_bleed_between_procedure_instances() {
 
     let procedure = catalog
         .stored_procedure("refresh_accounts")
-        .expect("procedure should exist")
-        .clone();
+        .expect("procedure should exist");
 
     let mut rows = Vec::new();
     let mut row = HashMap::new();
@@ -523,7 +520,7 @@ fn scoped_teardown_does_not_bleed_between_procedure_instances() {
     assert_eq!(outcomes, vec!["ok".to_string()]);
 
     for table_id in &first_scope_table_ids {
-        assert!(catalog.table(table_id).is_none());
+        assert!(catalog.table(table_id).is_some_and(|table| table.is_temporary()));
     }
 
     let result = execute_stored_procedure_invocation_with_scoped_teardown(
@@ -550,4 +547,45 @@ fn scoped_teardown_does_not_bleed_between_procedure_instances() {
 
     assert_eq!(result, None);
 
+}
+
+#[test]
+fn execute_stored_procedure_invocation_with_sql_lookup_context_supports_local_udf_in_if_condition() {
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = crate::RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+
+    catalog
+        .register_stored_procedure(
+            "fndistance",
+            "create FUNCTION `fndistance`(lon1 DECIMAL(10,7), lat1 DECIMAL(10,7), lon2 DECIMAL(10,7), lat2 DECIMAL(10,7)) RETURNS decimal(15,7)\n            DETERMINISTIC\n        BEGIN\n        SET @dlat = (lat2-lat1) * 0.0174532925;\n        SET @dlon = (lon2-lon1) * 0.0174532925;\n        SET @lat1 = lat1 * 0.0174532925;\n        SET @lat2 = lat2 * 0.0174532925;\n        SET @a = SIN(@dlat/2) * SIN(@dlat/2) + SIN(@dlon/2) * SIN(@dlon/2) * COS(@lat1) * COS(@lat2);\n        SET @c = 2 * ATAN2(SQRT(@a), SQRT(1-@a));\n        SET @d = 6371 * @c;\n        RETURN @d;\n        END",
+            vec![],
+        )
+        .expect("function should register");
+
+    catalog
+        .register_stored_procedure(
+            "refresh_accounts",
+            "create procedure refresh_accounts() begin if fndistance(6.95, 50.93, 6.95, 50.93) < 1 then select 'near'; else select 'far'; end if; end",
+            vec![],
+        )
+        .expect("procedure should register");
+
+    let procedure = catalog
+        .stored_procedure("refresh_accounts")
+        .expect("procedure should exist");
+
+    let result = execute_stored_procedure_invocation_with_sql_lookup_context(
+        &HashMap::new(),
+        &procedure,
+        EntityInvocationSource::DirectedUser,
+        &catalog,
+        &wal,
+        &runtime_indexes,
+        &mut |sql| Ok(sql.to_string()),
+    )
+    .expect("context-aware invocation should succeed");
+
+    assert_eq!(result, Some("select 'near'".to_string()));
 }

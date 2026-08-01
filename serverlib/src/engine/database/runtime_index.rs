@@ -137,6 +137,93 @@ fn runtime_index_preload_accessors_on_bootstrap() -> bool {
         .unwrap_or(true)
 }
 
+fn runtime_index_bootstrap_accessor_preload_max_live_rows() -> usize {
+
+    std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_ACCESSOR_PRELOAD_MAX_LIVE_ROWS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(150_000)
+
+}
+
+fn runtime_index_background_prewarm_skipped_accessors() -> bool {
+
+    std::env::var("DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+
+}
+
+fn should_preload_accessors_for_bootstrap(live_row_count: usize) -> bool {
+    live_row_count <= runtime_index_bootstrap_accessor_preload_max_live_rows()
+}
+
+fn spawn_background_accessor_prewarm_from_checkpoint(
+    data_dir: std::path::PathBuf,
+    cache_scope_id: usize,
+    database_id: String,
+    table_id: String,
+    table_stream_id: String,
+    schema: crate::TableSchema,
+    warm_fields: Vec<String>,
+) {
+
+    if warm_fields.is_empty() {
+        return;
+    }
+
+    std::thread::spawn(move || {
+
+        let started_at = Instant::now();
+
+        let Some((latest_tx_id, live_rows)) = RuntimeIndexSnapshotService::load_live_row_checkpoint_rows(
+            &data_dir,
+            &table_stream_id,
+            &table_id,
+            &schema,
+        ) else {
+            log::debug!(
+                "runtime index background accessor prewarm skipped database={} table={} reason=live_row_checkpoint_unavailable",
+                database_id,
+                table_id,
+            );
+            return;
+        };
+
+        let load_elapsed_ms = started_at.elapsed().as_millis();
+        let live_row_count = live_rows.len();
+
+        warm_equality_cache_from_live_rows(
+            cache_scope_id,
+            &table_stream_id,
+            &schema,
+            latest_tx_id,
+            live_rows,
+            &warm_fields,
+        );
+
+        let elapsed_ms = started_at.elapsed().as_millis();
+
+        log::info!(
+            "runtime index background accessor prewarm complete database={} table={} source=live_row_checkpoint live_rows={} load_ms={} elapsed_ms={}",
+            database_id,
+            table_id,
+            live_row_count,
+            load_elapsed_ms,
+            elapsed_ms,
+        );
+
+    });
+
+}
+
 /// In-memory state for a single index.
 /// Each entry is a composite key tuple in the index's field order.
 #[derive(Debug, Clone, Default)]
@@ -703,9 +790,10 @@ impl RuntimeIndexStore {
         let bootstrap_started_at = Instant::now();
 
         log::info!(
-            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
+            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} preload_accessor_max_live_rows={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
             runtime_index_preload_accessors_on_bootstrap(),
+            runtime_index_bootstrap_accessor_preload_max_live_rows(),
             
             if self.non_primary_field_allowlist.is_empty() {
                 "<none>".to_string()
@@ -759,8 +847,8 @@ impl RuntimeIndexStore {
 
                 set_runtime_index_bootstrap_progress(|progress| {
                     let now = epoch_ms!();
-                    progress.current_database_id = database_id.clone();
-                    progress.current_table_id = table_id.clone();
+                    progress.current_database_id.clone_from(database_id);
+                    progress.current_table_id.clone_from(&table_id);
                     progress.current_table_started_epoch_ms = now;
                     progress.last_update_epoch_ms = now;
                 });
@@ -910,6 +998,56 @@ impl RuntimeIndexStore {
                     }
 
                     if runtime_index_preload_accessors_on_bootstrap() && !warm_fields.is_empty() {
+
+                        if !should_preload_accessors_for_bootstrap(snapshot.live_row_count) {
+                            log::info!(
+                                "runtime index bootstrap accessor preload skipped database={} table={} live_rows={} max_live_rows={}",
+                                database_id,
+                                table_id,
+                                snapshot.live_row_count,
+                                runtime_index_bootstrap_accessor_preload_max_live_rows(),
+                            );
+
+                            if runtime_index_background_prewarm_skipped_accessors()
+                                && let Some(data_dir) = snapshot_data_dir.as_ref()
+                            {
+                                spawn_background_accessor_prewarm_from_checkpoint(
+                                    data_dir.clone(),
+                                    wal.cache_scope_id(),
+                                    database_id.to_string(),
+                                    table_id.clone(),
+                                    table_stream_id.clone(),
+                                    table.schema.clone(),
+                                    warm_fields.clone(),
+                                );
+
+                                log::info!(
+                                    "runtime index bootstrap accessor background prewarm scheduled database={} table={} source=live_row_checkpoint warm_fields={}",
+                                    database_id,
+                                    table_id,
+                                    warm_fields.len(),
+                                );
+                            }
+
+                            log::info!(
+                                "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=snapshot elapsed_ms={}",
+                                database_id,
+                                table_id,
+                                tracked_indexes.len(),
+                                snapshot.live_row_count,
+                                table_started_at.elapsed().as_millis(),
+                            );
+
+                            set_runtime_index_bootstrap_progress(|progress| {
+                                progress.tables_completed = progress.tables_completed.saturating_add(1);
+                                progress.current_database_id.clear();
+                                progress.current_table_id.clear();
+                                progress.current_table_started_epoch_ms = 0;
+                                progress.last_update_epoch_ms = epoch_ms!();
+                            });
+
+                            continue;
+                        }
                         
                         let preload_started_at = Instant::now();
 
@@ -1100,35 +1238,46 @@ impl RuntimeIndexStore {
                     &table_id,
                 );
 
-                let warm_started_at = Instant::now();
-                warm_equality_cache_from_live_rows(
-                    wal.cache_scope_id(),
-                    &table_stream_id,
-                    &table.schema,
-                    latest_tx_id,
-                    live_rows,
-                    &warm_fields,
-                );
-                
-                let warm_elapsed_ms = warm_started_at.elapsed().as_millis();
-
-                if let Some(data_dir) = snapshot_data_dir.as_ref()
-                    && let Err(err) = RuntimeIndexSnapshotService::save_accessor_cache_snapshot(
-                        data_dir,
-                        &table,
-                        &table_stream_id,
-                        latest_tx_id,
-                        wal_fingerprint,
-                        &warm_fields,
+                let warm_elapsed_ms = if should_preload_accessors_for_bootstrap(live_row_count) {
+                    let warm_started_at = Instant::now();
+                    warm_equality_cache_from_live_rows(
                         wal.cache_scope_id(),
-                    )
-                {
-                    log::warn!(
-                        "accessor cache snapshot save skipped table={} reason={}",
-                        table_id,
-                        err,
+                        &table_stream_id,
+                        &table.schema,
+                        latest_tx_id,
+                        live_rows,
+                        &warm_fields,
                     );
-                }
+
+                    if let Some(data_dir) = snapshot_data_dir.as_ref()
+                        && let Err(err) = RuntimeIndexSnapshotService::save_accessor_cache_snapshot(
+                            data_dir,
+                            &table,
+                            &table_stream_id,
+                            latest_tx_id,
+                            wal_fingerprint,
+                            &warm_fields,
+                            wal.cache_scope_id(),
+                        )
+                    {
+                        log::warn!(
+                            "accessor cache snapshot save skipped table={} reason={}",
+                            table_id,
+                            err,
+                        );
+                    }
+
+                    warm_started_at.elapsed().as_millis()
+                } else {
+                    log::info!(
+                        "runtime index bootstrap equality warm skipped database={} table={} live_rows={} max_live_rows={}",
+                        database_id,
+                        table_id,
+                        live_row_count,
+                        runtime_index_bootstrap_accessor_preload_max_live_rows(),
+                    );
+                    0
+                };
 
                 if let Some(data_dir) = snapshot_data_dir.as_ref()
                     && let Err(err) = persist_runtime_index_snapshot(
@@ -1289,12 +1438,14 @@ impl RuntimeIndexStore {
         }
 
         let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(&data_dir, table_stream_id);
+
         let latest_tx_id = wal
             .latest_transaction_id(table_stream_id)
             .map(|tx| tx.0)
             .unwrap_or(0);
 
         let table_scope_id = table_stream_id;
+        
         for index in &tracked_indexes {
             self.register_index_for_table(table_scope_id, index);
         }
@@ -1325,13 +1476,13 @@ impl RuntimeIndexStore {
         let snapshot_store = runtime_index_store_for_table(self, table_stream_id, &tracked_indexes);
         let table_owned = table.clone();
         let table_stream_id_owned = table_stream_id.to_string();
-        let data_dir_owned = data_dir.clone();
         let tracked_indexes_owned = tracked_indexes.clone();
 
         std::thread::spawn(move || {
+            
             if let Err(err) = persist_runtime_index_snapshot(
                 &snapshot_store,
-                &data_dir_owned,
+                &data_dir,
                 &table_owned,
                 &table_stream_id_owned,
                 latest_tx_id,
@@ -1345,6 +1496,7 @@ impl RuntimeIndexStore {
                     err,
                 );
             }
+
         });
 
         self.incremental_persist_last_saved_ms
@@ -1530,6 +1682,7 @@ fn snapshot_indexes_for_table(
     table_scope_id: &str,
     tracked_indexes: &[DatabaseIndex],
 ) -> Result<Vec<RuntimeIndexSnapshotIndex>, String> {
+
     let mut indexes = Vec::with_capacity(tracked_indexes.len());
 
     for index in tracked_indexes {
@@ -1551,6 +1704,7 @@ fn snapshot_indexes_for_table(
     }
 
     Ok(indexes)
+
 }
 
 fn build_bootstrap_index_entries(
@@ -1721,6 +1875,7 @@ fn build_snapshot_index_entries(
                 (start, chunk)
                 
             }));
+
         }
 
         let mut out = Vec::with_capacity(handles.len());
@@ -1765,7 +1920,7 @@ fn runtime_index_materialize_non_primary() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 
 }
 

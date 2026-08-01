@@ -222,6 +222,72 @@ impl ServerApp {
             .insert(session_id.to_string(), overrides);
     }
 
+    pub fn cleanup_scoped_temporary_tables_for_session(&mut self, session_id: &str) -> usize {
+
+        let normalized_session_id = common::normalize_identifier!(session_id);
+        if normalized_session_id.is_empty() {
+            return 0;
+        }
+
+        let scope_prefix = format!("__scope_proc_{}", normalized_session_id);
+        let mut cleaned_tables = 0usize;
+
+        for (database_id, catalog) in self.catalogs.iter_mut() {
+
+            let scoped_table_ids = catalog
+                .table_ids()
+                .into_iter()
+                .filter(|table_id| table_id.starts_with(scope_prefix.as_str()))
+                .collect::<Vec<_>>();
+
+            for table_id in scoped_table_ids {
+
+                let stream_id = catalog
+                    .entity_wal_stream_id(&table_id)
+                    .unwrap_or_else(|| table_id.clone());
+
+                match catalog.drop_table(&table_id) {
+
+                    Ok(()) | Err(serverlib::DatabaseError::TableNotFound) => {}
+
+                    Err(err) => {
+                        log::warn!(
+                            "failed to drop scoped temporary table during session cleanup session_id={} database={} table={} err={}",
+                            normalized_session_id,
+                            database_id,
+                            table_id,
+                            err,
+                        );
+                        continue;
+                    }
+
+                }
+
+                if let Err(err) = self.wal.delete_stream(&stream_id) {
+                    log::warn!(
+                        "failed to delete scoped temporary stream during session cleanup session_id={} database={} table={} stream={} err={}",
+                        normalized_session_id,
+                        database_id,
+                        table_id,
+                        stream_id,
+                        err,
+                    );
+                }
+
+                if stream_id != table_id {
+                    let _ = self.wal.delete_stream(&table_id);
+                }
+
+                cleaned_tables += 1;
+
+            }
+
+        }
+
+        cleaned_tables
+
+    }
+
     pub fn run_wal_smoke_test(&self) -> Result<WalProbeResult, ServerAppError> {
         // Keep startup probe isolated so repeated process boots do not mutate
         // persisted WAL streams and trigger out-of-order validation errors.

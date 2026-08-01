@@ -42,6 +42,7 @@ pub use commands::{
     execute_local_repeat_block, execute_local_while_block,
     execute_sql_cursor,
     execute_automatic_triggers_for_event, execute_stored_procedure_invocation,
+    execute_stored_procedure_invocation_with_sql_lookup_context,
     execute_stored_procedure_invocation_over_cursor,
     execute_stored_procedure_invocation_with_scoped_teardown,
     execute_stored_procedure_invocation_over_cursor_with_scoped_teardown,

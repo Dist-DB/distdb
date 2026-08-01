@@ -485,7 +485,7 @@ pub(super) fn execute_create_table_impl(
             .entity_identity_id(&normalized_table_id)
             .unwrap_or_else(|| normalized_table_id.clone());
         
-        let entity_wal_id = table_entity_stream_id.clone();
+        let entity_wal_id = table_entity_stream_id;
         
         let schema_payload = SchemaChangePayload {
             table_id: normalized_table_id.clone(),
@@ -1124,7 +1124,6 @@ fn execute_drop_entity_object(
     if object_type == DatabaseObjectType::Table {
 
         let table_scope_id = entity_wal_stream_id
-            .clone()
             .unwrap_or_else(|| normalized_object_id.clone());
         runtime_indexes.remove_table_indexes(&table_scope_id);
 

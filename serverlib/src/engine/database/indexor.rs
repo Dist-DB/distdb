@@ -171,16 +171,21 @@ impl DatabaseIndexor {
         index_name: &str,
         kind: DatabaseIndexKind,
     ) -> Result<(), IndexorDefinitionError> {
+
         let name = common::normalize_identifier!(index_name);
+
         match self.storages.get(&name) {
+
             Some(storage) if storage.kind != kind => {
                 Err(IndexorDefinitionError::ConflictingDesignation {
                     index_name: name,
                     current: storage.kind,
                     requested: kind,
                 })
-            }
+            },
+
             Some(_) => Ok(()),
+
             None => {
                 self.storages.insert(
                     name,
@@ -191,7 +196,9 @@ impl DatabaseIndexor {
                 );
                 Ok(())
             }
+
         }
+        
     }
 
     pub fn ensure_index_for(
@@ -220,17 +227,17 @@ impl DatabaseIndexor {
         if index_kind_is_unique(storage.kind)
             && let Some(existing_row_id) = bucket.iter().copied().next() {
 
-                if existing_row_id != row_id {
-                    return Err(IndexorInsertError::UniqueViolation {
-                        index_name: name,
-                        key: key.to_vec(),
-                        existing_row_id,
-                        attempted_row_id: row_id,
-                    });
-                }
-
-                return Ok(());
+            if existing_row_id != row_id {
+                return Err(IndexorInsertError::UniqueViolation {
+                    index_name: name,
+                    key: key.to_vec(),
+                    existing_row_id,
+                    attempted_row_id: row_id,
+                });
             }
+
+            return Ok(());
+        }
 
         bucket.insert(row_id);
         Ok(())
@@ -243,6 +250,7 @@ impl DatabaseIndexor {
         row_map: &HashMap<String, Vec<u8>>,
         row_id: u64,
     ) -> Result<(), IndexorInsertError> {
+
         self.ensure_index_for(index_spec)
             .map_err(|_| IndexorInsertError::IndexDefinitionFailed {
                 index_name: index_spec.index_id().to_string(),
@@ -255,11 +263,13 @@ impl DatabaseIndexor {
         })?;
 
         self.insert(index_spec.index_id(), &key, row_id)
+
     }
 
     pub fn has_hit(&self, index_name: &str, key: &[u8]) -> bool {
 
         let name = common::normalize_identifier!(index_name);
+
         self.storages
             .get(&name)
             .and_then(|storage| storage.bucket_for_key(key))
@@ -334,12 +344,14 @@ impl DatabaseIndexor {
     }
 
     pub fn snapshot(&self) -> IndexorSnapshot {
+
         let mut index_names = self.storages.keys().cloned().collect::<Vec<_>>();
         index_names.sort_unstable();
 
         let mut storages = Vec::with_capacity(index_names.len());
 
         for index_name in index_names {
+
             let Some(storage) = self.storages.get(&index_name) else {
                 continue;
             };
@@ -366,15 +378,18 @@ impl DatabaseIndexor {
                 kind: storage.kind,
                 entries,
             });
+
         }
 
         IndexorSnapshot {
             format_version: Self::SNAPSHOT_FORMAT_VERSION,
             storages,
         }
+
     }
 
     pub fn from_snapshot(snapshot: &IndexorSnapshot) -> Result<Self, IndexorSnapshotError> {
+
         if snapshot.format_version != Self::SNAPSHOT_FORMAT_VERSION {
             return Err(IndexorSnapshotError::UnsupportedFormatVersion {
                 found: snapshot.format_version,
@@ -384,6 +399,7 @@ impl DatabaseIndexor {
         let mut storages = HashMap::new();
 
         for storage_snapshot in &snapshot.storages {
+
             let index_name = common::normalize_identifier!(&storage_snapshot.index_name);
 
             if storages.contains_key(&index_name) {
@@ -396,37 +412,44 @@ impl DatabaseIndexor {
             };
 
             for entry in &storage_snapshot.entries {
+
                 if storage.equality_lookup.contains_key(entry.key.as_slice()) {
                     return Err(IndexorSnapshotError::DuplicateKey {
-                        index_name: index_name.clone(),
+                        index_name,
                         key: entry.key.clone(),
                     });
                 }
 
                 if index_kind_is_unique(storage.kind) && entry.row_ids.len() > 1 {
                     return Err(IndexorSnapshotError::UniqueIndexHasMultipleRows {
-                        index_name: index_name.clone(),
+                        index_name,
                         key: entry.key.clone(),
                         row_count: entry.row_ids.len(),
                     });
                 }
 
                 let bucket_id = storage.next_bucket_id;
+                
                 storage.next_bucket_id = storage.next_bucket_id.saturating_add(1);
 
                 storage
                     .equality_lookup
                     .insert(entry.key.clone(), bucket_id);
+                
                 storage.key_directory.insert(entry.key.clone(), bucket_id);
+
                 storage
                     .buckets
                     .insert(bucket_id, entry.row_ids.iter().copied().collect());
+
             }
 
             storages.insert(index_name, storage);
+
         }
 
         Ok(Self { storages })
+
     }
 
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>, IndexorSnapshotError> {

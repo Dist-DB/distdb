@@ -37,10 +37,13 @@ impl InbuiltServerCommand for LookupCommand {
         }
 
         let table_name = parse_identifier_or_string_arg(args, 0, "table")?;
+        
         let row_id = evaluate_argument_expression(function_argument_expr(&args[1])?)?
             .map(|value| String::from_utf8_lossy(&value).into_owned())
             .unwrap_or_default();
+
         let column_name = parse_identifier_or_string_arg(args, 2, "column")?;
+
         let default_value = evaluate_argument_expression(function_argument_expr(&args[3])?)?;
 
         let context = inbuilt_sql_runtime_context();
@@ -50,7 +53,7 @@ impl InbuiltServerCommand for LookupCommand {
         let lookup_keys = [
             format!("{}.{}.{}", table_name, row_id, column_name),
             format!("{}.{}", table_name, column_name),
-            column_name.clone(),
+            column_name,
         ];
 
         for key in lookup_keys {
@@ -91,10 +94,10 @@ fn parse_identifier_or_string_arg(
         }
 
         Expr::Value(
-            Value::SingleQuotedString(value)
-            | Value::DoubleQuotedString(value)
-            | Value::TripleSingleQuotedString(value)
-            | Value::TripleDoubleQuotedString(value),
+            Value::SingleQuotedString(value) |
+            Value::DoubleQuotedString(value) |
+            Value::TripleSingleQuotedString(value) |
+            Value::TripleDoubleQuotedString(value),
         ) => Ok(common::normalize_identifier!(value)),
 
         _ => Err(format!(

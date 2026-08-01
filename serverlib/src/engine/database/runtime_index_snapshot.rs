@@ -23,6 +23,7 @@ const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtix";
 const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
 const LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrcnt";
 const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";
+const LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS: usize = 150_000;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RuntimeIndexTableSnapshot {
@@ -85,6 +86,16 @@ pub(crate) struct RuntimeIndexSnapshotService;
 
 impl RuntimeIndexSnapshotService {
 
+    fn live_row_checkpoint_compress_max_rows() -> usize {
+
+        std::env::var("DISTDB_LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS)
+
+    }
+
     pub(crate) fn wal_stream_fingerprint(data_dir: &Path, table_stream_id: &str) -> Option<(u64, u64)> {
 
         let path = Self::wal_stream_path(data_dir, table_stream_id);
@@ -116,7 +127,7 @@ impl RuntimeIndexSnapshotService {
             return None;
         }
 
-        let (checkpoint, _legacy_plain_encoding): (TableLiveRowCheckpoint, bool) =
+        let (checkpoint, legacy_plain_encoding): (TableLiveRowCheckpoint, bool) =
             decode_snapshot_payload(&bytes[HEADER_SIZE..])?;
 
         let schema_fingerprint = table_schema_fingerprint_for_parts(table_id, schema)?;
@@ -130,6 +141,23 @@ impl RuntimeIndexSnapshotService {
             || checkpoint.wal_modified_epoch_ms != wal_modified_epoch_ms
         {
             return None;
+        }
+
+        if !legacy_plain_encoding
+            && checkpoint.live_rows.len() > Self::live_row_checkpoint_compress_max_rows()
+        {
+            let mut rewritten = make_header(FileKind::Entity).to_vec();
+            if let Ok(payload) = bincode::serialize(&checkpoint) {
+                rewritten.extend_from_slice(&payload);
+                if let Err(err) = write_bytes_atomic(&checkpoint_path, &rewritten) {
+                    log::debug!(
+                        "live-row checkpoint plain rewrite skipped table={} stream={} reason={}",
+                        table_id,
+                        table_stream_id,
+                        err,
+                    );
+                }
+            }
         }
 
         Some((checkpoint.latest_tx_id, checkpoint.live_rows))
@@ -393,7 +421,13 @@ impl RuntimeIndexSnapshotService {
         };
 
         let mut content = make_header(FileKind::Entity).to_vec();
-        let payload = encode_snapshot_payload(&checkpoint)?;
+        let compress_threshold = Self::live_row_checkpoint_compress_max_rows();
+        let payload = if live_rows.len() > compress_threshold {
+            bincode::serialize(&checkpoint)
+                .map_err(|_| "snapshot serialization failed".to_string())?
+        } else {
+            encode_snapshot_payload(&checkpoint)?
+        };
         content.extend_from_slice(&payload);
 
         let checkpoint_path = Self::live_row_checkpoint_path(data_dir, table_stream_id);
