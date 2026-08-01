@@ -6,3 +6,4 @@ target/
 /console/data/
 *.script
 *.code-workspace
+*/Cargo.lock

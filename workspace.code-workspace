@@ -1,69 +1,22 @@
 {
   "folders": [
-    { "name": "distdb-cloud",
-      "path": "./../distdb-cloud"
-    },
     { "name": "httpserver",
       "path": "./../../httpserver"
+    },
+    { "name": "papers",
+      "path": "./../papers"
+    },
+    { "name": "connectors",
+      "path": "./../connectors"
+    },
+    { "name": "distdb-cloud",
+      "path": "./../distdb-cloud"
     },
     { "name": "distdb-web",
       "path": "./../distdb-web"
     },
-    {
-      "name": "connectors",
-      "path": "./../connectors"
-    },
-    {
-      "name": "artifacts",
-      "path": "artifacts"
-    },
-    {
-      "name": "papers",
-      "path": "../papers"
-    },
-    {
-      "name": ".github",
-      "path": ".github"
-    },
-    {
-      "name": "scripts",
-      "path": "scripts"
-    },
-    {
-      "name": "docs",
-      "path": "docs"
-    },
-    {
-      "name": "common",
-      "path": "common"
-    },
-    {
-      "name": "peerlib",
-      "path": "peerlib"
-    },
-    {
-      "name": "serverlib",
-      "path": "serverlib"
-    },
-    {
-      "name": "server",
-      "path": "server"
-    },
-    {
-      "name": "connector",
-      "path": "connector"
-    },
-    {
-      "name": "clientlib",
-      "path": "clientlib"
-    },
-    {
-      "name": "client",
-      "path": "client"
-    },
-    {
-      "name": "console",
-      "path": "console"
+    { "name": "distdb",
+      "path": "."
     }
   ],
   "settings": {
