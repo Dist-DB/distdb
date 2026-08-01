@@ -5,3 +5,4 @@ target/
 /server/data/
 /console/data/
 *.script
+*.code-workspace

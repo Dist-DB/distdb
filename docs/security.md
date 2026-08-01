@@ -201,6 +201,19 @@ DistDB now enforces SQL authorization using per-request privilege metadata and c
 	- an encrypted user credential snapshot for the user.
 - duplicate user creation is rejected unless `IF NOT EXISTS` is supplied.
 
+### Root bootstrap credential note
+
+Current runtime behavior still exposes a bootstrap `root` access path for first connection flows.
+
+Target hardening direction:
+
+- initialization should require an explicit root password-set event rather than relying on a shared default root password,
+- this event should be valid only during bootstrap/initialization scope,
+- provisioning and orchestration systems should persist only a hash, verifier, or equivalent derived representation rather than raw plaintext root password material,
+- the instance should not be considered ready for managed/cloud access until the initial root credential is set.
+
+Until this is implemented in runtime behavior, treat any default bootstrap root path as a temporary compatibility mechanism rather than the intended long-term security posture.
+
 ### WAL persistence and precedence
 
 - security changes append `SecurityChange` records to the database WAL stream immediately,

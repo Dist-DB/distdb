@@ -1,5 +1,11 @@
 {
   "folders": [
+    { "name": "distdb-cloud",
+      "path": "./../distdb-cloud"
+    },
+    { "name": "httpserver",
+      "path": "./../../httpserver"
+    },
     { "name": "distdb-web",
       "path": "./../distdb-web"
     },

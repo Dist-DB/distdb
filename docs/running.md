@@ -104,3 +104,8 @@ If you restart the server with the same `datadir`, both indexes should still app
 - If console cannot connect, confirm server is listening on the same `listen_addr`/`port`.
 - If authentication fails, use `password root;` for bootstrap root access.
 - If you changed ports or node id, pass matching values in the console `user=root@<node_id>` and target address.
+
+Current note:
+
+- local/manual bootstrap still uses the current temporary root bootstrap path above,
+- planned managed/cloud initialization should replace this with an explicit one-time root password-set event and should not rely on a shared default root password.
