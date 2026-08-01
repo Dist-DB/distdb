@@ -520,7 +520,7 @@ fn scoped_teardown_does_not_bleed_between_procedure_instances() {
     assert_eq!(outcomes, vec!["ok".to_string()]);
 
     for table_id in &first_scope_table_ids {
-        assert!(catalog.table(table_id).is_some_and(|table| table.is_temporary()));
+        assert!(catalog.table(table_id).is_none());
     }
 
     let result = execute_stored_procedure_invocation_with_scoped_teardown(

@@ -89,7 +89,12 @@
       "mvn -q test": true,
       "dotnet test": true,
       "./debug.sh": true,
-      "awk": true
+      "awk": true,
+      "cargo install": true,
+      "/^cd '/Users/samcolak/Source Code/rust/distdb/distdb' && bash scripts/coverage\\.sh$/": {
+        "approve": true,
+        "matchCommandLine": true
+      }
     }
   }
 }

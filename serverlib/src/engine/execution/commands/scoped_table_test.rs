@@ -273,7 +273,7 @@ fn scoped_ephemeral_table_scope_cleanup_is_isolated_per_scope() {
         .cleanup(&mut catalog, &wal)
         .expect("scope a cleanup should succeed");
 
-    assert!(catalog.table(&table_a).is_some_and(|table| table.is_temporary()));
+    assert!(catalog.table(&table_a).is_none());
     assert!(catalog.table(&table_b).is_some());
     assert!(wal.since(&stream_a, None).is_empty());
     assert_eq!(wal.since(&stream_b, None).len(), 1);
@@ -281,6 +281,6 @@ fn scoped_ephemeral_table_scope_cleanup_is_isolated_per_scope() {
     scope_b
         .cleanup(&mut catalog, &wal)
         .expect("scope b cleanup should succeed");
-    assert!(catalog.table(&table_b).is_some_and(|table| table.is_temporary()));
+    assert!(catalog.table(&table_b).is_none());
     assert!(wal.since(&stream_b, None).is_empty());
 }

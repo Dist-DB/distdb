@@ -76,26 +76,46 @@ run_cov() {
   cargo llvm-cov clean --workspace
 
   # Run tests once with gates enabled; emit reports in follow-up no-run steps.
-  cargo llvm-cov \
-    --workspace \
-    --no-report \
-    "${threshold_args[@]}" \
-    "${mode_args[@]}"
+  if [[ ${#mode_args[@]} -gt 0 ]]; then
+    cargo llvm-cov \
+      --workspace \
+      --no-report \
+      "${threshold_args[@]}" \
+      "${mode_args[@]}"
 
-  cargo llvm-cov \
-    --workspace \
-    --no-run \
-    --json \
-    --summary-only \
-    --output-path "$OUT_DIR/${crate_name}-summary.json" \
-    "${mode_args[@]}"
+    cargo llvm-cov \
+      --workspace \
+      --no-run \
+      --json \
+      --summary-only \
+      --output-path "$OUT_DIR/${crate_name}-summary.json" \
+      "${mode_args[@]}"
 
-  cargo llvm-cov \
-    --workspace \
-    --no-run \
-    --lcov \
-    --output-path "$OUT_DIR/${crate_name}.lcov" \
-    "${mode_args[@]}"
+    cargo llvm-cov \
+      --workspace \
+      --no-run \
+      --lcov \
+      --output-path "$OUT_DIR/${crate_name}.lcov" \
+      "${mode_args[@]}"
+  else
+    cargo llvm-cov \
+      --workspace \
+      --no-report \
+      "${threshold_args[@]}"
+
+    cargo llvm-cov \
+      --workspace \
+      --no-run \
+      --json \
+      --summary-only \
+      --output-path "$OUT_DIR/${crate_name}-summary.json"
+
+    cargo llvm-cov \
+      --workspace \
+      --no-run \
+      --lcov \
+      --output-path "$OUT_DIR/${crate_name}.lcov"
+  fi
 
   popd >/dev/null
 }
