@@ -2450,6 +2450,18 @@ fn parse_select_condition_expression(
                     },
 
                     (Err(_), Err(_)) => {
+                        if let Some(unbound_field) = parse_unbound_field_reference(left)
+                            && let Some((qualifier, _)) = unbound_field.split_once('.')
+                        {
+                            validate_qualifier(qualifier, relation_bindings, "WHERE clause")?;
+                        }
+
+                        if let Some(unbound_field) = parse_unbound_field_reference(right)
+                            && let Some((qualifier, _)) = unbound_field.split_once('.')
+                        {
+                            validate_qualifier(qualifier, relation_bindings, "WHERE clause")?;
+                        }
+
                         if let Ok(value) = parse_condition_literal_value(right) {
                             Ok(SelectCondition::Predicate(SelectPredicate::ExpressionComparison {
                                 expression_sql: left.to_string(),

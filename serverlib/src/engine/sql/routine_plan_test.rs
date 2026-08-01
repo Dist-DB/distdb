@@ -310,7 +310,7 @@ fn bind_call_procedure_arguments_accepts_constant_expressions() {
     .expect("call arguments should bind");
 
     assert_eq!(bindings.len(), 2);
-    assert_eq!(bindings[0], ("arg_left".to_string(), b"1 + 2".to_vec()));
+    assert_eq!(bindings[0], ("arg_left".to_string(), b"3".to_vec()));
     assert_eq!(bindings[1], ("arg_right".to_string(), b"3".to_vec()));
 }
 

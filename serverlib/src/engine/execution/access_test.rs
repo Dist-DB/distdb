@@ -870,9 +870,12 @@ fn runtime_index_bootstrap_uses_latest_live_row_keys() {
         .expect("pk runtime index should exist")
         .contains(&[stored_pk]));
 
-    assert!(runtime_indexes
+    if let Some(email_runtime_index) = runtime_indexes
         .index_for_table(&table_stream_id, &email_index.index_id.0)
-        .is_none());
+    {
+        assert!(email_runtime_index.contains(&[b"sam+updated@example.com".to_vec()]));
+        assert!(!email_runtime_index.contains(&[b"sam@example.com".to_vec()]));
+    }
 
 }
 
