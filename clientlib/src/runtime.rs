@@ -1,7 +1,7 @@
 use crate::config::{normalize_bootstrap_peers, resolve_database_for_sql, DEFAULT_DATABASE};
 use crate::models::{QueryColumnDef, QueryValue};
 use crate::{
-    ClientError, ClientOptions, ConnectionInfo, DistDbClient, ExecuteResponse, QueryResponse,
+    ClientError, ClientOptions, ConnectionInfo, DistDbChannel, DistDbClient, ExecuteResponse, QueryResponse,
     QueryRow, QueryTimings,
 };
 use common::helpers::utils::md5_hash;
@@ -12,7 +12,7 @@ use connector::{
 use peerlib::{ConnectorP2pConfig, ConnectorP2pTransport, ConnectorPeer};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug)]
 pub(crate) struct ClientInner {
@@ -21,14 +21,19 @@ pub(crate) struct ClientInner {
     pub(crate) request_seq: u64,
     pub(crate) connected: bool,
     pub(crate) current_database: Option<String>,
+    pub(crate) current_connection: Option<ConnectionInfo>,
 }
 
 impl DistDbClient {
 
-    pub fn new(mut options: ClientOptions) -> Result<Self, ClientError> {
+    fn new_with_registry(
+        mut options: ClientOptions,
+        active_connections: Arc<Mutex<Vec<ConnectionInfo>>>,
+        client_handles: Arc<Mutex<Vec<Weak<Mutex<ClientInner>>>>>,
+    ) -> Result<Self, ClientError> {
 
         options.servers = normalize_bootstrap_peers(options.servers.clone());
-        
+
         if options.servers.is_empty() {
             return Err(ClientError::Config(
                 "at least one normalized server address is required".to_string(),
@@ -58,18 +63,50 @@ impl DistDbClient {
             request_seq: 0,
             connected: false,
             current_database: options.database.clone(),
+            current_connection: None,
             options,
         };
 
+        let inner = Arc::new(Mutex::new(inner));
+
+        {
+            let mut handles = client_handles
+                .lock()
+                .map_err(|_| ClientError::Runtime("client handle registry lock poisoned".to_string()))?;
+            handles.push(Arc::downgrade(&inner));
+        }
+
         Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner,
+            active_connections,
+            client_handles,
         })
+
+    }
+
+    fn options_snapshot(&self) -> Result<ClientOptions, ClientError> {
+
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+
+        Ok(guard.options.clone())
+
+    }
+
+    pub fn new(options: ClientOptions) -> Result<Self, ClientError> {
+
+        let registry = Arc::new(Mutex::new(Vec::<ConnectionInfo>::new()));
+        let handles = Arc::new(Mutex::new(Vec::<Weak<Mutex<ClientInner>>>::new()));
+        Self::new_with_registry(options, registry, handles)
 
     }
 
     pub async fn connect(&self) -> Result<ConnectionInfo, ClientError> {
 
         let inner = Arc::clone(&self.inner);
+        let active_connections = Arc::clone(&self.active_connections);
 
         tokio::task::spawn_blocking(move || {
             
@@ -101,12 +138,21 @@ impl DistDbClient {
 
             let session_id = guard.transport.session_id().ok().flatten();
 
-            Ok(ConnectionInfo {
+            let connection = ConnectionInfo {
                 active_peer_id,
                 session_id,
                 user: guard.options.user.clone(),
                 database: guard.current_database.clone(),
-            })
+            };
+
+            guard.current_connection = Some(connection.clone());
+
+            let mut registry = active_connections
+                .lock()
+                .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+            register_active_connection(&mut registry, &connection);
+
+            Ok(connection)
 
         })
         .await
@@ -114,9 +160,53 @@ impl DistDbClient {
 
     }
 
+    pub async fn connect_channel(&self) -> Result<DistDbChannel, ClientError> {
+
+        let options = self.options_snapshot()?;
+        let channel_client = DistDbClient::new_with_registry(
+            options,
+            Arc::clone(&self.active_connections),
+            Arc::clone(&self.client_handles),
+        )?;
+        let _ = channel_client.connect().await?;
+
+        Ok(DistDbChannel {
+            client: channel_client,
+        })
+
+    }
+
+    pub async fn connect_channels(&self, count: usize) -> Result<Vec<DistDbChannel>, ClientError> {
+
+        if count == 0 {
+            return Err(ClientError::Config(
+                "connect_channels requires count >= 1".to_string(),
+            ));
+        }
+
+        let options = self.options_snapshot()?;
+        let mut channels = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let channel_client = DistDbClient::new_with_registry(
+                options.clone(),
+                Arc::clone(&self.active_connections),
+                Arc::clone(&self.client_handles),
+            )?;
+            let _ = channel_client.connect().await?;
+            channels.push(DistDbChannel {
+                client: channel_client,
+            });
+        }
+
+        Ok(channels)
+
+    }
+
     pub async fn disconnect(&self) -> Result<(), ClientError> {
 
         let inner = Arc::clone(&self.inner);
+        let active_connections = Arc::clone(&self.active_connections);
 
         tokio::task::spawn_blocking(move || {
             
@@ -124,8 +214,16 @@ impl DistDbClient {
                 .lock()
                 .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
 
+            let disconnected = guard.current_connection.take();
             guard.transport.disconnect_active_peer();
             guard.connected = false;
+
+            if let Some(connection) = disconnected {
+                let mut registry = active_connections
+                    .lock()
+                    .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+                unregister_active_connection(&mut registry, &connection);
+            }
             
             Ok(())
 
@@ -269,6 +367,71 @@ impl DistDbClient {
     
     }
 
+}
+
+pub(crate) async fn close_all_connections(client: &DistDbClient) -> Result<(), ClientError> {
+
+    let client_handles = Arc::clone(&client.client_handles);
+    let active_connections = Arc::clone(&client.active_connections);
+
+    tokio::task::spawn_blocking(move || {
+
+        let tracked_inners: Vec<Arc<Mutex<ClientInner>>> = {
+            let mut handles = client_handles
+                .lock()
+                .map_err(|_| ClientError::Runtime("client handle registry lock poisoned".to_string()))?;
+
+            let mut upgraded = Vec::with_capacity(handles.len());
+            handles.retain(|weak| {
+                if let Some(inner) = weak.upgrade() {
+                    upgraded.push(inner);
+                    true
+                } else {
+                    false
+                }
+            });
+
+            upgraded
+        };
+
+        for inner in tracked_inners {
+            let mut guard = inner
+                .lock()
+                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+
+            guard.transport.disconnect_active_peer();
+            guard.connected = false;
+            guard.current_connection = None;
+        }
+
+        let mut registry = active_connections
+            .lock()
+            .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+        registry.clear();
+
+        Ok(())
+
+    })
+    .await
+    .map_err(|err| ClientError::Runtime(format!("close_all_connections task failed: {err}")))?
+
+}
+
+fn same_connection(left: &ConnectionInfo, right: &ConnectionInfo) -> bool {
+    left.active_peer_id == right.active_peer_id
+        && left.session_id == right.session_id
+        && left.user == right.user
+        && left.database == right.database
+}
+
+fn register_active_connection(registry: &mut Vec<ConnectionInfo>, connection: &ConnectionInfo) {
+    if !registry.iter().any(|existing| same_connection(existing, connection)) {
+        registry.push(connection.clone());
+    }
+}
+
+fn unregister_active_connection(registry: &mut Vec<ConnectionInfo>, connection: &ConnectionInfo) {
+    registry.retain(|existing| !same_connection(existing, connection));
 }
 
 fn ensure_connected(inner: &ClientInner) -> Result<(), ClientError> {

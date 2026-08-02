@@ -31,7 +31,7 @@
 
 */
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 mod config;
 mod error;
@@ -47,4 +47,59 @@ pub use models::{
 #[derive(Debug, Clone)]
 pub struct DistDbClient {
     inner: Arc<Mutex<runtime::ClientInner>>,
+	active_connections: Arc<Mutex<Vec<ConnectionInfo>>>,
+	client_handles: Arc<Mutex<Vec<Weak<Mutex<runtime::ClientInner>>>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DistDbChannel {
+	client: DistDbClient,
+}
+
+impl DistDbChannel {
+
+	pub async fn query(&self, sql: impl Into<String>) -> Result<QueryResponse, ClientError> {
+		self.client.query(sql).await
+	}
+
+	pub async fn query_as<T>(&self, sql: impl Into<String>) -> Result<Vec<T>, ClientError>
+	where
+		T: serde::de::DeserializeOwned,
+	{
+		self.client.query_as(sql).await
+	}
+
+	pub async fn execute(&self, sql: impl Into<String>) -> Result<ExecuteResponse, ClientError> {
+		self.client.execute(sql).await
+	}
+
+	pub async fn set_database(&self, database: impl Into<String>) -> Result<(), ClientError> {
+		self.client.set_database(database).await
+	}
+
+	pub async fn disconnect(&self) -> Result<(), ClientError> {
+		self.client.disconnect().await
+	}
+
+	pub fn client(&self) -> &DistDbClient {
+		&self.client
+	}
+
+}
+
+impl DistDbClient {
+
+	pub fn active_connections(&self) -> Result<Vec<ConnectionInfo>, ClientError> {
+		let guard = self
+			.active_connections
+			.lock()
+			.map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+
+		Ok(guard.clone())
+	}
+
+	pub async fn close_all_connections(&self) -> Result<(), ClientError> {
+		runtime::close_all_connections(self).await
+	}
+
 }

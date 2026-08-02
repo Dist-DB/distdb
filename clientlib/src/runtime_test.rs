@@ -24,6 +24,7 @@ fn make_inner(connected: bool) -> ClientInner {
         request_seq: 0,
         connected,
         current_database: Some("main".to_string()),
+        current_connection: None,
     }
 }
 
