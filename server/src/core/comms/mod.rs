@@ -2,7 +2,6 @@ pub mod outbound_transport;
 pub mod p2p;
 pub mod p2p_wire;
 pub mod surface;
-pub mod tls_support;
 pub mod wire_io;
 pub mod wss;
 
@@ -46,7 +45,7 @@ pub use surface::{
     default_surface_descriptors,
     validate_surface_contract,
 };
-pub use tls_support::{
+pub use security::{
     BoxedConnectorStream,
     build_tls_acceptor,
     build_tls_client_config,

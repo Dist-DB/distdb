@@ -502,6 +502,105 @@ fn show_slices_with_where_order_and_limit_maps_to_show_slices_operation() {
 }
 
 #[test]
+fn export_database_to_path_maps_to_export_database_operation() {
+    let requests = parse_mysql8_sql_requests("export database to '/tmp/distdb-export.sql'", "main")
+        .expect("export database should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn export_table_to_path_maps_to_export_database_operation() {
+    let requests = parse_mysql8_sql_requests("export table users to '/tmp/users.sql'", "main")
+        .expect("export table should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("users"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn export_view_to_path_maps_to_export_database_operation() {
+    let requests = parse_mysql8_sql_requests("export view sales_view to '/tmp/sales_view.sql'", "main")
+        .expect("export view should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("sales_view"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn export_olapview_to_path_maps_to_export_database_operation() {
+    let requests = parse_mysql8_sql_requests("export olapview sales_cube to '/tmp/sales_cube.sql'", "main")
+        .expect("export olapview should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("sales_cube"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn export_function_to_path_maps_to_export_database_operation() {
+    let requests = parse_mysql8_sql_requests("export function f_add to '/tmp/f_add.sql'", "main")
+        .expect("export function should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("f_add"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn export_stored_procedure_to_path_maps_to_export_database_operation() {
+    let requests = parse_mysql8_sql_requests(
+        "export stored procedure p_sync to '/tmp/p_sync.sql'",
+        "main",
+    )
+    .expect("export stored procedure should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("p_sync"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn export_procedure_to_path_maps_to_export_database_operation() {
+    let requests = parse_mysql8_sql_requests("export procedure p_sync to '/tmp/p_sync.sql'", "main")
+        .expect("export procedure should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].directive, SqlDirective::Retrieve);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("p_sync"));
+    assert_eq!(requests[0].required_privilege, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn export_table_with_quoted_identifier_normalizes_object_name() {
+    let requests = parse_mysql8_sql_requests(
+        "export table `Users` to '/tmp/users.sql'",
+        "main",
+    )
+    .expect("export table with quoted identifier should parse through fallback");
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].operation, SqlOperation::ExportDatabase);
+    assert_eq!(requests[0].object_name.as_deref(), Some("Users"));
+}
+
+#[test]
 fn show_privileges_maps_to_retrieve_operation() {
     let requests = parse_mysql8_sql_requests("show privileges", "main")
         .expect("show privileges should parse");

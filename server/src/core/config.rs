@@ -6,12 +6,7 @@ use serverlib::NodeConfig;
 pub const DEFAULT_LOCAL_NODE_ID: &str = "server-node-01";
 pub const DEFAULT_LOCAL_SWARM_ID: &str = "distdb-devnet";
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ServerTlsConfig {
-    pub cert_path: Option<PathBuf>,
-    pub key_path: Option<PathBuf>,
-    pub ca_path: Option<PathBuf>,
-}
+pub type ServerTlsConfig = security::TlsConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerRuntimeConfig {

@@ -72,3 +72,89 @@ fn fallback_extracts_table_name_for_update() {
     assert_eq!(classified.1, SqlOperation::Update);
     assert_eq!(classified.2.as_deref(), Some("users"));
 }
+
+#[test]
+fn fallback_classifies_export_database() {
+    let classified = classify_text_fallback("export database to '/tmp/distdb-export.sql';")
+        .expect("export database should classify");
+
+    assert_eq!(classified.0, SqlDirective::Retrieve);
+    assert_eq!(classified.1, SqlOperation::ExportDatabase);
+    assert_eq!(classified.2.as_deref(), Some("database"));
+    assert_eq!(classified.3, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn fallback_classifies_export_view() {
+    let classified = classify_text_fallback("export view sales_view to '/tmp/view.sql';")
+        .expect("export view should classify");
+
+    assert_eq!(classified.0, SqlDirective::Retrieve);
+    assert_eq!(classified.1, SqlOperation::ExportDatabase);
+    assert_eq!(classified.2.as_deref(), Some("sales_view"));
+    assert_eq!(classified.3, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn fallback_classifies_export_olapview_alias() {
+    let classified = classify_text_fallback("export olap_view cube_sales to '/tmp/olap.sql';")
+        .expect("export olap_view should classify");
+
+    assert_eq!(classified.0, SqlDirective::Retrieve);
+    assert_eq!(classified.1, SqlOperation::ExportDatabase);
+    assert_eq!(classified.2.as_deref(), Some("cube_sales"));
+    assert_eq!(classified.3, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn fallback_classifies_export_procedure() {
+    let classified = classify_text_fallback("export procedure p_sync to '/tmp/p_sync.sql';")
+        .expect("export procedure should classify");
+
+    assert_eq!(classified.0, SqlDirective::Retrieve);
+    assert_eq!(classified.1, SqlOperation::ExportDatabase);
+    assert_eq!(classified.2.as_deref(), Some("p_sync"));
+    assert_eq!(classified.3, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn fallback_rejects_malformed_export_target() {
+    let classified = classify_text_fallback("export table users '/tmp/users.sql';");
+    assert!(classified.is_none());
+}
+
+#[test]
+fn fallback_classifies_export_with_quoted_identifier_and_spaced_path() {
+    let classified = classify_text_fallback("export table `Order` to '/tmp/folder/export file.sql';")
+        .expect("export table with quoted name and spaced path should classify");
+
+    assert_eq!(classified.0, SqlDirective::Retrieve);
+    assert_eq!(classified.1, SqlOperation::ExportDatabase);
+    assert_eq!(classified.2.as_deref(), Some("Order"));
+    assert_eq!(classified.3, Some(AccountPrivilege::BackupAdmin));
+}
+
+#[test]
+fn fallback_classifies_export_with_path_containing_to_substring() {
+    let classified = classify_text_fallback("export view sales_view to '/tmp/to folder/export-to-file.sql';")
+        .expect("export with path containing to should classify");
+
+    assert_eq!(classified.1, SqlOperation::ExportDatabase);
+    assert_eq!(classified.2.as_deref(), Some("sales_view"));
+}
+
+#[test]
+fn fallback_classifies_export_stored_procedure_with_quoted_identifier() {
+    let classified = classify_text_fallback("export stored procedure `p_sync` to '/tmp/p sync.sql';")
+        .expect("export stored procedure with quoted identifier should classify");
+
+    assert_eq!(classified.0, SqlDirective::Retrieve);
+    assert_eq!(classified.1, SqlOperation::ExportDatabase);
+    assert_eq!(classified.2.as_deref(), Some("p_sync"));
+}
+
+#[test]
+fn fallback_rejects_export_without_destination_path() {
+    let classified = classify_text_fallback("export database to");
+    assert!(classified.is_none());
+}

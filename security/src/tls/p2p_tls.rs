@@ -1,6 +1,6 @@
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use rcgen::{
@@ -22,6 +22,7 @@ pub struct TlsEnrollmentRequestMaterial {
 }
 
 fn sanitize_file_component(value: &str) -> String {
+
     value
         .chars()
         .map(|c| match c {
@@ -29,34 +30,48 @@ fn sanitize_file_component(value: &str) -> String {
             _ => '_',
         })
         .collect()
+
 }
 
 fn extract_host(address_hint: &str) -> String {
+
     if let Some((host, _)) = address_hint.rsplit_once(':') {
         return host.trim_matches('[').trim_matches(']').to_string();
     }
+    
     address_hint.trim_matches('[').trim_matches(']').to_string()
+
 }
 
 fn cluster_tls_paths(node_data_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+
     let cluster_dir = node_data_dir.parent().unwrap_or(node_data_dir);
     let tls_dir = cluster_dir.join("p2p-tls");
     let ca_cert_path = tls_dir.join("ca-cert.pem");
     let ca_key_path = tls_dir.join("ca-key.pem");
+    
     (tls_dir, ca_cert_path, ca_key_path)
+
 }
 
-fn sanitize_subject_alt_names(address_hint: &str, extra_subject_alt_names: &[String]) -> BTreeSet<String> {
+fn sanitize_subject_alt_names(
+    address_hint: &str,
+    extra_subject_alt_names: &[String],
+) -> BTreeSet<String> {
+
     let mut san_candidates = BTreeSet::new();
     san_candidates.insert("localhost".to_string());
     san_candidates.insert(extract_host(address_hint));
+
     for san in extra_subject_alt_names {
         let san = san.trim();
         if !san.is_empty() {
             san_candidates.insert(san.to_string());
         }
     }
+    
     san_candidates
+
 }
 
 fn certificate_params_for_node(
@@ -80,7 +95,7 @@ fn certificate_params_for_node(
     }
 
     Ok(params)
-
+    
 }
 
 pub fn build_tls_enrollment_request(
@@ -89,8 +104,11 @@ pub fn build_tls_enrollment_request(
     extra_subject_alt_names: &[String],
 ) -> Result<TlsEnrollmentRequestMaterial, String> {
 
-    let leaf_params = certificate_params_for_node(node_id, address_hint, extra_subject_alt_names)?;
+    let leaf_params =
+        certificate_params_for_node(node_id, address_hint, extra_subject_alt_names)?;
+
     let leaf_key = KeyPair::generate().map_err(|err| format!("failed generating leaf key: {err}"))?;
+    
     let csr = leaf_params
         .serialize_request(&leaf_key)
         .map_err(|err| format!("failed generating CSR: {err}"))?;
@@ -110,6 +128,7 @@ pub fn sign_tls_enrollment_csr(
 ) -> Result<(String, String), String> {
 
     let (_, ca_cert_path, ca_key_path) = cluster_tls_paths(node_data_dir);
+
     if !(ca_cert_path.exists() && ca_key_path.exists()) {
         return Err("local CA material is missing; cannot sign CSR".to_string());
     }
@@ -122,10 +141,7 @@ pub fn sign_tls_enrollment_csr(
         .signed_by(&ca_cert, &ca_key)
         .map_err(|err| format!("failed signing CSR: {err}"))?;
 
-    Ok((
-        signed.pem(),
-        ca_cert.pem(),
-    ))
+    Ok((signed.pem(), ca_cert.pem()))
 
 }
 
@@ -165,9 +181,8 @@ pub fn install_signed_p2p_tls(
     }
 
     if !cert_path.exists() {
-        std::fs::write(&cert_path, node_cert_pem).map_err(|err| {
-            format!("failed writing node cert '{}': {}", cert_path.display(), err)
-        })?;
+        std::fs::write(&cert_path, node_cert_pem)
+            .map_err(|err| format!("failed writing node cert '{}': {}", cert_path.display(), err))?;
     }
 
     if !key_path.exists() {
@@ -190,13 +205,8 @@ pub fn load_p2p_ca_pem(node_data_dir: &Path) -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    let pem = std::fs::read_to_string(&ca_cert_path).map_err(|err| {
-        format!(
-            "failed reading CA cert '{}': {}",
-            ca_cert_path.display(),
-            err
-        )
-    })?;
+    let pem = std::fs::read_to_string(&ca_cert_path)
+        .map_err(|err| format!("failed reading CA cert '{}': {}", ca_cert_path.display(), err))?;
 
     Ok(Some(pem))
 
@@ -236,21 +246,11 @@ pub fn import_p2p_ca_pem_if_missing(node_data_dir: &Path, ca_cert_pem: &str) -> 
 
 fn load_existing_ca(ca_cert_path: &Path, ca_key_path: &Path) -> Result<(Certificate, KeyPair), String> {
 
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path).map_err(|err| {
-        format!(
-            "failed reading existing CA cert '{}': {}",
-            ca_cert_path.display(),
-            err
-        )
-    })?;
+    let ca_cert_pem = std::fs::read_to_string(ca_cert_path)
+        .map_err(|err| format!("failed reading existing CA cert '{}': {}", ca_cert_path.display(), err))?;
 
-    let ca_key_pem = std::fs::read_to_string(ca_key_path).map_err(|err| {
-        format!(
-            "failed reading existing CA key '{}': {}",
-            ca_key_path.display(),
-            err
-        )
-    })?;
+    let ca_key_pem = std::fs::read_to_string(ca_key_path)
+        .map_err(|err| format!("failed reading existing CA key '{}': {}", ca_key_path.display(), err))?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem)
         .map_err(|err| format!("failed parsing existing CA key: {err}"))?;
@@ -292,7 +292,7 @@ pub fn ensure_or_generate_p2p_tls(
 ) -> Result<AutoTlsPaths, String> {
 
     let (tls_dir, ca_cert_path, ca_key_path) = cluster_tls_paths(node_data_dir);
-    
+
     std::fs::create_dir_all(&tls_dir)
         .map_err(|err| format!("failed to create tls dir '{}': {}", tls_dir.display(), err))?;
 
@@ -330,9 +330,7 @@ pub fn ensure_or_generate_p2p_tls(
                         let _ = std::fs::remove_file(&self.path);
                     }
                 }
-                let _guard = CaLockGuard {
-                    path: ca_lock_path,
-                };
+                let _guard = CaLockGuard { path: ca_lock_path };
 
                 if ca_cert_path.exists() && ca_key_path.exists() {
                     load_existing_ca(&ca_cert_path, &ca_key_path)?
@@ -344,8 +342,8 @@ pub fn ensure_or_generate_p2p_tls(
                     ca_params.distinguished_name = ca_dn;
                     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 
-                    let ca_key = KeyPair::generate()
-                        .map_err(|err| format!("failed generating CA key: {err}"))?;
+                    let ca_key =
+                        KeyPair::generate().map_err(|err| format!("failed generating CA key: {err}"))?;
                     let ca_cert = ca_params
                         .self_signed(&ca_key)
                         .map_err(|err| format!("failed generating CA cert: {err}"))?;
@@ -376,7 +374,7 @@ pub fn ensure_or_generate_p2p_tls(
             }
 
         }
-        
+
     };
 
     let leaf_params = certificate_params_for_node(node_id, address_hint, extra_subject_alt_names)?;
@@ -389,7 +387,7 @@ pub fn ensure_or_generate_p2p_tls(
 
     std::fs::write(&cert_path, leaf_cert.pem())
         .map_err(|err| format!("failed writing node cert '{}': {}", cert_path.display(), err))?;
-    
+
     std::fs::write(&key_path, leaf_key.serialize_pem())
         .map_err(|err| format!("failed writing node key '{}': {}", key_path.display(), err))?;
 

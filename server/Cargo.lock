@@ -3013,6 +3013,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "security"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3074,6 +3086,7 @@ dependencies = [
  "peerlib",
  "rustls",
  "rustls-pemfile",
+ "security",
  "serde_json",
  "serverlib",
  "tokio",
@@ -3092,8 +3105,8 @@ dependencies = [
  "flate2",
  "log",
  "openssl",
- "rcgen",
  "regex",
+ "security",
  "serde",
  "sqlparser",
 ]

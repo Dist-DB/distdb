@@ -28,6 +28,7 @@ pub enum SqlDirective {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlOperation {
     Select,
+    ExportDatabase,
     UnionQuery,
     Insert,
     Update,

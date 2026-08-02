@@ -8,6 +8,7 @@ use super::variables::{
     SessionVariableOverrides,
     VariableScope,
 };
+use serverlib::DatabaseEntityAspect;
 
 struct QueryExecutionContext<'a> {
     catalogs: &'a mut HashMap<String, DatabaseCatalog>,
@@ -203,6 +204,8 @@ fn query_operation_handler(operation: SqlOperation) -> Option<QueryOperationHand
     match operation {
 
         SqlOperation::Insert => Some(execute_insert),
+
+        SqlOperation::ExportDatabase => Some(execute_export_database),
         
         SqlOperation::Update => Some(execute_update),
         
@@ -246,6 +249,103 @@ fn query_operation_handler(operation: SqlOperation) -> Option<QueryOperationHand
         SqlOperation::ShowSlices => Some(execute_select),
 
     }
+
+}
+
+fn execute_export_database(
+    ctx: &mut QueryExecutionContext<'_>,
+    request_id: &str,
+    database_id: &str,
+    statement: &SqlRequest,
+) -> ConnectorResponse {
+
+    let export_request = match serverlib::parse_export_request(&statement.sql) {
+        Ok(request) => request,
+        Err(message) => {
+            return ConnectorResponse::rejected(request_id.to_string(), message);
+        }
+    };
+
+    let Some(catalog) = resolve_catalog(ctx.catalogs, database_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("database '{}' not found", database_id),
+        );
+    };
+
+    let mut export_plan = match serverlib::plan_export_script(catalog, &export_request.target) {
+        Ok(plan) => plan,
+        Err(message) => {
+            return ConnectorResponse::rejected(request_id.to_string(), message);
+        }
+    };
+
+    let data_table_ids = std::mem::take(&mut export_plan.data_table_ids);
+
+    for table_id in data_table_ids {
+        let Some(table) = catalog.table(&table_id) else {
+            continue;
+        };
+
+        if table.is_temporary() {
+            continue;
+        }
+
+        let payload_context = payload_context_for_table(catalog, &table.table_id);
+        let stream_id = table.wal_stream_id(&catalog.database_id.0);
+        let live_rows = load_live_rows_with_context(ctx.wal, &stream_id, table.schema(), &payload_context)
+            .map_err(|err| format!("export failed while reading rows for '{}': {err}", table.table_id));
+
+        let live_rows = match live_rows {
+            Ok(rows) => rows,
+            Err(message) => {
+                return ConnectorResponse::rejected(request_id.to_string(), message);
+            }
+        };
+
+        serverlib::append_table_rows_to_export_script(&mut export_plan.script, &table, &live_rows);
+    }
+
+    let script = export_plan.script;
+
+    let export_target = PathBuf::from(&export_request.path);
+    if let Some(parent) = export_target.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("export failed: unable to create directory '{}': {err}", parent.display()),
+        );
+    }
+
+    let temp_target = export_target.with_extension("tmp");
+
+    if let Err(err) = fs::write(&temp_target, script) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "export failed: unable to write temporary file '{}': {err}",
+                temp_target.display()
+            ),
+        );
+    }
+
+    if let Err(err) = fs::rename(&temp_target, &export_target) {
+        let _ = fs::remove_file(&temp_target);
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "export failed: unable to finalize export file '{}': {err}",
+                export_target.display()
+            ),
+        );
+    }
+
+    ConnectorResponse::applied(
+        request_id.to_string(),
+        ConnectorResult::Mutation(MutationResult { affected_rows: 1 }),
+    )
 
 }
 
@@ -2875,6 +2975,39 @@ fn format_local_numeric_result(value: f64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_export_request_supports_quoted_identifier_and_spaced_path() {
+        let parsed = serverlib::parse_export_request("export table `Order` to '/tmp/folder/export file.sql';")
+            .expect("export table with quoted identifier and spaced path should parse");
+
+        assert_eq!(parsed.target, serverlib::ExportTarget::Table("order".to_string()));
+        assert_eq!(parsed.path, "/tmp/folder/export file.sql");
+    }
+
+    #[test]
+    fn parse_export_request_supports_path_containing_to_substring() {
+        let parsed = serverlib::parse_export_request("export view sales_view to '/tmp/to folder/export-to-file.sql';")
+            .expect("export with to substring in path should parse");
+
+        assert_eq!(parsed.target, serverlib::ExportTarget::View("sales_view".to_string()));
+        assert_eq!(parsed.path, "/tmp/to folder/export-to-file.sql");
+    }
+
+    #[test]
+    fn parse_export_request_supports_stored_procedure_form() {
+        let parsed = serverlib::parse_export_request("export stored procedure `p_sync` to '/tmp/p sync.sql';")
+            .expect("export stored procedure should parse");
+
+        assert_eq!(parsed.target, serverlib::ExportTarget::Procedure("p_sync".to_string()));
+        assert_eq!(parsed.path, "/tmp/p sync.sql");
+    }
+
+    #[test]
+    fn parse_export_request_rejects_missing_destination() {
+        let parsed = serverlib::parse_export_request("export database to");
+        assert!(parsed.is_err());
+    }
 
     #[test]
     fn parse_local_scalar_value_supports_argument_arithmetic_expression() {

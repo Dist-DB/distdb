@@ -41,7 +41,6 @@
 pub mod core;
 pub mod engine;
 pub mod helpers;
-pub mod security;
 
 pub use core::config::NodeConfig;
 pub use core::identity::{NodeId, UserId};
@@ -216,6 +215,12 @@ pub use engine::sql::{
 	parse_create_procedure_parameter_declarations_from_statement,
 	parse_create_procedure_parameter_names_from_statement,
 	bind_call_procedure_argument_bindings,
+	parse_export_request,
+	plan_export_script,
+	append_table_rows_to_export_script,
+	ExportRequest,
+	ExportScriptPlan,
+	ExportTarget,
 	RoutineArgumentBinding, RoutineParameterDeclaration, RoutineParameterMode,
 	with_lookup_sql_function_evaluator,
 	bind_call_procedure_arguments,
@@ -246,7 +251,21 @@ pub use engine::sql::{
 
 pub use engine::wal::{ConcurrentWalManager, WalStreamMode};
 
-pub use security::{
+pub use engine::affinity::{
+	AffinityDocument as AuthorityDocument,
+	AffinityMember as AuthorityMember,
+	AffinityMemberStatus as AuthorityMemberStatus,
+	AffinityProcessor as AuthorityProcessor,
+	AffinityProcessorError as AuthorityProcessorError,
+	AffinityProcessorState as AuthorityProcessorState,
+	AffinitySyncPhase as AuthoritySyncPhase,
+	AffinitySyncStep as AuthoritySyncStep,
+	CheckpointMetadata as AuthorityCheckpointMetadata,
+	DatabaseSchemaSummary as AuthorityDatabaseSchemaSummary,
+	ReplicationSecuritySummary as AuthorityReplicationSecuritySummary,
+};
+
+pub use ::security::{
 	AutoTlsPaths, TlsEnrollmentRequestMaterial, build_tls_enrollment_request,
 	ensure_or_generate_p2p_tls, import_p2p_ca_pem_if_missing, install_signed_p2p_tls,
 	load_p2p_ca_pem, sign_tls_enrollment_csr,

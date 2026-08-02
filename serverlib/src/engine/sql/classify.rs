@@ -370,6 +370,8 @@ fn required_privilege_for_operation(operation: SqlOperation) -> Option<AccountPr
         SqlOperation::UnionQuery |
         SqlOperation::ShowSlices            => Some(AccountPrivilege::Select),
 
+        SqlOperation::ExportDatabase        => Some(AccountPrivilege::BackupAdmin),
+
         SqlOperation::Insert                => Some(AccountPrivilege::Insert),
 
         SqlOperation::Update                => Some(AccountPrivilege::Update),
@@ -555,10 +557,7 @@ pub(super) fn classify_text_fallback(
     statement: &str,
 ) -> Option<(SqlDirective, SqlOperation, Option<String>, Option<AccountPrivilege>)> {
     
-    let tokens = statement
-        .split_whitespace()
-        .map(|token| token.trim_matches(';'))
-        .collect::<Vec<_>>();
+    let tokens = tokenize_fallback_statement(statement);
 
     let first = tokens.first()?;
     let verb = first.to_ascii_lowercase();
@@ -566,6 +565,8 @@ pub(super) fn classify_text_fallback(
     match verb.as_str() {
 
         "create" | "drop" => {},
+
+        "export" => return classify_export_fallback(&tokens),
 
         "show" => {
             if tokens.get(1).is_some_and(|token| {
@@ -755,7 +756,7 @@ pub(super) fn classify_text_fallback(
     
 }
 
-fn fallback_object_name_after_tokens(tokens: &[&str], verb: &str, object_idx: usize) -> Option<String> {
+fn fallback_object_name_after_tokens(tokens: &[String], verb: &str, object_idx: usize) -> Option<String> {
 
     let mut name_idx = object_idx + 1;
 
@@ -779,13 +780,140 @@ fn normalize_fallback_object_name(token: &str) -> Option<String> {
 
     let trimmed = token.trim_matches(';');
     let head = trimmed.split_once('(').map_or(trimmed, |(name, _)| name);
-    let normalized = head.trim_matches(|c| c == ';' || c == '`' || c == '"' || c == '\'');
+    let normalized = normalize_dotted_identifier(head)?;
 
     if normalized.is_empty() {
         None
     } else {
-        Some(normalized.to_string())
+        Some(normalized)
     }
+
+}
+
+fn normalize_dotted_identifier(identifier: &str) -> Option<String> {
+
+    let parts = identifier
+        .split('.')
+        .map(|part| part.trim_matches(|c| c == ';' || c == '`' || c == '"' || c == '\''))
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+
+    Some(parts.join("."))
+    
+}
+
+fn classify_export_fallback(
+    tokens: &[String],
+) -> Option<(SqlDirective, SqlOperation, Option<String>, Option<AccountPrivilege>)> {
+
+    let object_kind = tokens.get(1)?.to_ascii_lowercase();
+    let privilege = Some(AccountPrivilege::BackupAdmin);
+
+    match object_kind.as_str() {
+
+        "database" => {
+            if tokens.get(2).is_some_and(|token| token.eq_ignore_ascii_case("to"))
+                && tokens.get(3).is_some()
+            {
+                return Some((
+                    SqlDirective::Retrieve,
+                    SqlOperation::ExportDatabase,
+                    Some("database".to_string()),
+                    privilege,
+                ));
+            }
+            None
+        },
+
+        "table" | "view" | "olapview" | "olap_view" | "function" | "procedure" => {
+            if tokens.get(3).is_some_and(|token| token.eq_ignore_ascii_case("to"))
+                && tokens.get(4).is_some()
+            {
+                return Some((
+                    SqlDirective::Retrieve,
+                    SqlOperation::ExportDatabase,
+                    tokens.get(2).and_then(|name| normalize_fallback_object_name(name)),
+                    privilege,
+                ));
+            }
+            None
+        },
+
+        "stored" => {
+            if tokens.get(2).is_some_and(|token| token.eq_ignore_ascii_case("procedure"))
+                && tokens.get(4).is_some_and(|token| token.eq_ignore_ascii_case("to"))
+                && tokens.get(5).is_some()
+            {
+                return Some((
+                    SqlDirective::Retrieve,
+                    SqlOperation::ExportDatabase,
+                    tokens.get(3).and_then(|name| normalize_fallback_object_name(name)),
+                    privilege,
+                ));
+            }
+            None
+        }
+
+        _ => None,
+
+    }
+
+}
+
+fn tokenize_fallback_statement(statement: &str) -> Vec<String> {
+
+    let mut tokens = Vec::<String>::new();
+    let mut current = String::new();
+
+    let mut quote: Option<char> = None;
+    let mut chars = statement.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+
+        if let Some(q) = quote {
+            current.push(ch);
+
+            if ch == q {
+                quote = None;
+                continue;
+            }
+
+            if q != '`' && ch == '\\' {
+                if let Some(next_ch) = chars.next() {
+                    current.push(next_ch);
+                }
+                continue;
+            }
+
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+
+        if ch == '\'' || ch == '"' || ch == '`' {
+            quote = Some(ch);
+            current.push(ch);
+            continue;
+        }
+
+        current.push(ch);
+
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
 
 }
 

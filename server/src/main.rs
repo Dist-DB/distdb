@@ -53,7 +53,7 @@ use server::core::comms::p2p::{
     TcpServerTransport, initialize_server_p2p_runtime, spawn_p2p_heartbeat_task,
     spawn_service_announce_task,
 };
-use server::core::comms::tls_support::{
+use server::core::comms::{
     build_tls_acceptor, build_tls_client_config, negotiate_connector_stream,
     parse_tls_config_from_args, parse_tls_mode_from_args,
 };

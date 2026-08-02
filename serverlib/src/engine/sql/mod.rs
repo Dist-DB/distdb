@@ -4,6 +4,7 @@ mod types;
 mod expression;
 mod dialect;
 mod classify;
+mod export;
 mod literals;
 mod parser;
 mod requests;
@@ -68,6 +69,14 @@ pub use functions::{
     SqlFunctionEvaluationStrategy, with_lookup_sql_function_evaluator,
 };
 pub use dialect::{dialect_capabilities_for_target, SqlDialectCapabilities};
+pub use export::{
+    append_table_rows_to_export_script,
+    parse_export_request,
+    plan_export_script,
+    ExportRequest,
+    ExportScriptPlan,
+    ExportTarget,
+};
 pub use expression::{expression_references_column, SelectExpression};
 pub use predicates::{
     compare_like_value, compare_regex_value, compare_row_value, validate_regex_pattern,

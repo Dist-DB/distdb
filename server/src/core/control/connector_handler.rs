@@ -8,7 +8,7 @@ use crate::core::comms::p2p_wire::{
 use crate::core::comms::surface::{
     InboundChannelMessage, InboundChannelSurface, RustP2pInboundSurface,
 };
-use crate::core::comms::tls_support::BoxedConnectorStream;
+use crate::core::comms::BoxedConnectorStream;
 use crate::core::comms::wire_io::{write_response_frame, write_service_message_to_stream};
 use crate::core::control::affinity::build_database_schema_summaries_from_app;
 use crate::core::control::schema_catalog::{
