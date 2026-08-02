@@ -47,7 +47,7 @@ Logic in this layer should be deterministic and testable with isolated inputs.
 Within `server`, all communication provider and protocol concerns are isolated under `core/comms`, including:
 
 - provider implementations (for example `rust/p2p` and `rust/wss`),
-- transport negotiation and TLS handshake support,
+- transport negotiation and TLS handshake API surface (implemented by shared `security` crate),
 - framed request/response wire helpers,
 - protocol encode/decode utilities and service message wiring,
 - outbound transport helpers and provider surface contracts.
