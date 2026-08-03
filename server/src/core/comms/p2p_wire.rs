@@ -124,7 +124,41 @@ fn is_placeholder_host(value: &str) -> bool {
     trimmed.is_empty() || trimmed == "--" || trimmed == "*" || trimmed == "null"
 }
 
-pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> String {
+fn is_loopback_host(value: &str) -> bool {
+    let trimmed = value.trim().to_ascii_lowercase();
+    matches!(trimmed.as_str(), "127.0.0.1" | "localhost" | "localhost.localdomain" | "::1")
+}
+
+fn resolve_hostname_hint() -> Option<String> {
+    std::env::var("DISTDB_ADVERTISE_HOST")
+        .ok()
+        .filter(|value| !is_placeholder_host(value) && !is_loopback_host(value))
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .filter(|value| !is_placeholder_host(value) && !is_loopback_host(value))
+        })
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|value| !is_placeholder_host(value) && !is_loopback_host(value))
+        })
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if host.is_empty() || is_placeholder_host(&host) || is_loopback_host(&host) {
+                        None
+                    } else {
+                        Some(host)
+                    }
+                })
+        })
+}
+
+pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint: Option<&str>) -> String {
 
     if let Some(explicit) = args
         .iter()
@@ -163,11 +197,22 @@ pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> S
         }
     }
 
-    if listen_addr == "0.0.0.0" {
+    if let Some(hostname_hint) = hostname_hint
+        && !is_placeholder_host(hostname_hint)
+        && !is_loopback_host(hostname_hint)
+    {
+        return hostname_hint.to_string();
+    }
+
+    if listen_addr == "0.0.0.0" || listen_addr == "::" || listen_addr.is_empty() {
         return "127.0.0.1".to_string();
     }
 
     listen_addr.to_string()
+}
+
+pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> String {
+    resolve_advertise_host(args, listen_addr, resolve_hostname_hint().as_deref())
 }
 
 pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {

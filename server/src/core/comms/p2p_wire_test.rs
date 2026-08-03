@@ -94,14 +94,14 @@
     }
 
     #[test]
-    fn advertised_listen_addr_defaults_wildcard_to_localhost() {
+    fn advertised_listen_addr_defaults_wildcard_to_localhost_when_no_hint_available() {
         let args = vec!["server".to_string()];
         assert_eq!(
-            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            resolve_advertise_host(&args, "0.0.0.0", None),
             "127.0.0.1".to_string()
         );
         assert_eq!(
-            advertised_listen_addr_from_args(&args, "192.168.1.10"),
+            resolve_advertise_host(&args, "192.168.1.10", None),
             "192.168.1.10".to_string()
         );
     }
@@ -128,14 +128,23 @@
     fn advertised_listen_addr_ignores_placeholder_hosts() {
         let args = vec!["server".to_string(), "--".to_string()];
         assert_eq!(
-            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            resolve_advertise_host(&args, "0.0.0.0", None),
             "127.0.0.1".to_string()
         );
 
         let args = vec!["server".to_string(), "advertise_addr=--".to_string()];
         assert_eq!(
-            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            resolve_advertise_host(&args, "0.0.0.0", None),
             "127.0.0.1".to_string()
+        );
+    }
+
+    #[test]
+    fn advertised_listen_addr_uses_hostname_hint_when_listen_addr_is_wildcard() {
+        let args = vec!["server".to_string()];
+        assert_eq!(
+            resolve_advertise_host(&args, "0.0.0.0", Some("provision.distdb.com")),
+            "provision.distdb.com"
         );
     }
 
