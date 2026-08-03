@@ -306,53 +306,36 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
         }
     }
 
-    let has_positional_host = args.iter().skip(1).any(|arg| {
-        let trimmed = arg.trim();
-        !trimmed.is_empty()
-            && !trimmed.starts_with("listen_addr=")
-            && !trimmed.starts_with("advertise_addr=")
-            && !trimmed.starts_with("port=")
-            && !trimmed.starts_with("node_id=")
-            && !trimmed.starts_with("datadir=")
-            && !trimmed.starts_with("swarm_id=")
-            && !trimmed.starts_with("servers=")
-            && !trimmed.starts_with("affinity=")
-            && !trimmed.starts_with("tls_san=")
-            && !trimmed.starts_with("ca_root")
-            && !trimmed.starts_with("service=")
-            && !trimmed.starts_with("wss")
-    });
-
-    if has_positional_host {
-        if let Some(positional_host) = args.iter().skip(1).find_map(|arg| {
-            let trimmed = arg.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with("listen_addr=")
-                || trimmed.starts_with("advertise_addr=")
-                || trimmed.starts_with("port=")
-                || trimmed.starts_with("node_id=")
-                || trimmed.starts_with("datadir=")
-                || trimmed.starts_with("swarm_id=")
-                || trimmed.starts_with("servers=")
-                || trimmed.starts_with("affinity=")
-                || trimmed.starts_with("tls_san=")
-                || trimmed.starts_with("ca_root")
-                || trimmed.starts_with("service=")
-                || trimmed.starts_with("wss")
-            {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }) {
-            if !is_placeholder_host(&positional_host) {
-                return positional_host;
-            }
-        }
-    } else if let Some(hostname_hint) = hostname_hint
+    if let Some(hostname_hint) = hostname_hint
         && looks_like_public_hostname(hostname_hint)
     {
         return hostname_hint.to_string();
+    }
+
+    if let Some(positional_host) = args.iter().skip(1).find_map(|arg| {
+        let trimmed = arg.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("listen_addr=")
+            || trimmed.starts_with("advertise_addr=")
+            || trimmed.starts_with("port=")
+            || trimmed.starts_with("node_id=")
+            || trimmed.starts_with("datadir=")
+            || trimmed.starts_with("swarm_id=")
+            || trimmed.starts_with("servers=")
+            || trimmed.starts_with("affinity=")
+            || trimmed.starts_with("tls_san=")
+            || trimmed.starts_with("ca_root")
+            || trimmed.starts_with("service=")
+            || trimmed.starts_with("wss")
+        {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }) {
+        if !is_placeholder_host(&positional_host) {
+            return positional_host;
+        }
     }
 
     if let Some(server_host) = resolve_public_host_from_server_list(args) {

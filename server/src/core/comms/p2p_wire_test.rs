@@ -190,7 +190,7 @@
     }
 
     #[test]
-    fn advertised_listen_addr_prefers_positional_host_over_hostname_hint() {
+    fn advertised_listen_addr_prefers_hostname_hint_over_positional_host() {
         let args = vec![
             "server".to_string(),
             "distdb1-fra.samcolak.com".to_string(),
@@ -198,7 +198,7 @@
 
         assert_eq!(
             resolve_advertise_host(&args, "0.0.0.0", Some("provision.distdb.com")),
-            "distdb1-fra.samcolak.com"
+            "provision.distdb.com"
         );
     }
 
