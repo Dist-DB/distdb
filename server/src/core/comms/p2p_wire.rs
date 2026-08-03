@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use common::helpers::stable_id;
 use peerlib::{
@@ -129,19 +129,32 @@ fn is_loopback_host(value: &str) -> bool {
     matches!(trimmed.as_str(), "127.0.0.1" | "localhost" | "localhost.localdomain" | "::1")
 }
 
+fn looks_like_public_hostname(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || is_placeholder_host(trimmed) || is_loopback_host(trimmed) {
+        return false;
+    }
+
+    if trimmed.parse::<Ipv4Addr>().is_ok() || trimmed.parse::<Ipv6Addr>().is_ok() {
+        return true;
+    }
+
+    trimmed.contains('.') && !trimmed.starts_with('.') && !trimmed.ends_with('.')
+}
+
 fn resolve_hostname_hint() -> Option<String> {
     std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
-        .filter(|value| !is_placeholder_host(value) && !is_loopback_host(value))
+        .filter(|value| looks_like_public_hostname(value))
         .or_else(|| {
             std::env::var("HOSTNAME")
                 .ok()
-                .filter(|value| !is_placeholder_host(value) && !is_loopback_host(value))
+                .filter(|value| looks_like_public_hostname(value))
         })
         .or_else(|| {
             std::env::var("COMPUTERNAME")
                 .ok()
-                .filter(|value| !is_placeholder_host(value) && !is_loopback_host(value))
+                .filter(|value| looks_like_public_hostname(value))
         })
         .or_else(|| {
             std::process::Command::new("hostname")
@@ -149,10 +162,10 @@ fn resolve_hostname_hint() -> Option<String> {
                 .ok()
                 .and_then(|output| {
                     let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if host.is_empty() || is_placeholder_host(&host) || is_loopback_host(&host) {
-                        None
-                    } else {
+                    if looks_like_public_hostname(&host) {
                         Some(host)
+                    } else {
+                        None
                     }
                 })
         })
@@ -198,8 +211,7 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
     }
 
     if let Some(hostname_hint) = hostname_hint
-        && !is_placeholder_host(hostname_hint)
-        && !is_loopback_host(hostname_hint)
+        && looks_like_public_hostname(hostname_hint)
     {
         return hostname_hint.to_string();
     }
