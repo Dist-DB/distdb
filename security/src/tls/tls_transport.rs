@@ -2,8 +2,11 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
+use openssl::x509::X509;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::server::ResolvesServerCert;
+use rustls::sign::CertifiedKey;
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant, sleep, timeout};
@@ -62,6 +65,53 @@ fn load_tls_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
 
 }
 
+#[derive(Debug)]
+struct StaticServerCertResolver {
+    cert: Arc<CertifiedKey>,
+}
+
+impl StaticServerCertResolver {
+    fn new(cert_chain: Vec<CertificateDer<'static>>, private_key: PrivateKeyDer<'static>) -> Result<Self, String> {
+        let provider = rustls::crypto::ring::default_provider();
+        let cert = Arc::new(
+            CertifiedKey::from_der(cert_chain, private_key, &provider)
+                .map_err(|err| format!("invalid tls cert/key pair: {err}"))?,
+        );
+
+        Ok(Self { cert })
+    }
+}
+
+impl ResolvesServerCert for StaticServerCertResolver {
+    fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let Some(server_name) = client_hello.server_name() else {
+            return Some(self.cert.clone());
+        };
+
+        if certificate_matches_server_name(&self.cert.cert[0], server_name) {
+            return Some(self.cert.clone());
+        }
+
+        Some(self.cert.clone())
+    }
+}
+
+pub fn certificate_matches_server_name(cert_der: &[u8], server_name: &str) -> bool {
+    let Ok(cert) = X509::from_der(cert_der) else {
+        return false;
+    };
+
+    let Some(sans) = cert.subject_alt_names() else {
+        return false;
+    };
+
+    sans.iter().any(|san| {
+        san.dnsname()
+            .is_some_and(|name| name.eq_ignore_ascii_case(server_name))
+            || san.ipaddress().is_some_and(|ip| std::str::from_utf8(ip).is_ok_and(|value| value == server_name))
+    })
+}
+
 pub fn build_tls_acceptor(config: &TlsConfig) -> Result<TlsAcceptor, String> {
     
     let cert_path = config
@@ -76,11 +126,11 @@ pub fn build_tls_acceptor(config: &TlsConfig) -> Result<TlsAcceptor, String> {
 
     let cert_chain = load_tls_certificates(cert_path)?;
     let private_key = load_tls_private_key(key_path)?;
+    let resolver = StaticServerCertResolver::new(cert_chain, private_key)?;
 
-    let mut tls_config = rustls::ServerConfig::builder()
+    let mut tls_config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(cert_chain, private_key)
-        .map_err(|err| format!("invalid tls cert/key pair: {err}"))?;
+        .with_cert_resolver(Arc::new(resolver));
 
     tls_config.alpn_protocols = vec![b"distdb-p2p/1".to_vec()];
 

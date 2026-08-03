@@ -342,6 +342,16 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
         return server_host;
     }
 
+    if let Some(explicit_host) = std::env::var("DISTDB_ADVERTISE_HOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let explicit_host = explicit_host.trim().to_string();
+        if !is_placeholder_host(&explicit_host) {
+            return explicit_host;
+        }
+    }
+
     if listen_addr == "0.0.0.0" || listen_addr == "::" || listen_addr.is_empty() {
         return "127.0.0.1".to_string();
     }

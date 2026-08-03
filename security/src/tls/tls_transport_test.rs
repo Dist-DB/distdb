@@ -1,6 +1,27 @@
 use super::negotiate_connector_stream;
+use super::tls_transport::certificate_matches_server_name;
 
+use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
 use tokio::net::TcpListener;
+
+fn generate_test_certificate(san: &str) -> Vec<u8> {
+    let mut params = CertificateParams::default();
+    params.distinguished_name.push(DnType::CommonName, "test.local");
+    params.is_ca = IsCa::NoCa;
+    params.subject_alt_names.push(rcgen::SanType::DnsName(san.try_into().unwrap()));
+
+    let key_pair = KeyPair::generate().expect("key should generate");
+    let cert = params.self_signed(&key_pair).expect("cert should build");
+    cert.der().to_vec()
+}
+
+#[test]
+fn certificate_matches_request_name_when_sni_matches_san() {
+    let cert_der = generate_test_certificate("provision.distdb.com");
+
+    assert!(certificate_matches_server_name(&cert_der, "provision.distdb.com"));
+    assert!(!certificate_matches_server_name(&cert_der, "other.example"));
+}
 
 #[tokio::test]
 async fn required_tls_without_acceptor_fails_and_does_not_fallback() {
