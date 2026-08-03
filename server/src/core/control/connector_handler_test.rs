@@ -582,14 +582,14 @@
     }
 
     #[test]
-    fn local_node_discovery_addrs_uses_resolved_hostname_hint() {
+    fn local_node_discovery_addrs_preserves_the_server_advertise_address() {
         unsafe {
-            std::env::set_var("HOSTNAME", "provision.distdb.com");
+            std::env::set_var("HOSTNAME", "distdb1-fra.samcolak.com");
         }
 
         let local_node = NodeDescriptor {
             id: NodeId("node-01".to_string()),
-            addrs: vec!["/dns/127.0.0.1/tcp/4001".to_string()],
+            addrs: vec!["/dns/provision.distdb.com/tcp/4001".to_string()],
             is_local: true,
         };
 

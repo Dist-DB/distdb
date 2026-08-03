@@ -3,8 +3,7 @@ use crate::core::comms::outbound_transport::send_service_message_to_addr;
 use crate::core::comms::p2p::TcpServerTransport;
 use crate::core::comms::p2p_wire::{
     affinity_document_to_wire, multiaddr_to_socket_addr,
-    node_descriptor_to_peer_node, prefer_public_hostname_in_addrs,
-    resolve_hostname_hint, wire_transaction_id_to_transaction_id,
+    node_descriptor_to_peer_node, wire_transaction_id_to_transaction_id,
 };
 use crate::core::comms::surface::{
     InboundChannelMessage, InboundChannelSurface, RustP2pInboundSurface,
@@ -1869,7 +1868,7 @@ pub async fn maybe_show_entities_response(
 }
 
 fn local_node_discovery_addrs(local_node: &NodeDescriptor) -> Vec<String> {
-    prefer_public_hostname_in_addrs(&local_node.addrs, resolve_hostname_hint().as_deref())
+    local_node.addrs.clone()
 }
 
 fn discovery_peers_with_local_preferred(
