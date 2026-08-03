@@ -582,6 +582,27 @@
     }
 
     #[test]
+    fn local_node_discovery_addrs_uses_resolved_hostname_hint() {
+        unsafe {
+            std::env::set_var("HOSTNAME", "provision.distdb.com");
+        }
+
+        let local_node = NodeDescriptor {
+            id: NodeId("node-01".to_string()),
+            addrs: vec!["/dns/127.0.0.1/tcp/4001".to_string()],
+            is_local: true,
+        };
+
+        let addrs = local_node_discovery_addrs(&local_node);
+
+        unsafe {
+            std::env::remove_var("HOSTNAME");
+        }
+
+        assert_eq!(addrs, vec!["/dns/provision.distdb.com/tcp/4001".to_string()]);
+    }
+
+    #[test]
     fn discovery_peers_prefers_local_node_advertise_address() {
         let discovered = vec![
             PeerNode {

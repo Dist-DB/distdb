@@ -4,7 +4,7 @@ use crate::core::comms::p2p::TcpServerTransport;
 use crate::core::comms::p2p_wire::{
     affinity_document_to_wire, multiaddr_to_socket_addr,
     node_descriptor_to_peer_node, prefer_public_hostname_in_addrs,
-    wire_transaction_id_to_transaction_id,
+    resolve_hostname_hint, wire_transaction_id_to_transaction_id,
 };
 use crate::core::comms::surface::{
     InboundChannelMessage, InboundChannelSurface, RustP2pInboundSurface,
@@ -1868,6 +1868,10 @@ pub async fn maybe_show_entities_response(
 
 }
 
+fn local_node_discovery_addrs(local_node: &NodeDescriptor) -> Vec<String> {
+    prefer_public_hostname_in_addrs(&local_node.addrs, resolve_hostname_hint().as_deref())
+}
+
 fn discovery_peers_with_local_preferred(
     peers: Vec<PeerNode>,
     local_node: &NodeDescriptor,
@@ -1928,7 +1932,7 @@ pub async fn maybe_server_peer_discovery_response(
 
                 let peer_id = peer.id.clone();
                 let peer_addrs = if peer_id == local_node.id.0 {
-                    prefer_public_hostname_in_addrs(&local_node.addrs, std::env::var("DISTDB_ADVERTISE_HOST").ok().as_deref())
+                    local_node_discovery_addrs(local_node)
                 } else {
                     peer.addrs.clone()
                 };
