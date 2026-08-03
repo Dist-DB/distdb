@@ -139,7 +139,40 @@ fn looks_like_public_hostname(value: &str) -> bool {
         return true;
     }
 
-    trimmed.contains('.') && !trimmed.starts_with('.') && !trimmed.ends_with('.')
+    let lower = trimmed.to_ascii_lowercase();
+    let labels = lower.split('.').filter(|label| !label.is_empty()).collect::<Vec<_>>();
+    if labels.len() < 2 {
+        return false;
+    }
+
+    let local_suffixes = [
+        ".local",
+        ".localdomain",
+        ".lan",
+        ".home",
+        ".home.arpa",
+        ".internal",
+        ".corp",
+        ".private",
+        ".intranet",
+        ".test",
+        ".invalid",
+        ".example",
+        ".localhost",
+        ".onion",
+    ];
+
+    if local_suffixes.iter().any(|suffix| lower.ends_with(suffix)) {
+        return false;
+    }
+
+    let private_labels = ["fritz", "box", "local", "lan", "home", "host", "desktop", "mac"];
+    if labels.iter().any(|label| private_labels.contains(label)) {
+        return false;
+    }
+
+    !trimmed.starts_with('.') && !trimmed.ends_with('.')
+    
 }
 
 fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
@@ -187,29 +220,6 @@ fn resolve_hostname_hint() -> Option<String> {
     std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
         .filter(|value| looks_like_public_hostname(value))
-        .or_else(|| {
-            std::env::var("HOSTNAME")
-                .ok()
-                .filter(|value| looks_like_public_hostname(value))
-        })
-        .or_else(|| {
-            std::env::var("COMPUTERNAME")
-                .ok()
-                .filter(|value| looks_like_public_hostname(value))
-        })
-        .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .and_then(|output| {
-                    let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if looks_like_public_hostname(&host) {
-                        Some(host)
-                    } else {
-                        None
-                    }
-                })
-        })
 }
 
 pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint: Option<&str>) -> String {

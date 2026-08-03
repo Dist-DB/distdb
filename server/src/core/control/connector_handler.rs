@@ -1903,14 +1903,20 @@ pub async fn maybe_server_peer_discovery_response(
         peers
             .into_iter()
             .map(|peer| {
+                let peer_id = peer.id.clone();
+                let peer_addrs = if peer_id == local_node.id.0 {
+                    local_node.addrs.clone()
+                } else {
+                    peer.addrs.clone()
+                };
                 let services = registry
-                    .get(&peer.id)
+                    .get(&peer_id)
                     .map(|service_list| service_list.join(","))
                     .unwrap_or_default();
 
                 vec![
-                    peer.id.into_bytes(),
-                    peer.addrs.join(",").into_bytes(),
+                    peer_id.into_bytes(),
+                    peer_addrs.join(",").into_bytes(),
                     services.into_bytes(),
                 ]
             })
