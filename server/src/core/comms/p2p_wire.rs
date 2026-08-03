@@ -332,14 +332,14 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
         }
     }
 
-    if let Some(server_host) = resolve_public_host_from_server_list(args) {
-        return server_host;
-    }
-
     if let Some(hostname_hint) = hostname_hint
         && looks_like_public_hostname(hostname_hint)
     {
         return hostname_hint.to_string();
+    }
+
+    if let Some(server_host) = resolve_public_host_from_server_list(args) {
+        return server_host;
     }
 
     if listen_addr == "0.0.0.0" || listen_addr == "::" || listen_addr.is_empty() {
