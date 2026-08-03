@@ -203,6 +203,16 @@
     }
 
     #[test]
+    fn prefer_public_hostname_in_addrs_rewrites_local_node_multiaddrs() {
+        let rewritten = prefer_public_hostname_in_addrs(
+            &["/dns/distdb1-fra.samcolak.com/tcp/4001".to_string()],
+            Some("provision.distdb.com"),
+        );
+
+        assert_eq!(rewritten, vec!["/dns/provision.distdb.com/tcp/4001".to_string()]);
+    }
+
+    #[test]
     fn extract_public_hostname_from_hosts_content_finds_public_alias() {
         let content = "127.0.0.1 localhost\n203.0.113.10 provision.distdb.com\n";
         assert_eq!(

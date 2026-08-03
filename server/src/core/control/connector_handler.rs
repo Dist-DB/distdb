@@ -3,7 +3,8 @@ use crate::core::comms::outbound_transport::send_service_message_to_addr;
 use crate::core::comms::p2p::TcpServerTransport;
 use crate::core::comms::p2p_wire::{
     affinity_document_to_wire, multiaddr_to_socket_addr,
-    node_descriptor_to_peer_node, wire_transaction_id_to_transaction_id,
+    node_descriptor_to_peer_node, prefer_public_hostname_in_addrs,
+    wire_transaction_id_to_transaction_id,
 };
 use crate::core::comms::surface::{
     InboundChannelMessage, InboundChannelSurface, RustP2pInboundSurface,
@@ -1927,7 +1928,7 @@ pub async fn maybe_server_peer_discovery_response(
 
                 let peer_id = peer.id.clone();
                 let peer_addrs = if peer_id == local_node.id.0 {
-                    local_node.addrs.clone()
+                    prefer_public_hostname_in_addrs(&local_node.addrs, std::env::var("DISTDB_ADVERTISE_HOST").ok().as_deref())
                 } else {
                     peer.addrs.clone()
                 };

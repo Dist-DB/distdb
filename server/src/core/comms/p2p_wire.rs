@@ -395,6 +395,35 @@ pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {
 
 }
 
+fn extract_port_from_multiaddr(addr: &str) -> Option<u16> {
+    let trimmed = addr.trim();
+    let port_token = trimmed.rsplit_once("/tcp/").and_then(|(_, port)| port.parse::<u16>().ok());
+    if port_token.is_some() {
+        return port_token;
+    }
+
+    trimmed
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+}
+
+pub fn prefer_public_hostname_in_addrs(addrs: &[String], hostname_hint: Option<&str>) -> Vec<String> {
+    let Some(hostname_hint) = hostname_hint.filter(|value| looks_like_public_hostname(value)) else {
+        return addrs.to_vec();
+    };
+
+    addrs
+        .iter()
+        .map(|addr| {
+            if let Some(port) = extract_port_from_multiaddr(addr) {
+                normalize_advertise_addr(hostname_hint, port)
+            } else {
+                addr.clone()
+            }
+        })
+        .collect()
+}
+
 pub fn normalize_advertise_addr(addr: &str, port: u16) -> String {
     let trimmed = addr.trim();
     if trimmed.is_empty() || is_placeholder_host(trimmed) {
