@@ -83,7 +83,7 @@ fn sanitize_subject_alt_names(
     }
 
     for candidate in [
-        "provision.distdb.com",
+        "example.test",
         "*.distdb.com",
         "*.local",
         "*.internal",
@@ -230,7 +230,7 @@ mod tests {
     fn certificate_params_include_dns_subject_alt_names() {
         let params = certificate_params_for_node(
             "server-node-01",
-            "provision.distdb.com:4001",
+            "public.example:4001",
             &["foo.example".to_string()],
         )
         .expect("should build certificate params");
@@ -246,7 +246,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(names.iter().any(|name| name == "localhost"));
-        assert!(names.iter().any(|name| name == "provision.distdb.com"));
+        assert!(names.iter().any(|name| name == "public.example.com"));
         assert!(names.iter().any(|name| name == "foo.example"));
     }
 
@@ -313,8 +313,8 @@ mod tests {
         fs::write(&cert_path, &cert_pem).unwrap();
 
         assert!(cert_contains_san(&cert_pem, "localhost"));
-        assert!(!cert_contains_san(&cert_pem, "provision.distdb.com"));
-        assert!(should_refresh_leaf_cert(&cert_path, "provision.distdb.com:4001", &[]));
+        assert!(!cert_contains_san(&cert_pem, "public.example.com"));
+        assert!(should_refresh_leaf_cert(&cert_path, "public.example.com:4001", &[]));
     }
 
     #[test]
@@ -363,7 +363,7 @@ mod tests {
         let result = ensure_or_generate_p2p_tls(
             dir,
             "server-node-01",
-            "provision.distdb.com:4001",
+            "public.example:4001",
             &[],
         )
         .expect("should generate tls material");
@@ -410,7 +410,7 @@ mod tests {
         let result = ensure_or_generate_p2p_tls(
             dir,
             "server-node-01",
-            "provision.distdb.com:4001",
+            "public.example.com:4001",
             &[],
         )
         .expect("should rebuild tls material");

@@ -216,6 +216,24 @@ fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
         })
 }
 
+fn resolve_public_host_from_tls_sans(args: &[String]) -> Option<String> {
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("tls_san=").map(str::trim))
+        .and_then(|san_list| {
+            san_list
+                .split(',')
+                .map(str::trim)
+                .find_map(|san| {
+                    let sanitized = san.trim();
+                    if is_placeholder_host(sanitized) || sanitized.is_empty() {
+                        None
+                    } else {
+                        extract_public_host_from_server_entry(sanitized)
+                    }
+                })
+        })
+}
+
 fn extract_public_hostname_from_hosts_content(content: &str) -> Option<String> {
     content
         .lines()
@@ -332,16 +350,6 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
         }
     }
 
-    if let Some(hostname_hint) = hostname_hint
-        && looks_like_public_hostname(hostname_hint)
-    {
-        return hostname_hint.to_string();
-    }
-
-    if let Some(server_host) = resolve_public_host_from_server_list(args) {
-        return server_host;
-    }
-
     if let Some(explicit_host) = std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -352,11 +360,26 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
         }
     }
 
+    if let Some(tls_san_host) = resolve_public_host_from_tls_sans(args) {
+        return tls_san_host;
+    }
+
+    if let Some(hostname_hint) = hostname_hint
+        && looks_like_public_hostname(hostname_hint)
+    {
+        return hostname_hint.to_string();
+    }
+
+    if let Some(server_host) = resolve_public_host_from_server_list(args) {
+        return server_host;
+    }
+
     if listen_addr == "0.0.0.0" || listen_addr == "::" || listen_addr.is_empty() {
         return "127.0.0.1".to_string();
     }
 
     listen_addr.to_string()
+
 }
 
 pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> String {

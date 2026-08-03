@@ -589,7 +589,7 @@
 
         let local_node = NodeDescriptor {
             id: NodeId("node-01".to_string()),
-            addrs: vec!["/dns/provision.distdb.com/tcp/4001".to_string()],
+            addrs: vec!["/dns/public.example/tcp/4001".to_string()],
             is_local: true,
         };
 
@@ -599,7 +599,7 @@
             std::env::remove_var("HOSTNAME");
         }
 
-        assert_eq!(addrs, vec!["/dns/provision.distdb.com/tcp/4001".to_string()]);
+        assert_eq!(addrs, vec!["/dns/public.example.com/tcp/4001".to_string()]);
     }
 
     #[test]
@@ -619,7 +619,7 @@
 
         let local_node = NodeDescriptor {
             id: NodeId("node-01".to_string()),
-            addrs: vec!["/dns/provision.distdb.com/tcp/4001".to_string()],
+            addrs: vec!["/dns/public.example/tcp/4001".to_string()],
             is_local: true,
         };
 
@@ -629,7 +629,7 @@
             .find(|peer| peer.id == "node-01")
             .expect("local node should remain present");
 
-        assert_eq!(local_peer.addrs, vec!["/dns/provision.distdb.com/tcp/4001".to_string()]);
+        assert_eq!(local_peer.addrs, vec!["/dns/public.example.com/tcp/4001".to_string()]);
         assert_eq!(merged.iter().filter(|peer| peer.id == "node-01").count(), 1);
     }
 

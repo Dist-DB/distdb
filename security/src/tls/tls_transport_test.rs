@@ -17,9 +17,9 @@ fn generate_test_certificate(san: &str) -> Vec<u8> {
 
 #[test]
 fn certificate_matches_request_name_when_sni_matches_san() {
-    let cert_der = generate_test_certificate("provision.distdb.com");
+    let cert_der = generate_test_certificate("public.example.com");
 
-    assert!(certificate_matches_server_name(&cert_der, "provision.distdb.com"));
+    assert!(certificate_matches_server_name(&cert_der, "public.example.com"));
     assert!(!certificate_matches_server_name(&cert_der, "other.example"));
 }
 

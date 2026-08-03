@@ -169,13 +169,13 @@
             peer_id: "server-node-01".to_string(),
             addrs: vec![
                 "127.0.0.1:4001".to_string(),
-                "provision.distdb.com:4001".to_string(),
+                "public.example.com:4001".to_string(),
             ],
             is_discovered: true,
         });
 
         let peer = transport.active_peer().expect("peer should be active");
-        assert_eq!(peer.addrs.first().unwrap(), "provision.distdb.com:4001");
+        assert_eq!(peer.addrs.first().unwrap(), "public.example:4001");
         assert_eq!(peer.addrs.get(1).unwrap(), "127.0.0.1:4001");
     }
 
@@ -185,7 +185,7 @@
 
         transport.upsert_peer(ConnectorPeer {
             peer_id: "server-node-01".to_string(),
-            addrs: vec!["provision.distdb.com:4001".to_string()],
+            addrs: vec!["public.example:4001".to_string()],
             is_discovered: true,
         });
 
@@ -197,7 +197,7 @@
 
         let peer = transport.active_peer().expect("peer should be active");
         assert_eq!(peer.addrs.len(), 2);
-        assert_eq!(peer.addrs.first().unwrap(), "provision.distdb.com:4001");
+        assert_eq!(peer.addrs.first().unwrap(), "public.example:4001");
         assert_eq!(peer.addrs.get(1).unwrap(), "127.0.0.1:4001");
     }
 
@@ -207,7 +207,7 @@
 
         transport.upsert_peer(ConnectorPeer {
             peer_id: "server-node-01".to_string(),
-            addrs: vec!["provision.distdb.com:4001".to_string()],
+            addrs: vec!["public.example.com:4001".to_string()],
             is_discovered: true,
         });
 
@@ -222,7 +222,7 @@
         let peer = peers.first().unwrap();
         assert_eq!(peer.peer_id, "server-node-01");
         assert_eq!(peer.addrs.len(), 2);
-        assert_eq!(peer.addrs.first().unwrap(), "provision.distdb.com:4001");
+        assert_eq!(peer.addrs.first().unwrap(), "public.example:4001");
         assert_eq!(peer.addrs.get(1).unwrap(), "127.0.0.1:4001");
     }
 
@@ -296,11 +296,11 @@
 
     #[test]
     fn server_name_parser_prefers_hostname_over_localhost_for_public_dns_names() {
-        let host = server_name_from_socket_addr("provision.distdb.com:4001")
+        let host = server_name_from_socket_addr("public.example.com:4001")
             .expect("host should parse");
 
         assert!(matches!(host, ServerName::DnsName(_)));
-        assert!(format!("{host:?}").contains("provision.distdb.com"));
+        assert!(format!("{host:?}").contains("public.example.com"));
     }
 
     #[test]

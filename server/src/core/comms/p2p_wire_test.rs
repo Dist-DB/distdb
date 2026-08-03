@@ -1,5 +1,13 @@
     use super::*;
 
+    fn clear_advertise_host_inheritance() {
+        unsafe {
+            std::env::remove_var("DISTDB_ADVERTISE_HOST");
+            std::env::remove_var("HOSTNAME");
+            std::env::remove_var("COMPUTERNAME");
+        }
+    }
+
     #[test]
     fn normalize_bootstrap_addr_accepts_multiaddr_passthrough() {
         let addr = "/ip4/127.0.0.1/tcp/9400";
@@ -108,22 +116,39 @@
 
     #[test]
     fn advertised_listen_addr_uses_positional_host_when_present() {
-        let args = vec!["/tmp/distdb-server".to_string(), "provision.distdb.com".to_string()];
+        let args = vec!["/tmp/distdb-server".to_string(), "public.example.com".to_string()];
         assert_eq!(
             advertised_listen_addr_from_args(&args, "0.0.0.0"),
-            "provision.distdb.com".to_string()
+            "public.example.com".to_string()
         );
     }
 
     #[test]
     fn advertised_listen_addr_uses_public_host_from_server_list_when_available() {
+        unsafe {
+            std::env::remove_var("DISTDB_ADVERTISE_HOST");
+        }
+
         let args = vec![
             "server".to_string(),
-            "servers=provision.distdb.com:4001".to_string(),
+            "servers=public.example.com:4001".to_string(),
         ];
         assert_eq!(
             advertised_listen_addr_from_args(&args, "0.0.0.0"),
-            "provision.distdb.com".to_string()
+            "public.example.com".to_string()
+        );
+    }
+
+    #[test]
+    fn advertised_listen_addr_uses_tls_san_host_when_available() {
+        let args = vec![
+            "server".to_string(),
+            "tls_san=public.example.com,alt.example.net".to_string(),
+        ];
+
+        assert_eq!(
+            resolve_advertise_host(&args, "0.0.0.0", Some("distdb1-fra.samcolak.com")),
+            "public.example.com"
         );
     }
 
@@ -138,6 +163,10 @@
 
     #[test]
     fn advertised_listen_addr_ignores_placeholder_hosts() {
+        unsafe {
+            std::env::remove_var("DISTDB_ADVERTISE_HOST");
+        }
+
         let args = vec!["server".to_string(), "--".to_string()];
         assert_eq!(
             resolve_advertise_host(&args, "0.0.0.0", None),
@@ -155,25 +184,26 @@
     fn advertised_listen_addr_uses_hostname_hint_when_listen_addr_is_wildcard() {
         let args = vec!["server".to_string()];
         assert_eq!(
-            resolve_advertise_host(&args, "0.0.0.0", Some("provision.distdb.com")),
-            "provision.distdb.com"
+            resolve_advertise_host(&args, "0.0.0.0", Some("public.example.com")),
+            "public.example.com"
         );
     }
 
     #[test]
-    fn advertised_listen_addr_uses_public_hostname_env_when_available() {
+    fn advertised_listen_addr_uses_distdb_advertise_host_env_when_available() {
         unsafe {
-            std::env::set_var("HOSTNAME", "provision.distdb.com");
+            std::env::set_var("DISTDB_ADVERTISE_HOST", "public.example.com");
+            std::env::remove_var("HOSTNAME");
         }
 
         let args = vec!["server".to_string()];
         let resolved = advertised_listen_addr_from_args(&args, "0.0.0.0");
 
         unsafe {
-            std::env::remove_var("HOSTNAME");
+            std::env::remove_var("DISTDB_ADVERTISE_HOST");
         }
 
-        assert_eq!(resolved, "provision.distdb.com");
+        assert_eq!(resolved, "public.example.com");
     }
 
     #[test]
@@ -184,8 +214,8 @@
         ];
 
         assert_eq!(
-            resolve_advertise_host(&args, "0.0.0.0", Some("provision.distdb.com")),
-            "provision.distdb.com"
+            resolve_advertise_host(&args, "0.0.0.0", Some("public.example.com")),
+            "public.example.com"
         );
     }
 
@@ -193,12 +223,12 @@
     fn advertised_listen_addr_prefers_positional_host_over_hostname_hint() {
         let args = vec![
             "server".to_string(),
-            "provision.distdb.com".to_string(),
+            "public.example.com".to_string(),
         ];
 
         assert_eq!(
             resolve_advertise_host(&args, "0.0.0.0", Some("distdb1-fra.samcolak.com")),
-            "provision.distdb.com"
+            "public.example.com"
         );
     }
 
@@ -206,32 +236,32 @@
     fn prefer_public_hostname_in_addrs_rewrites_local_node_multiaddrs() {
         let rewritten = prefer_public_hostname_in_addrs(
             &["/dns/distdb1-fra.samcolak.com/tcp/4001".to_string()],
-            Some("provision.distdb.com"),
+            Some("public.example.com"),
         );
 
-        assert_eq!(rewritten, vec!["/dns/provision.distdb.com/tcp/4001".to_string()]);
+        assert_eq!(rewritten, vec!["/dns/public.example.com/tcp/4001".to_string()]);
     }
 
     #[test]
     fn extract_public_hostname_from_hosts_content_finds_public_alias() {
-        let content = "127.0.0.1 localhost\n203.0.113.10 provision.distdb.com\n";
+        let content = "127.0.0.1 localhost\n203.0.113.10 public.example.com\n";
         assert_eq!(
             extract_public_hostname_from_hosts_content(content),
-            Some("provision.distdb.com".to_string())
+            Some("public.example.com".to_string())
         );
     }
 
     #[test]
     fn resolve_public_hostname_from_hosts_paths_prefers_public_alias() {
         let temp_hosts = std::env::temp_dir().join(format!("distdb-hosts-{}.tmp", std::process::id()));
-        std::fs::write(&temp_hosts, "127.0.0.1 localhost\n203.0.113.10 provision.distdb.com\n")
+        std::fs::write(&temp_hosts, "127.0.0.1 localhost\n203.0.113.10 public.example.com\n")
             .expect("hosts fixture should write");
 
         let resolved = resolve_public_hostname_from_hosts_paths(&[temp_hosts.to_str().expect("temp path should be valid")]);
 
         let _ = std::fs::remove_file(&temp_hosts);
 
-        assert_eq!(resolved, Some("provision.distdb.com".to_string()));
+        assert_eq!(resolved, Some("public.example.com".to_string()));
     }
 
     #[test]
