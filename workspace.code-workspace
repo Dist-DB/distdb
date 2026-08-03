@@ -1,5 +1,8 @@
 {
   "folders": [
+    { "name": "util_lib",
+      "path": "./../../util_lib"
+    },
     { "name": "httpserver",
       "path": "./../../httpserver"
     },
