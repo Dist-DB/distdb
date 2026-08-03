@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
-    DistinguishedName, DnType, IsCa, KeyPair, SanType,
+    DistinguishedName, DnType, Ia5String, IsCa, KeyPair, SanType,
 };
 
 #[derive(Debug, Clone)]
@@ -61,13 +61,27 @@ fn sanitize_subject_alt_names(
 
     let mut san_candidates = BTreeSet::new();
     san_candidates.insert("localhost".to_string());
-    san_candidates.insert(extract_host(address_hint));
+
+    let host = extract_host(address_hint);
+    if !host.is_empty() {
+        san_candidates.insert(host);
+    }
 
     for san in extra_subject_alt_names {
         let san = san.trim();
         if !san.is_empty() {
             san_candidates.insert(san.to_string());
         }
+    }
+
+    for candidate in [
+        "provision.distdb.com",
+        "*.distdb.com",
+        "*.local",
+        "*.internal",
+        "*.docker.internal",
+    ] {
+        san_candidates.insert(candidate.to_string());
     }
     
     san_candidates
@@ -91,11 +105,44 @@ fn certificate_params_for_node(
     for san in &san_candidates {
         if let Ok(ip) = san.parse::<IpAddr>() {
             params.subject_alt_names.push(SanType::IpAddress(ip));
+        } else {
+            let dns_name = Ia5String::try_from(san.as_str())
+                .map_err(|err| format!("invalid SAN '{san}': {err}"))?;
+            params.subject_alt_names.push(SanType::DnsName(dns_name));
         }
     }
 
     Ok(params)
     
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SanType, certificate_params_for_node};
+
+    #[test]
+    fn certificate_params_include_dns_subject_alt_names() {
+        let params = certificate_params_for_node(
+            "server-node-01",
+            "provision.distdb.com:4001",
+            &["foo.example".to_string()],
+        )
+        .expect("should build certificate params");
+
+        let names = params
+            .subject_alt_names
+            .iter()
+            .filter_map(|san| match san {
+                SanType::DnsName(name) => Some(name.to_string()),
+                SanType::IpAddress(ip) => Some(ip.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "localhost"));
+        assert!(names.iter().any(|name| name == "provision.distdb.com"));
+        assert!(names.iter().any(|name| name == "foo.example"));
+    }
 }
 
 pub fn build_tls_enrollment_request(
