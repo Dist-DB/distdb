@@ -107,6 +107,15 @@
     }
 
     #[test]
+    fn advertised_listen_addr_uses_positional_host_when_present() {
+        let args = vec!["server".to_string(), "provision.distdb.com".to_string()];
+        assert_eq!(
+            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            "provision.distdb.com".to_string()
+        );
+    }
+
+    #[test]
     fn advertised_listen_addr_prefers_explicit_override() {
         let args = vec!["server".to_string(), "advertise_addr=10.1.1.5".to_string()];
         assert_eq!(
