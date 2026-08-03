@@ -190,6 +190,19 @@
     }
 
     #[test]
+    fn advertised_listen_addr_prefers_hostname_hint_over_positional_host() {
+        let args = vec![
+            "server".to_string(),
+            "distdb1-fra.samcolak.com".to_string(),
+        ];
+
+        assert_eq!(
+            resolve_advertise_host(&args, "0.0.0.0", Some("provision.distdb.com")),
+            "provision.distdb.com"
+        );
+    }
+
+    #[test]
     fn extract_public_hostname_from_hosts_content_finds_public_alias() {
         let content = "127.0.0.1 localhost\n203.0.113.10 provision.distdb.com\n";
         assert_eq!(
