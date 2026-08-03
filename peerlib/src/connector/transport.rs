@@ -353,9 +353,28 @@ impl ConnectorP2pTransport {
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
 
         let peer_id = peer.peer_id.clone();
-        let is_discovered = peer.is_discovered;
+        let existing_peer = self.peers.get(&peer_id).cloned();
+        let is_discovered = peer.is_discovered || existing_peer.as_ref().is_some_and(|existing| existing.is_discovered);
         let mut normalized_peer = peer.clone();
-        normalized_peer.addrs = Self::normalize_peer_addrs(&peer.addrs);
+
+        let mut merged_addrs = existing_peer
+            .as_ref()
+            .map(|existing| {
+                existing
+                    .addrs
+                    .iter()
+                    .map(|addr| normalize_peer_addr(addr))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        for addr in peer.addrs.iter().map(|addr| normalize_peer_addr(addr)) {
+            if !merged_addrs.contains(&addr) {
+                merged_addrs.push(addr);
+            }
+        }
+
+        normalized_peer.addrs = Self::normalize_peer_addrs(&merged_addrs);
 
         log::debug!(
             "connector transport upsert peer peer_id={} addrs={}",
