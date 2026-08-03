@@ -783,12 +783,15 @@ impl ConsoleSession {
         }
 
         let original_active_peer = self.runtime.transport().active_peer_id().map(ToOwned::to_owned);
+        let mut preferred_peer_id = None;
 
-        if let Some(active_peer_id) = original_active_peer.as_deref()
-            && let Some(position) = known_peers.iter().position(|peer| peer.peer_id == active_peer_id) {
+        if let Some(active_peer_id) = original_active_peer.as_deref() {
+            if let Some(position) = known_peers.iter().position(|peer| peer.peer_id == active_peer_id) {
                 let active_peer = known_peers.remove(position);
                 known_peers.insert(0, active_peer);
+                preferred_peer_id = Some(active_peer_id.to_string());
             }
+        }
 
         let database_id = self
             .current_database
@@ -909,10 +912,14 @@ impl ConsoleSession {
                 }
 
                 self.runtime.transport_mut().upsert_peer(ConnectorPeer {
-                    peer_id,
-                    addrs,
+                    peer_id: peer_id.clone(),
+                    addrs: addrs.clone(),
                     is_discovered: true,
                 });
+
+                if preferred_peer_id.as_deref() == Some(peer_id.as_str()) {
+                    let _ = self.runtime.transport_mut().select_peer(&peer_id);
+                }
 
             }
 
@@ -921,8 +928,8 @@ impl ConsoleSession {
 
         }
 
-        if let Some(active_peer_id) = original_active_peer {
-            let _ = self.runtime.transport_mut().select_peer(&active_peer_id);
+        if let Some(active_peer_id) = original_active_peer.as_deref() {
+            let _ = self.runtime.transport_mut().select_peer(active_peer_id);
         }
 
         if !refreshed_from_server {
