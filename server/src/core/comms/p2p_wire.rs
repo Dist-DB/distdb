@@ -123,6 +123,7 @@ pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> S
 
     if let Some(explicit) = args
         .iter()
+        .skip(1)
         .find_map(|arg| arg.strip_prefix("advertise_addr=").map(ToOwned::to_owned))
     {
         let explicit = explicit.trim().to_string();
@@ -131,9 +132,22 @@ pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> S
         }
     }
 
-    if let Some(positional_host) = args.iter().find_map(|arg| {
+    if let Some(positional_host) = args.iter().skip(1).find_map(|arg| {
         let trimmed = arg.trim();
-        if trimmed.is_empty() || trimmed.starts_with("server") || trimmed.starts_with("listen_addr=") || trimmed.starts_with("advertise_addr=") || trimmed.starts_with("port=") || trimmed.starts_with("node_id=") || trimmed.starts_with("datadir=") || trimmed.starts_with("swarm_id=") || trimmed.starts_with("servers=") || trimmed.starts_with("affinity=") || trimmed.starts_with("tls_san=") || trimmed.starts_with("ca_root") || trimmed.starts_with("service=") || trimmed.starts_with("wss") {
+        if trimmed.is_empty()
+            || trimmed.starts_with("listen_addr=")
+            || trimmed.starts_with("advertise_addr=")
+            || trimmed.starts_with("port=")
+            || trimmed.starts_with("node_id=")
+            || trimmed.starts_with("datadir=")
+            || trimmed.starts_with("swarm_id=")
+            || trimmed.starts_with("servers=")
+            || trimmed.starts_with("affinity=")
+            || trimmed.starts_with("tls_san=")
+            || trimmed.starts_with("ca_root")
+            || trimmed.starts_with("service=")
+            || trimmed.starts_with("wss")
+        {
             None
         } else {
             Some(trimmed.to_string())
