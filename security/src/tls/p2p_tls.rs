@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use openssl::{pkey::PKey, x509::X509};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
-    DistinguishedName, DnType, Ia5String, IsCa, KeyPair, SanType,
+    DistinguishedName, DnType, ExtendedKeyUsagePurpose, Ia5String, IsCa, KeyPair,
+    KeyUsagePurpose, SanType,
 };
 
 #[derive(Debug, Clone)]
@@ -56,6 +57,11 @@ fn cluster_tls_paths(node_data_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
 
 }
 
+fn is_placeholder_host(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed == "--" || trimmed == "*" || trimmed == "null"
+}
+
 fn sanitize_subject_alt_names(
     address_hint: &str,
     extra_subject_alt_names: &[String],
@@ -65,13 +71,13 @@ fn sanitize_subject_alt_names(
     san_candidates.insert("localhost".to_string());
 
     let host = extract_host(address_hint);
-    if !host.is_empty() {
+    if !is_placeholder_host(&host) && !host.is_empty() {
         san_candidates.insert(host);
     }
 
     for san in extra_subject_alt_names {
         let san = san.trim();
-        if !san.is_empty() {
+        if !is_placeholder_host(san) && !san.is_empty() {
             san_candidates.insert(san.to_string());
         }
     }
@@ -100,9 +106,11 @@ fn certificate_params_for_node(
     leaf_dn.push(DnType::CommonName, node_id);
 
     let san_candidates = sanitize_subject_alt_names(address_hint, extra_subject_alt_names);
-    let mut params = CertificateParams::new(san_candidates.iter().cloned().collect::<Vec<_>>())
+    let mut params = CertificateParams::new(vec![])
         .map_err(|err| format!("failed building leaf cert params: {err}"))?;
     params.distinguished_name = leaf_dn;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
     for san in &san_candidates {
         if let Ok(ip) = san.parse::<IpAddr>() {
@@ -131,10 +139,27 @@ fn cert_contains_san(cert_pem: &str, expected_san: &str) -> bool {
     })
 }
 
+fn cert_contains_placeholder_san(cert_pem: &str) -> bool {
+    let cert = match CertificateParams::from_ca_cert_pem(cert_pem) {
+        Ok(params) => params,
+        Err(_) => return true,
+    };
+
+    cert.subject_alt_names.iter().any(|san| match san {
+        SanType::DnsName(name) => is_placeholder_host(&name.to_string()),
+        SanType::IpAddress(ip) => is_placeholder_host(&ip.to_string()),
+        _ => false,
+    })
+}
+
 fn should_refresh_leaf_cert(cert_path: &Path, address_hint: &str, extra_subject_alt_names: &[String]) -> bool {
     let Some(existing_cert_pem) = fs::read_to_string(cert_path).ok() else {
         return true;
     };
+
+    if cert_contains_placeholder_san(&existing_cert_pem) {
+        return true;
+    }
 
     let expected_sans = sanitize_subject_alt_names(address_hint, extra_subject_alt_names);
     let Some(expected_host) = expected_sans.iter().find(|san| !san.contains("localhost")) else {
@@ -198,7 +223,7 @@ mod tests {
         certificate_params_for_node, cert_contains_san, ensure_or_generate_p2p_tls,
         should_refresh_leaf_cert,
     };
-    use rcgen::{CertificateParams, KeyPair};
+    use rcgen::{CertificateParams, KeyPair, KeyUsagePurpose};
     use std::fs;
 
     #[test]
@@ -249,6 +274,30 @@ mod tests {
     }
 
     #[test]
+    fn certificate_params_ignores_placeholder_hosts_in_subject_alt_names() {
+        let params = certificate_params_for_node(
+            "server-node-01",
+            "--",
+            &["*".to_string()],
+        )
+        .expect("should build certificate params");
+
+        let names = params
+            .subject_alt_names
+            .iter()
+            .filter_map(|san| match san {
+                SanType::DnsName(name) => Some(name.to_string()),
+                SanType::IpAddress(ip) => Some(ip.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "localhost"));
+        assert!(!names.iter().any(|name| name == "--"));
+        assert!(!names.iter().any(|name| name == "*"));
+    }
+
+    #[test]
     fn should_refresh_leaf_cert_when_expected_san_is_missing() {
         let dir = std::path::Path::new("../../target/test-data");
         let _ = fs::create_dir_all(dir);
@@ -278,6 +327,7 @@ mod tests {
         ca_params.distinguished_name = DistinguishedName::new();
         ca_params.distinguished_name.push(DnType::CommonName, "test-ca");
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca_cert = ca_params.self_signed(&ca_key).unwrap();
 
         let leaf_key = rcgen::KeyPair::generate().unwrap();
@@ -305,6 +355,33 @@ mod tests {
     }
 
     #[test]
+    fn generated_tls_material_includes_rustls_compatible_key_usage_extensions() {
+        let dir = std::path::Path::new("../../target/test-data-key-usage");
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::create_dir_all(dir);
+
+        let result = ensure_or_generate_p2p_tls(
+            dir,
+            "server-node-01",
+            "provision.distdb.com:4001",
+            &[],
+        )
+        .expect("should generate tls material");
+
+        let leaf_pem = fs::read_to_string(&result.cert_path).unwrap();
+        let ca_pem = fs::read_to_string(&result.ca_path).unwrap();
+
+        assert!(leaf_pem.contains("BEGIN CERTIFICATE"));
+        assert!(ca_pem.contains("BEGIN CERTIFICATE"));
+        assert!(certificate_material_is_valid(
+            &result.cert_path,
+            &result.key_path,
+            &result.ca_path,
+            &result.key_path.with_file_name("ca-key.pem"),
+        ));
+    }
+
+    #[test]
     fn ensure_or_generate_p2p_tls_rewrites_ca_material_when_existing_ca_is_inconsistent() {
         let dir = std::path::Path::new("../../target/test-data-ca-rebuild");
         let _ = fs::remove_dir_all(dir);
@@ -316,6 +393,7 @@ mod tests {
         ca_params.distinguished_name = DistinguishedName::new();
         ca_params.distinguished_name.push(DnType::CommonName, "test-ca");
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
         let bad_ca_cert = ca_params.self_signed(&bad_ca_key).unwrap();
         let stale_ca_pem = bad_ca_cert.pem();
@@ -592,6 +670,7 @@ pub fn ensure_or_generate_p2p_tls(
             let mut ca_params = CertificateParams::default();
             ca_params.distinguished_name = ca_dn;
             ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
             let ca_key =
                 KeyPair::generate().map_err(|err| format!("failed generating CA key: {err}"))?;
@@ -637,6 +716,7 @@ pub fn ensure_or_generate_p2p_tls(
                     let mut ca_params = CertificateParams::default();
                     ca_params.distinguished_name = ca_dn;
                     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+                    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
                     let ca_key =
                         KeyPair::generate().map_err(|err| format!("failed generating CA key: {err}"))?;
