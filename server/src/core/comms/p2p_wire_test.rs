@@ -125,6 +125,33 @@
     }
 
     #[test]
+    fn advertised_listen_addr_ignores_placeholder_hosts() {
+        let args = vec!["server".to_string(), "--".to_string()];
+        assert_eq!(
+            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            "127.0.0.1".to_string()
+        );
+
+        let args = vec!["server".to_string(), "advertise_addr=--".to_string()];
+        assert_eq!(
+            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            "127.0.0.1".to_string()
+        );
+    }
+
+    #[test]
+    fn normalize_advertise_addr_falls_back_to_loopback_for_placeholder_hosts() {
+        assert_eq!(
+            normalize_advertise_addr("--", 4001),
+            "/ip4/127.0.0.1/tcp/4001".to_string()
+        );
+        assert_eq!(
+            normalize_advertise_addr("*", 4002),
+            "/ip4/127.0.0.1/tcp/4002".to_string()
+        );
+    }
+
+    #[test]
     fn bootstrap_nodes_use_normalized_addrs() {
         let nodes = bootstrap_nodes_from_server_list(&[
             "/ip4/127.0.0.1/tcp/9400".to_string(),

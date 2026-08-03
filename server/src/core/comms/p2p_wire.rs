@@ -119,6 +119,11 @@ pub fn wire_affinity_document_to_domain(document: &WireAffinityDocument) -> Affi
     }
 }
 
+fn is_placeholder_host(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed == "--" || trimmed == "*" || trimmed == "null"
+}
+
 pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> String {
 
     if let Some(explicit) = args
@@ -127,7 +132,7 @@ pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> S
         .find_map(|arg| arg.strip_prefix("advertise_addr=").map(ToOwned::to_owned))
     {
         let explicit = explicit.trim().to_string();
-        if !explicit.is_empty() {
+        if !is_placeholder_host(&explicit) {
             return explicit;
         }
     }
@@ -153,7 +158,9 @@ pub fn advertised_listen_addr_from_args(args: &[String], listen_addr: &str) -> S
             Some(trimmed.to_string())
         }
     }) {
-        return positional_host;
+        if !is_placeholder_host(&positional_host) {
+            return positional_host;
+        }
     }
 
     if listen_addr == "0.0.0.0" {
@@ -203,6 +210,41 @@ pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {
 
     Some(format!("/{host_prefix}/{host}/tcp/{port}"))
 
+}
+
+pub fn normalize_advertise_addr(addr: &str, port: u16) -> String {
+    let trimmed = addr.trim();
+    if trimmed.is_empty() || is_placeholder_host(trimmed) {
+        return format!("/ip4/127.0.0.1/tcp/{port}");
+    }
+
+    if trimmed.starts_with('/') {
+        return trimmed.to_string();
+    }
+
+    if let Ok(ip) = trimmed.parse::<Ipv4Addr>() {
+        return format!("/ip4/{ip}/tcp/{port}");
+    }
+
+    if let Some((host, maybe_port)) = trimmed.rsplit_once(':') {
+        let maybe_port = maybe_port.trim();
+        if maybe_port.parse::<u16>().is_ok() {
+            let host = host.trim();
+            if host.is_empty() {
+                return format!("/dns/127.0.0.1/tcp/{port}");
+            }
+            if host.parse::<Ipv4Addr>().is_ok() {
+                return format!("/ip4/{host}/tcp/{port}");
+            }
+            return format!("/dns/{host}/tcp/{port}");
+        }
+    }
+
+    if trimmed.contains("/") {
+        return trimmed.to_string();
+    }
+
+    format!("/dns/{trimmed}/tcp/{port}")
 }
 
 pub fn bootstrap_nodes_from_server_list(server_list: &[String]) -> Vec<PeerNode> {

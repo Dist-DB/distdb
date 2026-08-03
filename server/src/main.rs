@@ -46,7 +46,7 @@ use server::core::comms::outbound_transport::{
 };
 use server::core::comms::p2p_wire::{
     advertised_listen_addr_from_args, multiaddr_to_socket_addr,
-    node_descriptor_to_peer_node,
+    node_descriptor_to_peer_node, normalize_advertise_addr,
 };
 use server::core::control::replication_sync::spawn_affinity_replication_task;
 use server::core::comms::p2p::{
@@ -631,7 +631,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let local_node = NodeDescriptor {
         id: NodeId(node_id.clone()),
-            addrs: vec![format!("/ip4/{advertise_addr}/tcp/{port}")],
+        addrs: vec![normalize_advertise_addr(&advertise_addr, port)],
         is_local: true,
     };
 
