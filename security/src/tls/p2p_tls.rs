@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -116,9 +117,35 @@ fn certificate_params_for_node(
     
 }
 
+fn cert_contains_san(cert_pem: &str, expected_san: &str) -> bool {
+    let cert = match CertificateParams::from_ca_cert_pem(cert_pem) {
+        Ok(params) => params,
+        Err(_) => return false,
+    };
+
+    cert.subject_alt_names.iter().any(|san| match san {
+        SanType::DnsName(name) => name.to_string() == expected_san,
+        SanType::IpAddress(ip) => ip.to_string() == expected_san,
+        _ => false,
+    })
+}
+
+fn should_refresh_leaf_cert(cert_path: &Path, address_hint: &str, extra_subject_alt_names: &[String]) -> bool {
+    let Some(existing_cert_pem) = fs::read_to_string(cert_path).ok() else {
+        return true;
+    };
+
+    let expected_sans = sanitize_subject_alt_names(address_hint, extra_subject_alt_names);
+    let Some(expected_host) = expected_sans.iter().find(|san| !san.contains("localhost")) else {
+        return false;
+    };
+
+    !cert_contains_san(&existing_cert_pem, expected_host)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SanType, certificate_params_for_node};
+    use super::{SanType, cert_contains_san, certificate_params_for_node, should_refresh_leaf_cert};
 
     #[test]
     fn certificate_params_include_dns_subject_alt_names() {
@@ -142,6 +169,29 @@ mod tests {
         assert!(names.iter().any(|name| name == "localhost"));
         assert!(names.iter().any(|name| name == "provision.distdb.com"));
         assert!(names.iter().any(|name| name == "foo.example"));
+    }
+
+    #[test]
+    fn should_refresh_leaf_cert_when_expected_san_is_missing() {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        use std::fs;
+
+        let dir = std::path::Path::new("../../target/test-data");
+        let _ = fs::create_dir_all(dir);
+
+        let mut params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, "test-node");
+
+        let key_pair = KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_pem = cert.pem();
+        let cert_path = dir.join("leaf-cert.pem");
+        fs::write(&cert_path, &cert_pem).unwrap();
+
+        assert!(cert_contains_san(&cert_pem, "localhost"));
+        assert!(!cert_contains_san(&cert_pem, "provision.distdb.com"));
+        assert!(should_refresh_leaf_cert(&cert_path, "provision.distdb.com:4001", &[]));
     }
 }
 
@@ -350,12 +400,17 @@ pub fn ensure_or_generate_p2p_tls(
     let have_ca = ca_cert_path.exists() && ca_key_path.exists();
     let have_leaf = cert_path.exists() && key_path.exists();
 
-    if have_ca && have_leaf {
+    if have_ca && have_leaf && !should_refresh_leaf_cert(&cert_path, address_hint, extra_subject_alt_names) {
         return Ok(AutoTlsPaths {
             cert_path,
             key_path,
             ca_path: ca_cert_path,
         });
+    }
+
+    if have_leaf {
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
     }
 
     let (ca_cert, ca_key) = if have_ca {
