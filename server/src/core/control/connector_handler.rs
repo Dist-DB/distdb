@@ -1867,6 +1867,29 @@ pub async fn maybe_show_entities_response(
 
 }
 
+fn discovery_peers_with_local_preferred(
+    peers: Vec<PeerNode>,
+    local_node: &NodeDescriptor,
+) -> Vec<PeerNode> {
+    if !is_valid_server_node(&node_descriptor_to_peer_node(local_node)) {
+        return peers;
+    }
+
+    let local_peer = node_descriptor_to_peer_node(local_node);
+    let local_peer_id = local_peer.id.clone();
+    let mut filtered = peers
+        .into_iter()
+        .filter(|peer| peer.id != local_peer_id)
+        .collect::<Vec<_>>();
+    filtered.push(local_peer);
+
+    let mut seen_ids = HashSet::new();
+    filtered
+        .into_iter()
+        .filter(|peer| seen_ids.insert(peer.id.clone()))
+        .collect()
+}
+
 pub async fn maybe_server_peer_discovery_response(
     request: &ConnectorRequest,
     p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
@@ -1882,24 +1905,21 @@ pub async fn maybe_server_peer_discovery_response(
         return None;
     }
 
-    let mut peers = {
+    let peers = {
         let runtime = p2p_runtime.lock().await;
-        runtime.network().discover_peers()
+        discovery_peers_with_local_preferred(runtime.network().discover_peers(), local_node)
     };
 
-    if is_valid_server_node(&node_descriptor_to_peer_node(local_node)) {
-        peers.push(node_descriptor_to_peer_node(local_node));
-    }
-
-    let mut seen_ids = HashSet::new();
-    peers.retain(|peer| seen_ids.insert(peer.id.clone()));
-
     let rows = {
-        
+
         let mut registry = service_registry.lock().await;
         let local_node_id = local_node.id.0.as_str();
+        let peer_ids = peers
+            .iter()
+            .map(|peer| peer.id.clone())
+            .collect::<HashSet<_>>();
 
-        registry.retain(|node_id, _| seen_ids.contains(node_id) || node_id == local_node_id);
+        registry.retain(|node_id, _| peer_ids.contains(node_id) || node_id == local_node_id);
 
         peers
             .into_iter()

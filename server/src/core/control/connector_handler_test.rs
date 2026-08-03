@@ -2,6 +2,8 @@
     use super::*;
     use crate::core::config::ServerRuntimeConfig;
     use connector::ResponseStatus;
+    use serverlib::core::cluster::NodeDescriptor;
+    use serverlib::core::identity::NodeId;
     use serverlib::DatabaseId;
 
     fn unique_test_data_dir(prefix: &str) -> std::path::PathBuf {
@@ -577,6 +579,37 @@
         
         assert!(!is_valid_server_node(&bad_addr));
 
+    }
+
+    #[test]
+    fn discovery_peers_prefers_local_node_advertise_address() {
+        let discovered = vec![
+            PeerNode {
+                id: "node-01".to_string(),
+                addrs: vec!["/dns/rdns-internal.example/tcp/4001".to_string()],
+                is_local: true,
+            },
+            PeerNode {
+                id: "node-02".to_string(),
+                addrs: vec!["/dns/peer-02.example/tcp/4001".to_string()],
+                is_local: false,
+            },
+        ];
+
+        let local_node = NodeDescriptor {
+            id: NodeId("node-01".to_string()),
+            addrs: vec!["/dns/provision.distdb.com/tcp/4001".to_string()],
+            is_local: true,
+        };
+
+        let merged = discovery_peers_with_local_preferred(discovered, &local_node);
+        let local_peer = merged
+            .iter()
+            .find(|peer| peer.id == "node-01")
+            .expect("local node should remain present");
+
+        assert_eq!(local_peer.addrs, vec!["/dns/provision.distdb.com/tcp/4001".to_string()]);
+        assert_eq!(merged.iter().filter(|peer| peer.id == "node-01").count(), 1);
     }
 
     #[test]
