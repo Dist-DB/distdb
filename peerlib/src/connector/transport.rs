@@ -350,6 +350,34 @@ impl ConnectorP2pTransport {
         normalized
     }
 
+    fn peer_addrs_share_port(left: &[String], right: &[String]) -> bool {
+        let left_ports = left
+            .iter()
+            .filter_map(|addr| normalize_peer_addr(addr).rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()))
+            .collect::<Vec<_>>();
+        let right_ports = right
+            .iter()
+            .filter_map(|addr| normalize_peer_addr(addr).rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()))
+            .collect::<Vec<_>>();
+
+        left_ports.iter().any(|port| right_ports.contains(port))
+    }
+
+    fn merge_peer_addrs(existing: &[String], incoming: &[String]) -> Vec<String> {
+        let mut merged = existing
+            .iter()
+            .map(|addr| normalize_peer_addr(addr))
+            .collect::<Vec<_>>();
+
+        for addr in incoming.iter().map(|addr| normalize_peer_addr(addr)) {
+            if !merged.contains(&addr) {
+                merged.push(addr);
+            }
+        }
+
+        Self::normalize_peer_addrs(&merged)
+    }
+
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
 
         let peer_id = peer.peer_id.clone();
@@ -375,6 +403,32 @@ impl ConnectorP2pTransport {
         }
 
         normalized_peer.addrs = Self::normalize_peer_addrs(&merged_addrs);
+
+        let incoming_is_loopback_only = peer.addrs.iter().all(|addr| is_local_loopback_socket_addr(addr));
+        let should_merge_into_existing_public_peer = self.peers.iter().any(|(existing_peer_id, existing_peer)| {
+            **existing_peer_id != peer_id
+                && Self::peer_addrs_share_port(&existing_peer.addrs, &peer.addrs)
+                && existing_peer.addrs.iter().any(|addr| !is_local_loopback_socket_addr(addr))
+                && incoming_is_loopback_only
+        });
+
+        if should_merge_into_existing_public_peer {
+            if let Some((existing_peer_id, existing_peer)) = self.peers.iter_mut().find(|(existing_peer_id, existing_peer)| {
+                **existing_peer_id != peer_id
+                    && Self::peer_addrs_share_port(&existing_peer.addrs, &peer.addrs)
+                    && existing_peer.addrs.iter().any(|addr| !is_local_loopback_socket_addr(addr))
+                    && incoming_is_loopback_only
+            }) {
+                let merged_addrs = Self::merge_peer_addrs(&existing_peer.addrs, &peer.addrs);
+                existing_peer.addrs = merged_addrs;
+                existing_peer.is_discovered = existing_peer.is_discovered || is_discovered;
+
+                if self.active_peer_id.as_deref() == Some(peer_id.as_str()) {
+                    self.active_peer_id = Some(existing_peer_id.clone());
+                }
+                return;
+            }
+        }
 
         log::debug!(
             "connector transport upsert peer peer_id={} addrs={}",

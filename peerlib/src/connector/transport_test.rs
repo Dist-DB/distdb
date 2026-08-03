@@ -202,6 +202,31 @@
     }
 
     #[test]
+    fn upsert_peer_merges_loopback_refresh_into_existing_public_peer() {
+        let mut transport = ConnectorP2pTransport::new(ConnectorP2pConfig::new("/distdb/kad/1.0.0"));
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "server-node-01".to_string(),
+            addrs: vec!["provision.distdb.com:4001".to_string()],
+            is_discovered: true,
+        });
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "server-node-02".to_string(),
+            addrs: vec!["127.0.0.1:4001".to_string()],
+            is_discovered: true,
+        });
+
+        let peers = transport.known_peers();
+        assert_eq!(peers.len(), 1);
+        let peer = peers.first().unwrap();
+        assert_eq!(peer.peer_id, "server-node-01");
+        assert_eq!(peer.addrs.len(), 2);
+        assert_eq!(peer.addrs.first().unwrap(), "provision.distdb.com:4001");
+        assert_eq!(peer.addrs.get(1).unwrap(), "127.0.0.1:4001");
+    }
+
+    #[test]
     fn normalize_peer_addr_parses_supported_multiaddrs() {
         assert_eq!(
             normalize_peer_addr("/ip4/127.0.0.1/tcp/4001"),
