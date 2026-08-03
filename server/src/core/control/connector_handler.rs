@@ -1935,6 +1935,12 @@ pub async fn maybe_server_peer_discovery_response(
                 } else {
                     peer.addrs.clone()
                 };
+                log::info!(
+                    "server peer discovery row peer_id={} local_node_addrs={:?} peer_addrs={:?}",
+                    peer_id,
+                    local_node.addrs,
+                    peer_addrs
+                );
                 let services = registry
                     .get(&peer_id)
                     .map(|service_list| service_list.join(","))

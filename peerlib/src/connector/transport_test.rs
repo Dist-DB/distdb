@@ -295,6 +295,15 @@
     }
 
     #[test]
+    fn server_name_parser_prefers_hostname_over_localhost_for_public_dns_names() {
+        let host = server_name_from_socket_addr("provision.distdb.com:4001")
+            .expect("host should parse");
+
+        assert!(matches!(host, ServerName::DnsName(_)));
+        assert!(format!("{host:?}").contains("provision.distdb.com"));
+    }
+
+    #[test]
     fn extract_session_id_supports_both_labels() {
         assert_eq!(
             extract_session_id("challenge session_id=sess-123"),

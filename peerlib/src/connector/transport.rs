@@ -1062,22 +1062,27 @@ fn server_names_from_socket_addr(socket_addr: &str) -> Vec<String> {
 
     let mut candidates = Vec::new();
 
-    if !host.is_empty() {
-        candidates.push(host.to_string());
+    if host.is_empty() {
+        return candidates;
     }
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         candidates.push(ip.to_string());
-    } else if !host.is_empty() {
-        candidates.push("localhost".to_string());
+        if ip.is_loopback() {
+            candidates.push("localhost".to_string());
+        }
+    } else {
         candidates.push(host.to_string());
+        if host.eq_ignore_ascii_case("localhost")
+            || host.eq_ignore_ascii_case("127.0.0.1")
+            || host.eq_ignore_ascii_case("::1")
+        {
+            candidates.push("localhost".to_string());
+        } else {
+            candidates.push("localhost".to_string());
+        }
     }
 
-    if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("::1") {
-        candidates.push("localhost".to_string());
-    }
-
-    candidates.sort();
     candidates.dedup();
     candidates
 }
@@ -1144,6 +1149,11 @@ fn connect_tls_stream(
         .map_err(|e| ConnectorError::Transport(format!("failed to set TCP_NODELAY: {e}")))?;
 
     let server_name = server_name_from_socket_addr(socket_addr)?;
+    log::debug!(
+        "connector TLS handshake target socket_addr={} server_name={:?}",
+        socket_addr,
+        server_name
+    );
     let mut connection = ClientConnection::new(Arc::new(client_config), server_name).map_err(|e| {
         ConnectorError::Transport(format!("failed to create TLS client connection: {e}"))
     })?;
