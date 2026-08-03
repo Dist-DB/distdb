@@ -161,6 +161,22 @@
     }
 
     #[test]
+    fn advertised_listen_addr_uses_public_hostname_env_when_available() {
+        unsafe {
+            std::env::set_var("HOSTNAME", "provision.distdb.com");
+        }
+
+        let args = vec!["server".to_string()];
+        let resolved = advertised_listen_addr_from_args(&args, "0.0.0.0");
+
+        unsafe {
+            std::env::remove_var("HOSTNAME");
+        }
+
+        assert_eq!(resolved, "provision.distdb.com");
+    }
+
+    #[test]
     fn normalize_advertise_addr_falls_back_to_loopback_for_placeholder_hosts() {
         assert_eq!(
             normalize_advertise_addr("--", 4001),
