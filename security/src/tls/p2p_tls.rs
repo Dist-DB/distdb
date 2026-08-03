@@ -172,6 +172,30 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn certificate_params_include_loopback_and_advertised_names() {
+        let params = certificate_params_for_node(
+            "server-node-01",
+            "127.0.0.1:4001",
+            &[],
+        )
+        .expect("should build certificate params");
+
+        let names = params
+            .subject_alt_names
+            .iter()
+            .filter_map(|san| match san {
+                SanType::DnsName(name) => Some(name.to_string()),
+                SanType::IpAddress(ip) => Some(ip.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "localhost"));
+        assert!(names.iter().any(|name| name == "127.0.0.1"));
+    }
+
+    #[test]
     fn should_refresh_leaf_cert_when_expected_san_is_missing() {
         use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
         use std::fs;

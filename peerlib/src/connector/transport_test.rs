@@ -162,6 +162,24 @@
     }
 
     #[test]
+    fn upsert_peer_prefers_non_loopback_addresses_when_available() {
+        let mut transport = ConnectorP2pTransport::new(ConnectorP2pConfig::new("/distdb/kad/1.0.0"));
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "server-node-01".to_string(),
+            addrs: vec![
+                "127.0.0.1:4001".to_string(),
+                "provision.distdb.com:4001".to_string(),
+            ],
+            is_discovered: true,
+        });
+
+        let peer = transport.active_peer().expect("peer should be active");
+        assert_eq!(peer.addrs.first().unwrap(), "provision.distdb.com:4001");
+        assert_eq!(peer.addrs.get(1).unwrap(), "127.0.0.1:4001");
+    }
+
+    #[test]
     fn normalize_peer_addr_parses_supported_multiaddrs() {
         assert_eq!(
             normalize_peer_addr("/ip4/127.0.0.1/tcp/4001"),
@@ -171,6 +189,18 @@
             normalize_peer_addr("/dns/server-node-01/tcp/9400"),
             "server-node-01:9400"
         );
+    }
+
+    #[test]
+    fn server_name_candidates_cover_loopback_aliases() {
+        let candidates = server_names_from_socket_addr("127.0.0.1:4001");
+        let names = candidates
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "127.0.0.1"));
+        assert!(names.iter().any(|name| name == "localhost"));
     }
 
     #[test]

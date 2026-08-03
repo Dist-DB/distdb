@@ -329,15 +329,38 @@ impl ConnectorP2pTransport {
         self.config.tls.ca_path.as_ref()
     }
 
+    fn normalize_peer_addrs(addrs: &[String]) -> Vec<String> {
+        let mut normalized = addrs.to_vec();
+        normalized.sort_by(|left, right| {
+            let left_is_loopback = left.trim().split(':').next().is_some_and(|host| {
+                let host = host.trim_matches('[').trim_matches(']').to_ascii_lowercase();
+                matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")
+            });
+            let right_is_loopback = right.trim().split(':').next().is_some_and(|host| {
+                let host = host.trim_matches('[').trim_matches(']').to_ascii_lowercase();
+                matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")
+            });
+
+            match (left_is_loopback, right_is_loopback) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+        normalized
+    }
+
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
 
         let peer_id = peer.peer_id.clone();
         let is_discovered = peer.is_discovered;
+        let mut normalized_peer = peer.clone();
+        normalized_peer.addrs = Self::normalize_peer_addrs(&peer.addrs);
 
         log::debug!(
             "connector transport upsert peer peer_id={} addrs={}",
             peer_id,
-            peer.addrs.join(",")
+            normalized_peer.addrs.join(",")
         );
 
         let stale_peer_ids = self
@@ -349,7 +372,7 @@ impl ConnectorP2pTransport {
                     && existing_peer
                         .addrs
                         .iter()
-                        .any(|existing_addr| peer.addrs.iter().any(|new_addr| new_addr == existing_addr))
+                        .any(|existing_addr| normalized_peer.addrs.iter().any(|new_addr| new_addr == existing_addr))
                         
             })
             .map(|(existing_peer_id, _)| existing_peer_id.clone())
@@ -372,7 +395,7 @@ impl ConnectorP2pTransport {
             peer_id.clone(),
             ConnectorPeer {
                 is_discovered,
-                ..peer
+                ..normalized_peer
             },
         );
 
@@ -956,8 +979,7 @@ fn load_tls_root_store_from_reader<R: Read>(
 
 }
 
-fn server_name_from_socket_addr(socket_addr: &str) -> Result<ServerName<'static>, ConnectorError> {
-
+fn server_names_from_socket_addr(socket_addr: &str) -> Vec<String> {
     let host = socket_addr
         .rsplit_once(':')
         .map(|(host, _)| host)
@@ -965,19 +987,52 @@ fn server_name_from_socket_addr(socket_addr: &str) -> Result<ServerName<'static>
         .trim_matches('[')
         .trim_matches(']');
 
-    if host.is_empty() {
+    let mut candidates = Vec::new();
+
+    if !host.is_empty() {
+        candidates.push(host.to_string());
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        candidates.push(ip.to_string());
+    } else if !host.is_empty() {
+        candidates.push("localhost".to_string());
+        candidates.push(host.to_string());
+    }
+
+    if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("::1") {
+        candidates.push("localhost".to_string());
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn server_name_from_socket_addr(socket_addr: &str) -> Result<ServerName<'static>, ConnectorError> {
+
+    let candidates = server_names_from_socket_addr(socket_addr);
+    if candidates.is_empty() {
         return Err(ConnectorError::Transport(format!(
             "cannot derive tls server name from '{socket_addr}'"
         )));
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(ServerName::IpAddress(ip.into()));
+    for candidate in &candidates {
+        if let Ok(ip) = candidate.parse::<IpAddr>() {
+            return Ok(ServerName::IpAddress(ip.into()));
+        }
+
+        if let Ok(name) = ServerName::try_from(candidate.clone()) {
+            return Ok(name);
+        }
     }
 
-    ServerName::try_from(host.to_string()).map_err(|_| {
-        ConnectorError::Transport(format!("invalid tls server name '{}': {}", host, socket_addr))
-    })
+    Err(ConnectorError::Transport(format!(
+        "invalid tls server name from '{}': {}",
+        socket_addr,
+        candidates.join(",")
+    )))
 
 }
 
