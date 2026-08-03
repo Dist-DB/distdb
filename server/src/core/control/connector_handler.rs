@@ -1895,6 +1895,7 @@ pub async fn maybe_server_peer_discovery_response(
     peers.retain(|peer| seen_ids.insert(peer.id.clone()));
 
     let rows = {
+        
         let mut registry = service_registry.lock().await;
         let local_node_id = local_node.id.0.as_str();
 
@@ -1903,6 +1904,7 @@ pub async fn maybe_server_peer_discovery_response(
         peers
             .into_iter()
             .map(|peer| {
+
                 let peer_id = peer.id.clone();
                 let peer_addrs = if peer_id == local_node.id.0 {
                     local_node.addrs.clone()

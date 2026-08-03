@@ -216,6 +216,41 @@ fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
         })
 }
 
+fn extract_public_hostname_from_hosts_content(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+
+            let mut parts = trimmed.split_whitespace();
+            let first = parts.next()?;
+            let mut candidate = None;
+
+            for part in parts {
+                let cleaned = part.trim();
+                if cleaned.is_empty() || cleaned.starts_with('#') {
+                    continue;
+                }
+
+                if looks_like_public_hostname(cleaned) {
+                    candidate = Some(cleaned.to_string());
+                    break;
+                }
+            }
+
+            if let Some(host) = candidate {
+                if first.parse::<Ipv4Addr>().is_ok() || first.parse::<Ipv6Addr>().is_ok() {
+                    return Some(host);
+                }
+            }
+
+            None
+        })
+}
+
 fn resolve_hostname_hint() -> Option<String> {
     std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
@@ -242,6 +277,18 @@ fn resolve_hostname_hint() -> Option<String> {
                         None
                     }
                 })
+        })
+        .or_else(|| {
+            let hosts_paths = ["/etc/hosts", "/etc/hosts.deny"];
+            for path in hosts_paths {
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                if let Some(host) = extract_public_hostname_from_hosts_content(&content) {
+                    return Some(host);
+                }
+            }
+            None
         })
 }
 

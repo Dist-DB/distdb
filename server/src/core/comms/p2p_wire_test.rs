@@ -177,6 +177,15 @@
     }
 
     #[test]
+    fn extract_public_hostname_from_hosts_content_finds_public_alias() {
+        let content = "127.0.0.1 localhost\n203.0.113.10 provision.distdb.com\n";
+        assert_eq!(
+            extract_public_hostname_from_hosts_content(content),
+            Some("provision.distdb.com".to_string())
+        );
+    }
+
+    #[test]
     fn normalize_advertise_addr_falls_back_to_loopback_for_placeholder_hosts() {
         assert_eq!(
             normalize_advertise_addr("--", 4001),
