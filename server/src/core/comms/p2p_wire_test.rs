@@ -116,6 +116,18 @@
     }
 
     #[test]
+    fn advertised_listen_addr_uses_public_host_from_server_list_when_available() {
+        let args = vec![
+            "server".to_string(),
+            "servers=provision.distdb.com:4001".to_string(),
+        ];
+        assert_eq!(
+            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            "provision.distdb.com".to_string()
+        );
+    }
+
+    #[test]
     fn advertised_listen_addr_prefers_explicit_override() {
         let args = vec!["server".to_string(), "advertise_addr=10.1.1.5".to_string()];
         assert_eq!(

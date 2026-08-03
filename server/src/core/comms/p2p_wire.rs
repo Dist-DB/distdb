@@ -142,6 +142,47 @@ fn looks_like_public_hostname(value: &str) -> bool {
     trimmed.contains('.') && !trimmed.starts_with('.') && !trimmed.ends_with('.')
 }
 
+fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() || is_placeholder_host(trimmed) {
+        return None;
+    }
+
+    if trimmed.starts_with('/') {
+        let parts = trimmed.trim_matches('/').split('/').collect::<Vec<_>>();
+        if let Some(host) = parts.get(1) {
+            let host = host.trim();
+            if looks_like_public_hostname(host) {
+                return Some(host.to_string());
+            }
+        }
+        return None;
+    }
+
+    if let Some((host, _)) = trimmed.rsplit_once(':') {
+        let host = host.trim();
+        if looks_like_public_hostname(host) {
+            return Some(host.to_string());
+        }
+    }
+
+    if looks_like_public_hostname(trimmed) {
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
+fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("servers=").map(str::trim))
+        .and_then(|server_list| {
+            server_list
+                .split(',')
+                .find_map(|entry| extract_public_host_from_server_entry(entry))
+        })
+}
+
 fn resolve_hostname_hint() -> Option<String> {
     std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
@@ -208,6 +249,10 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
         if !is_placeholder_host(&positional_host) {
             return positional_host;
         }
+    }
+
+    if let Some(server_host) = resolve_public_host_from_server_list(args) {
+        return server_host;
     }
 
     if let Some(hostname_hint) = hostname_hint
