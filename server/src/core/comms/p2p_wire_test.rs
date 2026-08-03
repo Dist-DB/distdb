@@ -186,6 +186,19 @@
     }
 
     #[test]
+    fn resolve_public_hostname_from_hosts_paths_prefers_public_alias() {
+        let temp_hosts = std::env::temp_dir().join(format!("distdb-hosts-{}.tmp", std::process::id()));
+        std::fs::write(&temp_hosts, "127.0.0.1 localhost\n203.0.113.10 provision.distdb.com\n")
+            .expect("hosts fixture should write");
+
+        let resolved = resolve_public_hostname_from_hosts_paths(&[temp_hosts.to_str().expect("temp path should be valid")]);
+
+        let _ = std::fs::remove_file(&temp_hosts);
+
+        assert_eq!(resolved, Some("provision.distdb.com".to_string()));
+    }
+
+    #[test]
     fn normalize_advertise_addr_falls_back_to_loopback_for_placeholder_hosts() {
         assert_eq!(
             normalize_advertise_addr("--", 4001),

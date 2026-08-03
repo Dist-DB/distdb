@@ -251,10 +251,23 @@ fn extract_public_hostname_from_hosts_content(content: &str) -> Option<String> {
         })
 }
 
+fn resolve_public_hostname_from_hosts_paths(paths: &[&str]) -> Option<String> {
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(host) = extract_public_hostname_from_hosts_content(&content) {
+            return Some(host);
+        }
+    }
+    None
+}
+
 fn resolve_hostname_hint() -> Option<String> {
     std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
         .filter(|value| looks_like_public_hostname(value))
+        .or_else(|| resolve_public_hostname_from_hosts_paths(&["/etc/hosts", "/etc/hosts.deny"]))
         .or_else(|| {
             std::env::var("HOSTNAME")
                 .ok()
@@ -277,18 +290,6 @@ fn resolve_hostname_hint() -> Option<String> {
                         None
                     }
                 })
-        })
-        .or_else(|| {
-            let hosts_paths = ["/etc/hosts", "/etc/hosts.deny"];
-            for path in hosts_paths {
-                let Ok(content) = std::fs::read_to_string(path) else {
-                    continue;
-                };
-                if let Some(host) = extract_public_hostname_from_hosts_content(&content) {
-                    return Some(host);
-                }
-            }
-            None
         })
 }
 
