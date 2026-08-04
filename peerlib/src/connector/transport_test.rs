@@ -440,6 +440,40 @@
     }
 
     #[test]
+    fn request_attempts_network_when_active_peer_has_no_live_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should exist");
+
+        let server = thread::spawn(move || {
+            let _stream = listener.accept().expect("server should accept");
+        });
+
+        let mut transport = ConnectorP2pTransport::new(
+            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Required),
+        );
+
+        transport.upsert_peer(ConnectorPeer {
+            peer_id: "peer-1".to_string(),
+            addrs: vec![addr.to_string()],
+            is_discovered: true,
+        });
+
+        let req = ConnectorRequest::new(
+            "req-network-attempt",
+            ConnectorCommand::CreateDatabase {
+                database_name: "main".to_string(),
+            },
+        );
+
+        let err = transport
+            .request(&req)
+            .expect_err("request should attempt network connect and fail TLS handshake");
+        assert_tls_connect_failure(err);
+
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
     fn connect_active_peer_and_request_roundtrip_over_plain_tcp() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let addr = listener.local_addr().expect("local addr should exist");

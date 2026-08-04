@@ -973,62 +973,48 @@ impl ConnectorTransport for ConnectorP2pTransport {
             );
         }
 
-        let mut network_request_error: Option<ConnectorError> = None;
+        if !has_live_connection {
+            let queued_response = self
+                .queued_responses
+                .lock()
+                .ok()
+                .and_then(|mut queued_responses| queued_responses.remove(&request.request_id));
 
-        if has_live_connection
-            && let Some(peer) = self.active_peer() {
-
-            match send_request_over_tcp(self, peer, request) {
-
-                Ok(response) => {
-                    log::debug!(
-                        "connector transport received network response request_id={} status={:?}",
-                        response.request_id,
-                        response.status
-                    );
-                    return Ok(response);
-                },
-
-                Err(err) => {
-                    log::warn!(
-                        "connector transport network request failed for request_id={}: {}",
-                        request.request_id,
-                        err
-                    );
-                    network_request_error = Some(err);
-                }
-
+            if let Some(response) = queued_response {
+                log::debug!(
+                    "connector transport returned queued response request_id={} status={:?}",
+                    response.request_id,
+                    response.status
+                );
+                return Ok(response);
             }
-
         }
 
-        if let Some(err) = network_request_error {
-            return Err(err);
-        }
+        let peer = self.active_peer().ok_or_else(|| {
+            ConnectorError::Transport(
+                "no connected peer selected for session routing".to_string(),
+            )
+        })?;
 
-        let queued_response = self
-            .queued_responses
-            .lock()
-            .ok()
-            .and_then(|mut queued_responses| queued_responses.remove(&request.request_id));
-
-        queued_response.ok_or_else(|| {
-            log::warn!(
-                "connector transport has no queued response for request_id={}",
-                request.request_id
-            );
-            if !has_live_connection {
-                ConnectorError::Transport(
-                    "no active peer connection; run `connect <user@peer-id>;` first"
-                        .to_string(),
-                )
-            } else {
-                ConnectorError::Transport(
-                    "no queued response for request_id; p2p request/response loop is not wired yet"
-                        .to_string(),
-                )
+        match send_request_over_tcp(self, peer, request) {
+            Ok(response) => {
+                log::debug!(
+                    "connector transport received network response request_id={} status={:?}",
+                    response.request_id,
+                    response.status
+                );
+                Ok(response)
             }
-        })
+
+            Err(err) => {
+                log::warn!(
+                    "connector transport network request failed for request_id={}: {}",
+                    request.request_id,
+                    err
+                );
+                Err(err)
+            }
+        }
     
     }
 
