@@ -6,7 +6,10 @@
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Mutex;
     use std::thread;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn write_frame(stream: &mut std::net::TcpStream, response: &ConnectorResponse) {
         let payload = bincode::serialize(response).expect("response should serialize");
@@ -305,8 +308,32 @@
 
     #[test]
     fn global_tls_fingerprint_reads_from_baked_constant() {
-        let loaded = global_tls_fingerprint().expect("fingerprint should load from baked constant");
-        assert_eq!(loaded, "7289c9ec291a7f0cff0542c982d8497b77bf314882316649b28634da10449c30");
+        let _guard = ENV_MUTEX.lock().expect("env mutex should lock");
+        unsafe {
+            std::env::remove_var(CONNECTOR_TLS_FINGERPRINT_ENV);
+        }
+        let loaded = global_tls_fingerprint("provision.distdb.com:4001")
+            .expect("fingerprint should load from baked constant");
+        assert_eq!(loaded, "74387312f08e50ea3ce715cb5f1f90838171ef373ade950f936944ff2b8191b0");
+    }
+
+    #[test]
+    fn global_tls_fingerprint_prefers_env_override_when_valid() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex should lock");
+        unsafe {
+            std::env::set_var(
+                CONNECTOR_TLS_FINGERPRINT_ENV,
+                "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+            );
+        }
+
+        let loaded = global_tls_fingerprint("provision.distdb.com:4001")
+            .expect("fingerprint should load from env override");
+        assert_eq!(loaded, "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+
+        unsafe {
+            std::env::remove_var(CONNECTOR_TLS_FINGERPRINT_ENV);
+        }
     }
 
     #[test]

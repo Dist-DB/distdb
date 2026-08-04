@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use openssl::{pkey::PKey, x509::X509};
+use openssl::sha::sha256;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
     DistinguishedName, DnType, ExtendedKeyUsagePurpose, Ia5String, IsCa, KeyPair,
     KeyUsagePurpose, SanType,
 };
 use common::helpers::utils::md5_hash;
+
+const CA_FINGERPRINT_FILE_NAME: &str = "ca-fingerprint.sha256";
 
 #[derive(Debug, Clone)]
 pub struct AutoTlsPaths {
@@ -264,6 +267,31 @@ fn certificate_material_is_valid(
         && leaf_subject_key_id != ca_subject_key_id
         && leaf_issuer.as_ref() == ca_subject.as_ref()
 
+}
+
+fn ca_spki_sha256_fingerprint(cert_pem: &str) -> Result<String, String> {
+    let cert = X509::from_pem(cert_pem.as_bytes())
+        .map_err(|err| format!("failed parsing CA cert PEM: {err}"))?;
+    let public_key = cert
+        .public_key()
+        .map_err(|err| format!("failed extracting CA public key: {err}"))?;
+    let spki_der = public_key
+        .public_key_to_der()
+        .map_err(|err| format!("failed serializing CA SPKI DER: {err}"))?;
+    let digest = sha256(&spki_der);
+    Ok(digest.iter().map(|byte| format!("{:02x}", byte)).collect::<String>())
+}
+
+fn persist_ca_fingerprint_file(tls_dir: &Path, ca_cert_pem: &str) -> Result<(), String> {
+    let fingerprint = ca_spki_sha256_fingerprint(ca_cert_pem)?;
+    let fingerprint_path = tls_dir.join(CA_FINGERPRINT_FILE_NAME);
+    std::fs::write(&fingerprint_path, format!("{}\n", fingerprint)).map_err(|err| {
+        format!(
+            "failed writing CA fingerprint '{}': {}",
+            fingerprint_path.display(),
+            err
+        )
+    })
 }
 
 pub fn build_tls_enrollment_request(
@@ -540,6 +568,15 @@ pub fn ensure_or_generate_tls_cert(
     };
 
     let leaf_params = certificate_params_for_node(node_id, address_hint, extra_subject_alt_names)?;
+
+    let ca_cert_pem = std::fs::read_to_string(&ca_cert_path).map_err(|err| {
+        format!(
+            "failed reading CA cert '{}' for fingerprint persistence: {}",
+            ca_cert_path.display(),
+            err
+        )
+    })?;
+    persist_ca_fingerprint_file(&tls_dir, &ca_cert_pem)?;
 
     let leaf_key = KeyPair::generate().map_err(|err| format!("failed generating leaf key: {err}"))?;
 

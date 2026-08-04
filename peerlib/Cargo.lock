@@ -2280,6 +2280,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "sha2",
+ "x509-parser 0.16.0",
 ]
 
 [[package]]

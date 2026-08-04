@@ -18,6 +18,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, Error as RustlsError, RootCertStore, SignatureScheme, StreamOwned};
 use sha2::{Digest, Sha256};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
@@ -27,7 +28,9 @@ const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
 const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
-const CONNECTOR_TLS_FINGERPRINT_BAKED: &str = "7289c9ec291a7f0cff0542c982d8497b77bf314882316649b28634da10449c30";
+const CONNECTOR_TLS_FINGERPRINT_ENV: &str = "DISTDB_CONNECTOR_TLS_FINGERPRINT";
+const CONNECTOR_TLS_FINGERPRINT_BAKED: &str = "74387312f08e50ea3ce715cb5f1f90838171ef373ade950f936944ff2b8191b0";
+const CONNECTOR_TLS_FINGERPRINT_FILE: &str = "ca-fingerprint.sha256";
 const MAX_QUEUED_RESPONSES: usize = 8192;
 
 #[derive(Debug)]
@@ -57,13 +60,18 @@ impl ServerCertVerifier for FingerprintServerCertVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        let actual = certificate_sha256_fingerprint(end_entity.as_ref());
-        if actual == self.expected_fingerprint {
+        let presented_fingerprints = presented_chain_fingerprints(end_entity, _intermediates);
+
+        if presented_fingerprints
+            .iter()
+            .any(|actual| actual == &self.expected_fingerprint)
+        {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(RustlsError::General(format!(
-                "tls fingerprint mismatch: expected '{}' got '{}'",
-                self.expected_fingerprint, actual
+                "tls fingerprint mismatch: expected '{}' got presented '{}'",
+                self.expected_fingerprint,
+                presented_fingerprints.join(",")
             )))
         }
     }
@@ -129,13 +137,97 @@ fn normalize_tls_fingerprint(raw: &str) -> Option<String> {
     }
 }
 
-fn global_tls_fingerprint() -> Option<String> {
+fn try_load_local_dev_fingerprint(socket_addr: &str) -> Option<String> {
+    if !is_local_loopback_socket_addr(socket_addr) {
+        return None;
+    }
+
+    let candidates = [
+        PathBuf::from(format!("../server/data/p2p-tls/{}", CONNECTOR_TLS_FINGERPRINT_FILE)),
+        PathBuf::from(format!("./data/p2p-tls/{}", CONNECTOR_TLS_FINGERPRINT_FILE)),
+        PathBuf::from(format!("../data/p2p-tls/{}", CONNECTOR_TLS_FINGERPRINT_FILE)),
+    ];
+
+    for candidate in candidates {
+        let Ok(raw) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        if let Some(normalized) = normalize_tls_fingerprint(raw.trim()) {
+            log::info!(
+                "connector loaded local dev fingerprint from {} for peer bootstrap",
+                candidate.display()
+            );
+            return Some(normalized);
+        }
+    }
+
+    None
+}
+
+fn global_tls_fingerprint(socket_addr: &str) -> Option<String> {
+
+    if let Ok(raw) = std::env::var(CONNECTOR_TLS_FINGERPRINT_ENV) {
+        if let Some(normalized) = normalize_tls_fingerprint(raw.trim()) {
+            return Some(normalized);
+        }
+
+        log::warn!(
+            "ignoring invalid connector TLS fingerprint from {}",
+            CONNECTOR_TLS_FINGERPRINT_ENV
+        );
+    }
+
+    if let Some(local_fp) = try_load_local_dev_fingerprint(socket_addr) {
+        return Some(local_fp);
+    }
+
     normalize_tls_fingerprint(CONNECTOR_TLS_FINGERPRINT_BAKED)
 }
 
 fn certificate_sha256_fingerprint(cert_der: &[u8]) -> String {
     let digest = Sha256::digest(cert_der);
     digest.iter().map(|byte| format!("{:02x}", byte)).collect::<String>()
+}
+
+fn certificate_spki_sha256_fingerprint(cert_der: &[u8]) -> Option<String> {
+    let (_, cert) = X509Certificate::from_der(cert_der).ok()?;
+    let spki_der = cert.public_key().raw;
+    let digest = Sha256::digest(spki_der);
+    Some(digest.iter().map(|byte| format!("{:02x}", byte)).collect::<String>())
+}
+
+fn presented_chain_fingerprints(
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+) -> Vec<String> {
+    let mut fingerprints = Vec::with_capacity((intermediates.len() + 1) * 2);
+
+    // Prefer issuer/intermediate identities first so pinned trust can remain stable
+    // across end-entity certificate rotation.
+    for cert in intermediates {
+        if let Some(spki_fp) = certificate_spki_sha256_fingerprint(cert.as_ref())
+            && !fingerprints.contains(&spki_fp)
+        {
+            fingerprints.push(spki_fp);
+        }
+        let fp = certificate_sha256_fingerprint(cert.as_ref());
+        if !fingerprints.contains(&fp) {
+            fingerprints.push(fp);
+        }
+    }
+
+    if let Some(end_entity_spki_fp) = certificate_spki_sha256_fingerprint(end_entity.as_ref())
+        && !fingerprints.contains(&end_entity_spki_fp)
+    {
+        fingerprints.push(end_entity_spki_fp);
+    }
+
+    let end_entity_fp = certificate_sha256_fingerprint(end_entity.as_ref());
+    if !fingerprints.contains(&end_entity_fp) {
+        fingerprints.push(end_entity_fp);
+    }
+
+    fingerprints
 }
 
     fn is_local_loopback_socket_addr(socket_addr: &str) -> bool {
@@ -1199,7 +1291,7 @@ fn connect_tls_stream(
     ca_pem_override: Option<&str>,
 ) -> Result<ConnectorWireStream, ConnectorError> {
 
-    let global_fingerprint = global_tls_fingerprint();
+    let global_fingerprint = global_tls_fingerprint(socket_addr);
 
     let mut client_config = if let Some(pem) = ca_pem_override {
         let roots = load_tls_root_store_from_pem(pem)?;
@@ -1225,7 +1317,7 @@ fn connect_tls_stream(
             .with_no_client_auth()
     } else {
         return Err(ConnectorError::Transport(
-            "tls_ca path is required for connector TLS (and baked connector fingerprint is missing/invalid)".to_string(),
+            "tls_ca path is required for connector TLS (and connector fingerprint is missing/invalid)".to_string(),
         ));
     };
 

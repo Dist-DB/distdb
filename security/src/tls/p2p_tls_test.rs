@@ -212,3 +212,27 @@ fn ensure_or_generate_tls_cert_rewrites_ca_material_when_existing_ca_is_inconsis
         &ca_key_path,
     ));
 }
+
+#[test]
+fn ensure_or_generate_tls_cert_persists_ca_fingerprint_file() {
+    let cluster_dir = std::path::Path::new("../../target/test-data-ca-fingerprint");
+    let node_dir = cluster_dir.join("node-1");
+    let _ = fs::remove_dir_all(cluster_dir);
+    let _ = fs::create_dir_all(&node_dir);
+
+    let _result = ensure_or_generate_tls_cert(
+        &node_dir,
+        "server-node-01",
+        "public.example.com:4001",
+        &[],
+    )
+    .expect("should generate tls material");
+
+    let fingerprint_path = cluster_dir.join("p2p-tls").join("ca-fingerprint.sha256");
+    let raw = fs::read_to_string(&fingerprint_path)
+        .expect("ca fingerprint file should exist");
+    let fingerprint = raw.trim();
+
+    assert_eq!(fingerprint.len(), 64);
+    assert!(fingerprint.chars().all(|ch| ch.is_ascii_hexdigit()));
+}
