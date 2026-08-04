@@ -103,6 +103,7 @@ If you restart the server with the same `datadir`, both indexes should still app
 - If console cannot connect, confirm server is listening on the same `listen_addr`/`port`.
 - If authentication fails, use `password root;` for bootstrap root access.
 - If you changed ports or node id, pass matching values in the console `user=root@<node_id>` and target address.
+- For deployment-time startup/connectivity constraints (including `tls_server` addressing and memory/swap advisories), see [installation-advisories.md](installation-advisories.md).
 
 Current note:
 

@@ -47,6 +47,7 @@ For design constraints and implementation ownership:
 - [partition-split-brain-matrix.md](partition-split-brain-matrix.md)
 - [non-functional-benchmarking.md](non-functional-benchmarking.md)
 - [large-dataset-import.md](large-dataset-import.md)
+- [installation-advisories.md](installation-advisories.md)
 - [security-adversarial-matrix.md](security-adversarial-matrix.md)
 - [security-findings-log.md](security-findings-log.md)
 - [operability-upgrade-safety.md](operability-upgrade-safety.md)
@@ -153,6 +154,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - [partition-split-brain-matrix.md](partition-split-brain-matrix.md): executable partition/split-brain scenario gate matrix.
 - [non-functional-benchmarking.md](non-functional-benchmarking.md): baseline performance/recovery benchmark profiles and evidence format.
 - [large-dataset-import.md](large-dataset-import.md): high-throughput import runbook for multi-million row datasets.
+- [installation-advisories.md](installation-advisories.md): deployment-time constraints and operational advisories for stable startup/connectivity.
 - [security-adversarial-matrix.md](security-adversarial-matrix.md): adversarial security scenario matrix and baseline evidence status.
 - [security-findings-log.md](security-findings-log.md): security severity rubric, triage disposition model, and tracked findings evidence.
 - [operability-upgrade-safety.md](operability-upgrade-safety.md): rolling restart and upgrade-safety contract, compatibility expectations, and drill evidence.
