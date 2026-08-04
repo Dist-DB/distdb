@@ -523,6 +523,10 @@ impl ConnectorP2pTransport {
 
     }
 
+    fn peer_is_loopback_only(addrs: &[String]) -> bool {
+        addrs.iter().all(|addr| is_local_loopback_socket_addr(addr))
+    }
+
     fn merge_peer_addrs(existing: &[String], incoming: &[String]) -> Vec<String> {
 
         let mut merged = Vec::with_capacity(existing.len() + incoming.len());
@@ -569,6 +573,41 @@ impl ConnectorP2pTransport {
             
     }
 
+    fn find_bootstrap_alias_peer_id(
+        &self,
+        peer_id: &str,
+        peer_addrs: &[String],
+        incoming_has_non_loopback: bool,
+    ) -> Option<String> {
+
+        if !incoming_has_non_loopback {
+            return None;
+        }
+
+        let bootstrap_addrs = self
+            .config
+            .bootstrap_peers
+            .iter()
+            .map(|addr| normalize_peer_addr(addr))
+            .collect::<HashSet<_>>();
+
+        self.peers
+            .iter()
+            .find(|(existing_peer_id, existing_peer)| {
+                existing_peer_id.as_str() != peer_id
+                    && Self::peer_addrs_share_port(&existing_peer.addrs, peer_addrs)
+                    && Self::peer_is_loopback_only(&existing_peer.addrs)
+                    && (bootstrap_addrs.contains(&normalize_peer_addr(existing_peer_id))
+                        || existing_peer
+                            .addrs
+                            .iter()
+                            .map(|addr| normalize_peer_addr(addr))
+                            .any(|addr| bootstrap_addrs.contains(&addr)))
+            })
+            .map(|(existing_peer_id, _)| existing_peer_id.clone())
+
+    }
+
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
 
         let peer_id = peer.peer_id.clone();
@@ -596,7 +635,9 @@ impl ConnectorP2pTransport {
 
         normalized_peer.addrs = Self::normalize_peer_addrs(&merged_addrs);
 
-        let incoming_is_loopback_only = peer.addrs.iter().all(|addr| is_local_loopback_socket_addr(addr));
+        let incoming_is_loopback_only = Self::peer_is_loopback_only(&peer.addrs);
+        let incoming_has_non_loopback = !incoming_is_loopback_only;
+
         if let Some(existing_peer_id) = self.find_public_merge_target_peer_id(
             &peer_id,
             &peer.addrs,
@@ -612,6 +653,26 @@ impl ConnectorP2pTransport {
                 self.active_peer_id = Some(existing_peer_id);
             }
             return;
+        }
+
+        if let Some(existing_peer_id) = self.find_bootstrap_alias_peer_id(
+            &peer_id,
+            &peer.addrs,
+            incoming_has_non_loopback,
+        ) {
+            if let Some(existing_peer) = self.peers.remove(&existing_peer_id) {
+                normalized_peer.addrs = Self::merge_peer_addrs(&existing_peer.addrs, &normalized_peer.addrs);
+                log::debug!(
+                    "connector transport merged bootstrap alias peer old_peer_id={} new_peer_id={} addrs={}",
+                    existing_peer_id,
+                    peer_id,
+                    normalized_peer.addrs.join(",")
+                );
+            }
+
+            if self.active_peer_id.as_deref() == Some(existing_peer_id.as_str()) {
+                self.active_peer_id = Some(peer_id.clone());
+            }
         }
 
         log::debug!(
