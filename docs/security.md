@@ -158,6 +158,24 @@ Connector-side TLS verification builds a rustls root store from either:
 
 Server identity is then validated from the dial target using rustls server-name handling.
 
+### TLS fingerprint definition for first-time connectivity
+
+In DistDB, a TLS fingerprint is the SHA-256 digest of the expected server certificate (or issuing trust anchor) embedded as a trust pin.
+
+For first-time connectivity, this fingerprint serves as the initial trust anchor when a connector does not yet have an explicit `tls_ca` file.
+
+Why this exists:
+
+1. first-connection bootstrap needs a deterministic trust decision before any session state exists,
+2. open-source deployments should avoid silent trust-on-first-use behavior,
+3. pinning reduces MITM risk during early environment setup where CA distribution may not be complete.
+
+Practical interpretation:
+
+- fingerprint trust is a bootstrap control, not a replacement for full CA lifecycle governance,
+- production environments should still prefer explicit `tls_ca` provisioning and managed rotation,
+- fingerprint mismatches fail closed and must be treated as potential trust-boundary incidents.
+
 ## Key Decisions
 
 - TLS is a platform concern for both client and node traffic.
@@ -180,6 +198,7 @@ Server identity is then validated from the dial target using rustls server-name 
 3. Provide explicit `tls_ca` material for clients/connectors that need custom trust roots.
 4. Provide explicit `tls_san` values for all expected IP and DNS dial targets.
 5. Protect CA keys and shared TLS storage with strict filesystem permissions.
+6. Treat fingerprint pin updates as controlled security changes with rollout and rollback procedures.
 
 ## Current Limits
 
