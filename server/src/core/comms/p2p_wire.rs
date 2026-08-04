@@ -207,6 +207,8 @@ fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
 }
 
 fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
+    
+    #[expect(clippy::redundant_closure, reason="we want to explicitly show the closure for clarity")]
     args.iter()
         .find_map(|arg| arg.strip_prefix("servers=").map(str::trim))
         .and_then(|server_list| {
@@ -214,6 +216,7 @@ fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
                 .split(',')
                 .find_map(|entry| extract_public_host_from_server_entry(entry))
         })
+
 }
 
 fn resolve_public_host_from_tls_sans(args: &[String]) -> Option<String> {
@@ -343,11 +346,10 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
         } else {
             Some(trimmed.to_string())
         }
-    }) {
-        if !is_placeholder_host(&positional_host) {
+    })
+        && !is_placeholder_host(&positional_host) {
             return positional_host;
         }
-    }
 
     if let Some(explicit_host) = std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
