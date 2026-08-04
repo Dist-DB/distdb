@@ -19,7 +19,7 @@ trap stop_server EXIT
 
 log "starting stored procedure smoke suite run_dir=$RUN_DIR"
 start_server "$NODE_ID" "$RUN_DIR" "$PORT" "$LOG_FILE"
-wait_for_server "$PORT" "$NODE_ID"
+wait_for_server "$PORT" "$NODE_ID" "$LOG_FILE"
 
 cat >"$SQL_FILE" <<'SQL'
 password root;

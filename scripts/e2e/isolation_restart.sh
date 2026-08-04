@@ -53,7 +53,7 @@ SQL
 
 log "starting isolation+restart suite run_dir=$RUN_DIR"
 start_server "$NODE_ID" "$RUN_DIR" "$PORT" "$LOG_PRE"
-wait_for_server "$PORT" "$NODE_ID"
+wait_for_server "$PORT" "$NODE_ID" "$LOG_PRE"
 
 run_console_sql_file "$PORT" "$NODE_ID" "$SEED_SQL" "$RUN_DIR/seed.out"
 run_console_sql_file "$PORT" "$NODE_ID" "$CHECK_SQL" "$OUT_PRE"
@@ -69,7 +69,7 @@ log "pre-restart checks passed"
 stop_server
 
 start_server "$NODE_ID" "$RUN_DIR" "$PORT" "$LOG_POST"
-wait_for_server "$PORT" "$NODE_ID"
+wait_for_server "$PORT" "$NODE_ID" "$LOG_POST"
 run_console_sql_file "$PORT" "$NODE_ID" "$CHECK_SQL" "$OUT_POST"
 
 assert_count "$OUT_POST" "c_all" "$EXPECTED" 1

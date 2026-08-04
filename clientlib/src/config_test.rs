@@ -41,7 +41,6 @@ fn resolve_database_rejects_non_global_sql_without_database() {
 fn parse_options_from_cli_args_supports_servers_list() {
     let args = vec![
         "servers=127.0.0.1:9400,node.local:9401".to_string(),
-        "tls=required".to_string(),
         "database=main".to_string(),
     ];
 
@@ -51,4 +50,29 @@ fn parse_options_from_cli_args_supports_servers_list() {
     assert_eq!(options.servers.len(), 2);
     assert_eq!(options.tls_mode, TlsMode::Required);
     assert_eq!(options.database.as_deref(), Some("main"));
+}
+
+#[test]
+fn parse_options_rejects_non_required_tls_modes() {
+    let off_args = vec![
+        "servers=127.0.0.1:9400".to_string(),
+        "tls=off".to_string(),
+    ];
+    assert!(ClientOptions::from_cli_args(&off_args).is_err());
+
+    let optional_args = vec![
+        "servers=127.0.0.1:9400".to_string(),
+        "tls=optional".to_string(),
+    ];
+    assert!(ClientOptions::from_cli_args(&optional_args).is_err());
+}
+
+#[test]
+fn parse_options_rejects_tls_required_override_argument() {
+    let args = vec![
+        "servers=127.0.0.1:9400".to_string(),
+        "tls=required".to_string(),
+    ];
+
+    assert!(ClientOptions::from_cli_args(&args).is_err());
 }

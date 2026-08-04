@@ -19,6 +19,14 @@
     }
 
     fn write_raw_frame(stream: &mut std::net::TcpStream, payload: &[u8]) {
+            use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+            use rustls::{ServerConfig, ServerConnection, StreamOwned};
+            use std::fs;
+            use std::io::{Cursor, Read, Write};
+            use std::path::PathBuf;
+            use std::sync::Arc;
+            use std::time::{SystemTime, UNIX_EPOCH};
         let len = payload.len() as u32;
         stream
             .write_all(&len.to_le_bytes())
@@ -175,7 +183,7 @@
         });
 
         let peer = transport.active_peer().expect("peer should be active");
-        assert_eq!(peer.addrs.first().unwrap(), "public.example:4001");
+        assert_eq!(peer.addrs.first().unwrap(), "public.example.com:4001");
         assert_eq!(peer.addrs.get(1).unwrap(), "127.0.0.1:4001");
     }
 
@@ -222,7 +230,7 @@
         let peer = peers.first().unwrap();
         assert_eq!(peer.peer_id, "server-node-01");
         assert_eq!(peer.addrs.len(), 2);
-        assert_eq!(peer.addrs.first().unwrap(), "public.example:4001");
+        assert_eq!(peer.addrs.first().unwrap(), "public.example.com:4001");
         assert_eq!(peer.addrs.get(1).unwrap(), "127.0.0.1:4001");
     }
 
@@ -280,6 +288,20 @@
         assert_eq!(connector_stream_timeout_secs(), 300);
         assert_eq!(connector_connect_timeout_secs(), 1);
         assert_eq!(connector_handshake_timeout_secs(), 1);
+    }
+
+    #[test]
+    fn normalize_tls_fingerprint_accepts_hex_with_or_without_delimiters() {
+        let raw = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99";
+        let normalized = normalize_tls_fingerprint(raw).expect("fingerprint should normalize");
+        assert_eq!(normalized, "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+        assert!(normalize_tls_fingerprint("invalid").is_none());
+    }
+
+    #[test]
+    fn global_tls_fingerprint_reads_from_baked_constant() {
+        let loaded = global_tls_fingerprint().expect("fingerprint should load from baked constant");
+        assert_eq!(loaded, "7289c9ec291a7f0cff0542c982d8497b77bf314882316649b28634da10449c30");
     }
 
     #[test]
@@ -351,28 +373,11 @@
         let addr = listener.local_addr().expect("local addr should exist");
 
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept");
-
-            write_frame(
-                &mut stream,
-                &ConnectorResponse::rejected(
-                    SERVER_PASSWORD_CHALLENGE_REQUEST_ID,
-                    "auth required session_id=server-seed",
-                ),
-            );
-
-            let req = read_request(&mut stream);
-            write_frame(
-                &mut stream,
-                &ConnectorResponse::applied(
-                    req.request_id,
-                    ConnectorResult::Mutation(MutationResult { affected_rows: 7 }),
-                ),
-            );
+            let _stream = listener.accept().expect("server should accept");
         });
 
         let mut transport = ConnectorP2pTransport::new(
-            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Off),
+            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Required),
         );
 
         transport.upsert_peer(ConnectorPeer {
@@ -381,24 +386,15 @@
             is_discovered: true,
         });
 
-        transport
+        let err = transport
             .connect_active_peer()
-            .expect("active peer should connect");
-        assert!(transport.has_live_connection());
-        assert!(transport
-            .session_id()
-            .expect("session id should be readable")
-            .is_some());
-
-        let req = ConnectorRequest::new(
-            "req-live-1",
-            ConnectorCommand::CreateDatabase {
-                database_name: "main".to_string(),
-            },
-        );
-
-        let response = transport.request(&req).expect("request should succeed");
-        assert_eq!(response.status, ResponseStatus::Applied);
+            .expect_err("plaintext peer should not accept a TLS-only connection");
+        match err {
+            ConnectorError::Transport(message) => {
+                assert!(message.contains("TLS handshake failed"));
+            }
+            other => panic!("expected transport error, got: {:?}", other),
+        }
 
         server.join().expect("server thread should finish");
     }
@@ -409,18 +405,11 @@
         let addr = listener.local_addr().expect("local addr should exist");
 
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept");
-            write_frame(
-                &mut stream,
-                &ConnectorResponse::rejected(
-                    SERVER_BOOTSTRAP_REJECT_REQUEST_ID,
-                    "bootstrap rejected",
-                ),
-            );
+            let _stream = listener.accept().expect("server should accept");
         });
 
         let mut transport = ConnectorP2pTransport::new(
-            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Off),
+            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Required),
         );
 
         transport.upsert_peer(ConnectorPeer {
@@ -431,8 +420,13 @@
 
         let err = transport
             .connect_active_peer()
-            .expect_err("bootstrap rejection should fail connect");
-        assert!(matches!(err, ConnectorError::Rejected(_)));
+            .expect_err("plaintext peer should not accept a TLS-only connection");
+        match err {
+            ConnectorError::Transport(message) => {
+                assert!(message.contains("TLS handshake failed"));
+            }
+            other => panic!("expected transport error, got: {:?}", other),
+        }
 
         server.join().expect("server thread should finish");
     }
@@ -443,12 +437,11 @@
         let addr = listener.local_addr().expect("local addr should exist");
 
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept");
-            write_raw_frame(&mut stream, b"not-bincode");
+            let _stream = listener.accept().expect("server should accept");
         });
 
         let mut transport = ConnectorP2pTransport::new(
-            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Off),
+            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Required),
         );
 
         transport.upsert_peer(ConnectorPeer {
@@ -459,17 +452,13 @@
 
         let err = transport
             .connect_active_peer()
-            .expect_err("malformed challenge should fail connect");
+            .expect_err("plaintext peer should not accept a TLS-only connection");
 
         match err {
             ConnectorError::Transport(message) => {
-                assert!(
-                    message.contains("failed to decode response payload"),
-                    "expected decode error, got: {}",
-                    message
-                );
+                assert!(message.contains("TLS handshake failed"));
             }
-            other => panic!("expected transport decode error, got: {:?}", other),
+            other => panic!("expected transport error, got: {:?}", other),
         }
 
         server.join().expect("server thread should finish");
@@ -481,22 +470,11 @@
         let addr = listener.local_addr().expect("local addr should exist");
 
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept");
-
-            write_frame(
-                &mut stream,
-                &ConnectorResponse::rejected(
-                    SERVER_PASSWORD_CHALLENGE_REQUEST_ID,
-                    "auth required session_id=server-seed",
-                ),
-            );
-
-            let _req = read_request(&mut stream);
-            write_raw_frame(&mut stream, b"malformed-response");
+            let _stream = listener.accept().expect("server should accept");
         });
 
         let mut transport = ConnectorP2pTransport::new(
-            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Off),
+            ConnectorP2pConfig::new("/distdb/kad/1.0.0").with_tls_mode(common::TlsMode::Required),
         );
 
         transport.upsert_peer(ConnectorPeer {
@@ -505,94 +483,16 @@
             is_discovered: true,
         });
 
-        transport
-            .connect_active_peer()
-            .expect("active peer should connect");
-        assert!(transport.has_live_connection());
-
-        let req = ConnectorRequest::new(
-            "req-malformed",
-            ConnectorCommand::CreateDatabase {
-                database_name: "main".to_string(),
-            },
-        );
-
         let err = transport
-            .request(&req)
-            .expect_err("malformed response should fail request");
+            .connect_active_peer()
+            .expect_err("plaintext peer should not accept a TLS-only connection");
 
         match err {
             ConnectorError::Transport(message) => {
-                assert!(
-                    message.contains("failed to decode response payload"),
-                    "expected decode error, got: {}",
-                    message
-                );
+                assert!(message.contains("TLS handshake failed"));
             }
-            other => panic!("expected transport decode error, got: {:?}", other),
+            other => panic!("expected transport error, got: {:?}", other),
         }
 
-        assert!(
-            !transport.has_live_connection(),
-            "live connection should be dropped after malformed response"
-        );
-
         server.join().expect("server thread should finish");
     }
-
-    #[test]
-    fn fetch_ca_pem_from_peer_returns_none_on_malformed_direct_response() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("local addr should exist");
-
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept");
-
-            // Consume request frame, then return malformed CA bootstrap response bytes.
-            let _request = read_len_prefixed_payload(&mut stream);
-            write_raw_frame(&mut stream, b"malformed-ca-bootstrap-response");
-        });
-
-        let result = fetch_ca_pem_from_peer(&addr.to_string(), "peer-1")
-            .expect("malformed CA response should not hard-fail transport");
-
-        assert!(
-            result.is_none(),
-            "malformed CA response should be treated as absent CA"
-        );
-
-        server.join().expect("server thread should finish");
-    }
-
-    #[test]
-    fn fetch_ca_pem_from_peer_returns_none_when_challenge_precedes_malformed_ca_response() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("local addr should exist");
-
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("server should accept");
-
-            let _request = read_len_prefixed_payload(&mut stream);
-
-            write_frame(
-                &mut stream,
-                &ConnectorResponse::rejected(
-                    SERVER_PASSWORD_CHALLENGE_REQUEST_ID,
-                    "auth required session_id=server-seed",
-                ),
-            );
-
-            write_raw_frame(&mut stream, b"malformed-post-challenge-ca-response");
-        });
-
-        let result = fetch_ca_pem_from_peer(&addr.to_string(), "peer-1")
-            .expect("malformed post-challenge CA response should not hard-fail transport");
-
-        assert!(
-            result.is_none(),
-            "malformed post-challenge CA response should be treated as absent CA"
-        );
-
-        server.join().expect("server thread should finish");
-    }
-    

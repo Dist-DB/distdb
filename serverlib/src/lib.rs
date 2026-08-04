@@ -143,7 +143,8 @@ pub use engine::execution::{
 	advise_select_execution, SelectExecutionAdvice,
 	field_has_single_column_index, join_condition_field_names, join_condition_matches_provider,
 	apply_limit_by_rows, apply_percent_rows, apply_with_ties_rows,
-	load_live_row_count, load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows, materialize_relation_rows, plan_relation_access, relation_qualifier,
+	load_live_row_count, load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows, 
+	materialize_relation_rows, plan_relation_access, relation_qualifier,
 	snapshot_equality_cache, restore_equality_cache_from_snapshot, EqualityTableCacheSnapshot,
 	apply_equality_cache_row_mutation, apply_equality_cache_row_mutation_batch,
 	row_matches_condition_with, row_matches_select_condition, ConditionValueProvider,
@@ -267,7 +268,6 @@ pub use engine::affinity::{
 
 pub use ::security::{
 	AutoTlsPaths, TlsEnrollmentRequestMaterial, build_tls_enrollment_request,
-	ensure_or_generate_p2p_tls, import_p2p_ca_pem_if_missing, install_signed_p2p_tls,
-	load_p2p_ca_pem, sign_tls_enrollment_csr,
+	ensure_or_generate_tls_cert, install_signed_p2p_tls, sign_tls_enrollment_csr,
 };
 

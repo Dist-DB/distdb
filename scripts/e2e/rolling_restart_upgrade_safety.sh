@@ -68,24 +68,32 @@ now_ms() {
 
 start_node_a() {
   local server_bin="$1"
+  ensure_tlsserver
   "$server_bin" \
     "node_id=$NODE_A_ID" \
     "datadir=$NODE_A_DIR" \
     "port=$NODE_A_PORT" \
     "listen_addr=127.0.0.1" \
-    "tls=off" \
+    "advertise_addr=127.0.0.1" \
+    "tls_san=localhost,127.0.0.1" \
+    "tls_server=$TLSSERVER_ADDR" \
+    "tls_ca=$TLSSERVER_CA_PATH" \
     >"$NODE_A_LOG" 2>&1 &
   NODE_A_PID=$!
 }
 
 start_node_b() {
   local server_bin="$1"
+  ensure_tlsserver
   "$server_bin" \
     "node_id=$NODE_B_ID" \
     "datadir=$NODE_B_DIR" \
     "port=$NODE_B_PORT" \
     "listen_addr=127.0.0.1" \
-    "tls=off" \
+    "advertise_addr=127.0.0.1" \
+    "tls_san=localhost,127.0.0.1" \
+    "tls_server=$TLSSERVER_ADDR" \
+    "tls_ca=$TLSSERVER_CA_PATH" \
     >"$NODE_B_LOG" 2>&1 &
   NODE_B_PID=$!
 }
@@ -107,11 +115,11 @@ stop_node_b() {
 }
 
 wait_node_a() {
-  wait_for_server "$NODE_A_PORT" "$NODE_A_ID"
+  wait_for_server "$NODE_A_PORT" "$NODE_A_ID" "$NODE_A_LOG"
 }
 
 wait_node_b() {
-  wait_for_server "$NODE_B_PORT" "$NODE_B_ID"
+  wait_for_server "$NODE_B_PORT" "$NODE_B_ID" "$NODE_B_LOG"
 }
 
 run_sql_inline() {

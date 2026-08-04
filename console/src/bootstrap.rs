@@ -97,12 +97,13 @@ pub fn connector_tls_config_from_cli_args(
     args: &[String],
 ) -> Result<ConnectorTlsConfig, String> {
 
-    let mode = match args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
-        Some(raw) => common::TlsMode::parse(raw).ok_or_else(|| {
-            format!("invalid tls mode '{}'; expected off|optional|required", raw)
-        })?,
-        None => common::TlsMode::Required,
-    };
+    if let Some(raw) = args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
+        return Err(format!(
+            "tls mode is fixed to required; remove unsupported argument tls={raw}"
+        ));
+    }
+
+    let mode = common::TlsMode::Required;
 
     let ca_path = args
         .iter()

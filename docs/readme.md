@@ -138,7 +138,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 
 - [using.md](using.md): running the server, console, and local multi-node setups.
 - [release.md](release.md): current release posture, Beta Ready scope, and expectations.
-- [security.md](security.md): TLS modes, CA flow, and runtime security tradeoffs.
+- [security.md](security.md): TLS-required runtime boundary, CA flow, and trust-plane split rationale.
 - [replication.md](replication.md): affinity model, sync sequence, and failure handling.
 
 ### Architecture and decisions

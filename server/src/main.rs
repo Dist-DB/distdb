@@ -42,7 +42,7 @@ use server::core::control::connector_handler::{
     maybe_show_entities_response, mark_bootstrap_status_started,
 };
 use server::core::comms::outbound_transport::{
-    configure_outbound_tls_state, send_service_request_to_addr,
+    configure_outbound_tls_state,
 };
 use server::core::comms::p2p_wire::{
     advertised_listen_addr_from_args, multiaddr_to_socket_addr,
@@ -54,8 +54,11 @@ use server::core::comms::p2p::{
     spawn_service_announce_task,
 };
 use server::core::comms::{
-    build_tls_acceptor, build_tls_client_config, negotiate_connector_stream,
+    build_tls_acceptor, build_tls_acceptor_from_pem, build_tls_client_config,
+    build_tls_client_config_from_pem, negotiate_connector_stream,
     parse_tls_config_from_args, parse_tls_mode_from_args,
+    validate_tls_certificate_subject_alt_names,
+    validate_tls_certificate_subject_alt_names_pem,
 };
 use server::core::comms::wss::{
     handle_wss_inbound_stream, validate_wss_tls_policy,
@@ -66,7 +69,9 @@ use serverlib::core::identity::NodeId;
 use serverlib::AffinityProcessor;
 use connector::{ConnectorCommand, ConnectorResponse, ConnectorResult, MutationResult};
 use futures_util::SinkExt;
-use peerlib::{ServiceMessage, ServerP2pRuntime};
+use peerlib::ServerP2pRuntime;
+use tlsserver::client::request_certificate_from_tls_server;
+use tlsserver::protocol::TlsCertificateRequest;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::accept_async;
@@ -111,7 +116,7 @@ fn parse_ca_root_from_args(args: &[String]) -> bool {
 
 }
 
-fn parse_advertised_services_from_args(args: &[String], ca_root_enabled: bool) -> Vec<String> {
+fn parse_advertised_services_from_args(args: &[String], _ca_root_enabled: bool) -> Vec<String> {
 
     let mut services = args
         .iter()
@@ -127,12 +132,7 @@ fn parse_advertised_services_from_args(args: &[String], ca_root_enabled: bool) -
             "sql.query".to_string(),
             "p2p.discovery".to_string(),
             "affinity.replication".to_string(),
-            "tls.ca.distribution".to_string(),
         ];
-    }
-
-    if ca_root_enabled && !services.iter().any(|service| service == "tls.enrollment.issuer") {
-        services.push("tls.enrollment.issuer".to_string());
     }
 
     services.sort();
@@ -155,6 +155,19 @@ fn parse_wss_port_from_args(args: &[String], connector_port: u16) -> u16 {
     args.iter()
         .find_map(|arg| arg.strip_prefix("wss_port=").and_then(|v| v.parse::<u16>().ok()))
         .unwrap_or_else(|| connector_port.saturating_add(1))
+}
+
+fn validate_startup_tls_requirements(tls_extra_sans: &[String]) -> Result<(), String> {
+
+    if tls_extra_sans.is_empty() {
+        return Err(
+            "startup tls configuration requires at least one tls_san when using tls_cert/tls_key or tls_server"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+
 }
 
 #[expect(clippy::too_many_arguments, reason="this function is a connection handler and needs to pass many arguments to the executor closure")]
@@ -355,13 +368,74 @@ async fn handle_wss_connection(
     result.map_err(Into::into)
 }
 
-fn try_enroll_tls_from_peers(
-    server_list: &[String],
+struct IssuedTlsMaterial {
+    cert_pem: String,
+    key_pem: String,
+    ca_pem: String,
+}
+
+fn load_cached_issued_tls_material(
     node_data_dir: &Path,
+    tls_extra_sans: &[String],
+) -> Option<IssuedTlsMaterial> {
+
+    let tls_dir = node_data_dir
+        .parent()
+        .unwrap_or(node_data_dir)
+        .join("p2p-tls");
+    let ca_cert_path = tls_dir.join("ca-cert.pem");
+
+    let ca_pem = std::fs::read_to_string(&ca_cert_path).ok()?;
+    let mut cert_paths = std::fs::read_dir(&tls_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-cert.pem") && name != "ca-cert.pem")
+        })
+        .collect::<Vec<_>>();
+
+    cert_paths.sort();
+
+    for cert_path in cert_paths {
+        if validate_tls_certificate_subject_alt_names(&cert_path, tls_extra_sans).is_err() {
+            continue;
+        }
+
+        let key_path = cert_path
+            .to_string_lossy()
+            .replace("-cert.pem", "-key.pem");
+
+        let cert_pem = match std::fs::read_to_string(&cert_path) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        let key_pem = match std::fs::read_to_string(&key_path) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        return Some(IssuedTlsMaterial {
+            cert_pem,
+            key_pem,
+            ca_pem: ca_pem.clone(),
+        });
+    }
+
+    None
+
+}
+
+fn enroll_tls_from_issuer(
+    tls_server_addr: &str,
     node_id: &str,
     advertise_addr: &str,
     tls_extra_sans: &[String],
-) -> Result<Option<serverlib::AutoTlsPaths>, String> {
+    requested_for: &str,
+) -> Result<IssuedTlsMaterial, String> {
 
     let enrollment = serverlib::build_tls_enrollment_request(
         node_id,
@@ -378,62 +452,55 @@ fn try_enroll_tls_from_peers(
             .as_millis()
     );
 
-    for peer in server_list {
-        let socket_addr = multiaddr_to_socket_addr(peer).unwrap_or_else(|| peer.to_string());
-        let request = ServiceMessage::TlsCertEnrollRequest(peerlib::TlsCertEnrollRequest {
-            request_id: request_id.clone(),
-            requester_node_id: node_id.to_string(),
-            csr_pem: enrollment.csr_pem.clone(),
-        });
+    let socket_addr = multiaddr_to_socket_addr(tls_server_addr)
+        .unwrap_or_else(|| tls_server_addr.to_string());
+    let request = TlsCertificateRequest {
+        request_id: request_id.clone(),
+        requester_id: node_id.to_string(),
+        requested_for: requested_for.to_string(),
+        csr_pem: enrollment.csr_pem.clone(),
+    };
 
-        let Ok(Some(ServiceMessage::TlsCertEnrollResponse(response))) =
-            send_service_request_to_addr(&socket_addr, &request)
-        else {
-            continue;
-        };
+    let response = request_certificate_from_tls_server(&socket_addr, &request)?;
 
-        if response.request_id != request_id {
-            continue;
-        }
-
-        if !response.ok {
-            log::debug!(
-                "tls enrollment rejected by {}: {}",
-                socket_addr,
-                response
-                    .error
-                    .unwrap_or_else(|| "unknown enrollment error".to_string())
-            );
-            continue;
-        }
-
-        let Some(node_cert_pem) = response.node_cert_pem else {
-            continue;
-        };
-        let Some(ca_cert_pem) = response.ca_cert_pem else {
-            continue;
-        };
-
-        let installed = serverlib::install_signed_p2p_tls(
-            node_data_dir,
-            node_id,
-            &enrollment.key_pem,
-            &node_cert_pem,
-            &ca_cert_pem,
-        )?;
-
-        log::info!(
-            "tls enrollment succeeded via peer={} cert={} key={} ca={}",
+    if response.request_id != request_id {
+        return Err(format!(
+            "tls-server '{}' returned mismatched request id '{}'",
             socket_addr,
-            installed.cert_path.display(),
-            installed.key_path.display(),
-            installed.ca_path.display()
-        );
-
-        return Ok(Some(installed));
+            response.request_id
+        ));
     }
 
-    Ok(None)
+    if !response.ok {
+        return Err(
+            response
+                .error
+                .unwrap_or_else(|| format!("tls-server '{}' rejected enrollment", socket_addr)),
+        );
+    }
+
+    let node_cert_pem = response.cert_pem.ok_or_else(|| {
+        format!("tls-server '{}' did not include a node certificate", socket_addr)
+    })?;
+    let ca_cert_pem = response.ca_cert_pem.ok_or_else(|| {
+        format!("tls-server '{}' did not include a CA certificate", socket_addr)
+    })?;
+
+    log::info!(
+        "tls enrollment succeeded via tls-server={} sans={}",
+        socket_addr,
+        if tls_extra_sans.is_empty() {
+            "<none>".to_string()
+        } else {
+            tls_extra_sans.join(",")
+        }
+    );
+
+    Ok(IssuedTlsMaterial {
+        cert_pem: node_cert_pem,
+        key_pem: enrollment.key_pem,
+        ca_pem: ca_cert_pem,
+    })
 
 }
 
@@ -486,107 +553,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tls_mode = parse_tls_mode_from_args(&args).map_err(|err| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
     })?;
+    let wss_enabled = parse_wss_enabled_from_args(&args);
 
-    let mut tls = parse_tls_config_from_args(&args);
+    if tls_mode != common::TlsMode::Required {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "p2p network requires tls=required",
+        )
+        .into());
+    }
 
-    if matches!(tls_mode, common::TlsMode::Optional | common::TlsMode::Required)
-        && (tls.cert_path.is_none() || tls.key_path.is_none() || tls.ca_path.is_none())
-    {
-        let mut resolved_tls: Option<serverlib::AutoTlsPaths> = None;
+    let tls = parse_tls_config_from_args(&args);
+    let mut tls_acceptor = None;
+    let mut outbound_tls_client_config = None;
 
-        if !ca_root_enabled
-            && tls.cert_path.is_none()
-            && tls.key_path.is_none()
-            && tls.ca_path.is_none()
-        {
-            resolved_tls = try_enroll_tls_from_peers(
-                &server_list,
-                &node_data_dir,
-                &node_id,
-                &advertise_addr,
-                &tls_extra_sans,
+    if tls_mode == common::TlsMode::Required {
+        let explicit_cert = tls.cert_path.is_some();
+        let explicit_key = tls.key_path.is_some();
+
+        if explicit_cert != explicit_key {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "tls_cert and tls_key must be provided together",
             )
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+            .into());
         }
 
-        if resolved_tls.is_none() {
-            resolved_tls = Some(
-                serverlib::ensure_or_generate_p2p_tls(
-                    &node_data_dir,
+        validate_startup_tls_requirements(&tls_extra_sans)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+        if !explicit_cert {
+            let issuer_addr = tls.issuer_addr.clone().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "tls requires either tls_cert/tls_key or tls_server",
+                )
+            })?;
+
+            let issued_tls = if let Some(cached) = load_cached_issued_tls_material(&node_data_dir, &tls_extra_sans) {
+                log::info!(
+                    "loaded cached p2p tls material from {}",
+                    node_data_dir
+                        .parent()
+                        .unwrap_or(&node_data_dir)
+                        .join("p2p-tls")
+                        .display()
+                );
+                cached
+            } else {
+                let enrolled = enroll_tls_from_issuer(
+                    &issuer_addr,
                     &node_id,
                     &advertise_addr,
                     &tls_extra_sans,
+                    if wss_enabled { "server+wss" } else { "server" },
                 )
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?,
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                if let Err(err) = security::install_signed_p2p_tls(
+                    &node_data_dir,
+                    &node_id,
+                    &enrolled.key_pem,
+                    &enrolled.cert_pem,
+                    &enrolled.ca_pem,
+                ) {
+                    log::warn!("failed to persist enrolled p2p tls material: {}", err);
+                }
+
+                enrolled
+            };
+
+            let issued_tls_acceptor = build_tls_acceptor_from_pem(&issued_tls.cert_pem, &issued_tls.key_pem)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+            tls_acceptor = Some(issued_tls_acceptor);
+            outbound_tls_client_config = Some(
+                build_tls_client_config_from_pem(&issued_tls.ca_pem)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?,
             );
+
+            validate_tls_certificate_subject_alt_names_pem(&issued_tls.cert_pem, &tls_extra_sans)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+            log::info!(
+                "loaded p2p tls material from tls-server={} extra_sans={}",
+                issuer_addr,
+                if tls_extra_sans.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    tls_extra_sans.join(",")
+                }
+            );
+        } else {
+            tls_acceptor = Some(build_tls_acceptor(&tls).map_err(|err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+            })?);
+
+            outbound_tls_client_config = Some(build_tls_client_config(&tls).map_err(|err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+            })?);
+
+            let cert_path = tls.cert_path.as_deref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "tls_cert must be resolved before startup validation",
+                )
+            })?;
+
+            validate_tls_certificate_subject_alt_names(cert_path, &tls_extra_sans)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
         }
 
-        let auto_tls = resolved_tls.expect("resolved tls paths should be available");
-
-        if tls.cert_path.is_none() {
-            tls.cert_path = Some(auto_tls.cert_path.clone());
-        }
-        if tls.key_path.is_none() {
-            tls.key_path = Some(auto_tls.key_path.clone());
-        }
-        if tls.ca_path.is_none() {
-            tls.ca_path = Some(auto_tls.ca_path);
-        }
-
-        log::info!(
-            "auto-generated p2p tls material cert={} key={} ca={} extra_sans={}",
-            tls.cert_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<none>".to_string()),
-            tls.key_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<none>".to_string()),
-            tls.ca_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<none>".to_string()),
-            if tls_extra_sans.is_empty() {
-                "<none>".to_string()
-            } else {
-                tls_extra_sans.join(",")
-            }
-        );
     }
-    
-    let tls_acceptor = if matches!(tls_mode, common::TlsMode::Optional | common::TlsMode::Required) {
-        Some(build_tls_acceptor(&tls).map_err(|err| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-        })?)
-    } else {
-        None
-    };
-
-    let outbound_tls_client_config = if matches!(tls_mode, common::TlsMode::Optional | common::TlsMode::Required) {
-
-        match build_tls_client_config(&tls) {
-            
-            Ok(config) => Some(config),
-
-            Err(err) if matches!(tls_mode, common::TlsMode::Optional) => {
-                log::warn!(
-                    "outbound optional tls client not configured (plaintext fallback enabled): {}",
-                    err
-                );
-                None
-            },
-            Err(err) => {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
-            }
-
-        }
-
-    } else {
-        None
-    };
 
     configure_outbound_tls_state(tls_mode, outbound_tls_client_config);
+
 
     log::info!(
         "starting server node_id={} with runtime config: data_dir={}, listen_addr={}, port={}, tls={}, ca_root={}, services={}",
@@ -646,29 +726,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         advertised_services.clone(),
     );
 
-    if ca_root_enabled && matches!(tls_mode, common::TlsMode::Optional | common::TlsMode::Required)
-        && let Ok(Some(ca_cert_pem)) = serverlib::load_p2p_ca_pem(&node_data_dir) {
-            
-            let distribution = peerlib::TlsCaDistribution {
-                issuer_node_id: local_node.id.0.clone(),
-                ca_cert_pem,
-            };
-
-            let mut runtime = p2p_runtime.lock().await;
-            for peer_addr in &peer_addrs {
-                if let Err(err) = runtime.network_mut().send_message(
-                    peer_addr,
-                    ServiceMessage::TlsCaDistribution(distribution.clone()),
-                ) {
-                    log::debug!(
-                        "p2p tls CA distribution send failed to {}: {}",
-                        peer_addr,
-                        err
-                    );
-                }
-            }
-        
-        }
 
     let (affinity_processor, affinity_storage) = initialize_affinity_with_persistence(
         affinity_config.as_ref(),
@@ -718,7 +775,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_data_dir_for_listener = node_data_dir.clone();
     let tls_acceptor_for_listener = tls_acceptor.clone();
     let ca_root_enabled_for_listener = ca_root_enabled;
-    let wss_enabled = parse_wss_enabled_from_args(&args);
     let wss_port = parse_wss_port_from_args(&args, port);
 
     if wss_enabled {
@@ -972,3 +1028,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 
 }
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;

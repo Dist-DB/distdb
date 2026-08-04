@@ -132,15 +132,6 @@ fn connect_outbound_service_stream(
     let state = outbound_tls_state();
 
     match state.mode {
-        common::TlsMode::Off => std::net::TcpStream::connect(addr)
-            .map(OutboundServiceStream::Plain)
-            .map_err(|err| {
-                serverlib::helpers::error::ServerLibError::Network(format!(
-                    "connect to {} failed: {}",
-                    addr, err
-                ))
-            }),
-
         common::TlsMode::Required => {
             let client_config = state.client_config.ok_or_else(|| {
                 serverlib::helpers::error::ServerLibError::Network(
@@ -152,30 +143,37 @@ fn connect_outbound_service_stream(
                 .map_err(serverlib::helpers::error::ServerLibError::Network)
         }
 
-        common::TlsMode::Optional => {
-            if let Some(client_config) = state.client_config {
-                match connect_tls_outbound_stream(addr, client_config) {
-                    Ok(stream) => return Ok(stream),
-                    Err(err) => {
-                        log::debug!(
-                            "outbound optional tls handshake failed for {}; falling back to plaintext: {}",
-                            addr,
-                            err
-                        );
-                    }
-                }
-            }
-
-            std::net::TcpStream::connect(addr)
-                .map(OutboundServiceStream::Plain)
-                .map_err(|err| {
-                    serverlib::helpers::error::ServerLibError::Network(format!(
-                        "connect to {} failed: {}",
-                        addr, err
-                    ))
-                })
-        }
+        _ => Err(serverlib::helpers::error::ServerLibError::Network(
+            "p2p network requires tls=required".to_string(),
+        )),
     }
+
+}
+
+fn consume_initial_challenge_frame(
+    stream: &mut OutboundServiceStream,
+    addr: &str,
+) -> serverlib::helpers::error::Result<()> {
+
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).map_err(|err| {
+        serverlib::helpers::error::ServerLibError::Network(format!(
+            "read initial challenge header from {} failed: {}",
+            addr, err
+        ))
+    })?;
+
+    let payload_len = u32::from_le_bytes(header) as usize;
+    let mut payload = vec![0u8; payload_len];
+
+    stream.read_exact(&mut payload).map_err(|err| {
+        serverlib::helpers::error::ServerLibError::Network(format!(
+            "read initial challenge payload from {} failed: {}",
+            addr, err
+        ))
+    })?;
+
+    Ok(())
 
 }
 
@@ -185,6 +183,17 @@ pub fn send_service_message_to_addr(
 ) -> serverlib::helpers::error::Result<()> {
 
     let mut stream = connect_outbound_service_stream(addr)?;
+
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .map_err(|err| {
+            serverlib::helpers::error::ServerLibError::Network(format!(
+                "set read timeout for {} failed: {}",
+                addr, err
+            ))
+        })?;
+
+    consume_initial_challenge_frame(&mut stream, addr)?;
 
     stream
         .set_write_timeout(Some(std::time::Duration::from_millis(500)))
@@ -241,6 +250,8 @@ pub fn send_service_request_to_addr(
             ))
         })?;
 
+    consume_initial_challenge_frame(&mut stream, addr)?;
+
     let payload = encode_service_message(message).ok_or_else(|| {
         serverlib::helpers::error::ServerLibError::Network(
             "unsupported service message for wire encoding".to_string(),
@@ -258,46 +269,38 @@ pub fn send_service_request_to_addr(
             ))
         })?;
 
-    // Listener sends an initial connector challenge frame to every new socket.
-    // Service-message callers skip non-service frames and consume the next frame.
-    for _ in 0..2 {
+    let mut header = [0u8; 4];
 
-        let mut header = [0u8; 4];
-
-        if let Err(err) = stream.read_exact(&mut header) {
-            let timed_out = matches!(
-                err.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            );
-            if timed_out {
-                return Ok(None);
-            }
-
-            return Err(serverlib::helpers::error::ServerLibError::Network(format!(
-                "read response header from {} failed: {}",
-                addr, err
-            )));
+    if let Err(err) = stream.read_exact(&mut header) {
+        let timed_out = matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        );
+        if timed_out {
+            return Ok(None);
         }
 
-        let payload_len = u32::from_le_bytes(header) as usize;
-        let mut response_payload = vec![0u8; payload_len];
-
-        stream.read_exact(&mut response_payload).map_err(|err| {
-            serverlib::helpers::error::ServerLibError::Network(format!(
-                "read response payload from {} failed: {}",
-                addr, err
-            ))
-        })?;
-
-        if let Some(message) = decode_service_message(&response_payload) {
-            return Ok(Some(message));
-        }
-
+        return Err(serverlib::helpers::error::ServerLibError::Network(format!(
+            "read response header from {} failed: {}",
+            addr, err
+        )));
     }
 
-    Err(serverlib::helpers::error::ServerLibError::Network(format!(
-        "decode response message from {} failed",
-        addr
-    )))
+    let payload_len = u32::from_le_bytes(header) as usize;
+    let mut response_payload = vec![0u8; payload_len];
+
+    stream.read_exact(&mut response_payload).map_err(|err| {
+        serverlib::helpers::error::ServerLibError::Network(format!(
+            "read response payload from {} failed: {}",
+            addr, err
+        ))
+    })?;
+
+    decode_service_message(&response_payload).map(Some).ok_or_else(|| {
+        serverlib::helpers::error::ServerLibError::Network(format!(
+            "decode response message from {} failed",
+            addr
+        ))
+    })
 
 }

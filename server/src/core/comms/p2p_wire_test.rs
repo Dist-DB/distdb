@@ -103,6 +103,8 @@
 
     #[test]
     fn advertised_listen_addr_defaults_wildcard_to_localhost_when_no_hint_available() {
+        clear_advertise_host_inheritance();
+
         let args = vec!["server".to_string()];
         assert_eq!(
             resolve_advertise_host(&args, "0.0.0.0", None),
@@ -125,16 +127,14 @@
 
     #[test]
     fn advertised_listen_addr_uses_public_host_from_server_list_when_available() {
-        unsafe {
-            std::env::remove_var("DISTDB_ADVERTISE_HOST");
-        }
+        clear_advertise_host_inheritance();
 
         let args = vec![
             "server".to_string(),
             "servers=public.example.com:4001".to_string(),
         ];
         assert_eq!(
-            advertised_listen_addr_from_args(&args, "0.0.0.0"),
+            resolve_advertise_host(&args, "0.0.0.0", None),
             "public.example.com".to_string()
         );
     }
@@ -163,9 +163,7 @@
 
     #[test]
     fn advertised_listen_addr_ignores_placeholder_hosts() {
-        unsafe {
-            std::env::remove_var("DISTDB_ADVERTISE_HOST");
-        }
+        clear_advertise_host_inheritance();
 
         let args = vec!["server".to_string(), "--".to_string()];
         assert_eq!(
@@ -191,17 +189,15 @@
 
     #[test]
     fn advertised_listen_addr_uses_distdb_advertise_host_env_when_available() {
+        clear_advertise_host_inheritance();
         unsafe {
             std::env::set_var("DISTDB_ADVERTISE_HOST", "public.example.com");
-            std::env::remove_var("HOSTNAME");
         }
 
         let args = vec!["server".to_string()];
-        let resolved = advertised_listen_addr_from_args(&args, "0.0.0.0");
+        let resolved = resolve_advertise_host(&args, "0.0.0.0", None);
 
-        unsafe {
-            std::env::remove_var("DISTDB_ADVERTISE_HOST");
-        }
+        clear_advertise_host_inheritance();
 
         assert_eq!(resolved, "public.example.com");
     }

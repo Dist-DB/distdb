@@ -52,7 +52,7 @@ pub use p2p::protocol::{
     AffinityJoinRequest, AffinityJoinResponse, AffinityReplicationAction,
     DataSnapshotRequest, DataSnapshotResponse,
     SchemaCatalogRequest, SchemaCatalogResponse, ServiceAnnounce, ServiceMessage,
-    TableLockState, TlsCaDistribution, TlsCertEnrollRequest, TlsCertEnrollResponse,
+	TableLockState,
     TransactionsSinceRequest, TransactionsSinceResponse,
 };
 

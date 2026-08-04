@@ -51,11 +51,11 @@ cd ./console
 
 ## Common Startup Options
 
-### TLS mode default and fallback behavior
+### TLS mode behavior
 
-- server defaults to `tls=required` when no `tls=` argument is provided.
-- `tls=required` enforces TLS-only transport and does not fall back to plaintext.
-- `tls=off` remains available as an explicit local-development override.
+- server, peer, and connector runtime paths are fixed to TLS-required mode.
+- `tls=` override arguments are rejected.
+- transport does not fall back to plaintext.
 
 ### Bootstrap peers
 

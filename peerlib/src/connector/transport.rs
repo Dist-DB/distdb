@@ -11,26 +11,85 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use common::helpers::p2p::{
-    CaBootstrapRequest, decode_ca_bootstrap_response, encode_ca_bootstrap_request,
-};
-
 use common::{DEFAULT_SERVER_PORT, PeerSession, epoch_nanos};
 use common::helpers::utils::{md5};
-use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls::DigitallySignedStruct;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, Error as RustlsError, RootCertStore, SignatureScheme, StreamOwned};
+use sha2::{Digest, Sha256};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
 const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 300;
-const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
 const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 1;
-const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 1;
+const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
+const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
-const CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_DEFAULT: u64 = 15;
-const CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS";
+const CONNECTOR_TLS_FINGERPRINT_BAKED: &str = "7289c9ec291a7f0cff0542c982d8497b77bf314882316649b28634da10449c30";
 const MAX_QUEUED_RESPONSES: usize = 8192;
+
+#[derive(Debug)]
+struct FingerprintServerCertVerifier {
+    expected_fingerprint: String,
+    supported_algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl FingerprintServerCertVerifier {
+    fn new(
+        expected_fingerprint: String,
+        supported_algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+    ) -> Self {
+        Self {
+            expected_fingerprint,
+            supported_algorithms,
+        }
+    }
+}
+
+impl ServerCertVerifier for FingerprintServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        let actual = certificate_sha256_fingerprint(end_entity.as_ref());
+        if actual == self.expected_fingerprint {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(RustlsError::General(format!(
+                "tls fingerprint mismatch: expected '{}' got '{}'",
+                self.expected_fingerprint, actual
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.supported_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported_algorithms.supported_schemes()
+    }
+}
 
 fn connector_connect_timeout_secs() -> u64 {
     std::env::var(CONNECTOR_CONNECT_TIMEOUT_SECS_ENV)
@@ -56,13 +115,28 @@ fn connector_handshake_timeout_secs() -> u64 {
         .unwrap_or(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT)
 }
 
-    fn connector_ca_bootstrap_timeout_secs() -> u64 {
-        std::env::var(CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|value| value.clamp(1, 30))
-        .unwrap_or(CONNECTOR_CA_BOOTSTRAP_TIMEOUT_SECS_DEFAULT)
+fn normalize_tls_fingerprint(raw: &str) -> Option<String> {
+    let normalized = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    if normalized.len() == 64 {
+        Some(normalized)
+    } else {
+        None
     }
+}
+
+fn global_tls_fingerprint() -> Option<String> {
+    normalize_tls_fingerprint(CONNECTOR_TLS_FINGERPRINT_BAKED)
+}
+
+fn certificate_sha256_fingerprint(cert_der: &[u8]) -> String {
+    let digest = Sha256::digest(cert_der);
+    digest.iter().map(|byte| format!("{:02x}", byte)).collect::<String>()
+}
 
     fn is_local_loopback_socket_addr(socket_addr: &str) -> bool {
         let host = socket_addr
@@ -175,9 +249,7 @@ struct LiveConnection {
     session: PeerSession,
 }
 
-#[expect(clippy::large_enum_variant, reason="the variants represent distinct connection types and the enum is not expected to be used in performance-critical code paths where the size difference would be a concern")]
 enum ConnectorWireStream {
-    Plain(TcpStream),
     Tls(StreamOwned<ClientConnection, TcpStream>),
 }
 
@@ -186,11 +258,7 @@ impl std::fmt::Debug for ConnectorWireStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 
         match self {
-            
-            Self::Plain(_) => f.write_str("ConnectorWireStream::Plain"),
-
             Self::Tls(_) => f.write_str("ConnectorWireStream::Tls"),
-
         }
 
     }
@@ -202,11 +270,7 @@ impl Read for ConnectorWireStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
 
         match self {
-
-            Self::Plain(stream) => stream.read(buf),
-
             Self::Tls(stream) => stream.read(buf),
-
         }
 
     }
@@ -218,11 +282,7 @@ impl Write for ConnectorWireStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 
         match self {
-
-            Self::Plain(stream) => stream.write(buf),
-
             Self::Tls(stream) => stream.write(buf),
-
         }
 
     }
@@ -230,11 +290,7 @@ impl Write for ConnectorWireStream {
     fn flush(&mut self) -> std::io::Result<()> {
 
         match self {
-
-            Self::Plain(stream) => stream.flush(),
-
             Self::Tls(stream) => stream.flush(),
-
         }
 
     }
@@ -250,21 +306,6 @@ impl ConnectorWireStream {
     ) -> Result<(), ConnectorError> {
 
         match self {
-
-            Self::Plain(stream) => {
-                
-                stream
-                    .set_read_timeout(read_timeout)
-                    .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
-
-                stream
-                    .set_write_timeout(write_timeout)
-                    .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
-                
-                Ok(())
-            
-            },
-
             Self::Tls(stream) => {
 
                 let tcp = stream.get_mut();
@@ -330,12 +371,16 @@ impl ConnectorP2pTransport {
     }
 
     fn normalize_peer_addrs(addrs: &[String]) -> Vec<String> {
+
         let mut normalized = addrs.to_vec();
+
         normalized.sort_by(|left, right| {
+
             let left_is_loopback = left.trim().split(':').next().is_some_and(|host| {
                 let host = host.trim_matches('[').trim_matches(']').to_ascii_lowercase();
                 matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")
             });
+
             let right_is_loopback = right.trim().split(':').next().is_some_and(|host| {
                 let host = host.trim_matches('[').trim_matches(']').to_ascii_lowercase();
                 matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")
@@ -346,24 +391,38 @@ impl ConnectorP2pTransport {
                 (false, true) => std::cmp::Ordering::Less,
                 _ => std::cmp::Ordering::Equal,
             }
+
         });
+
         normalized
+
     }
 
     fn peer_addrs_share_port(left: &[String], right: &[String]) -> bool {
+
         let left_ports = left
             .iter()
-            .filter_map(|addr| normalize_peer_addr(addr).rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()))
+            .filter_map(|addr| normalize_peer_addr(addr)
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>()
+                .ok())
+            )
             .collect::<Vec<_>>();
+
         let right_ports = right
             .iter()
-            .filter_map(|addr| normalize_peer_addr(addr).rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()))
+            .filter_map(|addr| normalize_peer_addr(addr)
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+            )
             .collect::<Vec<_>>();
 
         left_ports.iter().any(|port| right_ports.contains(port))
+
     }
 
     fn merge_peer_addrs(existing: &[String], incoming: &[String]) -> Vec<String> {
+
         let mut merged = existing
             .iter()
             .map(|addr| normalize_peer_addr(addr))
@@ -376,6 +435,7 @@ impl ConnectorP2pTransport {
         }
 
         Self::normalize_peer_addrs(&merged)
+
     }
 
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
@@ -412,22 +472,21 @@ impl ConnectorP2pTransport {
                 && incoming_is_loopback_only
         });
 
-        if should_merge_into_existing_public_peer {
-            if let Some((existing_peer_id, existing_peer)) = self.peers.iter_mut().find(|(existing_peer_id, existing_peer)| {
+        if should_merge_into_existing_public_peer
+            && let Some((existing_peer_id, existing_peer)) = self.peers.iter_mut().find(|(existing_peer_id, existing_peer)| {
                 **existing_peer_id != peer_id
                     && Self::peer_addrs_share_port(&existing_peer.addrs, &peer.addrs)
                     && existing_peer.addrs.iter().any(|addr| !is_local_loopback_socket_addr(addr))
                     && incoming_is_loopback_only
             }) {
-                let merged_addrs = Self::merge_peer_addrs(&existing_peer.addrs, &peer.addrs);
-                existing_peer.addrs = merged_addrs;
-                existing_peer.is_discovered = existing_peer.is_discovered || is_discovered;
+            let merged_addrs = Self::merge_peer_addrs(&existing_peer.addrs, &peer.addrs);
+            existing_peer.addrs = merged_addrs;
+            existing_peer.is_discovered = existing_peer.is_discovered || is_discovered;
 
-                if self.active_peer_id.as_deref() == Some(peer_id.as_str()) {
-                    self.active_peer_id = Some(existing_peer_id.clone());
-                }
-                return;
+            if self.active_peer_id.as_deref() == Some(peer_id.as_str()) {
+                self.active_peer_id = Some(existing_peer_id.clone());
             }
+            return;
         }
 
         log::debug!(
@@ -548,17 +607,21 @@ impl ConnectorP2pTransport {
     }
 
     pub fn queued_response_count(&self) -> usize {
+        
         self.queued_responses
             .lock()
             .map(|queued_responses| queued_responses.len())
             .unwrap_or(0)
+
     }
 
     pub fn has_live_connection(&self) -> bool {
+
         self.live_connection
             .lock()
             .map(|connection| connection.is_some())
             .unwrap_or(false)
+
     }
 
     pub fn connect_active_peer(&mut self) -> Result<(), ConnectorError> {
@@ -812,151 +875,171 @@ fn ensure_live_connection(
         return Ok(());
     }
 
-    let Some(addr) = peer.addrs.first() else {
+    if peer.addrs.is_empty() {
         return Err(ConnectorError::Transport(
             "active peer has no address for routing".to_string(),
         ));
-    };
+    }
 
-    let socket_addr = normalize_peer_addr(addr);
+    let handshake_timeout_secs = connector_handshake_timeout_secs();
+    let stream_timeout_secs = connector_stream_timeout_secs();
+    let mut last_err: Option<ConnectorError> = None;
 
-    // Auto-discover CA cert before TLS connection if not already configured.
-    let ca_pem_override = if matches!(
-        transport.config.tls.mode,
-        common::TlsMode::Optional | common::TlsMode::Required
-    ) && transport.config.tls.ca_path.is_none() {
+    let mut candidate_addrs = peer
+        .addrs
+        .iter()
+        .map(|addr| normalize_peer_addr(addr))
+        .collect::<Vec<_>>();
 
-        let cached = transport.cached_ca_pem();
-        
-        if cached.is_none() {
-            log::debug!(
-                "connector attempting CA bootstrap from peer={} addr={}",
-                peer.peer_id,
-                socket_addr
-            );
-            match fetch_ca_pem_from_peer(&socket_addr, &peer.peer_id) {
+    for bootstrap_addr in transport
+        .config
+        .bootstrap_peers
+        .iter()
+        .map(|addr| normalize_peer_addr(addr))
+    {
+        if !candidate_addrs.contains(&bootstrap_addr) {
+            candidate_addrs.push(bootstrap_addr);
+        }
+    }
 
-                Ok(Some(pem)) => {
+    for socket_addr in candidate_addrs {
 
-                    log::info!(
-                        "connector auto-discovered CA cert from peer={} addr={}",
-                        peer.peer_id,
-                        socket_addr
-                    );
-                    if let Ok(mut guard) = transport.cached_ca_pem.lock() {
-                        *guard = Some(pem.clone());
-                    }
-                    Some(pem)
+        // With legacy CA bootstrap removed, only an explicitly configured CA file
+        // or the local development CA fallback can seed connector trust.
+        let ca_pem_override = if transport.config.tls.ca_path.is_none() {
 
-                },
+            let cached = transport.cached_ca_pem();
 
-                Ok(None) => {
-                    log::debug!("CA auto-discovery from {} returned no cert", socket_addr);
-                    try_load_local_dev_ca_pem(&socket_addr)
-                },
-
-                Err(err) => {
-                    if let ConnectorError::Rejected(message) = &err
-                        && message.to_ascii_lowercase().contains("bootstrapp") {
-                            return Err(err);
-                        }
-                    log::debug!("CA auto-discovery from {} failed: {}", socket_addr, err);
-                    try_load_local_dev_ca_pem(&socket_addr)
-                }
-
+            if cached.is_none() {
+                try_load_local_dev_ca_pem(&socket_addr)
+            } else {
+                log::debug!(
+                    "connector using cached CA cert for peer={} addr={}",
+                    peer.peer_id,
+                    socket_addr
+                );
+                cached
             }
 
         } else {
-            log::debug!(
-                "connector using cached CA cert for peer={} addr={}",
-                peer.peer_id,
-                socket_addr
-            );
-            cached
-        }
-
-    } else {
-        None
-    };
-
-    let cached_ca_pem = transport.cached_ca_pem();
-    let ca_pem_ref = ca_pem_override.as_deref().or(cached_ca_pem.as_deref());
-
-    log::debug!(
-        "connector TLS root selection peer={} addr={} ca_override={} ca_cached={}",
-        peer.peer_id,
-        socket_addr,
-        ca_pem_override.is_some(),
-        cached_ca_pem.is_some()
-    );
-
-    let handshake_timeout_secs = connector_handshake_timeout_secs();
-    let mut stream = connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref)?;
-
-    stream.set_timeouts(
-        Some(std::time::Duration::from_secs(handshake_timeout_secs)),
-        Some(std::time::Duration::from_secs(handshake_timeout_secs)),
-    )?;
-
-    let challenge = read_response_frame(&mut stream)?;
-
-    if challenge.request_id == SERVER_BOOTSTRAP_REJECT_REQUEST_ID {
-        return match (&challenge.status, &challenge.result) {
-            (ResponseStatus::Rejected, ConnectorResult::Error(message)) => {
-                Err(ConnectorError::Rejected(message.clone()))
-            }
-            _ => Err(ConnectorError::InvalidResponse(
-                "bootstrap rejection frame had unexpected status/result".to_string(),
-            )),
+            None
         };
-    }
 
-    if challenge.request_id != SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
-        return Err(ConnectorError::InvalidResponse(format!(
-            "missing server password challenge on connect; received request_id='{}'",
-            challenge.request_id
-        )));
-    }
+        let cached_ca_pem = transport.cached_ca_pem();
+        let ca_pem_ref = ca_pem_override.as_deref().or(cached_ca_pem.as_deref());
 
-    match (&challenge.status, &challenge.result) {
-        (ResponseStatus::Rejected, ConnectorResult::Error(_message)) => {}
-        _ => {
-            return Err(ConnectorError::InvalidResponse(
-                "server challenge frame had unexpected status/result".to_string(),
-            ));
+        log::debug!(
+            "connector TLS root selection peer={} addr={} ca_override={} ca_cached={}",
+            peer.peer_id,
+            socket_addr,
+            ca_pem_override.is_some(),
+            cached_ca_pem.is_some()
+        );
+
+        let mut stream = match connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref) {
+            Ok(stream) => stream,
+            Err(err) => {
+                log::debug!(
+                    "connector failed address candidate peer={} addr={} err={}",
+                    peer.peer_id,
+                    socket_addr,
+                    err
+                );
+                last_err = Some(err);
+                continue;
+            }
+        };
+
+        let establish_result: Result<PeerSession, ConnectorError> = (|| {
+
+            stream.set_timeouts(
+                Some(std::time::Duration::from_secs(handshake_timeout_secs)),
+                Some(std::time::Duration::from_secs(handshake_timeout_secs)),
+            )?;
+
+            let challenge = read_response_frame(&mut stream)?;
+
+            if challenge.request_id == SERVER_BOOTSTRAP_REJECT_REQUEST_ID {
+                return match (&challenge.status, &challenge.result) {
+                    (ResponseStatus::Rejected, ConnectorResult::Error(message)) => {
+                        Err(ConnectorError::Rejected(message.clone()))
+                    }
+                    _ => Err(ConnectorError::InvalidResponse(
+                        "bootstrap rejection frame had unexpected status/result".to_string(),
+                    )),
+                };
+            }
+
+            if challenge.request_id != SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
+                return Err(ConnectorError::InvalidResponse(format!(
+                    "missing server password challenge on connect; received request_id='{}'",
+                    challenge.request_id
+                )));
+            }
+
+            match (&challenge.status, &challenge.result) {
+                (ResponseStatus::Rejected, ConnectorResult::Error(_message)) => {}
+                _ => {
+                    return Err(ConnectorError::InvalidResponse(
+                        "server challenge frame had unexpected status/result".to_string(),
+                    ));
+                }
+            }
+
+            let server_session_id = match &challenge.result {
+                ConnectorResult::Error(message) => extract_session_id(message),
+                _ => None,
+            };
+            let shared_session_token = generate_shared_session_token(
+                &peer.peer_id,
+                server_session_id.as_deref(),
+            );
+
+            Ok(PeerSession::new().with_session_id(shared_session_token))
+
+        })();
+
+        match establish_result {
+
+            Ok(session) => {
+
+                log::info!(
+                    "connector transport established persistent stream peer={} addr={}",
+                    peer.peer_id,
+                    socket_addr
+                );
+
+                stream.set_timeouts(
+                    Some(std::time::Duration::from_secs(stream_timeout_secs)),
+                    Some(std::time::Duration::from_secs(stream_timeout_secs)),
+                )?;
+
+                *connection = Some(LiveConnection {
+                    peer_id: peer.peer_id.clone(),
+                    stream,
+                    session,
+                });
+
+                return Ok(());
+            },
+
+            Err(err) => {
+                log::debug!(
+                    "connector failed address candidate after connect peer={} addr={} err={}",
+                    peer.peer_id,
+                    socket_addr,
+                    err
+                );
+                last_err = Some(err);
+            }
+
         }
+
     }
 
-    log::info!(
-        "connector transport established persistent stream peer={} addr={}",
-        peer.peer_id,
-        socket_addr
-    );
-
-    let server_session_id = match &challenge.result {
-        ConnectorResult::Error(message) => extract_session_id(message),
-        _ => None,
-    };
-    let shared_session_token = generate_shared_session_token(
-        &peer.peer_id,
-        server_session_id.as_deref(),
-    );
-
-    *connection = Some(LiveConnection {
-        peer_id: peer.peer_id.clone(),
-        stream,
-        session: PeerSession::new().with_session_id(shared_session_token),
-    });
-
-    if let Some(live) = connection.as_mut() {
-        let stream_timeout_secs = connector_stream_timeout_secs();
-        live.stream.set_timeouts(
-            Some(std::time::Duration::from_secs(stream_timeout_secs)),
-            Some(std::time::Duration::from_secs(stream_timeout_secs)),
-        )?;
-    }
-
-    Ok(())
+    Err(last_err.unwrap_or_else(|| {
+        ConnectorError::Transport("failed to establish connection to any peer address".to_string())
+    }))
 
 }
 
@@ -986,6 +1069,7 @@ fn send_request_frame(
 fn read_response_frame(stream: &mut ConnectorWireStream) -> Result<ConnectorResponse, ConnectorError> {
 
     let mut response_len_buf = [0u8; 4];
+
     stream
         .read_exact(&mut response_len_buf)
         .map_err(|e| ConnectorError::Transport(format!("failed to read response length: {e}")))?;
@@ -1053,6 +1137,7 @@ fn load_tls_root_store_from_reader<R: Read>(
 }
 
 fn server_names_from_socket_addr(socket_addr: &str) -> Vec<String> {
+
     let host = socket_addr
         .rsplit_once(':')
         .map(|(host, _)| host)
@@ -1073,18 +1158,12 @@ fn server_names_from_socket_addr(socket_addr: &str) -> Vec<String> {
         }
     } else {
         candidates.push(host.to_string());
-        if host.eq_ignore_ascii_case("localhost")
-            || host.eq_ignore_ascii_case("127.0.0.1")
-            || host.eq_ignore_ascii_case("::1")
-        {
-            candidates.push("localhost".to_string());
-        } else {
-            candidates.push("localhost".to_string());
-        }
+        candidates.push("localhost".to_string());
     }
 
     candidates.dedup();
     candidates
+
 }
 
 fn server_name_from_socket_addr(socket_addr: &str) -> Result<ServerName<'static>, ConnectorError> {
@@ -1120,20 +1199,36 @@ fn connect_tls_stream(
     ca_pem_override: Option<&str>,
 ) -> Result<ConnectorWireStream, ConnectorError> {
 
-    let roots = if let Some(pem) = ca_pem_override {
-        load_tls_root_store_from_pem(pem)?
+    let global_fingerprint = global_tls_fingerprint();
+
+    let mut client_config = if let Some(pem) = ca_pem_override {
+        let roots = load_tls_root_store_from_pem(pem)?;
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    } else if let Some(ca_path) = tls.ca_path.as_ref() {
+        let roots = load_tls_root_store(ca_path)?;
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    } else if let Some(expected_fingerprint) = global_fingerprint {
+        let provider = rustls::crypto::CryptoProvider::get_default()
+            .cloned()
+            .ok_or_else(|| ConnectorError::Transport("rustls crypto provider is not initialized".to_string()))?;
+        let verifier = Arc::new(FingerprintServerCertVerifier::new(
+            expected_fingerprint,
+            provider.signature_verification_algorithms,
+        ));
+        ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth()
     } else {
-        let ca_path = tls.ca_path.as_ref().ok_or_else(|| {
-            ConnectorError::Transport(
-                "tls_ca path is required for connector TLS (or auto-discovery must run first)".to_string(),
-            )
-        })?;
-        load_tls_root_store(ca_path)?
+        return Err(ConnectorError::Transport(
+            "tls_ca path is required for connector TLS (and baked connector fingerprint is missing/invalid)".to_string(),
+        ));
     };
 
-    let mut client_config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
     client_config.alpn_protocols = vec![b"distdb-p2p/1".to_vec()];
 
     let mut tcp = connect_tcp_with_timeout(socket_addr)?;
@@ -1168,24 +1263,6 @@ fn connect_tls_stream(
 
 }
 
-fn connect_plain_stream(socket_addr: &str) -> Result<ConnectorWireStream, ConnectorError> {
-
-    let tcp = connect_tcp_with_timeout(socket_addr)?;
-    let stream_timeout_secs = connector_stream_timeout_secs();
-
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(stream_timeout_secs)))
-        .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
-    
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(stream_timeout_secs)))
-        .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
-
-    tcp.set_nodelay(true)
-        .map_err(|e| ConnectorError::Transport(format!("failed to set TCP_NODELAY: {e}")))?;
-
-    Ok(ConnectorWireStream::Plain(tcp))
-
-}
-
 fn connect_connector_stream(
     socket_addr: &str,
     tls: &ConnectorTlsConfig,
@@ -1193,185 +1270,13 @@ fn connect_connector_stream(
 ) -> Result<ConnectorWireStream, ConnectorError> {
 
     match tls.mode {
-        common::TlsMode::Off => connect_plain_stream(socket_addr),
         common::TlsMode::Required => connect_tls_stream(socket_addr, tls, ca_pem_override),
-        common::TlsMode::Optional => match connect_tls_stream(socket_addr, tls, ca_pem_override) {
-            Ok(stream) => Ok(stream),
-            Err(err) => {
-                if ca_pem_override.is_some() {
-                    return Err(err);
-                }
-                log::debug!(
-                    "connector optional tls failed for {}; falling back to plaintext: {}",
-                    socket_addr,
-                    err
-                );
-                connect_plain_stream(socket_addr)
-            }
-        },
+        _ => Err(ConnectorError::Transport(
+            "p2p network requires tls=required".to_string(),
+        )),
     }
 
 }
-
-fn fetch_ca_pem_from_peer(
-    socket_addr: &str,
-    node_id: &str,
-) -> Result<Option<String>, ConnectorError> {
-
-    let mut last_err: Option<ConnectorError> = None;
-
-    for attempt in 1..=2 {
-        match fetch_ca_pem_from_peer_once(socket_addr, node_id) {
-            Ok(result) => return Ok(result),
-
-            Err(err) => {
-                let retryable = matches!(
-                    &err,
-                    ConnectorError::Transport(message)
-                    if message.contains("failed to read CA bootstrap response header")
-                );
-
-                if retryable && attempt < 2 {
-                    log::debug!(
-                        "CA bootstrap header read timed out from {}; retrying attempt={}",
-                        socket_addr,
-                        attempt + 1
-                    );
-                    last_err = Some(err);
-                    continue;
-                }
-
-                return Err(err);
-            }
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| {
-        ConnectorError::Transport(
-            "CA bootstrap failed without detailed transport error".to_string(),
-        )
-    }))
-
-}
-
-fn fetch_ca_pem_from_peer_once(
-    socket_addr: &str,
-    node_id: &str,
-) -> Result<Option<String>, ConnectorError> {
-
-    let mut tcp = connect_tcp_with_timeout(socket_addr).map_err(|err| {
-        ConnectorError::Transport(format!("CA bootstrap connect to {socket_addr} failed: {err}"))
-    })?;
-
-    let bootstrap_timeout_secs = connector_ca_bootstrap_timeout_secs();
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(bootstrap_timeout_secs)))
-        .map_err(|err| ConnectorError::Transport(format!("set read timeout failed: {err}")))?;
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(bootstrap_timeout_secs)))
-        .map_err(|err| ConnectorError::Transport(format!("set write timeout failed: {err}")))?;
-    tcp.set_nodelay(true)
-        .map_err(|err| ConnectorError::Transport(format!("set TCP_NODELAY failed: {err}")))?;
-
-    let request = CaBootstrapRequest {
-        node_id: node_id.to_string(),
-    };
-
-    let Some(encoded) = encode_ca_bootstrap_request(&request) else {
-        return Err(ConnectorError::Transport(
-            "failed to encode CA bootstrap request".to_string(),
-        ));
-    };
-
-    let len = encoded.len() as u32;
-    tcp.write_all(&len.to_le_bytes())
-        .and_then(|_| tcp.write_all(&encoded))
-        .map_err(|err| {
-            ConnectorError::Transport(format!("failed to write CA bootstrap request: {err}"))
-        })?;
-    tcp.flush().map_err(|err| {
-        ConnectorError::Transport(format!("failed to flush CA bootstrap request: {err}"))
-    })?;
-
-    let first_frame = read_len_prefixed_frame(&mut tcp)?;
-
-    if let Some(response) = decode_ca_bootstrap_response(&first_frame) {
-        return match response {
-            response if response.ok => Ok(response.ca_cert_pem),
-            response => {
-                log::debug!(
-                    "CA bootstrap from {} failed: {}",
-                    socket_addr,
-                    response.error.unwrap_or_else(|| "unknown".to_string())
-                );
-                Ok(None)
-            }
-        };
-    }
-
-    if let Ok(frame) = bincode::deserialize::<ConnectorResponse>(&first_frame)
-        && frame.request_id == SERVER_PASSWORD_CHALLENGE_REQUEST_ID {
-            let second_frame = read_len_prefixed_frame(&mut tcp)?;
-
-            match decode_ca_bootstrap_response(&second_frame) {
-                Some(response) if response.ok => return Ok(response.ca_cert_pem),
-                Some(response) => {
-                    log::debug!(
-                        "CA bootstrap from {} failed after challenge: {}",
-                        socket_addr,
-                        response.error.unwrap_or_else(|| "unknown".to_string())
-                    );
-                    return Ok(None);
-                }
-                None => {
-                    let preview = second_frame
-                        .iter()
-                        .take(16)
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    log::debug!(
-                        "CA bootstrap response from {} could not be decoded after challenge; len={} preview={}",
-                        socket_addr,
-                        second_frame.len(),
-                        preview
-                    );
-                    return Ok(None);
-                }
-            }
-        }
-
-    let preview = first_frame
-        .iter()
-        .take(16)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    log::debug!(
-        "CA bootstrap response from {} could not be decoded; len={} preview={}",
-        socket_addr,
-        first_frame.len(),
-        preview
-    );
-    Ok(None)
-
-}
-
-fn read_len_prefixed_frame(tcp: &mut TcpStream) -> Result<Vec<u8>, ConnectorError> {
-
-    let mut resp_header = [0u8; 4];
-    tcp.read_exact(&mut resp_header).map_err(|err| {
-        ConnectorError::Transport(format!("failed to read CA bootstrap response header: {err}"))
-    })?;
-
-    let resp_len = u32::from_le_bytes(resp_header) as usize;
-    let mut resp_buf = vec![0u8; resp_len];
-    tcp.read_exact(&mut resp_buf).map_err(|err| {
-        ConnectorError::Transport(format!("failed to read CA bootstrap response payload: {err}"))
-    })?;
-
-    Ok(resp_buf)
-
-}
-
 fn normalize_peer_addr(raw: &str) -> String {
 
     let trimmed = raw.trim();
@@ -1389,10 +1294,10 @@ fn normalize_peer_addr(raw: &str) -> String {
             }
 
     if trimmed.contains(':') {
-        return trimmed.to_string();
+        trimmed.to_string()
+    } else {    
+        format!("{trimmed}:{DEFAULT_SERVER_PORT}")
     }
-    
-    format!("{}:{}", trimmed, DEFAULT_SERVER_PORT)
 
 }
 
@@ -1417,7 +1322,7 @@ fn connect_tcp_with_timeout(socket_addr: &str) -> Result<TcpStream, ConnectorErr
         match TcpStream::connect_timeout(&addr, timeout) {
             Ok(stream) => {
                 return Ok(stream);
-            }
+            },
             Err(err) => {
                 last_err = Some(err);
             }

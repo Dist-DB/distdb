@@ -4,8 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVER_BIN="$ROOT_DIR/server/target/debug/server"
 CONSOLE_BIN="$ROOT_DIR/console/target/debug/console"
+TLSSERVER_BIN="$ROOT_DIR/tlsserver/target/debug/tlsserver"
 
 DATA_ROOT="$ROOT_DIR/server/data/e2e"
+TLSSERVER_PORT="${DISTDB_E2E_TLSSERVER_PORT:-19443}"
+TLSSERVER_ADDR="127.0.0.1:${TLSSERVER_PORT}"
+TLSSERVER_DATA_DIR="$DATA_ROOT/tlsserver"
+TLSSERVER_LOG="$DATA_ROOT/tlsserver.log"
+TLSSERVER_CA_PATH="$TLSSERVER_DATA_DIR/p2p-tls/ca-cert.pem"
 
 mkdir -p "$DATA_ROOT"
 
@@ -29,8 +35,45 @@ require_binaries() {
     (cd "$ROOT_DIR/console" && cargo build --quiet)
   fi
 
+  if [[ ! -x "$TLSSERVER_BIN" ]]; then
+    log "tlsserver binary missing; building tlsserver crate"
+    (cd "$ROOT_DIR/tlsserver" && cargo build --quiet)
+  fi
+
   [[ -x "$SERVER_BIN" ]] || fail "server binary missing at $SERVER_BIN"
   [[ -x "$CONSOLE_BIN" ]] || fail "console binary missing at $CONSOLE_BIN"
+  [[ -x "$TLSSERVER_BIN" ]] || fail "tlsserver binary missing at $TLSSERVER_BIN"
+}
+
+ensure_tlsserver() {
+  if [[ -n "${TLSSERVER_PID:-}" ]] && kill -0 "$TLSSERVER_PID" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  mkdir -p "$TLSSERVER_DATA_DIR"
+
+  "$TLSSERVER_BIN" \
+    "datadir=$TLSSERVER_DATA_DIR" \
+    "listen_addr=127.0.0.1" \
+    "port=$TLSSERVER_PORT" \
+    >"$TLSSERVER_LOG" 2>&1 &
+
+  TLSSERVER_PID=$!
+  export TLSSERVER_PID
+
+  for _ in {1..100}; do
+    if [[ -f "$TLSSERVER_CA_PATH" ]] && lsof -nP -iTCP:"$TLSSERVER_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+
+    if ! kill -0 "$TLSSERVER_PID" >/dev/null 2>&1; then
+      fail "tlsserver exited unexpectedly; see $TLSSERVER_LOG"
+    fi
+
+    sleep 0.1
+  done
+
+  fail "tlsserver did not become ready at $TLSSERVER_ADDR"
 }
 
 new_run_dir() {
@@ -48,12 +91,17 @@ start_server() {
   local port="$3"
   local logfile="$4"
 
+  ensure_tlsserver
+
   "$SERVER_BIN" \
     "node_id=$node_id" \
     "datadir=$datadir_root" \
     "port=$port" \
     "listen_addr=127.0.0.1" \
-    "tls=off" \
+    "advertise_addr=127.0.0.1" \
+    "tls_san=localhost,127.0.0.1" \
+    "tls_server=$TLSSERVER_ADDR" \
+    "tls_ca=$TLSSERVER_CA_PATH" \
     >"$logfile" 2>&1 &
 
   SERVER_PID=$!
@@ -66,18 +114,38 @@ stop_server() {
     wait "$SERVER_PID" >/dev/null 2>&1 || true
   fi
   unset SERVER_PID
+
+  if [[ -n "${TLSSERVER_PID:-}" ]] && kill -0 "$TLSSERVER_PID" >/dev/null 2>&1; then
+    kill "$TLSSERVER_PID" >/dev/null 2>&1 || true
+    wait "$TLSSERVER_PID" >/dev/null 2>&1 || true
+  fi
+  unset TLSSERVER_PID
 }
 
 wait_for_server() {
   local port="$1"
-  local node_id="$2"
+  local _node_id="$2"
+  local logfile="${3:-}"
+  local probe_out="${DATA_ROOT}/wait-${port}.out"
 
   for _ in {1..50}; do
-    if "$CONSOLE_BIN" "127.0.0.1:$port" tls=off "user=root@$node_id" <<'SQL' >/dev/null 2>&1
+    if [[ -n "$logfile" ]] && [[ -f "$logfile" ]]; then
+      if ! rg -q "connector bootstrap gate opened" "$logfile"; then
+        sleep 0.2
+        continue
+      fi
+    fi
+
+    if "$CONSOLE_BIN" "127.0.0.1:$port" "tls_ca=$TLSSERVER_CA_PATH" <<'SQL' >"$probe_out" 2>&1
+  show peers;
 password root;
 quit;
 SQL
     then
+      if rg -q "no active peer connection|transport reconnect failed|Connection refused|server is bootstrapping" "$probe_out"; then
+        sleep 0.2
+        continue
+      fi
       return 0
     fi
     sleep 0.2
@@ -88,11 +156,19 @@ SQL
 
 run_console_sql_file() {
   local port="$1"
-  local node_id="$2"
+  local _node_id="$2"
   local sql_file="$3"
   local out_file="$4"
 
-  "$CONSOLE_BIN" "127.0.0.1:$port" tls=off "user=root@$node_id" <"$sql_file" >"$out_file" 2>&1
+  local staged_file
+  staged_file="${out_file}.input"
+
+  {
+    printf '%s\n' "show peers;"
+    cat "$sql_file"
+  } >"$staged_file"
+
+  "$CONSOLE_BIN" "127.0.0.1:$port" "tls_ca=$TLSSERVER_CA_PATH" <"$staged_file" >"$out_file" 2>&1
 }
 
 extract_count() {

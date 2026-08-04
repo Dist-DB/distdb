@@ -259,11 +259,10 @@ fn extract_public_hostname_from_hosts_content(content: &str) -> Option<String> {
                 }
             }
 
-            if let Some(host) = candidate {
-                if first.parse::<Ipv4Addr>().is_ok() || first.parse::<Ipv6Addr>().is_ok() {
+            if let Some(host) = candidate
+                && (first.parse::<Ipv4Addr>().is_ok() || first.parse::<Ipv6Addr>().is_ok()) {
                     return Some(host);
                 }
-            }
 
             None
         })

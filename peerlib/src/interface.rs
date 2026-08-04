@@ -13,12 +13,14 @@ pub struct TransferEnvelope {
 }
 
 impl TransferEnvelope {
+
     pub fn new(
         channel: impl Into<String>,
         message_type: impl Into<String>,
         request_id: Option<String>,
         payload: Vec<u8>,
     ) -> Self {
+
         Self {
             channel: channel.into(),
             message_type: message_type.into(),
@@ -26,12 +28,14 @@ impl TransferEnvelope {
             payload,
             headers: TransferHeaders::new(),
         }
+
     }
 
     pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into(), value.into());
         self
     }
+    
 }
 
 pub trait TransferCodec<M> {

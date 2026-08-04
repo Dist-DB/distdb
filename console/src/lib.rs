@@ -131,36 +131,7 @@ impl ConsoleSession {
         requested_peer_id: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
 
-        self.refresh_discovered_peers_from_server()?;
-
-        let discovered_peers = self.runtime.transport().discovered_peers();
-        let resolved_peer_id = if discovered_peers
-            .iter()
-            .any(|peer| peer.peer_id == requested_peer_id)
-        {
-            requested_peer_id.to_string()
-        } else if discovered_peers.len() == 1 {
-            discovered_peers[0].peer_id.clone()
-        } else {
-
-            let discovered_ids = discovered_peers
-                .iter()
-                .map(|peer| peer.peer_id.clone())
-                .collect::<Vec<_>>();
-
-            let hint = if discovered_ids.is_empty() {
-                "none".to_string()
-            } else {
-                discovered_ids.join(", ")
-            };
-
-            return Err(format!(
-                "peer '{}' is not discovered (discovered peers: {})",
-                requested_peer_id, hint
-            )
-            .into());
-
-        };
+        let resolved_peer_id = self.resolve_startup_peer_id(requested_peer_id)?;
 
         self.execute(ConsoleCommand::ConnectPeer {
             user: user.to_string(),
@@ -168,6 +139,52 @@ impl ConsoleSession {
         })?;
 
         Ok(resolved_peer_id)
+
+    }
+
+    fn resolve_startup_peer_id(
+        &self,
+        requested_peer_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+
+        let known_peers = self.runtime.transport().known_peers();
+        if known_peers
+            .iter()
+            .any(|peer| peer.peer_id == requested_peer_id)
+        {
+            return Ok(requested_peer_id.to_string());
+        }
+
+        if known_peers.len() == 1 {
+            return Ok(known_peers[0].peer_id.clone());
+        }
+
+        let bootstrap_peers = self.runtime.transport().bootstrap_peers();
+        if bootstrap_peers.len() == 1 {
+            return Ok(bootstrap_peers[0].clone());
+        }
+
+        let known_ids = known_peers
+            .iter()
+            .map(|peer| peer.peer_id.clone())
+            .collect::<Vec<_>>();
+        let known_hint = if known_ids.is_empty() {
+            "none".to_string()
+        } else {
+            known_ids.join(", ")
+        };
+
+        let bootstrap_hint = if bootstrap_peers.is_empty() {
+            "none".to_string()
+        } else {
+            bootstrap_peers.join(", ")
+        };
+
+        Err(format!(
+            "peer '{}' is not available before authentication (known peers: {}; bootstrap peers: {})",
+            requested_peer_id, known_hint, bootstrap_hint
+        )
+        .into())
 
     }
 

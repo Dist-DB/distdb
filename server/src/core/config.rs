@@ -30,7 +30,7 @@ impl ServerRuntimeConfig {
             swarm_id: DEFAULT_LOCAL_SWARM_ID.to_string(),
             data_dir,
             listen_addrs: vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")],
-            tls_mode: common::TlsMode::Off,
+            tls_mode: common::TlsMode::Required,
             tls: ServerTlsConfig::default(),
         }
     }
@@ -44,7 +44,7 @@ impl ServerRuntimeConfig {
             swarm_id: DEFAULT_LOCAL_SWARM_ID.to_string(),
             data_dir,
             listen_addrs: vec![listen_addr.into()],
-            tls_mode: common::TlsMode::Off,
+            tls_mode: common::TlsMode::Required,
             tls: ServerTlsConfig::default(),
         }
     }

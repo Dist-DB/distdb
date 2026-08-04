@@ -29,7 +29,7 @@ use connector::{
 use peerlib::{
     PeerNode,
     AffinityJoinResponse, DataSnapshotResponse, SchemaCatalogResponse, ServiceMessage,
-    TableLockState, TlsCertEnrollResponse, TransactionsSinceResponse,
+    TableLockState, TransactionsSinceResponse,
     ServerP2pEvent, ServerP2pRuntime,
 };
 use serverlib::core::cluster::NodeDescriptor;
@@ -38,12 +38,7 @@ use serverlib::{
     current_runtime_index_bootstrap_progress,
     ConcurrentWalManager, DatabaseCatalog, DatabaseEntity,
     DatabaseEntityAspect, DatabaseId,
-    SqlOperation, SqlRequest, encode_wal_frame, import_p2p_ca_pem_if_missing, parse_mysql8_sql_requests,
-    sign_tls_enrollment_csr,
-};
-use common::helpers::p2p::{
-    decode_ca_bootstrap_request, encode_ca_bootstrap_response, is_ca_bootstrap_frame,
-    CaBootstrapResponse,
+    SqlOperation, SqlRequest, encode_wal_frame, parse_mysql8_sql_requests,
 };
 use common::helpers::format::FileKind;
 use common::helpers::list_files;
@@ -2029,7 +2024,7 @@ pub async fn handle_connector_stream(
     affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
     seen_node_announces: Arc<Mutex<HashSet<String>>>,
     service_registry: Arc<Mutex<HashMap<String, Vec<String>>>>,
-    ca_root_enabled: bool,
+    _ca_root_enabled: bool,
     local_node: NodeDescriptor,
     peer_addr: String,
     connection_id: usize,
@@ -2087,69 +2082,6 @@ pub async fn handle_connector_stream(
             return Err(Box::new(err));
         }
 
-        if is_ca_bootstrap_frame(&payload) {
-            let response = if let Some(_req) = decode_ca_bootstrap_request(&payload) {
-                
-                match serverlib::load_p2p_ca_pem(&node_data_dir) {
-
-                    Ok(Some(ca_cert_pem)) => CaBootstrapResponse {
-                        ok: true,
-                        ca_cert_pem: Some(ca_cert_pem),
-                        error: None,
-                    },
-
-                    Ok(None) => CaBootstrapResponse {
-                        ok: false,
-                        ca_cert_pem: None,
-                        error: Some("no CA cert is available on this node".to_string()),
-                    },
-
-                    Err(err) => CaBootstrapResponse {
-                        ok: false,
-                        ca_cert_pem: None,
-                        error: Some(format!("failed loading CA cert: {err}")),
-                    },
-
-                }
-
-            } else {
-
-                CaBootstrapResponse {
-                    ok: false,
-                    ca_cert_pem: None,
-                    error: Some("malformed CA bootstrap request".to_string()),
-                }
-
-            };
-
-            if let Some(encoded) = encode_ca_bootstrap_response(&response) {
-                let len = encoded.len() as u32;
-                use tokio::io::AsyncWriteExt;
-                if let Err(err) = stream.write_all(&len.to_le_bytes()).await {
-                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                    return Err(Box::new(err));
-                }
-                if let Err(err) = stream.write_all(&encoded).await {
-                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                    return Err(Box::new(err));
-                }
-                if let Err(err) = stream.flush().await {
-                    rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
-                    return Err(Box::new(err));
-                }
-            }
-
-            log::debug!(
-                "served CA bootstrap request from {} ok={}",
-                peer_addr,
-                response.ok
-            );
-
-            session.mark_disconnect();
-            return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
-
-        }
-
         let inbound_message = match inbound_surface.decode_inbound_payload(&payload) {
             Ok(message) => message,
             Err(_) => {
@@ -2178,111 +2110,6 @@ pub async fn handle_connector_stream(
                 message,
             }) {
                 log::debug!("server p2p message handling failed from {}: {}", peer_addr, err);
-            }
-
-            if let ServiceMessage::TlsCaDistribution(distribution) = &message_for_fanout {
-                
-                let node_data_dir = {
-                    let app_guard = app.read().await;
-                    app_guard.node_data_dir().clone()
-                };
-
-                match import_p2p_ca_pem_if_missing(&node_data_dir, &distribution.ca_cert_pem) {
-
-                    Ok(true) => {
-                        log::info!(
-                            "imported p2p CA certificate from issuer_node_id={} via peer={}",
-                            distribution.issuer_node_id,
-                            peer_addr
-                        );
-                    },
-
-                    Ok(false) => {
-                        log::debug!(
-                            "ignored p2p CA distribution from issuer_node_id={} because local CA already exists",
-                            distribution.issuer_node_id
-                        );
-                    },
-
-                    Err(err) => {
-                        log::warn!(
-                            "failed importing p2p CA distribution from issuer_node_id={}: {}",
-                            distribution.issuer_node_id,
-                            err
-                        );
-                    }
-
-                }
-
-                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
-
-            }
-
-            if let ServiceMessage::TlsCertEnrollRequest(enroll_req) = &message_for_fanout {
-
-                if !ca_root_enabled {
-
-                    let response_message = ServiceMessage::TlsCertEnrollResponse(
-                        TlsCertEnrollResponse {
-                            request_id: enroll_req.request_id.clone(),
-                            ok: false,
-                            error: Some("tls enrollment disabled on this node; ca_root is not enabled".to_string()),
-                            node_cert_pem: None,
-                            ca_cert_pem: None,
-                        },
-                    );
-
-                    if let Err(err) =
-                        write_service_message_to_stream(&mut stream, &response_message).await
-                    {
-                        log::warn!(
-                            "failed sending tls enrollment rejection to {}: {}",
-                            peer_addr,
-                            err
-                        );
-                    }
-
-                    return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
-
-                }
-                
-                let node_data_dir = {
-                    let app_guard = app.read().await;
-                    app_guard.node_data_dir().clone()
-                };
-
-                let response = match sign_tls_enrollment_csr(&node_data_dir, &enroll_req.csr_pem) {
-
-                    Ok((node_cert_pem, ca_cert_pem)) => TlsCertEnrollResponse {
-                        request_id: enroll_req.request_id.clone(),
-                        ok: true,
-                        error: None,
-                        node_cert_pem: Some(node_cert_pem),
-                        ca_cert_pem: Some(ca_cert_pem),
-                    },
-
-                    Err(err) => TlsCertEnrollResponse {
-                        request_id: enroll_req.request_id.clone(),
-                        ok: false,
-                        error: Some(err),
-                        node_cert_pem: None,
-                        ca_cert_pem: None,
-                    },
-
-                };
-
-                let response_message = ServiceMessage::TlsCertEnrollResponse(response);
-
-                if let Err(err) = write_service_message_to_stream(&mut stream, &response_message).await {
-                    log::warn!(
-                        "failed sending tls enrollment response to {}: {}",
-                        peer_addr,
-                        err
-                    );
-                }
-
-                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node).await;
-
             }
 
             if let ServiceMessage::ServiceAnnounce(announcement) = &message_for_fanout {
@@ -2871,6 +2698,7 @@ pub async fn handle_connector_stream(
                     set_password.user_id,
                     set_password.password,
                 ) {
+                    
                     Ok(payload) => {
                         let append_result = append_set_password_wal_record(
                             &app,
@@ -2890,8 +2718,10 @@ pub async fn handle_connector_stream(
                             },
                             Err(message) => ConnectorResponse::rejected(request.request_id, message),
                         }
-                    }
+                    },
+                    
                     Err(message) => ConnectorResponse::rejected(request.request_id, message),
+
                 };
 
                 write_response_or_rollback(
@@ -2963,13 +2793,16 @@ pub async fn handle_connector_stream(
         session.record_request(&request);
 
         let parsed_requests_for_routing = match &request.command {
+            
             ConnectorCommand::Query { query } => {
                 let parse_start = Instant::now();
                 parse_mysql8_sql_requests(&query.sql, &query.database_id)
                     .ok()
                     .map(|parsed| (parsed, parse_start.elapsed().as_millis() as u64))
-            }
+            },
+
             _ => None,
+
         };
 
         let parsed_requests_ref = parsed_requests_for_routing

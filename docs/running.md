@@ -34,17 +34,16 @@ cargo run -- \
 	node_id=server-node-01 \
 	datadir=./data/server-node-01 \
 	listen_addr=127.0.0.1 \
-	port=9400 \
-	tls=off
+	port=9400
 ```
 
 Notes:
 
 - `node_id` identifies this server instance.
 - `datadir` is where local state and WAL data are stored.
-- server default TLS mode is `required` when `tls=` is omitted.
-- `tls=off` in the example above is an explicit local-dev override for smoke testing.
-- when `tls=required` is used, the server does not fall back to plaintext.
+- server, peer, and connector runtime paths are fixed to TLS-required mode.
+- `tls=` runtime arguments are rejected.
+- transport does not fall back to plaintext.
 
 ## 3. Connect With Console
 
@@ -59,14 +58,14 @@ Or explicitly point console to your server address:
 
 ```bash
 cd console
-cargo run -- 127.0.0.1:9400 tls=off user=root@server-node-01
+cargo run -- 127.0.0.1:9400 user=root@server-node-01
 ```
 
-For TLS-required runs, configure console with `tls=required` and a trust root:
+To configure a custom trust root, supply `tls_ca`:
 
 ```bash
 cd console
-cargo run -- 127.0.0.1:9400 tls=required tls_ca=/path/to/ca.pem user=root@server-node-01
+cargo run -- 127.0.0.1:9400 tls_ca=/path/to/ca.pem user=root@server-node-01
 ```
 
 ## 4. Authenticate And Run A Quick Check

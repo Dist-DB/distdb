@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if server_list.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: console <server-address>[:<port>] [servers=host1[:port],host2[:port]] [tls=off|optional|required] [tls_ca=/path/to/ca.pem] [user=<username@peer-id>] [password=<secret>]",
+            "usage: console <server-address>[:<port>] [servers=host1[:port],host2[:port]] [tls_ca=/path/to/ca.pem] [user=<username@peer-id>] [password=<secret>]",
         )
         .into());
     }

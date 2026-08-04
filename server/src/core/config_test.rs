@@ -10,7 +10,7 @@
             config.listen_addrs,
             vec![format!("/ip4/0.0.0.0/tcp/{DEFAULT_SERVER_PORT}")]
         );
-        assert_eq!(config.tls_mode, common::TlsMode::Off);
+        assert_eq!(config.tls_mode, common::TlsMode::Required);
         assert_eq!(config.tls, ServerTlsConfig::default());
     }
     

@@ -4,6 +4,7 @@ target/
 *.o
 /server/data/
 /console/data/
+/tlsserver/data/
 *.script
 *.code-workspace
 */Cargo.lock

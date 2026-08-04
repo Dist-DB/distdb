@@ -48,10 +48,14 @@ pub use surface::{
 pub use security::{
     BoxedConnectorStream,
     build_tls_acceptor,
+    build_tls_acceptor_from_pem,
     build_tls_client_config,
+    build_tls_client_config_from_pem,
     negotiate_connector_stream,
     parse_tls_config_from_args,
     parse_tls_mode_from_args,
+    validate_tls_certificate_subject_alt_names,
+    validate_tls_certificate_subject_alt_names_pem,
 };
 pub use wire_io::{write_response_frame, write_service_message_to_stream};
 pub use wss::{

@@ -127,28 +127,6 @@ pub struct TransactionsSinceResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TlsCaDistribution {
-    pub issuer_node_id: String,
-    pub ca_cert_pem: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TlsCertEnrollRequest {
-    pub request_id: String,
-    pub requester_node_id: String,
-    pub csr_pem: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TlsCertEnrollResponse {
-    pub request_id: String,
-    pub ok: bool,
-    pub error: Option<String>,
-    pub node_cert_pem: Option<String>,
-    pub ca_cert_pem: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceAnnounce {
     pub node_id: String,
     #[serde(default)]
@@ -191,9 +169,6 @@ pub enum ServiceMessage {
     DataSnapshotResponse(DataSnapshotResponse),
     TransactionsSinceRequest(TransactionsSinceRequest),
     TransactionsSinceResponse(TransactionsSinceResponse),
-    TlsCaDistribution(TlsCaDistribution),
-    TlsCertEnrollRequest(TlsCertEnrollRequest),
-    TlsCertEnrollResponse(TlsCertEnrollResponse),
     ServiceAnnounce(ServiceAnnounce),
     TableLockState(TableLockState),
     

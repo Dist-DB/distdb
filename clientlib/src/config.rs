@@ -17,15 +17,15 @@ impl ClientOptions {
             ));
         }
 
-        let tls_mode = match args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
-            Some(raw) => TlsMode::parse(raw).ok_or_else(|| {
-                ClientError::Config(format!(
-                    "invalid tls mode '{}'; expected off|optional|required",
-                    raw
-                ))
-            })?,
-            None => TlsMode::Optional,
-        };
+        if let Some(raw) = args.iter().find_map(|arg| arg.strip_prefix("tls=")) {
+            return Err(ClientError::Config(
+                format!(
+                    "tls mode is fixed to required; remove unsupported argument tls={raw}"
+                ),
+            ));
+        }
+
+        let tls_mode = TlsMode::Required;
 
         let tls_ca_path = args
             .iter()

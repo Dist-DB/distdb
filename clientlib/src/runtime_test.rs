@@ -3,7 +3,7 @@ use super::*;
 fn sample_options(servers: Vec<String>) -> ClientOptions {
     ClientOptions {
         servers,
-        tls_mode: crate::TlsMode::Off,
+        tls_mode: crate::TlsMode::Required,
         tls_ca_path: None,
         user: Some("root".to_string()),
         password: None,

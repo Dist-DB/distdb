@@ -2441,6 +2441,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -3090,6 +3091,7 @@ dependencies = [
  "security",
  "serde_json",
  "serverlib",
+ "tlsserver",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
@@ -3406,6 +3408,17 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tlsserver"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "env_logger",
+ "log",
+ "security",
+ "serde",
+]
 
 [[package]]
 name = "tokio"

@@ -2414,6 +2414,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde",
+ "sha2",
 ]
 
 [[package]]
