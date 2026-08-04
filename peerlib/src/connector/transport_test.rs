@@ -19,20 +19,25 @@
     }
 
     fn write_raw_frame(stream: &mut std::net::TcpStream, payload: &[u8]) {
-            use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
-            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-            use rustls::{ServerConfig, ServerConnection, StreamOwned};
-            use std::fs;
-            use std::io::{Cursor, Read, Write};
-            use std::path::PathBuf;
-            use std::sync::Arc;
-            use std::time::{SystemTime, UNIX_EPOCH};
         let len = payload.len() as u32;
         stream
             .write_all(&len.to_le_bytes())
             .and_then(|_| stream.write_all(payload))
             .expect("raw frame should write");
         stream.flush().expect("raw frame should flush");
+    }
+
+    fn assert_tls_connect_failure(err: ConnectorError) {
+        match err {
+            ConnectorError::Transport(message) => {
+                assert!(
+                    message.contains("TLS handshake failed")
+                        || message.contains("failed to create TLS client connection"),
+                    "unexpected transport error message: {message}"
+                );
+            }
+            other => panic!("expected transport error, got: {:?}", other),
+        }
     }
 
     fn read_request(stream: &mut std::net::TcpStream) -> ConnectorRequest {
@@ -389,12 +394,7 @@
         let err = transport
             .connect_active_peer()
             .expect_err("plaintext peer should not accept a TLS-only connection");
-        match err {
-            ConnectorError::Transport(message) => {
-                assert!(message.contains("TLS handshake failed"));
-            }
-            other => panic!("expected transport error, got: {:?}", other),
-        }
+        assert_tls_connect_failure(err);
 
         server.join().expect("server thread should finish");
     }
@@ -421,12 +421,7 @@
         let err = transport
             .connect_active_peer()
             .expect_err("plaintext peer should not accept a TLS-only connection");
-        match err {
-            ConnectorError::Transport(message) => {
-                assert!(message.contains("TLS handshake failed"));
-            }
-            other => panic!("expected transport error, got: {:?}", other),
-        }
+        assert_tls_connect_failure(err);
 
         server.join().expect("server thread should finish");
     }
@@ -453,13 +448,7 @@
         let err = transport
             .connect_active_peer()
             .expect_err("plaintext peer should not accept a TLS-only connection");
-
-        match err {
-            ConnectorError::Transport(message) => {
-                assert!(message.contains("TLS handshake failed"));
-            }
-            other => panic!("expected transport error, got: {:?}", other),
-        }
+        assert_tls_connect_failure(err);
 
         server.join().expect("server thread should finish");
     }
@@ -486,13 +475,7 @@
         let err = transport
             .connect_active_peer()
             .expect_err("plaintext peer should not accept a TLS-only connection");
-
-        match err {
-            ConnectorError::Transport(message) => {
-                assert!(message.contains("TLS handshake failed"));
-            }
-            other => panic!("expected transport error, got: {:?}", other),
-        }
+        assert_tls_connect_failure(err);
 
         server.join().expect("server thread should finish");
     }

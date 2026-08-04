@@ -140,8 +140,20 @@ fn looks_like_public_hostname(value: &str) -> bool {
     }
 
     let lower = trimmed.to_ascii_lowercase();
-    let labels = lower.split('.').filter(|label| !label.is_empty()).collect::<Vec<_>>();
-    if labels.len() < 2 {
+    let mut label_count = 0usize;
+    let mut has_private_label = false;
+    for label in lower.split('.') {
+        if label.is_empty() {
+            continue;
+        }
+
+        label_count += 1;
+        if matches!(label, "fritz" | "box" | "local" | "lan" | "home" | "host" | "desktop" | "mac") {
+            has_private_label = true;
+        }
+    }
+
+    if label_count < 2 {
         return false;
     }
 
@@ -166,8 +178,7 @@ fn looks_like_public_hostname(value: &str) -> bool {
         return false;
     }
 
-    let private_labels = ["fritz", "box", "local", "lan", "home", "host", "desktop", "mac"];
-    if labels.iter().any(|label| private_labels.contains(label)) {
+    if has_private_label {
         return false;
     }
 
@@ -182,8 +193,9 @@ fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
     }
 
     if trimmed.starts_with('/') {
-        let parts = trimmed.trim_matches('/').split('/').collect::<Vec<_>>();
-        if let Some(host) = parts.get(1) {
+        let mut parts = trimmed.trim_matches('/').split('/');
+        let _proto = parts.next();
+        if let Some(host) = parts.next() {
             let host = host.trim();
             if looks_like_public_hostname(host) {
                 return Some(host.to_string());
@@ -207,15 +219,9 @@ fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
 }
 
 fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
-    
-    #[expect(clippy::redundant_closure, reason="we want to explicitly show the closure for clarity")]
     args.iter()
         .find_map(|arg| arg.strip_prefix("servers=").map(str::trim))
-        .and_then(|server_list| {
-            server_list
-                .split(',')
-                .find_map(|entry| extract_public_host_from_server_entry(entry))
-        })
+        .and_then(|server_list| server_list.split(',').find_map(extract_public_host_from_server_entry))
 
 }
 
@@ -225,13 +231,11 @@ fn resolve_public_host_from_tls_sans(args: &[String]) -> Option<String> {
         .and_then(|san_list| {
             san_list
                 .split(',')
-                .map(str::trim)
                 .find_map(|san| {
-                    let sanitized = san.trim();
-                    if is_placeholder_host(sanitized) || sanitized.is_empty() {
+                    if is_placeholder_host(san) {
                         None
                     } else {
-                        extract_public_host_from_server_entry(sanitized)
+                        extract_public_host_from_server_entry(san)
                     }
                 })
         })
@@ -508,16 +512,16 @@ pub fn bootstrap_nodes_from_server_list(server_list: &[String]) -> Vec<PeerNode>
 
 pub fn multiaddr_to_socket_addr(addr: &str) -> Option<String> {
 
-    let parts = addr.trim_matches('/').split('/').collect::<Vec<_>>();
-    if parts.len() < 4 {
-        return None;
-    }
+    let mut parts = addr.trim_matches('/').split('/');
+    let p0 = parts.next()?;
+    let host = parts.next()?;
+    let p2 = parts.next()?;
+    let p3 = parts.next()?;
 
-    match (parts[0], parts[2]) {
+    match (p0, p2) {
         ("ip4", "tcp") | ("dns", "tcp") => {
-            let host = parts[1];
-            let port = parts[3].parse::<u16>().ok()?;
-            Some(format!("{}:{}", host, port))
+            let port = p3.parse::<u16>().ok()?;
+            Some(format!("{host}:{port}"))
         }
         _ => None,
     }
@@ -525,8 +529,9 @@ pub fn multiaddr_to_socket_addr(addr: &str) -> Option<String> {
 }
 
 pub fn encode_service_message(message: &ServiceMessage) -> Option<Vec<u8>> {
-    let mut payload = SERVICE_MESSAGE_MAGIC.to_vec();
     let encoded = bincode::serialize(message).ok()?;
+    let mut payload = Vec::with_capacity(SERVICE_MESSAGE_MAGIC.len() + encoded.len());
+    payload.extend_from_slice(SERVICE_MESSAGE_MAGIC);
     payload.extend_from_slice(&encoded);
     Some(payload)
 }

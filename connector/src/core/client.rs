@@ -46,12 +46,12 @@ impl<T: ConnectorTransport> ConnectorClient<T> {
         }
 
         if response.status == ResponseStatus::Rejected {
-            if let ConnectorResult::Error(message) = &response.result {
-                return Err(ConnectorError::Rejected(message.clone()));
-            }
-            return Err(ConnectorError::InvalidResponse(
-                "rejected response missing error message".to_string(),
-            ));
+            return match response.result {
+                ConnectorResult::Error(message) => Err(ConnectorError::Rejected(message)),
+                _ => Err(ConnectorError::InvalidResponse(
+                    "rejected response missing error message".to_string(),
+                )),
+            };
         }
 
         Ok(response)

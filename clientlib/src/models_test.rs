@@ -1,15 +1,8 @@
 use super::*;
 
 #[test]
-fn tls_mode_parse_and_as_common_cover_all_variants() {
-    assert_eq!(TlsMode::parse("off"), Some(TlsMode::Off));
-    assert_eq!(TlsMode::parse("optional"), Some(TlsMode::Optional));
-    assert_eq!(TlsMode::parse("required"), Some(TlsMode::Required));
-    assert_eq!(TlsMode::parse("unknown"), None);
-
-    assert_eq!(TlsMode::Off.as_common(), common::TlsMode::Off);
-    assert_eq!(TlsMode::Optional.as_common(), common::TlsMode::Optional);
-    assert_eq!(TlsMode::Required.as_common(), common::TlsMode::Required);
+fn tls_mode_default_is_required() {
+    assert_eq!(TlsMode::default(), TlsMode::Required);
 }
 
 #[test]

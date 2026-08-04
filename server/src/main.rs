@@ -421,7 +421,7 @@ fn load_cached_issued_tls_material(
         return Some(IssuedTlsMaterial {
             cert_pem,
             key_pem,
-            ca_pem: ca_pem.clone(),
+            ca_pem,
         });
     }
 

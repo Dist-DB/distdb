@@ -1928,7 +1928,7 @@ pub async fn maybe_server_peer_discovery_response(
                 let peer_addrs = if peer_id == local_node.id.0 {
                     local_node_discovery_addrs(local_node)
                 } else {
-                    peer.addrs.clone()
+                    peer.addrs
                 };
                 log::info!(
                     "server peer discovery row peer_id={} local_node_addrs={:?} peer_addrs={:?}",

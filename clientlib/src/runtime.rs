@@ -32,7 +32,7 @@ impl DistDbClient {
         client_handles: Arc<Mutex<Vec<Weak<Mutex<ClientInner>>>>>,
     ) -> Result<Self, ClientError> {
 
-        options.servers = normalize_bootstrap_peers(options.servers.clone());
+        options.servers = normalize_bootstrap_peers(std::mem::take(&mut options.servers));
 
         if options.servers.is_empty() {
             return Err(ClientError::Config(
@@ -40,9 +40,16 @@ impl DistDbClient {
             ));
         }
 
+        if options.tls_mode != crate::TlsMode::Required {
+            return Err(ClientError::Config(
+                "tls mode is fixed to required; set ClientOptions.tls_mode=required"
+                    .to_string(),
+            ));
+        }
+
         let mut p2p_config = ConnectorP2pConfig::new("/distdb/kad/1.0.0")
             .with_bootstrap_peers(options.servers.clone())
-            .with_tls_mode(options.tls_mode.as_common());
+            .with_tls_mode(common::TlsMode::Required);
 
         if let Some(path) = &options.tls_ca_path {
             p2p_config = p2p_config.with_tls_ca_path(path.clone());
@@ -486,8 +493,13 @@ fn query_response_from_wire(
     wire: connector::QueryResult,
 ) -> QueryResponse {
 
-    let columns = wire
-        .columns
+    let connector::QueryResult {
+        columns: wire_columns,
+        rows: wire_rows,
+        timings: wire_timings,
+    } = wire;
+
+    let columns = wire_columns
         .iter()
         .enumerate()
         .map(|(ordinal, column)| QueryColumnDef {
@@ -499,10 +511,7 @@ fn query_response_from_wire(
         })
         .collect::<Vec<_>>();
 
-    let wire_columns = wire.columns.clone();
-
-    let rows = wire
-        .rows
+    let rows = wire_rows
         .into_iter()
         .map(|row| QueryRow {
             values: row
@@ -527,11 +536,11 @@ fn query_response_from_wire(
         rows,
         row_count,
         timings: QueryTimings {
-            server_parse_ms: wire.timings.server_parse_ms,
-            server_execute_ms: wire.timings.server_execute_ms,
-            server_total_ms: wire.timings.server_total_ms,
-            network_round_trip_ms: wire.timings.network_round_trip_ms,
-            cache: wire.timings.cache.map(|cache| format!("{cache:?}")),
+            server_parse_ms: wire_timings.server_parse_ms,
+            server_execute_ms: wire_timings.server_execute_ms,
+            server_total_ms: wire_timings.server_total_ms,
+            network_round_trip_ms: wire_timings.network_round_trip_ms,
+            cache: wire_timings.cache.map(|cache| format!("{cache:?}")),
         },
     }
 

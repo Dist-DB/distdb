@@ -16,7 +16,7 @@ fn make_inner(connected: bool) -> ClientInner {
     let options = sample_options(vec!["/ip4/127.0.0.1/tcp/4001".to_string()]);
     let config = ConnectorP2pConfig::new("/distdb/kad/1.0.0")
         .with_bootstrap_peers(options.servers.clone())
-        .with_tls_mode(options.tls_mode.as_common());
+        .with_tls_mode(common::TlsMode::Required);
 
     ClientInner {
         transport: ConnectorP2pTransport::new(config),

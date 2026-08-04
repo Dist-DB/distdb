@@ -5,30 +5,9 @@ use std::path::PathBuf;
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
     Off,
-    #[default]
     Optional,
+    #[default]
     Required,
-}
-
-impl TlsMode {
-
-    pub(crate) fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "off" => Some(Self::Off),
-            "optional" => Some(Self::Optional),
-            "required" => Some(Self::Required),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_common(self) -> common::TlsMode {
-        match self {
-            Self::Off => common::TlsMode::Off,
-            Self::Optional => common::TlsMode::Optional,
-            Self::Required => common::TlsMode::Required,
-        }
-    }
-    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
