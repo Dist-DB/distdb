@@ -802,13 +802,12 @@ impl ConsoleSession {
         let original_active_peer = self.runtime.transport().active_peer_id().map(ToOwned::to_owned);
         let mut preferred_peer_id = None;
 
-        if let Some(active_peer_id) = original_active_peer.as_deref() {
-            if let Some(position) = known_peers.iter().position(|peer| peer.peer_id == active_peer_id) {
+        if let Some(active_peer_id) = original_active_peer.as_deref()
+            && let Some(position) = known_peers.iter().position(|peer| peer.peer_id == active_peer_id) {
                 let active_peer = known_peers.remove(position);
                 known_peers.insert(0, active_peer);
                 preferred_peer_id = Some(active_peer_id.to_string());
             }
-        }
 
         let database_id = self
             .current_database

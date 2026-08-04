@@ -1,3 +1,7 @@
+
+#![allow(unused_imports)]
+#![allow(dead_code)]
+
 /*
 
 	This file is part of DistDB.
@@ -28,8 +32,6 @@
     Copyright (c) 2026 Sam Colak. All rights reserved.
 
 */
-
-#![allow(dead_code)]
 
 pub mod error;
 pub mod interface;

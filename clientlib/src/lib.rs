@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /*
 
 	This file is part of DistDB.

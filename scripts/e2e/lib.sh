@@ -19,6 +19,17 @@ log() {
   printf '[e2e] %s\n' "$*"
 }
 
+has_match() {
+  local pattern="$1"
+  local file="$2"
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" "$file"
+  else
+    grep -Eq "$pattern" "$file"
+  fi
+}
+
 fail() {
   printf '[e2e][fail] %s\n' "$*" >&2
   exit 1
@@ -130,7 +141,7 @@ wait_for_server() {
 
   for _ in {1..50}; do
     if [[ -n "$logfile" ]] && [[ -f "$logfile" ]]; then
-      if ! rg -q "connector bootstrap gate opened" "$logfile"; then
+      if ! has_match "connector bootstrap gate opened" "$logfile"; then
         sleep 0.2
         continue
       fi
@@ -142,7 +153,7 @@ password root;
 quit;
 SQL
     then
-      if rg -q "no active peer connection|transport reconnect failed|Connection refused|server is bootstrapping" "$probe_out"; then
+      if has_match "no active peer connection|transport reconnect failed|Connection refused|server is bootstrapping" "$probe_out"; then
         sleep 0.2
         continue
       fi
