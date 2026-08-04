@@ -36,6 +36,13 @@ mod caroot;
 pub use caroot::platform_ca::{
 	PLATFORM_TLS_ROOT_CERT_PEM,
 	PLATFORM_TLS_ROOT_FINGERPRINT_SHA256,
+	PLATFORM_TLS_ISSUING_CA_CERT_PEM,
+	PLATFORM_TLS_ISSUING_CA_FINGERPRINT_SHA256,
+	PLATFORM_TLS_ISSUING_CA_KEY_PEM,
+	platform_tls_issuing_ca_cert_pem,
+	platform_tls_issuing_ca_fingerprint_sha256,
+	platform_tls_issuing_ca_key_pem,
+	platform_tls_leaf_chain_pem,
 	platform_tls_root_cert_pem,
 	platform_tls_root_fingerprint_sha256,
 };

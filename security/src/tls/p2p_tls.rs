@@ -1,16 +1,23 @@
+use crate::{
+    platform_tls_issuing_ca_cert_pem,
+    platform_tls_issuing_ca_key_pem,
+    platform_tls_leaf_chain_pem,
+    platform_tls_root_cert_pem,
+};
 use std::collections::BTreeSet;
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use openssl::{pkey::PKey, x509::X509};
 use openssl::sha::sha256;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
-    DistinguishedName, DnType, ExtendedKeyUsagePurpose, Ia5String, IsCa, KeyPair,
+    Certificate, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
+    DnType, ExtendedKeyUsagePurpose, Ia5String, KeyPair,
     KeyUsagePurpose, SanType,
 };
+#[cfg(test)]
+use rcgen::{BasicConstraints, IsCa};
 use common::helpers::utils::md5_hash;
 
 const CA_FINGERPRINT_FILE_NAME: &str = "ca-fingerprint.sha256";
@@ -263,11 +270,47 @@ fn certificate_material_is_valid(
     let leaf_issuer = leaf_cert.issuer_name().to_der().ok();
     let ca_subject = ca_cert.subject_name().to_der().ok();
 
-    ca_cert.verify(&ca_public_key).is_ok()
-        && leaf_cert.verify(&ca_public_key).is_ok()
+    leaf_cert.verify(&ca_public_key).is_ok()
         && leaf_subject_key_id != ca_subject_key_id
         && leaf_issuer.as_ref() == ca_subject.as_ref()
 
+}
+
+fn load_embedded_platform_issuing_ca() -> Result<(Certificate, KeyPair), String> {
+    let ca_key = KeyPair::from_pem(platform_tls_issuing_ca_key_pem())
+        .map_err(|err| format!("failed parsing embedded issuing CA key: {err}"))?;
+
+    let ca_params = CertificateParams::from_ca_cert_pem(platform_tls_issuing_ca_cert_pem())
+        .map_err(|err| format!("failed parsing embedded issuing CA cert: {err}"))?;
+
+    let ca_cert = ca_params
+        .self_signed(&ca_key)
+        .map_err(|err| format!("failed rebuilding embedded issuing CA certificate params: {err}"))?;
+
+    Ok((ca_cert, ca_key))
+}
+
+fn sync_embedded_platform_issuing_ca(
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+) -> Result<(Certificate, KeyPair), String> {
+    std::fs::write(ca_cert_path, platform_tls_issuing_ca_cert_pem()).map_err(|err| {
+        format!(
+            "failed writing issuing CA cert '{}': {}",
+            ca_cert_path.display(),
+            err
+        )
+    })?;
+
+    std::fs::write(ca_key_path, platform_tls_issuing_ca_key_pem()).map_err(|err| {
+        format!(
+            "failed writing issuing CA key '{}': {}",
+            ca_key_path.display(),
+            err
+        )
+    })?;
+
+    load_embedded_platform_issuing_ca()
 }
 
 fn ca_spki_sha256_fingerprint(cert_pem: &str) -> Result<String, String> {
@@ -349,13 +392,9 @@ pub fn sign_tls_enrollment_csr(
     csr_pem: &str,
 ) -> Result<(String, String), String> {
 
-    let (_, ca_cert_path, ca_key_path) = cluster_tls_paths(node_data_dir);
+    let _ = node_data_dir;
 
-    if !(ca_cert_path.exists() && ca_key_path.exists()) {
-        return Err("local CA material is missing; cannot sign CSR".to_string());
-    }
-
-    let (ca_cert, ca_key) = load_existing_ca(&ca_cert_path, &ca_key_path)?;
+    let (ca_cert, ca_key) = load_embedded_platform_issuing_ca()?;
     let csr = CertificateSigningRequestParams::from_pem(csr_pem)
         .map_err(|err| format!("failed parsing CSR PEM: {err}"))?;
 
@@ -363,7 +402,10 @@ pub fn sign_tls_enrollment_csr(
         .signed_by(&ca_cert, &ca_key)
         .map_err(|err| format!("failed signing CSR: {err}"))?;
 
-    Ok((signed.pem(), ca_cert.pem()))
+    Ok((
+        platform_tls_leaf_chain_pem(&signed.pem()),
+        platform_tls_issuing_ca_cert_pem().to_string(),
+    ))
 
 }
 
@@ -420,46 +462,6 @@ pub fn install_signed_p2p_tls(
 
 }
 
-fn load_existing_ca(ca_cert_path: &Path, ca_key_path: &Path) -> Result<(Certificate, KeyPair), String> {
-
-    let ca_cert_pem = std::fs::read_to_string(ca_cert_path)
-        .map_err(|err| format!("failed reading existing CA cert '{}': {}", ca_cert_path.display(), err))?;
-
-    let ca_key_pem = std::fs::read_to_string(ca_key_path)
-        .map_err(|err| format!("failed reading existing CA key '{}': {}", ca_key_path.display(), err))?;
-
-    let ca_key = KeyPair::from_pem(&ca_key_pem)
-        .map_err(|err| format!("failed parsing existing CA key: {err}"))?;
-
-    let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
-        .map_err(|err| format!("failed parsing existing CA cert: {err}"))?;
-
-    let ca_cert = ca_params
-        .self_signed(&ca_key)
-        .map_err(|err| format!("failed rebuilding existing CA certificate params: {err}"))?;
-
-    Ok((ca_cert, ca_key))
-
-}
-
-fn wait_for_ca_material(ca_cert_path: &Path, ca_key_path: &Path) -> Result<(), String> {
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if ca_cert_path.exists() && ca_key_path.exists() {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    Err(format!(
-        "timed out waiting for CA material '{}' and '{}'",
-        ca_cert_path.display(),
-        ca_key_path.display()
-    ))
-
-}
-
 pub fn ensure_or_generate_tls_cert(
     node_data_dir: &Path,
     node_id: &str,
@@ -479,6 +481,8 @@ pub fn ensure_or_generate_tls_cert(
     let have_ca = ca_cert_path.exists() && ca_key_path.exists();
     let have_leaf = cert_path.exists() && key_path.exists();
 
+    let (ca_cert, ca_key) = sync_embedded_platform_issuing_ca(&ca_cert_path, &ca_key_path)?;
+
     let existing_material_is_valid = have_ca
         && have_leaf
         && certificate_material_is_valid(&cert_path, &key_path, &ca_cert_path, &ca_key_path);
@@ -496,113 +500,16 @@ pub fn ensure_or_generate_tls_cert(
         let _ = std::fs::remove_file(&key_path);
     }
 
-    let (ca_cert, ca_key) = if have_ca {
-        if !certificate_material_is_valid(&cert_path, &key_path, &ca_cert_path, &ca_key_path) {
-            let _ = std::fs::remove_file(&ca_cert_path);
-            let _ = std::fs::remove_file(&ca_key_path);
-        }
-        if ca_cert_path.exists() && ca_key_path.exists() {
-            load_existing_ca(&ca_cert_path, &ca_key_path)?
-        } else {
-            let mut ca_dn = DistinguishedName::new();
-            ca_dn.push(DnType::CommonName, "distdb-p2p-ca");
-
-            let mut ca_params = CertificateParams::default();
-            ca_params.distinguished_name = ca_dn;
-            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-
-            let ca_key =
-                KeyPair::generate().map_err(|err| format!("failed generating CA key: {err}"))?;
-            let ca_cert = ca_params
-                .self_signed(&ca_key)
-                .map_err(|err| format!("failed generating CA cert: {err}"))?;
-
-            std::fs::write(&ca_cert_path, ca_cert.pem()).map_err(|err| {
-                format!("failed writing CA cert '{}': {}", ca_cert_path.display(), err)
-            })?;
-
-            std::fs::write(&ca_key_path, ca_key.serialize_pem()).map_err(|err| {
-                format!("failed writing CA key '{}': {}", ca_key_path.display(), err)
-            })?;
-
-            (ca_cert, ca_key)
-        }
-    } else {
-        let ca_lock_path = tls_dir.join(".ca-init.lock");
-
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&ca_lock_path)
-        {
-            Ok(_) => {
-                struct CaLockGuard {
-                    path: PathBuf,
-                }
-                impl Drop for CaLockGuard {
-                    fn drop(&mut self) {
-                        let _ = std::fs::remove_file(&self.path);
-                    }
-                }
-                let _guard = CaLockGuard { path: ca_lock_path };
-
-                if ca_cert_path.exists() && ca_key_path.exists() {
-                    load_existing_ca(&ca_cert_path, &ca_key_path)?
-                } else {
-                    let mut ca_dn = DistinguishedName::new();
-                    ca_dn.push(DnType::CommonName, "distdb-p2p-ca");
-
-                    let mut ca_params = CertificateParams::default();
-                    ca_params.distinguished_name = ca_dn;
-                    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-                    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-
-                    let ca_key =
-                        KeyPair::generate().map_err(|err| format!("failed generating CA key: {err}"))?;
-                    let ca_cert = ca_params
-                        .self_signed(&ca_key)
-                        .map_err(|err| format!("failed generating CA cert: {err}"))?;
-
-                    std::fs::write(&ca_cert_path, ca_cert.pem()).map_err(|err| {
-                        format!("failed writing CA cert '{}': {}", ca_cert_path.display(), err)
-                    })?;
-
-                    std::fs::write(&ca_key_path, ca_key.serialize_pem()).map_err(|err| {
-                        format!("failed writing CA key '{}': {}", ca_key_path.display(), err)
-                    })?;
-
-                    (ca_cert, ca_key)
-                }
-            },
-
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                wait_for_ca_material(&ca_cert_path, &ca_key_path)?;
-                load_existing_ca(&ca_cert_path, &ca_key_path)?
-            },
-
-            Err(err) => {
-                return Err(format!(
-                    "failed to acquire CA initialization lock '{}': {}",
-                    ca_lock_path.display(),
-                    err
-                ));
-            }
-
-        }
-
-    };
-
     let leaf_params = certificate_params_for_node(node_id, address_hint, extra_subject_alt_names)?;
 
-    let ca_cert_pem = std::fs::read_to_string(&ca_cert_path).map_err(|err| {
+    std::fs::write(&ca_cert_path, platform_tls_issuing_ca_cert_pem()).map_err(|err| {
         format!(
-            "failed reading CA cert '{}' for fingerprint persistence: {}",
+            "failed writing issuing CA cert '{}': {}",
             ca_cert_path.display(),
             err
         )
     })?;
-    persist_ca_fingerprint_file(&tls_dir, &ca_cert_pem)?;
+    persist_ca_fingerprint_file(&tls_dir, platform_tls_root_cert_pem())?;
 
     let leaf_key = KeyPair::generate().map_err(|err| format!("failed generating leaf key: {err}"))?;
 
@@ -610,7 +517,7 @@ pub fn ensure_or_generate_tls_cert(
         .signed_by(&leaf_key, &ca_cert, &ca_key)
         .map_err(|err| format!("failed generating leaf cert: {err}"))?;
 
-    std::fs::write(&cert_path, leaf_cert.pem())
+    std::fs::write(&cert_path, platform_tls_leaf_chain_pem(&leaf_cert.pem()))
         .map_err(|err| format!("failed writing node cert '{}': {}", cert_path.display(), err))?;
 
     std::fs::write(&key_path, leaf_key.serialize_pem())
