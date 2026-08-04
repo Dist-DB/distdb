@@ -47,6 +47,7 @@ impl ServerApp {
     }
 
     fn read_only_runtime_index_scope_table_ids(parsed_requests: &[SqlRequest]) -> HashSet<String> {
+
         let mut table_ids = HashSet::new();
 
         for request in parsed_requests {
@@ -71,6 +72,7 @@ impl ServerApp {
         }
 
         table_ids
+
     }
 
     fn quoted_sql_identifier(name: &str) -> String {
@@ -103,6 +105,7 @@ impl ServerApp {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+
         format!("x'{hex}'")
         
     }
@@ -219,6 +222,7 @@ impl ServerApp {
         let sql = match mutation {
 
             connector::DataMutation::Insert { table_id, values } => {
+
                 let columns = values
                     .iter()
                     .map(|value| Self::quoted_sql_identifier(&value.name))
@@ -237,6 +241,7 @@ impl ServerApp {
                     columns,
                     rendered_values
                 )
+
             },
 
             connector::DataMutation::Update {
@@ -244,6 +249,7 @@ impl ServerApp {
                 values,
                 predicate_sql,
             } => {
+
                 let assignments = values
                     .iter()
                     .map(|value| {
@@ -277,6 +283,7 @@ impl ServerApp {
                 table_id,
                 predicate_sql,
             } => {
+
                 let mut sql = format!("delete from {}", Self::quoted_sql_identifier(table_id));
 
                 if let Some(predicate_sql) = predicate_sql.as_deref() {
@@ -288,6 +295,7 @@ impl ServerApp {
                 }
 
                 sql
+                
             },
 
         };

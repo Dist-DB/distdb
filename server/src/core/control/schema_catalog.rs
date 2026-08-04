@@ -24,6 +24,7 @@ pub fn load_schema_catalog_from_disk(
     app: &ServerApp,
     database_id: &str,
 ) -> Option<serverlib::DatabaseCatalog> {
+
     let mut candidate_ids = vec![database_id.to_string()];
 
     if let Ok(normalized_id) = serverlib::DatabaseId::from_database_name(database_id)
@@ -54,9 +55,11 @@ pub fn load_schema_catalog_from_disk(
     }
 
     None
+
 }
 
 pub fn schema_catalog_signature(catalog: &serverlib::DatabaseCatalog) -> (u64, Option<String>) {
+
     let mut table_ids = catalog.table_ids();
     table_ids.sort();
 
@@ -72,18 +75,21 @@ pub fn schema_catalog_signature(catalog: &serverlib::DatabaseCatalog) -> (u64, O
     );
 
     (schema_identifier, Some(schema_hash))
+
 }
 
 pub fn build_schema_definitions_for_database(
     app: &ServerApp,
     database_id: &str,
 ) -> Result<Vec<String>, String> {
+
     let catalog = resolve_schema_catalog(app, database_id)
         .cloned()
         .or_else(|| load_schema_catalog_from_disk(app, database_id))
         .ok_or_else(|| format!("database '{}' not found", database_id))?;
 
     let mut table_ids = catalog.table_ids();
+
     table_ids.sort();
 
     let mut statements = Vec::new();
@@ -121,9 +127,11 @@ pub fn build_schema_definitions_for_database(
             table_id,
             parts.join(", ")
         ));
+    
     }
 
     Ok(statements)
+
 }
 
 pub fn apply_schema_definitions_to_local_database(
@@ -131,5 +139,7 @@ pub fn apply_schema_definitions_to_local_database(
     database_id: &str,
     schema_definitions: &[String],
 ) -> Result<(), String> {
+    
     app.apply_affinity_schema_definitions(database_id, schema_definitions)
+    
 }

@@ -43,7 +43,7 @@ pub(crate) fn statement_preview(statement: &str) -> String {
 }
 
 pub(crate) fn record_import_statement_timing(
-    transaction_state: &mut super::ImportTransactionState,
+    transaction_state: &mut super::session::ImportTransactionState,
     kind: ImportStatementKind,
     statement_bytes: usize,
     elapsed_ms: u128,
@@ -74,12 +74,12 @@ pub(crate) fn record_import_statement_timing(
 pub(crate) fn execute_import_from_reader<R, F>(
     mut reader: R,
     database_id: &str,
-    transaction_state: &mut super::ImportTransactionState,
+    transaction_state: &mut super::session::ImportTransactionState,
     mut execute_statement: F,
 ) -> Result<(), String>
 where
     R: BufRead,
-    F: FnMut(&str, &str, &mut super::ImportTransactionState) -> Result<(), String>,
+    F: FnMut(&str, &str, &mut super::session::ImportTransactionState) -> Result<(), String>,
 {
     let mut parser = SqlStatementParser::default();
     let mut pending_bytes = Vec::<u8>::new();

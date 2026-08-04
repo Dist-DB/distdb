@@ -99,18 +99,23 @@ where
     let mut text_request_seq = 0u64;
 
     while let Some(inbound) = stream.next().await {
+
         let message = inbound
             .map_err(|err| WssHandlerError::Transport(err.to_string()))?;
 
         match message {
+
             Message::Close(_) => return Ok(()),
+
             Message::Ping(payload) => {
                 stream
                     .send(Message::Pong(payload))
                     .await
                     .map_err(|err| WssHandlerError::Transport(err.to_string()))?;
-            }
-            Message::Pong(_) => {}
+            },
+
+            Message::Pong(_) => {},
+
             Message::Binary(payload) => {
                 let inbound_message = surface
                     .decode_inbound_payload(&payload)
@@ -138,7 +143,8 @@ where
                     .send(Message::Binary(response_payload))
                     .await
                     .map_err(|err| WssHandlerError::Transport(err.to_string()))?;
-            }
+            },
+
             Message::Text(sql) => {
                 text_request_seq = text_request_seq.saturating_add(1);
                 let request = ConnectorRequest::new(
@@ -159,23 +165,29 @@ where
                     .send(Message::Text(render_text_response(&response)))
                     .await
                     .map_err(|err| WssHandlerError::Transport(err.to_string()))?;
-            }
+            },
+
             Message::Frame(_) => {
                 return Err(WssHandlerError::Frame(
                     WssFrameError::UnsupportedMessageType,
                 ));
             }
+
         }
+
     }
 
     Ok(())
+
 }
 
 fn render_text_response(response: &ConnectorResponse) -> String {
+
     let ok = response.status.to_string() == "applied";
     let code = if ok { 0 } else { 1 };
 
     let payload = match &response.result {
+
         ConnectorResult::Mutation(result) => json!({
             "ok": ok,
             "code": code,
@@ -185,6 +197,7 @@ fn render_text_response(response: &ConnectorResponse) -> String {
                 "affected_rows": result.affected_rows,
             }
         }),
+
         ConnectorResult::Schema(result) => json!({
             "ok": ok,
             "code": code,
@@ -195,12 +208,14 @@ fn render_text_response(response: &ConnectorResponse) -> String {
                 "schema_revision": result.schema_revision,
             }
         }),
+
         ConnectorResult::Error(message) => json!({
             "ok": false,
             "code": 1,
             "error": message,
             "result": Value::Null,
         }),
+
         ConnectorResult::Query(result) => {
             let columns = result
                 .columns
@@ -243,23 +258,28 @@ fn render_text_response(response: &ConnectorResponse) -> String {
                 }
             })
         }
+
     };
 
     payload.to_string()
+
 }
 
 fn index_kind_name(indexed: connector::FieldIndex) -> &'static str {
+
     match indexed {
         connector::FieldIndex::None => "none",
         connector::FieldIndex::Indexed => "indexed",
         connector::FieldIndex::PrimaryKey => "primary_key",
     }
+
 }
 
 pub fn validate_wss_tls_policy(
     tls_mode: common::TlsMode,
     tls_acceptor_configured: bool,
 ) -> Result<(), WssFrameError> {
+
     if tls_mode != common::TlsMode::Required {
         return Err(WssFrameError::TlsPolicy(
             "wss requires tls=required; off/optional are not allowed".to_string(),
@@ -273,6 +293,7 @@ pub fn validate_wss_tls_policy(
     }
 
     Ok(())
+
 }
 
 pub fn is_wss_path(path: &str) -> bool {
@@ -290,12 +311,17 @@ pub fn encode_connector_response_message(
 pub fn decode_connector_request_message(
     message: Message,
 ) -> Result<ConnectorRequest, WssFrameError> {
+
     let payload = match message {
+        
         Message::Binary(bytes) => bytes,
+        
         Message::Close(_) => return Err(WssFrameError::MissingPayload),
+        
         Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_) => {
             return Err(WssFrameError::UnsupportedMessageType);
         }
+
     };
 
     if payload.is_empty() {
@@ -304,6 +330,7 @@ pub fn decode_connector_request_message(
 
     bincode::deserialize::<ConnectorRequest>(&payload)
         .map_err(|err| WssFrameError::Decode(err.to_string()))
+        
 }
 
 #[cfg(test)]

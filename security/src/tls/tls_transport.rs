@@ -159,20 +159,13 @@ impl StaticServerCertResolver {
 }
 
 impl ResolvesServerCert for StaticServerCertResolver {
-    fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let Some(server_name) = client_hello.server_name() else {
-            return Some(self.cert.clone());
-        };
-
-        if certificate_matches_server_name(&self.cert.cert[0], server_name) {
-            return Some(self.cert.clone());
-        }
-
-        Some(self.cert.clone())
+    fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.cert))
     }
 }
 
 pub fn certificate_matches_server_name(cert_der: &[u8], server_name: &str) -> bool {
+
     let Ok(cert) = X509::from_der(cert_der) else {
         return false;
     };
@@ -191,18 +184,25 @@ pub fn certificate_matches_server_name(cert_der: &[u8], server_name: &str) -> bo
                 .and_then(ip_addr_from_san_bytes)
                 .is_some_and(|ip| Some(ip) == expected_ip)
     })
+
 }
 
 fn ip_addr_from_san_bytes(raw: &[u8]) -> Option<IpAddr> {
+
     match raw.len() {
+
         4 => Some(IpAddr::V4(Ipv4Addr::new(raw[0], raw[1], raw[2], raw[3]))),
+
         16 => {
             let mut octets = [0u8; 16];
             octets.copy_from_slice(raw);
             Some(IpAddr::V6(Ipv6Addr::from(octets)))
-        }
+        },
+
         _ => None,
+
     }
+
 }
 
 pub fn build_tls_acceptor(config: &TlsConfig) -> Result<TlsAcceptor, String> {
@@ -318,6 +318,7 @@ pub async fn negotiate_connector_stream(
 ) -> Result<BoxedConnectorStream, Box<dyn std::error::Error + Send + Sync>> {
 
     match tls_mode {
+
         common::TlsMode::Required => {
 
             let acceptor = tls_acceptor.ok_or_else(|| {
@@ -337,6 +338,7 @@ pub async fn negotiate_connector_stream(
             Ok(Box::new(tls_stream))
 
         },
+        
         _ => Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("p2p network requires tls=required for peer {peer_addr}"),

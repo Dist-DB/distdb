@@ -119,29 +119,27 @@ impl ServerConnectionSession {
 
     pub fn record_request(&mut self, request: &ConnectorRequest) {
 
-        let event_type = match &request.command {
+        let (event_type, current_database) = match &request.command {
 
             ConnectorCommand::Query { query } => {
-                self.session.current_database = Some(query.database_id.clone());
-                SessionLogEventType::QueryExecute
+                (SessionLogEventType::QueryExecute, Some(query.database_id.as_str()))
             },
 
             ConnectorCommand::Schema { database_id, .. } => {
-                self.session.current_database = Some(database_id.clone());
-                SessionLogEventType::SchemaChange
+                (SessionLogEventType::SchemaChange, Some(database_id.as_str()))
             },
 
             ConnectorCommand::Mutation { database_id, .. } => {
-                self.session.current_database = Some(database_id.clone());
-                SessionLogEventType::Other
+                (SessionLogEventType::Other, Some(database_id.as_str()))
             },
 
             ConnectorCommand::CreateDatabase { database_name } => {
-                self.session.current_database = Some(database_name.clone());
-                SessionLogEventType::Other
-            }
+                (SessionLogEventType::Other, Some(database_name.as_str()))
+            },
 
         };
+
+        self.session.current_database = current_database.map(ToOwned::to_owned);
 
         self.log.add_entry(
             event_type,

@@ -31,13 +31,17 @@ impl ServerApp {
         let key = database_id.to_string();
 
         let mut catalog = DatabaseCatalog::new(DatabaseId(key.clone()));
+
         catalog.set_database_name(&key);
+        
         catalog
             .transition_status(ObjectStatus::Ready)
             .map_err(|err| format!("failed preparing replicated catalog '{}': {}", key, err))?;
+        
         catalog
             .save_in_directory(&self.node_data_dir)
             .map_err(|err| format!("failed persisting replicated catalog '{}' to disk: {:?}", key, err))?;
+        
         self.catalogs.insert(key.clone(), catalog);
 
         Ok(key)
@@ -65,13 +69,17 @@ impl ServerApp {
         if name.is_empty() {
             return Ok(());
         }
+        
         let Some(key) = self.resolve_catalog_key(database_id) else {
             return Ok(());
         };
+        
         let Some(catalog) = self.catalogs.get_mut(&key) else {
             return Ok(());
         };
+        
         catalog.set_database_name(name);
+
         catalog
             .save_in_directory(&self.node_data_dir)
             .map_err(|err| format!("failed persisting catalog name update for '{}': {:?}", key, err))
@@ -81,6 +89,7 @@ impl ServerApp {
     pub(super) fn begin_affinity_sync_lock(&mut self, database_id: &str) -> Result<(), String> {
 
         let database_key = self.ensure_affinity_catalog_exists(database_id)?;
+        
         let catalog = self
             .catalogs
             .get_mut(&database_key)

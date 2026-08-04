@@ -277,6 +277,7 @@ fn certificate_material_is_valid(
 }
 
 fn load_embedded_platform_issuing_ca() -> Result<(Certificate, KeyPair), String> {
+    
     let ca_key = KeyPair::from_pem(platform_tls_issuing_ca_key_pem())
         .map_err(|err| format!("failed parsing embedded issuing CA key: {err}"))?;
 
@@ -288,12 +289,14 @@ fn load_embedded_platform_issuing_ca() -> Result<(Certificate, KeyPair), String>
         .map_err(|err| format!("failed rebuilding embedded issuing CA certificate params: {err}"))?;
 
     Ok((ca_cert, ca_key))
+
 }
 
 fn sync_embedded_platform_issuing_ca(
     ca_cert_path: &Path,
     ca_key_path: &Path,
 ) -> Result<(Certificate, KeyPair), String> {
+
     std::fs::write(ca_cert_path, platform_tls_issuing_ca_cert_pem()).map_err(|err| {
         format!(
             "failed writing issuing CA cert '{}': {}",
@@ -311,25 +314,34 @@ fn sync_embedded_platform_issuing_ca(
     })?;
 
     load_embedded_platform_issuing_ca()
+
 }
 
 fn ca_spki_sha256_fingerprint(cert_pem: &str) -> Result<String, String> {
+    
     let cert = X509::from_pem(cert_pem.as_bytes())
         .map_err(|err| format!("failed parsing CA cert PEM: {err}"))?;
+    
     let public_key = cert
         .public_key()
         .map_err(|err| format!("failed extracting CA public key: {err}"))?;
+    
     let spki_der = public_key
         .public_key_to_der()
         .map_err(|err| format!("failed serializing CA SPKI DER: {err}"))?;
+    
     let digest = sha256(&spki_der);
+    
     Ok(digest.iter().map(|byte| format!("{:02x}", byte)).collect::<String>())
+
 }
 
 fn persist_ca_fingerprint_file(tls_dir: &Path, ca_cert_pem: &str) -> Result<(), String> {
+
     let fingerprint = ca_spki_sha256_fingerprint(ca_cert_pem)?;
 
     if let Ok(expected_raw) = std::env::var(PLATFORM_TLS_FINGERPRINT_ENV) {
+
         let normalized = expected_raw
             .trim()
             .chars()
@@ -351,6 +363,7 @@ fn persist_ca_fingerprint_file(tls_dir: &Path, ca_cert_pem: &str) -> Result<(), 
                 fingerprint
             ));
         }
+
     }
 
     let fingerprint_path = tls_dir.join(CA_FINGERPRINT_FILE_NAME);

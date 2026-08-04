@@ -284,10 +284,8 @@ pub fn cleanup_temporary_tables(
         .collect::<Vec<_>>();
 
     for table_id in temporary_tables {
-
-        let stream_id = catalog
-            .entity_wal_stream_id(&table_id)
-            .unwrap_or_else(|| table_id.clone());
+        
+        let stream_id = catalog.entity_wal_stream_id(&table_id);
         
         match catalog.drop_table(&table_id) {
             
@@ -298,6 +296,8 @@ pub fn cleanup_temporary_tables(
             }
 
         }
+
+        let stream_id = stream_id.unwrap_or(table_id);
 
         if wal.stream_mode(&stream_id) == crate::WalStreamMode::Ephemeral {
             wal.clear_stream_records(&stream_id)

@@ -1,8 +1,8 @@
 use super::*;
 use std::io::BufReader;
 
-fn new_transaction_state() -> super::super::ImportTransactionState {
-    super::super::ImportTransactionState {
+fn new_transaction_state() -> crate::session::ImportTransactionState {
+    crate::session::ImportTransactionState {
         enabled: false,
         active: false,
         dml_statements_in_batch: 0,

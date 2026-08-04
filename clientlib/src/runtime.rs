@@ -131,9 +131,7 @@ impl DistDbClient {
                 authenticate_sync(&mut guard, &password)?;
             }
 
-            if let Some(database) = guard.options.database.clone() {
-                guard.current_database = Some(database);
-            }
+            guard.current_database = guard.options.database.clone();
 
             guard.connected = true;
 
@@ -309,11 +307,12 @@ impl DistDbClient {
         for row in response.rows {
             let mut object = Map::new();
             for (index, column) in response.columns.iter().enumerate() {
-                if let Some(value) = row.values.get(index) {
-                    object.insert(column.name.clone(), query_value_to_json(value));
-                } else {
-                    object.insert(column.name.clone(), Value::Null);
-                }
+                let value = row
+                    .values
+                    .get(index)
+                    .map(query_value_to_json)
+                    .unwrap_or(Value::Null);
+                object.insert(column.name.clone(), value);
             }
 
             let entity = serde_json::from_value::<T>(Value::Object(object))

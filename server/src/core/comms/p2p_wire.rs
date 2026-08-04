@@ -187,6 +187,7 @@ fn looks_like_public_hostname(value: &str) -> bool {
 }
 
 fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
+
     let trimmed = entry.trim();
     if trimmed.is_empty() || is_placeholder_host(trimmed) {
         return None;
@@ -216,6 +217,7 @@ fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
     }
 
     None
+
 }
 
 fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
@@ -242,6 +244,7 @@ fn resolve_public_host_from_tls_sans(args: &[String]) -> Option<String> {
 }
 
 fn extract_public_hostname_from_hosts_content(content: &str) -> Option<String> {
+
     content
         .lines()
         .find_map(|line| {
@@ -273,9 +276,11 @@ fn extract_public_hostname_from_hosts_content(content: &str) -> Option<String> {
 
             None
         })
+
 }
 
 fn resolve_public_hostname_from_hosts_paths(paths: &[&str]) -> Option<String> {
+    
     for path in paths {
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
@@ -284,10 +289,13 @@ fn resolve_public_hostname_from_hosts_paths(paths: &[&str]) -> Option<String> {
             return Some(host);
         }
     }
+    
     None
+
 }
 
 pub(crate) fn resolve_hostname_hint() -> Option<String> {
+
     std::env::var("DISTDB_ADVERTISE_HOST")
         .ok()
         .filter(|value| looks_like_public_hostname(value))
@@ -315,6 +323,7 @@ pub(crate) fn resolve_hostname_hint() -> Option<String> {
                     }
                 })
         })
+
 }
 
 pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint: Option<&str>) -> String {
@@ -434,8 +443,10 @@ pub fn normalize_bootstrap_addr(raw: &str) -> Option<String> {
 }
 
 fn extract_port_from_multiaddr(addr: &str) -> Option<u16> {
+
     let trimmed = addr.trim();
     let port_token = trimmed.rsplit_once("/tcp/").and_then(|(_, port)| port.parse::<u16>().ok());
+    
     if port_token.is_some() {
         return port_token;
     }
@@ -443,9 +454,11 @@ fn extract_port_from_multiaddr(addr: &str) -> Option<u16> {
     trimmed
         .rsplit_once(':')
         .and_then(|(_, port)| port.parse::<u16>().ok())
+
 }
 
 pub fn prefer_public_hostname_in_addrs(addrs: &[String], hostname_hint: Option<&str>) -> Vec<String> {
+
     let Some(hostname_hint) = hostname_hint.filter(|value| looks_like_public_hostname(value)) else {
         return addrs.to_vec();
     };
@@ -460,9 +473,11 @@ pub fn prefer_public_hostname_in_addrs(addrs: &[String], hostname_hint: Option<&
             }
         })
         .collect()
+
 }
 
 pub fn normalize_advertise_addr(addr: &str, port: u16) -> String {
+
     let trimmed = addr.trim();
     if trimmed.is_empty() || is_placeholder_host(trimmed) {
         return format!("/ip4/127.0.0.1/tcp/{port}");
@@ -495,6 +510,7 @@ pub fn normalize_advertise_addr(addr: &str, port: u16) -> String {
     }
 
     format!("/dns/{trimmed}/tcp/{port}")
+
 }
 
 pub fn bootstrap_nodes_from_server_list(server_list: &[String]) -> Vec<PeerNode> {
@@ -537,6 +553,7 @@ pub fn encode_service_message(message: &ServiceMessage) -> Option<Vec<u8>> {
 }
 
 pub fn decode_service_message(payload: &[u8]) -> Option<ServiceMessage> {
+
     if payload.len() < SERVICE_MESSAGE_MAGIC.len() {
         return None;
     }
@@ -546,6 +563,7 @@ pub fn decode_service_message(payload: &[u8]) -> Option<ServiceMessage> {
     }
 
     bincode::deserialize(&payload[SERVICE_MESSAGE_MAGIC.len()..]).ok()
+    
 }
 
 

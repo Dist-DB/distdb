@@ -85,6 +85,7 @@ pub enum InboundChannelMessage {
 }
 
 pub trait InboundChannelSurface {
+
     fn route(&self) -> ConnectorSurfaceRoute;
 
     fn protocol_version(&self) -> &'static str {
@@ -108,6 +109,7 @@ pub trait InboundChannelSurface {
     ) -> Result<Vec<u8>, String> {
         bincode::serialize(response).map_err(|err| err.to_string())
     }
+    
 }
 
 #[derive(Debug, Clone, Copy, Default)]
