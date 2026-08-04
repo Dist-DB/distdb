@@ -3,6 +3,7 @@ target/
 */.vscode
 *.o
 /server/data/
+/server/secure/
 /console/data/
 /tlsserver/data/
 *.script

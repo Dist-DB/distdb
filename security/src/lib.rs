@@ -31,6 +31,14 @@
 */
 
 mod tls;
+mod caroot;
+
+pub use caroot::platform_ca::{
+	PLATFORM_TLS_ROOT_CERT_PEM,
+	PLATFORM_TLS_ROOT_FINGERPRINT_SHA256,
+	platform_tls_root_cert_pem,
+	platform_tls_root_fingerprint_sha256,
+};
 
 pub use tls::{TlsConfig, parse_tls_config_from_args, parse_tls_mode_from_args};
 pub use tls::{

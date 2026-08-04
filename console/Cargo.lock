@@ -2468,6 +2468,7 @@ dependencies = [
  "log",
  "rustls",
  "rustls-pemfile",
+ "security",
  "serde",
  "sha2",
  "x509-parser 0.16.0",
@@ -2867,6 +2868,7 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "time",
+ "x509-parser 0.16.0",
  "yasna",
 ]
 
@@ -3071,6 +3073,19 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "security"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "openssl",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "tokio",
+ "tokio-rustls",
+]
 
 [[package]]
 name = "semver"
@@ -3404,6 +3419,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "tokio-rustls"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+dependencies = [
+ "rustls",
+ "tokio",
 ]
 
 [[package]]
@@ -4110,6 +4135,7 @@ dependencies = [
  "lazy_static",
  "nom",
  "oid-registry 0.7.1",
+ "ring",
  "rusticata-macros",
  "thiserror 1.0.69",
  "time",

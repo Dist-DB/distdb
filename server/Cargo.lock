@@ -2440,6 +2440,7 @@ dependencies = [
  "log",
  "rustls",
  "rustls-pemfile",
+ "security",
  "serde",
  "sha2",
  "x509-parser 0.16.0",

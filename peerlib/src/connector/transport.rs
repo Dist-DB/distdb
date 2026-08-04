@@ -18,6 +18,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, Error as RustlsError, RootCertStore, SignatureScheme, StreamOwned};
 use sha2::{Digest, Sha256};
+use security::platform_tls_root_cert_pem;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
@@ -28,8 +29,8 @@ const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
 const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
+const PLATFORM_TLS_FINGERPRINT_ENV: &str = "DISTDB_PLATFORM_TLS_FINGERPRINT";
 const CONNECTOR_TLS_FINGERPRINT_ENV: &str = "DISTDB_CONNECTOR_TLS_FINGERPRINT";
-const CONNECTOR_TLS_FINGERPRINT_BAKED: &str = "74387312f08e50ea3ce715cb5f1f90838171ef373ade950f936944ff2b8191b0";
 const CONNECTOR_TLS_FINGERPRINT_FILE: &str = "ca-fingerprint.sha256";
 const MAX_QUEUED_RESPONSES: usize = 8192;
 
@@ -166,6 +167,17 @@ fn try_load_local_dev_fingerprint(socket_addr: &str) -> Option<String> {
 
 fn global_tls_fingerprint(socket_addr: &str) -> Option<String> {
 
+    if let Ok(raw) = std::env::var(PLATFORM_TLS_FINGERPRINT_ENV) {
+        if let Some(normalized) = normalize_tls_fingerprint(raw.trim()) {
+            return Some(normalized);
+        }
+
+        log::warn!(
+            "ignoring invalid platform TLS fingerprint from {}",
+            PLATFORM_TLS_FINGERPRINT_ENV
+        );
+    }
+
     if let Ok(raw) = std::env::var(CONNECTOR_TLS_FINGERPRINT_ENV) {
         if let Some(normalized) = normalize_tls_fingerprint(raw.trim()) {
             return Some(normalized);
@@ -181,7 +193,7 @@ fn global_tls_fingerprint(socket_addr: &str) -> Option<String> {
         return Some(local_fp);
     }
 
-    normalize_tls_fingerprint(CONNECTOR_TLS_FINGERPRINT_BAKED)
+    None
 }
 
 fn certificate_sha256_fingerprint(cert_der: &[u8]) -> String {
@@ -1316,9 +1328,10 @@ fn connect_tls_stream(
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth()
     } else {
-        return Err(ConnectorError::Transport(
-            "tls_ca path is required for connector TLS (and connector fingerprint is missing/invalid)".to_string(),
-        ));
+        let roots = load_tls_root_store_from_pem(platform_tls_root_cert_pem())?;
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
     };
 
     client_config.alpn_protocols = vec![b"distdb-p2p/1".to_vec()];

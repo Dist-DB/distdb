@@ -11,6 +11,12 @@
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    fn lock_env_mutex() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn write_frame(stream: &mut std::net::TcpStream, response: &ConnectorResponse) {
         let payload = bincode::serialize(response).expect("response should serialize");
         let len = payload.len() as u32;
@@ -307,19 +313,24 @@
     }
 
     #[test]
-    fn global_tls_fingerprint_reads_from_baked_constant() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex should lock");
+    fn built_in_platform_root_cert_is_available() {
+        let _guard = lock_env_mutex();
         unsafe {
             std::env::remove_var(CONNECTOR_TLS_FINGERPRINT_ENV);
+            std::env::remove_var(PLATFORM_TLS_FINGERPRINT_ENV);
         }
-        let loaded = global_tls_fingerprint("provision.distdb.com:4001")
-            .expect("fingerprint should load from baked constant");
-        assert_eq!(loaded, "74387312f08e50ea3ce715cb5f1f90838171ef373ade950f936944ff2b8191b0");
+
+        let pem = platform_tls_root_cert_pem();
+        assert!(pem.contains("BEGIN CERTIFICATE"));
+
+        let roots = load_tls_root_store_from_pem(pem)
+            .expect("built-in platform root cert should parse into a root store");
+        assert_eq!(roots.len(), 1);
     }
 
     #[test]
     fn global_tls_fingerprint_prefers_env_override_when_valid() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex should lock");
+        let _guard = lock_env_mutex();
         unsafe {
             std::env::set_var(
                 CONNECTOR_TLS_FINGERPRINT_ENV,

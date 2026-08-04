@@ -14,6 +14,7 @@ use rcgen::{
 use common::helpers::utils::md5_hash;
 
 const CA_FINGERPRINT_FILE_NAME: &str = "ca-fingerprint.sha256";
+const PLATFORM_TLS_FINGERPRINT_ENV: &str = "DISTDB_PLATFORM_TLS_FINGERPRINT";
 
 #[derive(Debug, Clone)]
 pub struct AutoTlsPaths {
@@ -284,6 +285,31 @@ fn ca_spki_sha256_fingerprint(cert_pem: &str) -> Result<String, String> {
 
 fn persist_ca_fingerprint_file(tls_dir: &Path, ca_cert_pem: &str) -> Result<(), String> {
     let fingerprint = ca_spki_sha256_fingerprint(ca_cert_pem)?;
+
+    if let Ok(expected_raw) = std::env::var(PLATFORM_TLS_FINGERPRINT_ENV) {
+        let normalized = expected_raw
+            .trim()
+            .chars()
+            .filter(|ch| ch.is_ascii_hexdigit())
+            .collect::<String>()
+            .to_ascii_lowercase();
+
+        if normalized.len() != 64 {
+            return Err(format!(
+                "invalid {} value; expected 64 hex chars",
+                PLATFORM_TLS_FINGERPRINT_ENV
+            ));
+        }
+
+        if normalized != fingerprint {
+            return Err(format!(
+                "generated CA fingerprint mismatch: expected '{}' got '{}'",
+                normalized,
+                fingerprint
+            ));
+        }
+    }
+
     let fingerprint_path = tls_dir.join(CA_FINGERPRINT_FILE_NAME);
     std::fs::write(&fingerprint_path, format!("{}\n", fingerprint)).map_err(|err| {
         format!(
