@@ -608,6 +608,19 @@ impl ConnectorP2pTransport {
 
     }
 
+    fn rebind_live_connection_peer_id(&self, old_peer_id: &str, new_peer_id: &str) {
+        if let Ok(mut connection) = self.live_connection.lock()
+            && let Some(live) = connection.as_mut()
+            && live.peer_id == old_peer_id {
+                log::debug!(
+                    "connector transport rebound live connection peer old_peer_id={} new_peer_id={}",
+                    old_peer_id,
+                    new_peer_id
+                );
+                live.peer_id = new_peer_id.to_string();
+            }
+    }
+
     pub fn upsert_peer(&mut self, peer: ConnectorPeer) {
 
         let peer_id = peer.peer_id.clone();
@@ -660,6 +673,8 @@ impl ConnectorP2pTransport {
             &peer.addrs,
             incoming_has_non_loopback,
         ) {
+            self.rebind_live_connection_peer_id(&existing_peer_id, &peer_id);
+
             if let Some(existing_peer) = self.peers.remove(&existing_peer_id) {
                 normalized_peer.addrs = Self::merge_peer_addrs(&existing_peer.addrs, &normalized_peer.addrs);
                 log::debug!(
@@ -712,6 +727,7 @@ impl ConnectorP2pTransport {
                 stale_peer_id,
                 peer_id
             );
+            self.rebind_live_connection_peer_id(&stale_peer_id, &peer_id);
             self.peers.remove(&stale_peer_id);
         }
 

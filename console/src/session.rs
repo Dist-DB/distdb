@@ -402,6 +402,7 @@ impl ConsoleSession {
             .unwrap_or_else(|| AUTH_FALLBACK_DATABASE.to_string());
 
         let mut refreshed_from_server = false;
+        let mut last_refresh_error: Option<String> = None;
 
         for peer in known_peers {
             if !self
@@ -438,6 +439,7 @@ impl ConsoleSession {
                     )
                     .into());
                 }
+                last_refresh_error = Some(err.to_string());
                 log::debug!(
                     "server peer refresh skipped for peer_id={}: {}",
                     peer.peer_id,
@@ -469,6 +471,8 @@ impl ConsoleSession {
                         Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
                         Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
                     );
+
+                    last_refresh_error = Some(err.to_string());
 
                     log::debug!(
                         "server peer refresh request failed for peer_id={}: {}",
@@ -530,9 +534,18 @@ impl ConsoleSession {
 
         if !refreshed_from_server {
             log::debug!("server peer refresh completed without a successful discovery response");
+
+            if let Some(err) = last_refresh_error {
+                return Err(format!(
+                    "server peer discovery is unreachable: {}. Verify the server connector endpoint is reachable from this client (host/port, firewall, and load balancer).",
+                    err
+                )
+                .into());
+            }
         }
 
         Ok(())
+        
     }
 
     fn print_p2p_status(&self) {
