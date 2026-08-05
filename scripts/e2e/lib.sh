@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SERVER_BIN="$ROOT_DIR/server/target/debug/server"
-CONSOLE_BIN="$ROOT_DIR/console/target/debug/console"
-TLSSERVER_BIN="$ROOT_DIR/tlsserver/target/debug/tlsserver"
+SERVER_BIN=""
+CONSOLE_BIN=""
+TLSSERVER_BIN=""
 
 DATA_ROOT="$ROOT_DIR/server/data/e2e"
 TLSSERVER_PORT="${DISTDB_E2E_TLSSERVER_PORT:-19443}"
@@ -17,6 +17,24 @@ mkdir -p "$DATA_ROOT"
 
 log() {
   printf '[e2e] %s\n' "$*"
+}
+
+resolve_bin() {
+  local name="$1"
+  local workspace_path="$ROOT_DIR/target/debug/$name"
+  local crate_path="$ROOT_DIR/$name/target/debug/$name"
+
+  if [[ -x "$workspace_path" ]]; then
+    printf '%s\n' "$workspace_path"
+    return 0
+  fi
+
+  if [[ -x "$crate_path" ]]; then
+    printf '%s\n' "$crate_path"
+    return 0
+  fi
+
+  printf '%s\n' "$workspace_path"
 }
 
 has_match() {
@@ -36,19 +54,26 @@ fail() {
 }
 
 require_binaries() {
+  SERVER_BIN="$(resolve_bin server)"
+  CONSOLE_BIN="$(resolve_bin console)"
+  TLSSERVER_BIN="$(resolve_bin tlsserver)"
+
   if [[ ! -x "$SERVER_BIN" ]]; then
     log "server binary missing; building server crate"
     (cd "$ROOT_DIR/server" && cargo build --quiet)
+    SERVER_BIN="$(resolve_bin server)"
   fi
 
   if [[ ! -x "$CONSOLE_BIN" ]]; then
     log "console binary missing; building console crate"
     (cd "$ROOT_DIR/console" && cargo build --quiet)
+    CONSOLE_BIN="$(resolve_bin console)"
   fi
 
   if [[ ! -x "$TLSSERVER_BIN" ]]; then
     log "tlsserver binary missing; building tlsserver crate"
     (cd "$ROOT_DIR/tlsserver" && cargo build --quiet)
+    TLSSERVER_BIN="$(resolve_bin tlsserver)"
   fi
 
   [[ -x "$SERVER_BIN" ]] || fail "server binary missing at $SERVER_BIN"
