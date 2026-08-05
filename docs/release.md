@@ -1,12 +1,22 @@
 # DistDB Release State
 
-This page tracks current release posture, what is in scope for Beta Ready, and what operators and integrators should expect.
+This page tracks current release posture, what is in scope for Beta Ready, RC progression, and what operators and integrators should expect.
 
 ## Current Recommendation
 
-DistDB is ready for a **Beta Ready** release, with explicitly scoped expectations.
+DistDB is ready for a **Beta Ready** release and is actively progressing toward **RC Candidate** status, with explicitly scoped expectations.
 
-The platform is not positioned as broad MySQL parity. It is positioned as a documented, partially complete SQL/runtime system with working durability/replay, validated core execution paths, and objective beta confidence gates.
+The platform is not positioned as broad MySQL parity. It is positioned as a documented, partially complete SQL/runtime system with working durability/replay, validated core execution paths, objective beta confidence gates, and an evidence-tracked RC checklist.
+
+Current RC posture remains gated by open checklist items in `docs/checklists/release-candidate-checklist.md`.
+
+## RC Progression Status
+
+DistDB is currently in **RC progression** mode:
+
+- multiple RC evidence rows are captured for correctness, security, non-functional baseline, and rollback rehearsal,
+- remaining gates are concentrated in trust-boundary closure, backup/restore RPO-RTO drills, and formal sign-off records,
+- release posture is therefore progressing toward RC Candidate but remains **Not RC Ready** until all hard-gate items are complete.
 
 ## What Beta Ready Means Here
 
@@ -59,6 +69,12 @@ For beta-ready users:
 Recommended wording:
 
 "DistDB Beta Ready provides a documented subset of SQL/runtime behavior with validated WAL-backed durability/replay and enforced beta confidence gates for the currently supported surface. It is not a full MySQL compatibility release."
+
+## Suggested RC Progression Messaging
+
+Recommended wording:
+
+"DistDB is in active RC progression. Core correctness, adversarial security baseline, non-functional baseline, and rollback rehearsal evidence are captured, and remaining gates are tracked in the RC checklist before candidate declaration."
 
 ## Exit Criteria Toward General Availability
 

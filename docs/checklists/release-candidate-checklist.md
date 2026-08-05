@@ -240,6 +240,8 @@ Current validation against this checklist based on repository evidence:
 
 Overall posture for this checklist: `Not RC Ready`.
 
+Current trajectory: `Advancing toward RC Candidate`.
+
 ## Evidence Tracking Matrix
 
 Use this matrix to track concrete closure evidence for each checklist section.

@@ -9,7 +9,7 @@ DistDB is a distributed SQL database project built around a Rust execution core,
 
 ## Release Status
 
-DistDB is currently **Beta Ready**.
+DistDB is currently **Beta Ready** and moving toward **RC Candidate** status.
 
 This means:
 
@@ -17,6 +17,12 @@ This means:
 - core behavior is documented and validated for the supported surface,
 - compatibility and behavior remain scoped to the documented contracts,
 - partial/unsupported areas are still expected and documented.
+
+RC progression status means:
+
+- RC evidence capture is actively in progress and tracked in the RC checklist,
+- several RC gates are already captured,
+- remaining hard-gate items must close before RC candidate declaration.
 
 For current release scope and expectations, see [release.md](release.md).
 
