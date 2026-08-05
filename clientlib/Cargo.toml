@@ -2,11 +2,15 @@
 name = "clientlib"
 version = "0.1.0"
 edition = "2024"
+authors = ["Sam Colak <sam@samcolak.com>"]
+
+[lints] 
+workspace = true
 
 [dependencies]
-connector = { path = "../connector" }
-peerlib = { path = "../peerlib" }
-common = { path = "../common" }
-tokio = { version = "1", features = ["rt", "sync"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+connector  = { workspace = true }
+peerlib    = { workspace = true, features = ["connector-stack"] }
+common     = { workspace = true }
+tokio      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }

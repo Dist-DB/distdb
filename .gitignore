@@ -8,4 +8,4 @@ target/
 /tlsserver/data/
 *.script
 *.code-workspace
-*/Cargo.lock
+Cargo.lock

@@ -3,11 +3,14 @@ name = "console"
 version = "0.1.0"
 edition = "2024"
 
+[lints] 
+workspace = true
+
 [dependencies]
-connector = { path = "../connector" }
-peerlib = { path = "../peerlib" }
-env_logger = "0.11.10"
-log = "0.4"
-common = { path = "../common" }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
-rustyline = "18.0.0"
+connector  = { workspace = true }
+peerlib    = { workspace = true, features = ["connector-stack"] }
+common     = { workspace = true }
+env_logger = { workspace = true }
+log        = { workspace = true }
+rustls     = { workspace = true }
+rustyline  = "18.0.0"

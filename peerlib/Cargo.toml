@@ -3,22 +3,25 @@ name = "peerlib"
 version = "0.1.0"
 edition = "2024"
 
+[lints] 
+workspace = true
+
 [features]
 default = ["connector-stack"]
 connector-stack = []
 server-p2p = []
 
 [dependencies]
-connector = { path = "../connector" }
-common = { path = "../common" }
-security = { path = "../security" }
-serde = { version = "1", features = ["derive"] }
-bincode = "1.3.2"
-log = "0.4"
-rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
-rustls-pemfile = "2"
-rustls-native-certs = "0.8"
-sha2 = "0.10"
+connector           = { workspace = true }
+common              = { workspace = true }
+security            = { workspace = true }
+serde               = { workspace = true }
+bincode             = { workspace = true }
+log                 = { workspace = true }
+rustls              = { workspace = true }
+rustls-pemfile      = { workspace = true }
+rustls-native-certs = { workspace = true }
+sha2        = "0.10"
 x509-parser = "0.16"
 
 [dev-dependencies]

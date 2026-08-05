@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Sam Colak <sam@samcolak.com>"]
 
+[lints] 
+workspace = true
+
 [dependencies]
-clientlib = { path = "../clientlib" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-log = "0.4"
-env_logger = "0.11"
+clientlib  = { workspace = true }
+tokio      = { workspace = true, features = ["rt-multi-thread"] }
+log        = { workspace = true }
+env_logger = { workspace = true }
