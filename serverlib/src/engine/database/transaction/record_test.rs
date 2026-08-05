@@ -39,6 +39,12 @@ fn wal_frame_decode_accepts_legacy_hex() {
 }
 
 #[test]
+fn wal_frame_decode_returns_error_for_invalid_hex() {
+    let err = decode_wal_frame("zz").expect_err("invalid hex should fail");
+    assert!(err.contains("invalid WAL frame hex"));
+}
+
+#[test]
 fn plain_payload_resolver_returns_raw_bytes_and_caches_once() {
 
     struct CountingResolver<'a> {

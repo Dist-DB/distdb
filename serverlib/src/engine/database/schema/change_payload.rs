@@ -1,5 +1,5 @@
 use crate::engine::database::table::schema::TableSchema;
-use crate::engine::database::transaction::payload::TransactionPayloadCodec;
+use crate::engine::database::transaction::payload::SerdeTransactionPayloadCodec;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SchemaChangePayload {
@@ -15,11 +15,12 @@ pub struct SchemaChangePayload {
 impl SchemaChangePayload {
     
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
-        <Self as TransactionPayloadCodec>::encode_payload(self)
+        self.encode_payload_serde()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, &'static str> {
-        <Self as TransactionPayloadCodec>::decode_payload(payload)
+        Self::decode_payload_serde(payload)
     }
 
 }
+

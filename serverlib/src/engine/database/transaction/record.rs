@@ -438,6 +438,11 @@ impl TransactionRecord {
     
 }
 
+fn decode_wal_frame_bytes(bytes: &[u8]) -> Result<(String, TransactionRecord), String> {
+    bincode::deserialize::<(String, TransactionRecord)>(bytes)
+        .map_err(|err| format!("failed to deserialize WAL frame: {}", err))
+}
+
 /// Base64-encode a `(stream_id, TransactionRecord)` frame for wire/replication transport only.
 /// Persisted WAL/table payload bytes remain binary (bincode payload in file records).
 pub fn encode_wal_frame(frame: &(String, TransactionRecord)) -> Result<String, String> {
@@ -455,9 +460,8 @@ pub fn encode_wal_frame(frame: &(String, TransactionRecord)) -> Result<String, S
 pub fn decode_wal_frame(encoded: &str) -> Result<(String, TransactionRecord), String> {
 
     let base64_bytes = b64_decode(encoded);
-    
     if !base64_bytes.is_empty()
-        && let Ok(frame) = bincode::deserialize::<(String, TransactionRecord)>(&base64_bytes) {
+        && let Ok(frame) = decode_wal_frame_bytes(&base64_bytes) {
             return Ok(frame);
         }
 
@@ -482,8 +486,7 @@ pub fn decode_wal_frame(encoded: &str) -> Result<(String, TransactionRecord), St
 
     }
 
-    bincode::deserialize::<(String, TransactionRecord)>(&bytes)
-        .map_err(|err| format!("failed to deserialize WAL frame: {}", err))
+    decode_wal_frame_bytes(&bytes)
 
 }
 

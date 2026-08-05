@@ -499,6 +499,74 @@ fn field_names_by_ordinal(schema: &TableSchema) -> Vec<String> {
 
 }
 
+enum CompatibleRowPayload {
+    Ordinal(OrdinalRowPayload),
+    LegacyMap(HashMap<String, Vec<u8>>),
+    LegacyOrdinal(Vec<Vec<u8>>),
+}
+
+fn decode_compatible_row_payload_shape(payload: &[u8]) -> Result<CompatibleRowPayload, String> {
+    if let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
+        return Ok(CompatibleRowPayload::Ordinal(ordinal_row));
+    }
+
+    if let Ok(legacy_row) = bincode::deserialize::<HashMap<String, Vec<u8>>>(payload) {
+        return Ok(CompatibleRowPayload::LegacyMap(legacy_row));
+    }
+
+    if let Ok(legacy_ordinal_row) = bincode::deserialize::<Vec<Vec<u8>>>(payload) {
+        return Ok(CompatibleRowPayload::LegacyOrdinal(legacy_ordinal_row));
+    }
+
+    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
+        return Err(
+            "row payload is encrypted at rest and must be decrypted before decode".to_string(),
+        );
+    }
+
+    Err("row payload decode failed".to_string())
+}
+
+fn decode_compatible_row_payload(
+    schema: &TableSchema,
+    payload: &[u8],
+) -> Result<HashMap<String, Vec<u8>>, String> {
+
+    let ordered_field_names = field_names_by_ordinal(schema);
+
+    match decode_compatible_row_payload_shape(payload)? {
+
+        CompatibleRowPayload::LegacyMap(legacy_row) => Ok(legacy_row),
+
+        CompatibleRowPayload::Ordinal(ordinal_row) => {
+            let mut row_map = HashMap::with_capacity(ordered_field_names.len());
+
+            for (idx, field_name) in ordered_field_names.iter().enumerate() {
+                let maybe_value = ordinal_row.get(idx).cloned().flatten();
+                if let Some(value) = maybe_value {
+                    row_map.insert(field_name.clone(), value);
+                }
+            }
+
+            Ok(row_map)
+        },
+
+        CompatibleRowPayload::LegacyOrdinal(legacy_ordinal_row) => {
+            let mut row_map = HashMap::with_capacity(ordered_field_names.len());
+
+            for (idx, field_name) in ordered_field_names.iter().enumerate() {
+                if let Some(value) = legacy_ordinal_row.get(idx) {
+                    row_map.insert(field_name.clone(), value.clone());
+                }
+            }
+
+            Ok(row_map)
+        }
+
+    }
+
+}
+
 pub fn encode_row_payload(
     schema: &TableSchema,
     row_map: &HashMap<String, Vec<u8>>,
@@ -537,48 +605,7 @@ pub fn decode_row_payload(
     schema: &TableSchema,
     payload: &[u8],
 ) -> Result<HashMap<String, Vec<u8>>, String> {
-
-    let ordered_field_names = field_names_by_ordinal(schema);
-
-    if let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
-        
-        let mut row_map = HashMap::with_capacity(ordered_field_names.len());
-
-        for (idx, field_name) in ordered_field_names.iter().enumerate() {
-            let maybe_value = ordinal_row.get(idx).cloned().flatten();
-            if let Some(value) = maybe_value {
-                row_map.insert(field_name.clone(), value);
-            }
-        }
-
-        return Ok(row_map);
-    }
-
-    if let Ok(legacy_row) = bincode::deserialize::<HashMap<String, Vec<u8>>>(payload) {
-        return Ok(legacy_row);
-    }
-
-    if let Ok(legacy_ordinal_row) = bincode::deserialize::<Vec<Vec<u8>>>(payload) {
-
-        let mut row_map = HashMap::with_capacity(ordered_field_names.len());
-
-        for (idx, field_name) in ordered_field_names.iter().enumerate() {
-            if let Some(value) = legacy_ordinal_row.get(idx) {
-                row_map.insert(field_name.clone(), value.clone());
-            }
-        }
-
-        return Ok(row_map);
-    }
-
-    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
-        return Err(
-            "row payload is encrypted at rest and must be decrypted before decode".to_string(),
-        );
-    }
-
-    Err("row payload decode failed".to_string())
-    
+    decode_compatible_row_payload(schema, payload)
 }
 
 pub fn decode_row_field_value(
@@ -588,28 +615,17 @@ pub fn decode_row_field_value(
 ) -> Result<Option<Vec<u8>>, String> {
 
     let ordered_field_names = field_names_by_ordinal(schema);
+    let position = ordered_field_names.iter().position(|name| name == field_name);
 
-    if let Some(position) = ordered_field_names.iter().position(|name| name == field_name)
-        && let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
-            return Ok(ordinal_row.get(position).cloned().flatten());
+    match decode_compatible_row_payload_shape(payload)? {
+        CompatibleRowPayload::Ordinal(ordinal_row) => {
+            Ok(position.and_then(|idx| ordinal_row.get(idx).cloned().flatten()))
         }
-
-    if let Ok(legacy_row) = bincode::deserialize::<HashMap<String, Vec<u8>>>(payload) {
-        return Ok(legacy_row.get(field_name).cloned());
-    }
-
-    if let Some(position) = ordered_field_names.iter().position(|name| name == field_name)
-        && let Ok(legacy_ordinal_row) = bincode::deserialize::<Vec<Vec<u8>>>(payload) {
-            return Ok(legacy_ordinal_row.get(position).cloned());
+        CompatibleRowPayload::LegacyMap(legacy_row) => Ok(legacy_row.get(field_name).cloned()),
+        CompatibleRowPayload::LegacyOrdinal(legacy_ordinal_row) => {
+            Ok(position.and_then(|idx| legacy_ordinal_row.get(idx).cloned()))
         }
-
-    if decode_encrypted_row_payload_envelope(payload)?.is_some() {
-        return Err(
-            "row payload is encrypted at rest and must be decrypted before field decode".to_string(),
-        );
     }
-
-    Err("row payload decode failed".to_string())
 
 }
 

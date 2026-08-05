@@ -1,5 +1,5 @@
 
-use super::transaction::payload::TransactionPayloadCodec;
+use super::transaction::payload::SerdeTransactionPayloadCodec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SqlObjectKind {
@@ -29,11 +29,12 @@ pub struct SqlDefinitionPayload {
 impl SqlDefinitionPayload {
     
     pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
-        <Self as TransactionPayloadCodec>::encode_payload(self)
+        self.encode_payload_serde()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, &'static str> {
-        <Self as TransactionPayloadCodec>::decode_payload(payload)
+        Self::decode_payload_serde(payload)
     }
 
 }
+

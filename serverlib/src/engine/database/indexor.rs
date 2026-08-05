@@ -10,6 +10,7 @@ pub trait IndexorIndexSpec {
 }
 
 impl IndexorIndexSpec for DatabaseIndex {
+
     fn index_id(&self) -> &str {
         self.index_id.0.as_str()
     }
@@ -19,6 +20,7 @@ impl IndexorIndexSpec for DatabaseIndex {
     }
 
     fn encode_index_key(&self, row_map: &HashMap<String, Vec<u8>>) -> Option<Vec<u8>> {
+
         let tuple = if self.field_names.is_empty() {
             vec![
                 row_map
@@ -35,7 +37,9 @@ impl IndexorIndexSpec for DatabaseIndex {
         };
 
         bincode::serialize(&tuple).ok()
+        
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

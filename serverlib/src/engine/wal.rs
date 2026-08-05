@@ -25,8 +25,9 @@ use crate::engine::database::row_payload::{
     RowPayloadDecryptionTransform, RowPayloadEncryptionWriteTransform,
 };
 use crate::engine::database::transaction::record::{
-    PayloadTransformError, TransactionPayloadContext,
-    TransactionPayloadTransform, TransactionPayloadWriteTransform,
+    ChainedTransactionPayloadResolver, ChainedTransactionPayloadWriter, PayloadTransformError,
+    TransactionPayloadContext, TransactionPayloadResolver, TransactionPayloadTransform,
+    TransactionPayloadWriteTransform,
 };
 use crate::engine::database::transaction::{TransactionId, TransactionLog, TransactionRecord};
 use crate::TransactionKind;
@@ -81,25 +82,20 @@ fn resolve_wal_storage_payload<'a>(
         return Ok(None);
     };
 
-    let compression = WalCompressionPayloadTransform;
-    let decrypt = RowPayloadDecryptionTransform::new(AesGcmRowPayloadCryptoProvider);
-    let preserve_opaque = EncryptedRowPayloadTransform::preserve_opaque();
+    let mut resolver = ChainedTransactionPayloadResolver::new();
+    resolver.push_transform(WalCompressionPayloadTransform);
+    resolver.push_transform(RowPayloadDecryptionTransform::new(AesGcmRowPayloadCryptoProvider));
+    resolver.push_transform(EncryptedRowPayloadTransform::preserve_opaque());
 
-    let mut current = Cow::Borrowed(payload);
+    let resolved = resolver.resolve_payload(Some(payload), context)?;
 
-    if let Some(decoded) = compression.transform_payload(current.as_ref(), context)? {
-        current = Cow::Owned(decoded);
-    }
-
-    if let Some(decoded) = decrypt.transform_payload(current.as_ref(), context)? {
-        current = Cow::Owned(decoded);
-    }
-
-    if let Some(decoded) = preserve_opaque.transform_payload(current.as_ref(), context)? {
-        current = Cow::Owned(decoded);
-    }
-
-    Ok(Some(current))
+    Ok(resolved.map(|resolved_payload| {
+        if resolved_payload.as_slice() == payload {
+            Cow::Borrowed(payload)
+        } else {
+            Cow::Owned(resolved_payload)
+        }
+    }))
 
 }
 
@@ -120,6 +116,7 @@ impl TransactionPayloadWriteTransform for WalCompressionPayloadWriteTransform {
         }
 
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+
         encoder
             .write_all(payload)
             .map_err(|_| PayloadTransformError::InternalTransformError(
@@ -148,31 +145,20 @@ fn write_wal_storage_payload<'a>(
         return Ok(None);
     };
 
-    let encrypt = RowPayloadEncryptionWriteTransform::new(AesGcmRowPayloadCryptoProvider);
-    let preserve_opaque = EncryptedRowPayloadTransform::preserve_opaque();
-    let compression = WalCompressionPayloadWriteTransform;
+    let mut writer = ChainedTransactionPayloadWriter::new();
+    writer.push_transform(RowPayloadEncryptionWriteTransform::new(AesGcmRowPayloadCryptoProvider));
+    writer.push_transform(EncryptedRowPayloadTransform::preserve_opaque());
+    writer.push_transform(WalCompressionPayloadWriteTransform);
 
-    let mut current = Cow::Borrowed(payload);
+    let transformed = writer.write_payload_with_context(record, Some(payload), context)?;
 
-    if let Some(transformed) =
-        encrypt.transform_payload_for_write(record, current.as_ref(), context)?
-    {
-        current = Cow::Owned(transformed);
-    }
-
-    if let Some(transformed) =
-        preserve_opaque.transform_payload_for_write(record, current.as_ref(), context)?
-    {
-        current = Cow::Owned(transformed);
-    }
-
-    if let Some(transformed) =
-        compression.transform_payload_for_write(record, current.as_ref(), context)?
-    {
-        current = Cow::Owned(transformed);
-    }
-
-    Ok(Some(current))
+    Ok(transformed.map(|transformed_payload| {
+        if transformed_payload.as_slice() == payload {
+            Cow::Borrowed(payload)
+        } else {
+            Cow::Owned(transformed_payload)
+        }
+    }))
 
 }
 
@@ -776,11 +762,14 @@ impl ConcurrentWalManager {
         let mut records = self.since(wal_id, from);
 
         for record in &mut records {
+            
             let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), context)
                 .map_err(map_payload_transform_error)?;
+
             if let Some(Cow::Owned(payload)) = resolved_payload {
                 record.set_payload(Some(payload));
             }
+
         }
 
         Ok(records)
@@ -1138,6 +1127,17 @@ fn latest_write_timestamp(entries: &[TransactionRecord]) -> Option<u64> {
 
 }
 
+fn get_or_insert_stream_entries<'a>(
+    state: &'a mut HashMap<String, Vec<TransactionRecord>>,
+    stream_key: &str,
+) -> &'a mut Vec<TransactionRecord> {
+    if !state.contains_key(stream_key) {
+        state.insert(stream_key.to_string(), Vec::new());
+    }
+
+    state.get_mut(stream_key).expect("WAL stream entry should exist")
+}
+
 fn obfuscated_stream_key(wal_id: &str) -> Result<String, &'static str> {
 
     let normalized = wal_id.trim().to_ascii_lowercase();
@@ -1256,10 +1256,13 @@ fn decode_records_parallel(
         for handle in handles {
 
             match handle.join() {
+                
                 Ok(chunk) => decoded.push(chunk),
+                
                 Err(_) => {
                     log::error!("parallel WAL decode worker panicked; falling back to partial results");
                 }
+
             }
 
         }
@@ -1296,6 +1299,7 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
+
     let read_elapsed_ms = read_started_at.elapsed().as_millis();
 
     if let Err(e) = verify_header(FileKind::Data, &bytes) {
@@ -1315,6 +1319,7 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
         ) as usize;
 
         pos += 8;
+
         if pos + len > bytes.len() {
             log::warn!("truncated WAL frame at byte offset {}, stopping replay", pos);
             break;
@@ -1345,7 +1350,9 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
         decode_records_parallel(&bytes, &frame_ranges, workers)
 
     } else {
+
         decode_records_sequential(&bytes, &frame_ranges)
+
     };
 
     let decode_elapsed_ms = decode_started_at.elapsed().as_millis();
@@ -1523,6 +1530,7 @@ fn compact_entries_to_latest_schema_and_metadata(
     }
 
     let mut retained = Vec::new();
+
     if let Some(mut schema) = latest_schema {
         if schema.refid.is_some_and(|refid| !retained_ids.contains(&refid.0)) {
             schema.refid = None;
@@ -1564,6 +1572,7 @@ fn exact_record_duplicate_at_or_after(
 ) -> bool {
 
     let mut idx = start_idx;
+
     while idx < entries.len() && entries[idx].id.0 == record.id.0 {
         if &entries[idx] == record {
             return true;
@@ -1600,12 +1609,7 @@ fn spawn_worker(
             let mut count = 0usize;
 
             if let Ok(mut state) = storage.lock() {
-                let entries = if let Some(entries) = state.get_mut(&stream_key) {
-                    entries
-                } else {
-                    state.insert(stream_key.clone(), Vec::new());
-                    state.get_mut(&stream_key).expect("WAL stream entry should exist")
-                };
+                let entries = get_or_insert_stream_entries(&mut state, &stream_key);
                 if entries.is_empty() {
                     count = existing.len();
                     entries.extend(existing);
@@ -1634,13 +1638,7 @@ fn spawn_worker(
 
                     if let Ok(mut state) = storage.lock() {
 
-                        let entries = if let Some(entries) = state.get_mut(&stream_key) {
-                            entries
-                        } else {
-                            state.insert(stream_key.clone(), Vec::new());
-                            // inserted above, so mutable access is guaranteed
-                            state.get_mut(&stream_key).expect("WAL stream entry should exist")
-                        };
+                        let entries = get_or_insert_stream_entries(&mut state, &stream_key);
                         let is_ordered = entries
                             .last()
                             .map(|last| record.id.0 > last.id.0)
@@ -1679,6 +1677,7 @@ fn spawn_worker(
                             let _ = ack.send(Ok(()));
                         
                         } else {
+
                             let base_pos = entries
                                 .binary_search_by_key(&record.id.0, |existing| existing.id.0)
                                 .unwrap_or_else(|idx| idx);
@@ -1756,12 +1755,7 @@ fn spawn_worker(
 
                     if let Ok(mut state) = storage.lock() {
 
-                        let entries = if let Some(entries) = state.get_mut(&stream_key) {
-                            entries
-                        } else {
-                            state.insert(stream_key.clone(), Vec::new());
-                            state.get_mut(&stream_key).expect("WAL stream entry should exist")
-                        };
+                        let entries = get_or_insert_stream_entries(&mut state, &stream_key);
 
                         let mut previous_id = entries.last().map(|last| last.id.0);
 
@@ -1941,12 +1935,7 @@ fn spawn_worker(
 
                     if let Ok(mut state) = storage.lock() {
 
-                        let entries = if let Some(entries) = state.get_mut(&stream_key) {
-                            entries
-                        } else {
-                            state.insert(stream_key.clone(), Vec::new());
-                            state.get_mut(&stream_key).expect("WAL stream entry should exist")
-                        };
+                        let entries = get_or_insert_stream_entries(&mut state, &stream_key);
 
                         compact_entries_to_latest_schema_and_metadata(
                             entries,

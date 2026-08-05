@@ -6,6 +6,7 @@ pub mod base64;
 pub mod aes;
 pub mod hash;
 pub mod macros;
+pub mod password;
 pub mod tphashset;
 
 pub use hash::stable_id;

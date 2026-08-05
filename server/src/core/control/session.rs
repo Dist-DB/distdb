@@ -1,5 +1,6 @@
 use common::helpers::utils::md5_hash;
-use common::helpers::{aes_decrypt, aes_encrypt, stable_id};
+use common::helpers::{aes_decrypt, aes_encrypt};
+use common::helpers::password::{derive_password_nonce, derive_password_secret, salt_from_nonce};
 use common::{PeerSession, SessionLog, SessionLogEventType};
 use connector::{ConnectorCommand, ConnectorRequest};
 use std::sync::{OnceLock, RwLock};
@@ -399,12 +400,12 @@ fn current_bootstrap_password_plaintext() -> String {
 fn encrypt_bootstrap_password(password: &str) -> BootstrapPasswordState {
 
     let context = current_bootstrap_crypto_context();
-    let nonce = build_bootstrap_password_nonce(
-        SERVER_TEMP_USER,
+    let nonce = derive_password_nonce(
+        &SERVER_TEMP_USER.trim().to_ascii_lowercase(),
         &context.server_identifier,
         context.first_schema_wal_timestamp_ms,
     );
-    let secret = build_bootstrap_password_secret(&nonce, &context.server_identifier);
+    let secret = derive_password_secret(&nonce, &context.server_identifier);
     let salt = salt_from_nonce(&nonce);
 
     BootstrapPasswordState {
@@ -417,7 +418,7 @@ fn encrypt_bootstrap_password(password: &str) -> BootstrapPasswordState {
 fn decrypt_bootstrap_password(state: &BootstrapPasswordState) -> Result<String, String> {
 
     let context = current_bootstrap_crypto_context();
-    let secret = build_bootstrap_password_secret(&state.password_nonce, &context.server_identifier);
+    let secret = derive_password_secret(&state.password_nonce, &context.server_identifier);
     let plaintext = std::panic::catch_unwind(|| aes_decrypt(&state.encrypted_password, &secret))
         .map_err(|_| "set password failed: encrypted password is invalid".to_string())?;
 
@@ -448,48 +449,6 @@ fn current_bootstrap_crypto_context() -> BootstrapCryptoContext {
 
 }
 
-fn build_bootstrap_password_nonce(
-    user_name: &str,
-    server_identifier: &str,
-    first_schema_wal_timestamp_ms: Option<u64>,
-) -> String {
-
-    let wal_seed = first_schema_wal_timestamp_ms
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "wal-ts-unset".to_string());
-
-    stable_id(&[
-        "distdb-password-nonce",
-        "bootstrap",
-        &user_name.trim().to_ascii_lowercase(),
-        server_identifier,
-        &wal_seed,
-    ])
-
-}
-
-fn build_bootstrap_password_secret(password_nonce: &str, server_identifier: &str) -> String {
-
-    stable_id(&[
-        "distdb-password-secret",
-        password_nonce,
-        server_identifier,
-    ])
-
-}
-
-fn salt_from_nonce(password_nonce: &str) -> [u8; 8] {
-
-    let mut salt = [0u8; 8];
-    let bytes = password_nonce.as_bytes();
-    
-    for idx in 0..8 {
-        salt[idx] = if idx < bytes.len() { bytes[idx] } else { b'0' };
-    }
-    
-    salt
-
-}
 
 #[cfg(test)]
 pub(crate) fn reset_bootstrap_password_for_tests() {

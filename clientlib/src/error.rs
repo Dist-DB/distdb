@@ -16,11 +16,17 @@ impl fmt::Display for ClientError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            
             Self::Config(msg) => write!(f, "config error: {msg}"),
+            
             Self::Transport(msg) => write!(f, "transport error: {msg}"),
+            
             Self::Protocol(msg) => write!(f, "protocol error: {msg}"),
+            
             Self::Decode(msg) => write!(f, "decode error: {msg}"),
+            
             Self::Runtime(msg) => write!(f, "runtime error: {msg}"),
+
         }
     }
 

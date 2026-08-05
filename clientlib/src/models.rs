@@ -47,12 +47,19 @@ pub enum QueryValue {
 
 impl QueryValue {
     pub fn render_display(&self) -> String {
+
         match self {
+
             Self::Null => "NULL".to_string(),
+
             Self::Int(value) => value.to_string(),
+
             Self::UInt(value) => value.to_string(),
+
             Self::Float(value) => value.clone(),
+
             Self::Text(value) => value.clone(),
+
             Self::Bytes(value) => {
                 let hex = value
                     .iter()
@@ -60,8 +67,11 @@ impl QueryValue {
                     .collect::<String>();
                 format!("0x{hex}")
             }
+
         }
+
     }
+    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

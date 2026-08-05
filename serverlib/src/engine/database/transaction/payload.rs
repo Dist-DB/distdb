@@ -19,26 +19,40 @@ pub trait TransactionPayloadCodec: Sized {
     
 }
 
-trait SerdeTransactionPayload: Sized + Serialize + DeserializeOwned {
+pub trait SerdeTransactionPayload: Sized + Serialize + DeserializeOwned {
     const KIND: TransactionKind;
     const ENCODE_ERROR: &'static str;
     const DECODE_ERROR: &'static str;
 }
 
+pub trait SerdeTransactionPayloadCodec: SerdeTransactionPayload {
+
+    fn encode_payload_serde(&self) -> Result<Vec<u8>, &'static str> {
+        bincode::serialize(self).map_err(|_| Self::ENCODE_ERROR)
+    }
+
+    fn decode_payload_serde(payload: &[u8]) -> Result<Self, &'static str> {
+        bincode::deserialize(payload).map_err(|_| Self::DECODE_ERROR)
+    }
+    
+}
+
 impl<T> TransactionPayloadCodec for T
 where
-    T: SerdeTransactionPayload,
+    T: SerdeTransactionPayloadCodec,
 {
     const KIND: TransactionKind = T::KIND;
 
     fn encode_payload(&self) -> Result<Vec<u8>, &'static str> {
-        bincode::serialize(self).map_err(|_| T::ENCODE_ERROR)
+        self.encode_payload_serde()
     }
 
     fn decode_payload(payload: &[u8]) -> Result<Self, &'static str> {
-        bincode::deserialize(payload).map_err(|_| T::DECODE_ERROR)
+        Self::decode_payload_serde(payload)
     }
 }
+
+impl<T> SerdeTransactionPayloadCodec for T where T: SerdeTransactionPayload {}
 
 impl SerdeTransactionPayload for SchemaChangePayload {
     const KIND: TransactionKind = TransactionKind::SchemaChange;

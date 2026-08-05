@@ -89,6 +89,19 @@ fn decode_accepts_legacy_name_map() {
 }
 
 #[test]
+fn compatible_row_payload_decoder_handles_legacy_map_payloads() {
+    let schema = test_schema();
+    let mut legacy = HashMap::new();
+    legacy.insert("email".to_string(), b"legacy@example.com".to_vec());
+
+    let encoded = bincode::serialize(&legacy).expect("legacy row should encode");
+    let row = decode_compatible_row_payload(&schema, &encoded)
+        .expect("compatible row payload should decode");
+
+    assert_eq!(row.get("email"), Some(&b"legacy@example.com".to_vec()));
+}
+
+#[test]
 fn encrypted_row_payload_envelope_roundtrip() {
     let encoded = encode_encrypted_row_payload_envelope(
         1,

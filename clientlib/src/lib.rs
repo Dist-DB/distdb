@@ -95,7 +95,7 @@ impl DistDbClient {
 		let guard = self
 			.active_connections
 			.lock()
-			.map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+			.map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_owned()))?;
 
 		Ok(guard.clone())
 	}

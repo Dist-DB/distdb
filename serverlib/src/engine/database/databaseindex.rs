@@ -25,10 +25,10 @@ impl DatabaseIndexOrigin {
 
 	pub fn prefix(self) -> &'static str {
 		match self {
-			Self::Derived => "drv",
-			Self::UserDefined => "usr",
-			Self::Relationship => "rel",
-			Self::Temporary => "tmp",
+			Self::Derived 		=> "drv",
+			Self::UserDefined 	=> "usr",
+			Self::Relationship 	=> "rel",
+			Self::Temporary 	=> "tmp",
 		}
 	}
 
@@ -38,9 +38,9 @@ impl DatabaseIndexKind {
 
 	pub fn prefix(self) -> &'static str {
 		match self {
-			Self::PrimaryKey => "pri",
-			Self::Unique => "uni",
-			Self::Indexed => "ind",
+			Self::PrimaryKey 	=> "pri",
+			Self::Unique 		=> "uni",
+			Self::Indexed 		=> "ind",
 		}
 	}
 

@@ -1,5 +1,6 @@
 use crate::core::identity::UserId;
-use common::helpers::{aes_decrypt, aes_encrypt, stable_id};
+use common::helpers::{aes_decrypt, aes_encrypt};
+use common::helpers::password::{derive_password_nonce, derive_password_secret, salt_from_nonce};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -21,13 +22,13 @@ impl UserCredential {
 
         let normalized_database_name = database_name.trim().to_ascii_lowercase();
         
-        let password_nonce = build_password_nonce(
+        let password_nonce = derive_password_nonce(
             &normalized_database_name,
             server_identifier,
             first_schema_wal_timestamp_ms,
         );
 
-        let secret = build_password_secret(&password_nonce, server_identifier);
+        let secret = derive_password_secret(&password_nonce, server_identifier);
         let salt = salt_from_nonce(&password_nonce);
 
         Self {
@@ -44,50 +45,12 @@ impl UserCredential {
         server_identifier: &str,
     ) -> bool {
 
-        let secret = build_password_secret(&self.password_nonce, server_identifier);
+        let secret = derive_password_secret(&self.password_nonce, server_identifier);
         
         aes_decrypt(&self.encrypted_password, &secret) == candidate_password
 
     }
 
-}
-
-fn build_password_nonce(
-    database_name: &str,
-    server_identifier: &str,
-    first_schema_wal_timestamp_ms: Option<u64>,
-) -> String {
-
-    let wal_seed = first_schema_wal_timestamp_ms
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "wal-ts-unset".to_string());
-
-    stable_id(&[
-        "distdb-password-nonce",
-        database_name,
-        server_identifier,
-        &wal_seed,
-    ])
-
-}
-
-fn build_password_secret(password_nonce: &str, server_identifier: &str) -> String {
-    
-    stable_id(&[
-        "distdb-password-secret",
-        password_nonce,
-        server_identifier,
-    ])
-    
-}
-
-fn salt_from_nonce(password_nonce: &str) -> [u8; 8] {
-    let mut salt = [0u8; 8];
-    let bytes = password_nonce.as_bytes();
-    for i in 0..8 {
-        salt[i] = if i < bytes.len() { bytes[i] } else { b'0' };
-    }
-    salt
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

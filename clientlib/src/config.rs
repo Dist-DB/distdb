@@ -13,7 +13,7 @@ impl ClientOptions {
         
         if servers.is_empty() {
             return Err(ClientError::Config(
-                "at least one server address is required".to_string(),
+                "at least one server address is required".to_owned(),
             ));
         }
 
@@ -72,16 +72,16 @@ pub(crate) fn resolve_database_for_sql(
 ) -> Result<String, ClientError> {
 
     if let Some(database) = current_database {
-        return Ok(database.to_string());
+        return Ok(database.to_owned());
     }
 
     if is_global_sql_without_database(sql) {
-        return Ok(DEFAULT_DATABASE.to_string());
+        return Ok(DEFAULT_DATABASE.to_owned());
     }
 
     Err(ClientError::Config(
         "no active database selected; set database in options or call set_database()"
-            .to_string(),
+            .to_owned(),
     ))
     
 }
@@ -111,7 +111,7 @@ fn bootstrap_peers_from_cli_args(args: &[String]) -> Vec<String> {
         .find_map(|arg| arg.strip_prefix("servers=").map(ToOwned::to_owned))
         .map(|list| {
             list.split(',')
-                .map(|addr| addr.trim().to_string())
+                .map(|addr| addr.trim().to_owned())
                 .collect::<Vec<String>>()
         })
         .unwrap_or_default();
@@ -119,7 +119,7 @@ fn bootstrap_peers_from_cli_args(args: &[String]) -> Vec<String> {
     let mut candidates = Vec::new();
 
     if let Some(primary_server) = args.iter().find(|arg| !arg.contains('=')) {
-        let primary_server = primary_server.trim().to_string();
+        let primary_server = primary_server.trim().to_owned();
         if !primary_server.is_empty() {
             candidates.push(primary_server);
         }
@@ -187,11 +187,11 @@ fn is_global_sql_without_database(sql: &str) -> bool {
 
     matches!(
         (tokens[0].as_str(), tokens[1].as_str()),
-        ("show", "databases")
-            | ("show", "entities")
-            | ("show", "server")
-            | ("create", "database")
-            | ("drop", "database")
+            ("show", "databases") |
+            ("show", "entities") |
+            ("show", "server") |
+            ("create", "database") |
+            ("drop", "database")
     ) || (tokens[0] == "password" && tokens.len() == 2)
     
 }

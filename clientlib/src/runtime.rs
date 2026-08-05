@@ -36,14 +36,14 @@ impl DistDbClient {
 
         if options.servers.is_empty() {
             return Err(ClientError::Config(
-                "at least one normalized server address is required".to_string(),
+                "at least one normalized server address is required".to_owned(),
             ));
         }
 
         if options.tls_mode != crate::TlsMode::Required {
             return Err(ClientError::Config(
                 "tls mode is fixed to required; set ClientOptions.tls_mode=required"
-                    .to_string(),
+                    .to_owned(),
             ));
         }
 
@@ -79,7 +79,7 @@ impl DistDbClient {
         {
             let mut handles = client_handles
                 .lock()
-                .map_err(|_| ClientError::Runtime("client handle registry lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client handle registry lock poisoned".to_owned()))?;
             handles.push(Arc::downgrade(&inner));
         }
 
@@ -96,7 +96,7 @@ impl DistDbClient {
         let guard = self
             .inner
             .lock()
-            .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+            .map_err(|_| ClientError::Runtime("client state lock poisoned".to_owned()))?;
 
         Ok(guard.options.clone())
 
@@ -119,7 +119,7 @@ impl DistDbClient {
             
             let mut guard = inner
                 .lock()
-                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_owned()))?;
 
             if let Some(peer_id) = guard.options.peer_id.clone() {
                 guard.transport.select_peer(peer_id)?;
@@ -154,7 +154,7 @@ impl DistDbClient {
 
             let mut registry = active_connections
                 .lock()
-                .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_owned()))?;
             register_active_connection(&mut registry, &connection);
 
             Ok(connection)
@@ -185,7 +185,7 @@ impl DistDbClient {
 
         if count == 0 {
             return Err(ClientError::Config(
-                "connect_channels requires count >= 1".to_string(),
+                "connect_channels requires count >= 1".to_owned(),
             ));
         }
 
@@ -217,7 +217,7 @@ impl DistDbClient {
             
             let mut guard = inner
                 .lock()
-                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_owned()))?;
 
             let disconnected = guard.current_connection.take();
             guard.transport.disconnect_active_peer();
@@ -226,7 +226,7 @@ impl DistDbClient {
             if let Some(connection) = disconnected {
                 let mut registry = active_connections
                     .lock()
-                    .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+                    .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_owned()))?;
                 unregister_active_connection(&mut registry, &connection);
             }
             
@@ -247,7 +247,7 @@ impl DistDbClient {
             
             let mut guard = inner
                 .lock()
-                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_owned()))?;
 
             ensure_connected(&guard)?;
             guard.current_database = Some(database);
@@ -269,7 +269,7 @@ impl DistDbClient {
 
             let mut guard = inner
                 .lock()
-                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_owned()))?;
 
             ensure_connected(&guard)?;
 
@@ -333,7 +333,7 @@ impl DistDbClient {
             
             let mut guard = inner
                 .lock()
-                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_owned()))?;
 
             ensure_connected(&guard)?;
 
@@ -385,7 +385,7 @@ pub(crate) async fn close_all_connections(client: &DistDbClient) -> Result<(), C
         let tracked_inners: Vec<Arc<Mutex<ClientInner>>> = {
             let mut handles = client_handles
                 .lock()
-                .map_err(|_| ClientError::Runtime("client handle registry lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client handle registry lock poisoned".to_owned()))?;
 
             let mut upgraded = Vec::with_capacity(handles.len());
             handles.retain(|weak| {
@@ -403,7 +403,7 @@ pub(crate) async fn close_all_connections(client: &DistDbClient) -> Result<(), C
         for inner in tracked_inners {
             let mut guard = inner
                 .lock()
-                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_string()))?;
+                .map_err(|_| ClientError::Runtime("client state lock poisoned".to_owned()))?;
 
             guard.transport.disconnect_active_peer();
             guard.connected = false;
@@ -412,7 +412,7 @@ pub(crate) async fn close_all_connections(client: &DistDbClient) -> Result<(), C
 
         let mut registry = active_connections
             .lock()
-            .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_string()))?;
+            .map_err(|_| ClientError::Runtime("active connection registry lock poisoned".to_owned()))?;
         registry.clear();
 
         Ok(())
@@ -447,7 +447,7 @@ fn ensure_connected(inner: &ClientInner) -> Result<(), ClientError> {
     }
 
     Err(ClientError::Transport(
-        "no active peer connection; call connect() first".to_string(),
+        "no active peer connection; call connect() first".to_owned(),
     ))
 
 }
