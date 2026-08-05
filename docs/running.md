@@ -26,6 +26,33 @@ cd server
 ./debug.sh
 ```
 
+By default the startup scripts request a certificate for `localhost,provision.distdb.com`.
+If the node must present a different SAN set, override it with one variable:
+
+```bash
+cd server
+TLS_SANS=localhost ./debug.sh
+```
+
+`./debug.sh` now defaults to the minimum-footprint runtime-index profile.
+Use a single profile switch to control startup behavior:
+
+- `DISTDB_PLATFORM_PROFILE=minimum` (default)
+- `DISTDB_PLATFORM_PROFILE=throughput`
+
+To opt out for higher throughput benchmarking, disable it explicitly:
+
+```bash
+cd server
+DISTDB_PLATFORM_PROFILE=throughput ./debug.sh
+```
+
+Backward-compatible toggle is still accepted:
+
+```bash
+DISTDB_ENABLE_LOW_MEMORY_PROFILE=0 ./debug.sh
+```
+
 Option B (explicit runtime flags):
 
 ```bash
@@ -44,6 +71,8 @@ Notes:
 - server, peer, and connector runtime paths are fixed to TLS-required mode.
 - `tls=` runtime arguments are rejected.
 - transport does not fall back to plaintext.
+- `TLS_SANS` maps to the `tls_san=` runtime argument accepted by the server.
+- when using `tls_server`, pass a dialable endpoint (for example `127.0.0.1:5443`), not a bind wildcard such as `0.0.0.0:5443`.
 
 ## 3. Connect With Console
 

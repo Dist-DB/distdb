@@ -65,7 +65,7 @@ impl TransactionPayloadTransform for EncryptedRowPayloadTransform {
 
             Ok(Some(_)) => match self.policy {
                 EncryptedRowPayloadTransformPolicy::PreserveOpaque => {
-                    Ok(Some(payload.to_vec()))
+                    Ok(None)
                 }
                 EncryptedRowPayloadTransformPolicy::RejectEncrypted => {
                     Err(PayloadTransformError::DecryptFailed)
@@ -101,7 +101,7 @@ impl TransactionPayloadWriteTransform for EncryptedRowPayloadTransform {
 
             Ok(Some(_)) => match self.policy {
                 EncryptedRowPayloadTransformPolicy::PreserveOpaque => {
-                    Ok(Some(payload.to_vec()))
+                    Ok(None)
                 }
                 EncryptedRowPayloadTransformPolicy::RejectEncrypted => {
                     Err(PayloadTransformError::InvalidEncryptedPayload)

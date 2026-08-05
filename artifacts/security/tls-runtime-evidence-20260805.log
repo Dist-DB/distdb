@@ -1,0 +1,3 @@
+4:[2026-08-04T20:10:27Z INFO  server] loaded p2p tls material from tls-server=127.0.0.1:5443 extra_sans=localhost,provision.distdb.com
+5:[2026-08-04T20:10:27Z INFO  server] starting server node_id=server-node-01 with runtime config: data_dir=./data, listen_addr=0.0.0.0, port=4001, tls=required, ca_root=false, services=affinity.replication,p2p.discovery,sql.query
+10:[2026-08-04T20:10:27Z INFO  server] wss listener bound at 0.0.0.0:4002

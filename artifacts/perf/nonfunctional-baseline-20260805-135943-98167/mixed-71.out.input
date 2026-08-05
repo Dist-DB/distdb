@@ -1,0 +1,5 @@
+show peers;
+password root;
+use perfdb;
+select count(*) as c from events where id <= 71;
+quit;

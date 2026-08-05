@@ -20,12 +20,17 @@ impl IndexorIndexSpec for DatabaseIndex {
 
     fn encode_index_key(&self, row_map: &HashMap<String, Vec<u8>>) -> Option<Vec<u8>> {
         let tuple = if self.field_names.is_empty() {
-            vec![row_map.get(&self.field_name).cloned().unwrap_or_default()]
+            vec![
+                row_map
+                    .get(&self.field_name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            ]
         } else {
             self
                 .field_names
                 .iter()
-                .map(|field_name| row_map.get(field_name).cloned().unwrap_or_default())
+                .map(|field_name| row_map.get(field_name).map(Vec::as_slice).unwrap_or(&[]))
                 .collect::<Vec<_>>()
         };
 
@@ -314,20 +319,23 @@ impl DatabaseIndexor {
         };
 
         let lower_bound = match lower {
-            Some(bound) if bound.inclusive => Bound::Included(bound.key.clone()),
-            Some(bound) => Bound::Excluded(bound.key.clone()),
+            Some(bound) if bound.inclusive => Bound::Included(bound.key.as_slice()),
+            Some(bound) => Bound::Excluded(bound.key.as_slice()),
             None => Bound::Unbounded,
         };
 
         let upper_bound = match upper {
-            Some(bound) if bound.inclusive => Bound::Included(bound.key.clone()),
-            Some(bound) => Bound::Excluded(bound.key.clone()),
+            Some(bound) if bound.inclusive => Bound::Included(bound.key.as_slice()),
+            Some(bound) => Bound::Excluded(bound.key.as_slice()),
             None => Bound::Unbounded,
         };
 
         let mut row_id_set = HashSet::new();
 
-        for (_, bucket_id) in storage.key_directory.range((lower_bound, upper_bound)) {
+        for (_, bucket_id) in storage
+            .key_directory
+            .range::<[u8], _>((lower_bound, upper_bound))
+        {
             if let Some(ids) = storage.buckets.get(bucket_id) {
                 row_id_set.extend(ids.iter().copied());
             }

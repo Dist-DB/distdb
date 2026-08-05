@@ -1,0 +1,18 @@
+[2026-08-05T11:59:49Z INFO  console] console bootstrap peers: /ip4/127.0.0.1/tcp/19401
+Distdb console (www.distdb.com)
+Copyright (c) 2026 Sam Colak. All rights reserved.
+Type help for commands, or \q to quit
+Default delimiter is ';' (use delimiter <token> to change)
+[2026-08-05T11:59:49Z INFO  peerlib::connector::transport] connector transport active peer set to /ip4/127.0.0.1/tcp/19401
+[2026-08-05T11:59:49Z INFO  peerlib::connector::transport] connector transport established persistent stream peer=/ip4/127.0.0.1/tcp/19401 addr=127.0.0.1:19401
+[2026-08-05T11:59:49Z INFO  console::session] * peer=perf-baseline-node addrs=127.0.0.1:19401
+ok: 0 row(s) affected
+[2026-08-05T11:59:49Z INFO  console::session] database switched to perfdb
+┌──────────────┐
+│ payload:TEXT │
+├──────────────┤
+│ seed:59      │
+└──────────────┘
+1 row(s)
+timing: server_total=1ms parse=0ms execute=1ms network_rtt=2ms
+[2026-08-05T11:59:49Z INFO  peerlib::connector::transport] connector transport disconnected peer=perf-baseline-node reason=disconnect directive

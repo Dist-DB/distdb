@@ -42,5 +42,49 @@
          "summary_file" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260717-145552-32504/summary.txt"
       },
       "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260717-145552-32504/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-08-05T12:00:03Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260804-082530-3685",
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-08-04T06:25:35Z",
+         "git_sha" : "dffb09b",
+         "kind" : "split_brain_evidence_bundle",
+         "report_file" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260804-082530-3685/observation-report.md",
+         "run_id" : "split-brain-evidence-20260804-082530-3685",
+         "scenarios" : [
+            "SB-001",
+            "SB-002",
+            "SB-003",
+            "SB-004"
+         ],
+         "started_at_utc" : "2026-08-04T06:25:30Z",
+         "status" : "pass",
+         "summary_file" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260804-082530-3685/summary.txt"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260804-082530-3685/manifest.json"
+   },
+   {
+      "ingested_at_utc" : "2026-08-05T12:00:16Z",
+      "manifest" : {
+         "artifacts_dir" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260805-140005-1976",
+         "exit_code" : 0,
+         "finished_at_utc" : "2026-08-05T12:00:11Z",
+         "git_sha" : "5967183",
+         "kind" : "split_brain_evidence_bundle",
+         "report_file" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260805-140005-1976/observation-report.md",
+         "run_id" : "split-brain-evidence-20260805-140005-1976",
+         "scenarios" : [
+            "SB-001",
+            "SB-002",
+            "SB-003",
+            "SB-004"
+         ],
+         "started_at_utc" : "2026-08-05T12:00:05Z",
+         "status" : "pass",
+         "summary_file" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260805-140005-1976/summary.txt"
+      },
+      "manifest_path" : "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/split-brain-evidence-20260805-140005-1976/manifest.json"
    }
 ]

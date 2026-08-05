@@ -1,0 +1,5 @@
+show peers;
+password root;
+use opsdb;
+insert into heartbeat (id, origin) values (3, 'upgrade-a-node-old-peer-active');
+quit;

@@ -43,7 +43,8 @@ For design constraints and implementation ownership:
 - [at-rest-encryption.md](at-rest-encryption.md)
 - [consistency-isolation.md](consistency-isolation.md)
 - [node-failure-matrix.md](node-failure-matrix.md)
-- [beta-confidence-scorecard.md](beta-confidence-scorecard.md)
+- [checklists/beta-confidence-scorecard.md](checklists/beta-confidence-scorecard.md)
+- [checklists/release-candidate-checklist.md](checklists/release-candidate-checklist.md)
 - [partition-split-brain-matrix.md](partition-split-brain-matrix.md)
 - [non-functional-benchmarking.md](non-functional-benchmarking.md)
 - [large-dataset-import.md](large-dataset-import.md)
@@ -150,7 +151,8 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - [at-rest-encryption.md](at-rest-encryption.md): current at-rest encryption direction and constraints.
 - [consistency-isolation.md](consistency-isolation.md): current beta-ready consistency and isolation contract.
 - [node-failure-matrix.md](node-failure-matrix.md): node/network failure expectations and evidence status.
-- [beta-confidence-scorecard.md](beta-confidence-scorecard.md): four-domain beta confidence gates and status tracking.
+- [checklists/beta-confidence-scorecard.md](checklists/beta-confidence-scorecard.md): four-domain beta confidence gates and status tracking.
+- [checklists/release-candidate-checklist.md](checklists/release-candidate-checklist.md): release-candidate hard gates, evidence hooks, and owner sign-off checklist.
 - [partition-split-brain-matrix.md](partition-split-brain-matrix.md): executable partition/split-brain scenario gate matrix.
 - [non-functional-benchmarking.md](non-functional-benchmarking.md): baseline performance/recovery benchmark profiles and evidence format.
 - [large-dataset-import.md](large-dataset-import.md): high-throughput import runbook for multi-million row datasets.
@@ -171,7 +173,7 @@ Swarm membership is not the same as replication trust. DistDB uses the idea of a
 - If you want to understand security or deployment posture, read [security.md](security.md) and [replication.md](replication.md).
 - If you need guarantee boundaries, read [consistency-isolation.md](consistency-isolation.md) and [node-failure-matrix.md](node-failure-matrix.md).
 - If you need partition confidence details, read [partition-split-brain-matrix.md](partition-split-brain-matrix.md).
-- If you need release confidence posture, read [beta-confidence-scorecard.md](beta-confidence-scorecard.md) alongside [release.md](release.md).
+- If you need release confidence posture, read [checklists/beta-confidence-scorecard.md](checklists/beta-confidence-scorecard.md), [checklists/release-candidate-checklist.md](checklists/release-candidate-checklist.md), and [release.md](release.md).
 - If you need non-functional evidence, read [non-functional-benchmarking.md](non-functional-benchmarking.md).
 - If you need security confidence evidence, read [security-adversarial-matrix.md](security-adversarial-matrix.md).
 - If you need security finding triage/disposition detail, read [security-findings-log.md](security-findings-log.md).

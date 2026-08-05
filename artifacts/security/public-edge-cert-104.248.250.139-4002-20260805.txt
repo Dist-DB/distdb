@@ -1,0 +1,6 @@
+subject=CN=server-node-01
+issuer=C=DE, ST=Hessen, L=Frankfurt, O=DistDB, OU=Platform Issuance, CN=DistDB Platform Issuing CA
+notBefore=Jan  1 00:00:00 1975 GMT
+notAfter=Jan  1 00:00:00 4096 GMT
+X509v3 Subject Alternative Name: 
+    DNS:*.distdb.com, DNS:*.docker.internal, DNS:*.internal, DNS:*.local, DNS:example.test, DNS:localhost, DNS:provision.cloud.distdb.com, DNS:provision.distdb.com

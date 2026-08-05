@@ -98,7 +98,7 @@ The following minimum signals are required for operability drills and incident t
 
 ## Beta Closure Requirements
 
-To mark Domain 4 as green in [beta-confidence-scorecard.md](beta-confidence-scorecard.md):
+To mark Domain 4 as green in [checklists/beta-confidence-scorecard.md](checklists/beta-confidence-scorecard.md):
 
 1. expand cross-version rolling upgrade evidence into a maintained matrix (multiple adjacent and declared-supported version windows),
 2. keep the frozen WAL/catalog compatibility table current with evidence-backed window updates,
@@ -107,7 +107,7 @@ To mark Domain 4 as green in [beta-confidence-scorecard.md](beta-confidence-scor
 
 ## Domain 4 Closure Status (2026-07-17)
 
-Current status against Domain 4 beta gates in `docs/beta-confidence-scorecard.md`:
+Current status against Domain 4 beta gates in `docs/checklists/beta-confidence-scorecard.md`:
 
 1. Rolling restart and rolling upgrade scenarios are documented and validated: satisfied.
 2. Backward/forward WAL/catalog compatibility expectations are published with declared windows: satisfied.

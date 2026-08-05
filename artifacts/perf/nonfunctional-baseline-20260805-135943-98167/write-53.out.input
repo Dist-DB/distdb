@@ -1,0 +1,5 @@
+show peers;
+password root;
+use perfdb;
+insert into events (id, payload) values (253, 'write:53');
+quit;

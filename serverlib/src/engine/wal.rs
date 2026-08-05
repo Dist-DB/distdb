@@ -176,6 +176,32 @@ fn write_wal_storage_payload<'a>(
 
 }
 
+fn into_owned_payload(payload: Option<Cow<'_, [u8]>>) -> Option<Vec<u8>> {
+
+    match payload {
+        Some(Cow::Owned(payload)) => Some(payload),
+        Some(Cow::Borrowed(_)) | None => None,
+    }
+
+}
+
+fn record_for_storage_with_payload(
+    record: &TransactionRecord,
+    payload: Option<Vec<u8>>,
+) -> TransactionRecord {
+
+    TransactionRecord::new(
+        record.id,
+        record.groupid,
+        record.refid,
+        record.timestamp_epoch_ms,
+        record.actor.clone(),
+        record.kind,
+        payload,
+    )
+
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalStreamMode {
     Durable,
@@ -953,16 +979,15 @@ pub(crate) fn encode_record_for_storage_with_context(
     context: &TransactionPayloadContext,
 ) -> Result<Vec<u8>, &'static str> {
 
-    let mut record_for_storage = record.clone();
-
-    let stored_payload = write_wal_storage_payload(record, record_for_storage.payload_raw(), context)
+    let stored_payload = write_wal_storage_payload(record, record.payload_raw(), context)
         .map_err(map_payload_write_transform_error)?;
 
-    if let Some(Cow::Owned(payload)) = stored_payload {
-        record_for_storage.set_payload(Some(payload));
+    if let Some(payload) = into_owned_payload(stored_payload) {
+        let record_for_storage = record_for_storage_with_payload(record, Some(payload));
+        return bincode::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record");
     }
 
-    bincode::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record")
+    bincode::serialize(record).map_err(|_| "failed to serialize WAL record")
 
 }
 
@@ -971,14 +996,22 @@ pub(crate) fn decode_record_from_storage(
 ) -> Result<TransactionRecord, &'static str> {
 
     let context = TransactionPayloadContext::default();
+    decode_record_from_storage_with_context(encoded, &context)
+
+}
+
+fn decode_record_from_storage_internal(
+    encoded: &[u8],
+    context: &TransactionPayloadContext,
+) -> Result<TransactionRecord, &'static str> {
 
     let mut record = bincode::deserialize::<TransactionRecord>(encoded)
         .map_err(|_| "failed to deserialize WAL record")?;
 
-    let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), &context)
+    let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), context)
         .map_err(map_payload_transform_error)?;
 
-    if let Some(Cow::Owned(payload)) = resolved_payload {
+    if let Some(payload) = into_owned_payload(resolved_payload) {
         record.set_payload(Some(payload));
     }
 
@@ -990,18 +1023,7 @@ pub(crate) fn decode_record_from_storage_with_context(
     encoded: &[u8],
     context: &TransactionPayloadContext,
 ) -> Result<TransactionRecord, &'static str> {
-
-    let mut record = bincode::deserialize::<TransactionRecord>(encoded)
-        .map_err(|_| "failed to deserialize WAL record")?;
-
-    let resolved_payload =
-        resolve_wal_storage_payload(record.payload_raw(), context).map_err(map_payload_transform_error)?;
-
-    if let Some(Cow::Owned(payload)) = resolved_payload {
-        record.set_payload(Some(payload));
-    }
-
-    Ok(record)
+    decode_record_from_storage_internal(encoded, context)
 
 }
 
@@ -1148,6 +1170,14 @@ struct WalDecodeChunkResult {
     first_error: Option<(usize, &'static str)>,
 }
 
+fn decode_record_from_frame(
+    bytes: &[u8],
+    offset: usize,
+    len: usize,
+) -> Result<TransactionRecord, &'static str> {
+    decode_record_from_storage(&bytes[offset..offset + len])
+}
+
 fn decode_records_sequential(
     bytes: &[u8],
     frame_ranges: &[(usize, usize)],
@@ -1157,7 +1187,7 @@ fn decode_records_sequential(
 
     for &(offset, len) in frame_ranges {
 
-        match decode_record_from_storage(&bytes[offset..offset + len]) {
+        match decode_record_from_frame(bytes, offset, len) {
 
             Ok(record) => records.push(record),
 
@@ -1202,7 +1232,7 @@ fn decode_records_parallel(
                 let mut first_error = None;
 
                 for &(offset, len) in ranges {
-                    match decode_record_from_storage(&bytes[offset..offset + len]) {
+                    match decode_record_from_frame(bytes, offset, len) {
                         Ok(record) => records.push(record),
                         Err(e) => {
                             first_error = Some((offset, e));

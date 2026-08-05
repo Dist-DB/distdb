@@ -68,7 +68,7 @@ Use these gates to move from beta-ready posture toward a broader general-availab
 - complete broader end-to-end resilience testing around restart/replay/replication under failure conditions,
 - publish and freeze the consistency/isolation contract for supported behavior (`consistency-isolation.md`),
 - publish and continuously validate the node/network failure matrix (`node-failure-matrix.md`),
-- maintain a current four-domain beta confidence scorecard (`beta-confidence-scorecard.md`) with objective `Red/Yellow/Green` domain status,
+- maintain a current four-domain beta confidence scorecard (`checklists/beta-confidence-scorecard.md`) with objective `Red/Yellow/Green` domain status,
 - require all scorecard domains to reach `Green` before declaring beta,
 - stabilize and freeze a compatibility contract for supported SQL shapes,
 - publish upgrade/migration expectations for persisted catalog/WAL formats,

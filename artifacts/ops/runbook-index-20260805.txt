@@ -1,0 +1,6 @@
+# runbook index 2026-08-05
+date_utc=2026-08-05T12:03:45Z
+
+c9ac00ecaef59930ca0494b3a8242a23e6775ee06b4bcfeb0c65da9934cc937d  docs/operability-runbooks.md
+6b3a7b5041cbb0d440e6065d546fe5a6550d3587bec88263b2ba1477a2713fa5  docs/node-failure-matrix.md
+84daf662046ce317afdb40e0ed739904748b68a7d612c33f5f76ce2c9c15edcf  docs/operability-upgrade-safety.md

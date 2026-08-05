@@ -79,8 +79,28 @@ For remote hosts where `tlsserver` runs on the same machine, prefer:
   tls_server=127.0.0.1:5443
 ```
 
-If memory pressure persists during bootstrap, temporarily reduce runtime-index pressure with env flags
-while capacity is increased:
+If the deployment should issue a local-only certificate, set `TLS_SANS=localhost` in the startup script or pass `tls_san=localhost` explicitly.
+
+Runtime-index bootstrap now defaults to a conservative memory baseline:
+
+- `DISTDB_PLATFORM_PROFILE=minimum` (single startup switch; default in `server/debug.sh` and `server/run.sh`)
+
+- `DISTDB_RUNTIME_INDEX_BUILD_WORKERS=1`
+- `DISTDB_RUNTIME_INDEX_MATERIALIZE_NON_PRIMARY=0`
+- `DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=0`
+- `DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS=0`
+- `DISTDB_RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS=1000000` (parallel rebuild only for very large tables)
+
+Additional guardrail for steady-state ingest memory:
+
+- `DISTDB_RUNTIME_INDEX_AGGRESSIVE_RESERVE_GROWTH=0` by default to avoid oversized reserve runway growth.
+- Set `DISTDB_RUNTIME_INDEX_AGGRESSIVE_RESERVE_GROWTH=1` only when prioritizing ingest throughput over memory footprint.
+
+For higher-throughput startup behavior, use:
+
+- `DISTDB_PLATFORM_PROFILE=throughput`
+
+If you need to apply the same minimum-footprint profile explicitly (for older binaries or external service managers), use:
 
 ```bash
 DISTDB_RUNTIME_INDEX_BUILD_WORKERS=1 \
@@ -93,4 +113,4 @@ DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS=0 \
   tls_server=127.0.0.1:5443
 ```
 
-These flags are intended as stabilization levers, not long-term replacements for adequate memory sizing.
+These flags are stabilization levers, not long-term replacements for adequate memory sizing.

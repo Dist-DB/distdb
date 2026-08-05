@@ -100,6 +100,7 @@ static EQUALITY_TABLE_CACHE: OnceLock<Mutex<EqualityCacheScopeMap>> =
 
 type EqualityCacheTableMap = AHashMap<String, EqualityTableCacheEntry>;
 type EqualityCacheScopeMap = AHashMap<usize, EqualityCacheTableMap>;
+type LiveRow = (u64, HashMap<String, Vec<u8>>);
 
 fn equality_cache_table_map_mut(
     cache_guard: &mut EqualityCacheScopeMap,
@@ -177,6 +178,44 @@ fn cache_entry_matches_loaded_wal_head(
         .latest_transaction_id_if_loaded(table_id)
         .map(|tx| tx.0 == entry_latest_tx_id)
         .unwrap_or(true)
+
+}
+
+fn with_matching_equality_cache_entry<R>(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    f: impl FnOnce(&mut EqualityTableCacheEntry) -> R,
+) -> Option<R> {
+
+    let cache_scope_id = wal.cache_scope_id();
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    let Ok(mut cache_guard) = cache.lock() else {
+        return None;
+    };
+
+    let entry = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)?;
+
+    if !cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id) {
+        return None;
+    }
+
+    Some(f(entry))
+
+}
+
+fn insert_scoped_equality_cache_entry(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    entry: EqualityTableCacheEntry,
+) {
+
+    let cache_scope_id = wal.cache_scope_id();
+    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
+    }
 
 }
 
@@ -590,11 +629,11 @@ fn decode_live_row_chunk(
     committed_groups: &AHashSet<u64>,
     aborted_groups: &AHashSet<u64>,
     workers: usize,
-) -> Vec<Option<HashMap<String, Vec<u8>>>> {
+) -> Vec<(usize, HashMap<String, Vec<u8>>)> {
 
     if workers <= 1 || chunk.len() < 2 {
 
-        let mut decoded = vec![None; chunk.len()];
+        let mut decoded = Vec::new();
         
         for (idx, record) in chunk.iter().enumerate() {
             if !record_visible_for_live_row_apply(record, committed_groups, aborted_groups) {
@@ -605,7 +644,7 @@ fn decode_live_row_chunk(
                 && let Some(payload) = record.payload_logical()
                 && let Ok(row_map) = decode_row_payload(schema, payload)
             {
-                decoded[idx] = Some(row_map);
+                decoded.push((idx, row_map));
             }
         }
 
@@ -664,11 +703,11 @@ fn decode_live_row_chunk(
 
     });
 
-    let mut decoded = vec![None; chunk.len()];
-    for local in partials {
-        for (idx, row_map) in local {
-            decoded[idx] = Some(row_map);
-        }
+    let total_decoded = partials.iter().map(|local| local.len()).sum();
+    let mut decoded = Vec::with_capacity(total_decoded);
+
+    for mut local in partials {
+        decoded.append(&mut local);
     }
 
     decoded
@@ -1071,6 +1110,50 @@ fn rows_for_field_string_like(
                 .map(|row_map| (row_id, row_map))
         })
         .collect()
+
+}
+
+fn rows_for_field_string_like_case_insensitive(
+    entry: &EqualityTableCacheEntry,
+    field_name: &str,
+    pattern: &[u8],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    entry
+        .rows_by_id
+        .iter()
+        .filter_map(|(row_id, row_map)| {
+            row_map
+                .get(field_name)
+                .filter(|value| compare_like_value(value, pattern, true, None))
+                .map(|_| (*row_id, row_map.clone()))
+        })
+        .collect()
+
+}
+
+fn rows_for_field_string_like_indexed(
+    entry: &EqualityTableCacheEntry,
+    field_name: &str,
+    pattern: &[u8],
+) -> Option<Vec<LiveRow>> {
+
+    let pattern_text = String::from_utf8_lossy(pattern).to_string();
+
+    entry.string_index_by_field.get(field_name).map(|index| {
+        index
+            .search_like(&pattern_text)
+            .into_iter()
+            .flat_map(|(_, row_ids)| row_ids.iter().copied())
+            .filter_map(|row_id| {
+                entry
+                    .rows_by_id
+                    .get(&row_id)
+                    .cloned()
+                    .map(|row_map| (row_id, row_map))
+            })
+            .collect()
+    })
 
 }
 
@@ -1684,15 +1767,11 @@ pub fn load_live_rows_by_in_list(
         return Vec::new();
     }
 
-    let cache_scope_id = wal.cache_scope_id();
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
-
-    if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
-    {
+    if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
         ensure_field_postings(entry, field_name);
-        return rows_for_field_in_list(entry, field_name, lookup_values);
+        rows_for_field_in_list(entry, field_name, lookup_values)
+    }) {
+        return result;
     }
 
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
@@ -1710,9 +1789,7 @@ pub fn load_live_rows_by_in_list(
         let result = rows_for_field_in_list(&entry, field_name, lookup_values);
         let live_row_count = entry.rows_by_id.len();
 
-        if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-        }
+        insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
         maybe_persist_accessor_snapshot_from_accessor_miss(
             wal,
@@ -1736,9 +1813,7 @@ pub fn load_live_rows_by_in_list(
     let result = rows_for_field_in_list(&entry, field_name, lookup_values);
     let live_row_count = entry.rows_by_id.len();
 
-    if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-    }
+    insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
     maybe_persist_accessor_snapshot_from_accessor_miss(
         wal,
@@ -2271,7 +2346,7 @@ fn collect_live_rows_from_records(
 
         for chunk in wal_records.chunks(LIVE_ROW_APPLY_PARALLEL_CHUNK_SIZE) {
 
-            let mut decoded_chunk = decode_live_row_chunk(
+            let decoded_chunk = decode_live_row_chunk(
                 chunk,
                 schema,
                 &committed_groups,
@@ -2279,12 +2354,9 @@ fn collect_live_rows_from_records(
                 apply_workers,
             );
 
+            let mut decoded_iter = decoded_chunk.into_iter().peekable();
+
             for (offset, record) in chunk.iter().enumerate() {
-
-                if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
-                    continue;
-                }
-
                 match record.kind {
 
                     TransactionKind::Ignore => {}
@@ -2292,7 +2364,10 @@ fn collect_live_rows_from_records(
                     TransactionKind::Insert | 
                     TransactionKind::Update => {
 
-                        if let Some(row_map) = decoded_chunk[offset].take() {
+                        if let Some((decoded_offset, _)) = decoded_iter.peek()
+                            && *decoded_offset == offset
+                            && let Some((_, row_map)) = decoded_iter.next()
+                        {
                             row_order.push(record.id.0);
                             live_rows.insert(record.id.0, row_map);
                         }
@@ -2300,6 +2375,10 @@ fn collect_live_rows_from_records(
                     },
 
                     TransactionKind::Delete => {
+
+                        if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                            continue;
+                        }
 
                         if let Some(refid) = record.refid {
                             live_rows.remove(&refid.0);
@@ -2450,19 +2529,14 @@ pub fn load_live_rows_by_equality_filters(
         return Vec::new();
     }
 
-    let cache_scope_id = wal.cache_scope_id();
-
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
-
-    if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
-    {
+    if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
         for field_name in equality_filters.keys() {
             ensure_field_postings(entry, field_name);
         }
 
-        return rows_for_field_values(entry, equality_filters);
+        rows_for_field_values(entry, equality_filters)
+    }) {
+        return result;
     }
 
     let warm_fields = equality_filters
@@ -2488,9 +2562,7 @@ pub fn load_live_rows_by_equality_filters(
         let result = rows_for_field_values(&entry, equality_filters);
         let live_row_count = entry.rows_by_id.len();
 
-        if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-        }
+        insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
         maybe_persist_accessor_snapshot_from_accessor_miss(
             wal,
@@ -2514,9 +2586,7 @@ pub fn load_live_rows_by_equality_filters(
     let result = rows_for_field_values(&entry, equality_filters);
     let live_row_count = entry.rows_by_id.len();
 
-    if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-    }
+    insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
     maybe_persist_accessor_snapshot_from_accessor_miss(
         wal,
@@ -2542,24 +2612,14 @@ pub fn load_live_rows_by_prefix(
     case_insensitive: bool,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
-    let cache_scope_id = wal.cache_scope_id();
-
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
-
-    if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
-    {
-        if !entry.row_ids_by_field_value.contains_key(field_name) {
-            entry.row_ids_by_field_value.insert(
-                field_name.to_string(),
-                build_postings_for_field(&entry.rows_by_id, field_name),
-            );
-        }
+    if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
+        ensure_field_postings(entry, field_name);
 
         ensure_string_like_index(entry, field_name, case_insensitive);
 
-        return rows_for_field_prefix(entry, field_name, prefix, case_insensitive);
+        rows_for_field_prefix(entry, field_name, prefix, case_insensitive)
+    }) {
+        return result;
     }
 
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
@@ -2578,9 +2638,7 @@ pub fn load_live_rows_by_prefix(
         
         let result = rows_for_field_prefix(&entry, field_name, prefix, case_insensitive);
 
-        if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-        }
+        insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
         return result;
     }
@@ -2595,9 +2653,7 @@ pub fn load_live_rows_by_prefix(
 
     let result = rows_for_field_prefix(&entry, field_name, prefix, case_insensitive);
 
-    if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-    }
+    insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
     result
 
@@ -2614,41 +2670,41 @@ pub fn load_live_rows_by_string_like(
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     if case_insensitive {
-        return load_live_rows(wal, table_stream_id, table_id, schema)
-            .into_iter()
-            .filter(|(_, row_map)| {
-                row_map
-                    .get(field_name)
-                    .map(|value| compare_like_value(value, pattern, true, None))
-                    .unwrap_or(false)
-            })
-            .collect();
+
+        if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
+            rows_for_field_string_like_case_insensitive(entry, field_name, pattern)
+        }) {
+            return result;
+        }
+
+        let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
+            wal,
+            table_stream_id,
+            table_id,
+            schema,
+            &[],
+        );
+
+        let entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
+
+        let result = rows_for_field_string_like_case_insensitive(&entry, field_name, pattern);
+
+        insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
+
+        return result;
+
     }
 
-    let cache_scope_id = wal.cache_scope_id();
+    // we are case sensitive, so we can use the string index for faster lookups
 
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+    if let Some(Some(rows)) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
 
-    if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
-    {
         ensure_string_like_index(entry, field_name, false);
 
-        if let Some(index) = entry.string_index_by_field.get(field_name) {
-            return index
-                .search_like(&String::from_utf8_lossy(pattern))
-                .into_iter()
-                .flat_map(|(_, row_ids)| row_ids.iter().copied())
-                .filter_map(|row_id| {
-                    entry
-                        .rows_by_id
-                        .get(&row_id)
-                        .cloned()
-                        .map(|row_map| (row_id, row_map))
-                })
-                .collect();
-        }
+        rows_for_field_string_like_indexed(entry, field_name, pattern)
+        
+    }) {
+        return rows;
     }
 
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
@@ -2665,30 +2721,10 @@ pub fn load_live_rows_by_string_like(
         ensure_field_postings(&mut entry, field_name);
         ensure_string_like_index(&mut entry, field_name, false);
 
-        let pattern_text = String::from_utf8_lossy(pattern).to_string();
-        
-        let result = entry
-            .string_index_by_field
-            .get(field_name)
-            .map(|index| {
-                index
-                    .search_like(&pattern_text)
-                    .into_iter()
-                    .flat_map(|(_, row_ids)| row_ids.iter().copied())
-                    .filter_map(|row_id| {
-                        entry
-                            .rows_by_id
-                            .get(&row_id)
-                            .cloned()
-                            .map(|row_map| (row_id, row_map))
-                    })
-                    .collect()
-            })
+        let result = rows_for_field_string_like_indexed(&entry, field_name, pattern)
             .unwrap_or_default();
 
-        if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-        }
+        insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
         return result;
 
@@ -2702,29 +2738,10 @@ pub fn load_live_rows_by_string_like(
 
     ensure_string_like_index(&mut entry, field_name, false);
 
-    let pattern_text = String::from_utf8_lossy(pattern).to_string();
-    let result = entry
-        .string_index_by_field
-        .get(field_name)
-        .map(|index| {
-            index
-                .search_like(&pattern_text)
-                .into_iter()
-                .flat_map(|(_, row_ids)| row_ids.iter().copied())
-                .filter_map(|row_id| {
-                    entry
-                        .rows_by_id
-                        .get(&row_id)
-                        .cloned()
-                        .map(|row_map| (row_id, row_map))
-                })
-                .collect()
-        })
+    let result = rows_for_field_string_like_indexed(&entry, field_name, pattern)
         .unwrap_or_default();
 
-    if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-    }
+    insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
     result
 
@@ -2744,16 +2761,11 @@ pub fn load_live_rows_by_range(
         return load_live_rows(wal, table_stream_id, table_id, schema);
     }
 
-    let cache_scope_id = wal.cache_scope_id();
-
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
-
-    if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
-    {
+    if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
         ensure_field_postings(entry, field_name);
-        return rows_for_field_range(entry, field_name, lower_bound, upper_bound);
+        rows_for_field_range(entry, field_name, lower_bound, upper_bound)
+    }) {
+        return result;
     }
 
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
@@ -2771,9 +2783,7 @@ pub fn load_live_rows_by_range(
 
         let result = rows_for_field_range(&mut entry, field_name, lower_bound, upper_bound);
 
-        if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-        }
+        insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
         return result;
 
@@ -2787,9 +2797,7 @@ pub fn load_live_rows_by_range(
 
     let result = rows_for_field_range(&mut entry, field_name, lower_bound, upper_bound);
 
-    if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-    }
+    insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
     result
 
@@ -2807,19 +2815,15 @@ pub fn load_live_rows_by_range_intersection(
         return load_live_rows(wal, table_stream_id, table_id, schema);
     }
 
-    let cache_scope_id = wal.cache_scope_id();
-
-    let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     let anchor_field = filters.first().map(|filter| filter.field_name.as_str());
 
-    if let Ok(mut cache_guard) = cache.lock()
-        && let Some(entry) = equality_cache_entry_mut(&mut cache_guard, cache_scope_id, table_stream_id)
-        && cache_entry_matches_loaded_wal_head(wal, table_stream_id, entry.latest_tx_id)
-    {
+    if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
         if let Some(anchor_field) = anchor_field {
             ensure_field_postings(entry, anchor_field);
         }
-        return rows_for_range_filters(entry, filters);
+        rows_for_range_filters(entry, filters)
+    }) {
+        return result;
     }
 
     let warm_fields = anchor_field
@@ -2842,9 +2846,7 @@ pub fn load_live_rows_by_range_intersection(
 
         let result = rows_for_range_filters(&mut entry, filters);
 
-        if let Ok(mut cache_guard) = cache.lock() {
-            insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-        }
+        insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
         return result;
     }
@@ -2857,9 +2859,7 @@ pub fn load_live_rows_by_range_intersection(
 
     let result = rows_for_range_filters(&mut entry, filters);
 
-    if let Ok(mut cache_guard) = cache.lock() {
-        insert_equality_cache_entry(&mut cache_guard, cache_scope_id, table_stream_id, entry);
-    }
+    insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
 
     result
 

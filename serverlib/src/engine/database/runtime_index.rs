@@ -22,8 +22,8 @@ use crate::{
     TransactionKind,
 };
 
-const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: usize = 250_000;
-const RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS: usize = 32;
+const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: usize = 1_000_000;
+const RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS: usize = 1;
 static RUNTIME_INDEX_BOOTSTRAP_PROGRESS: OnceLock<Mutex<RuntimeIndexBootstrapProgress>> = OnceLock::new();
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +52,16 @@ fn set_runtime_index_bootstrap_progress(
     }
 }
 
+fn mark_runtime_index_bootstrap_table_complete() {
+    set_runtime_index_bootstrap_progress(|progress| {
+        progress.tables_completed = progress.tables_completed.saturating_add(1);
+        progress.current_database_id.clear();
+        progress.current_table_id.clear();
+        progress.current_table_started_epoch_ms = 0;
+        progress.last_update_epoch_ms = epoch_ms!();
+    });
+}
+
 pub fn current_runtime_index_bootstrap_progress() -> RuntimeIndexBootstrapProgress {
 
     runtime_index_bootstrap_progress_store()
@@ -68,6 +78,30 @@ fn runtime_index_parallel_build_max_workers() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS)
+
+}
+
+fn runtime_index_parallel_build_min_rows() -> usize {
+
+    std::env::var("DISTDB_RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS)
+
+}
+
+fn runtime_index_aggressive_reserve_growth() -> bool {
+
+    std::env::var("DISTDB_RUNTIME_INDEX_AGGRESSIVE_RESERVE_GROWTH")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 
 }
 
@@ -134,7 +168,8 @@ fn runtime_index_preload_accessors_on_bootstrap() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
+        
 }
 
 fn runtime_index_bootstrap_accessor_preload_max_live_rows() -> usize {
@@ -157,7 +192,7 @@ fn runtime_index_background_prewarm_skipped_accessors() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 
 }
 
@@ -286,7 +321,8 @@ impl RuntimeIndexState {
 
         // For sustained bulk ingest on large unique-key indexes, grow before
         // hitting the near-full threshold so rehash happens on smaller maps.
-        let proactive_growth = is_unique_key_index
+        let proactive_growth = runtime_index_aggressive_reserve_growth()
+            && is_unique_key_index
             && high_ingest_batch
             && capacity >= 16_384
             && len.saturating_mul(100) >= capacity.saturating_mul(55);
@@ -338,7 +374,7 @@ impl RuntimeIndexState {
             } else if high_ingest_batch && near_capacity {
                 // Under sustained large-batch ingest near load threshold, reserve
                 // a wider runway to avoid repeated tier-by-tier rehash cliffs.
-                capacity.clamp(16_384, 131_072)
+                capacity.clamp(4_096, 32_768)
             } else {
                 additional.saturating_mul(2).clamp(4_096, 32_768)
             }
@@ -788,12 +824,14 @@ impl RuntimeIndexStore {
     ) {
 
         let bootstrap_started_at = Instant::now();
+        let preload_accessors_on_bootstrap = runtime_index_preload_accessors_on_bootstrap();
 
         log::info!(
-            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} preload_accessor_max_live_rows={} warm_equality_cache_on_bootstrap=true non_primary_field_allowlist={} non_primary_index_allowlist={}",
+            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} preload_accessor_max_live_rows={} warm_equality_cache_on_bootstrap={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
-            runtime_index_preload_accessors_on_bootstrap(),
+            preload_accessors_on_bootstrap,
             runtime_index_bootstrap_accessor_preload_max_live_rows(),
+            preload_accessors_on_bootstrap,
             
             if self.non_primary_field_allowlist.is_empty() {
                 "<none>".to_string()
@@ -858,25 +896,13 @@ impl RuntimeIndexStore {
                 let Some(table) = catalog
                     .table_handle(&table_id)
                     .and_then(|handle| handle.table_snapshot()) else {
-                    set_runtime_index_bootstrap_progress(|progress| {
-                        progress.tables_completed = progress.tables_completed.saturating_add(1);
-                        progress.current_database_id.clear();
-                        progress.current_table_id.clear();
-                        progress.current_table_started_epoch_ms = 0;
-                        progress.last_update_epoch_ms = epoch_ms!();
-                    });
+                    mark_runtime_index_bootstrap_table_complete();
                     continue;
                 };
 
                 let table_stream_id = resolve_table_stream_id_for_bootstrap(catalog, &table_id, wal);
                 if table.indexes.is_empty() {
-                    set_runtime_index_bootstrap_progress(|progress| {
-                        progress.tables_completed = progress.tables_completed.saturating_add(1);
-                        progress.current_database_id.clear();
-                        progress.current_table_id.clear();
-                        progress.current_table_started_epoch_ms = 0;
-                        progress.last_update_epoch_ms = epoch_ms!();
-                    });
+                    mark_runtime_index_bootstrap_table_complete();
                     continue;
                 }
 
@@ -891,13 +917,7 @@ impl RuntimeIndexStore {
                     .collect::<Vec<_>>();
 
                 if tracked_indexes.is_empty() {
-                    set_runtime_index_bootstrap_progress(|progress| {
-                        progress.tables_completed = progress.tables_completed.saturating_add(1);
-                        progress.current_database_id.clear();
-                        progress.current_table_id.clear();
-                        progress.current_table_started_epoch_ms = 0;
-                        progress.last_update_epoch_ms = epoch_ms!();
-                    });
+                    mark_runtime_index_bootstrap_table_complete();
                     continue;
                 }
 
@@ -909,20 +929,21 @@ impl RuntimeIndexStore {
                     .as_ref()
                     .and_then(|data_dir| RuntimeIndexSnapshotService::wal_stream_fingerprint(data_dir, &table_stream_id));
 
-                let mut warm_fields = tracked_indexes
-                    .iter()
-                    .flat_map(|index| {
-                        if index.field_names.len() == 1 {
-                            vec![index.field_names[0].clone()]
-                        } else if index.field_names.is_empty() && !index.field_name.is_empty() {
-                            vec![index.field_name.clone()]
-                        } else {
-                            Vec::new()
+                let mut warm_fields = Vec::with_capacity(tracked_indexes.len());
+
+                for index in &tracked_indexes {
+                    if index.field_names.len() == 1 {
+                        let normalized = common::normalize_identifier!(&index.field_names[0]);
+                        if !normalized.is_empty() {
+                            warm_fields.push(normalized);
                         }
-                    })
-                    .filter(|field_name| !field_name.is_empty())
-                    .map(|field_name| common::normalize_identifier!(field_name))
-                    .collect::<Vec<_>>();
+                    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+                        let normalized = common::normalize_identifier!(&index.field_name);
+                        if !normalized.is_empty() {
+                            warm_fields.push(normalized);
+                        }
+                    }
+                }
 
                 warm_fields.sort();
                 warm_fields.dedup();
@@ -997,7 +1018,7 @@ impl RuntimeIndexStore {
                         );
                     }
 
-                    if runtime_index_preload_accessors_on_bootstrap() && !warm_fields.is_empty() {
+                    if preload_accessors_on_bootstrap && !warm_fields.is_empty() {
 
                         if !should_preload_accessors_for_bootstrap(snapshot.live_row_count) {
                             log::info!(
@@ -1038,13 +1059,7 @@ impl RuntimeIndexStore {
                                 table_started_at.elapsed().as_millis(),
                             );
 
-                            set_runtime_index_bootstrap_progress(|progress| {
-                                progress.tables_completed = progress.tables_completed.saturating_add(1);
-                                progress.current_database_id.clear();
-                                progress.current_table_id.clear();
-                                progress.current_table_started_epoch_ms = 0;
-                                progress.last_update_epoch_ms = epoch_ms!();
-                            });
+                            mark_runtime_index_bootstrap_table_complete();
 
                             continue;
                         }
@@ -1095,13 +1110,7 @@ impl RuntimeIndexStore {
                                 table_started_at.elapsed().as_millis(),
                             );
 
-                            set_runtime_index_bootstrap_progress(|progress| {
-                                progress.tables_completed = progress.tables_completed.saturating_add(1);
-                                progress.current_database_id.clear();
-                                progress.current_table_id.clear();
-                                progress.current_table_started_epoch_ms = 0;
-                                progress.last_update_epoch_ms = epoch_ms!();
-                            });
+                            mark_runtime_index_bootstrap_table_complete();
 
                             continue;
 
@@ -1178,13 +1187,7 @@ impl RuntimeIndexStore {
                         table_started_at.elapsed().as_millis(),
                     );
 
-                    set_runtime_index_bootstrap_progress(|progress| {
-                        progress.tables_completed = progress.tables_completed.saturating_add(1);
-                        progress.current_database_id.clear();
-                        progress.current_table_id.clear();
-                        progress.current_table_started_epoch_ms = 0;
-                        progress.last_update_epoch_ms = epoch_ms!();
-                    });
+                    mark_runtime_index_bootstrap_table_complete();
 
                     continue;
 
@@ -1238,7 +1241,9 @@ impl RuntimeIndexStore {
                     &table_id,
                 );
 
-                let warm_elapsed_ms = if should_preload_accessors_for_bootstrap(live_row_count) {
+                let warm_elapsed_ms = if preload_accessors_on_bootstrap
+                    && should_preload_accessors_for_bootstrap(live_row_count)
+                {
                     let warm_started_at = Instant::now();
                     warm_equality_cache_from_live_rows(
                         wal.cache_scope_id(),
@@ -1269,13 +1274,21 @@ impl RuntimeIndexStore {
 
                     warm_started_at.elapsed().as_millis()
                 } else {
-                    log::info!(
-                        "runtime index bootstrap equality warm skipped database={} table={} live_rows={} max_live_rows={}",
-                        database_id,
-                        table_id,
-                        live_row_count,
-                        runtime_index_bootstrap_accessor_preload_max_live_rows(),
-                    );
+                    if !preload_accessors_on_bootstrap {
+                        log::debug!(
+                            "runtime index bootstrap equality warm skipped database={} table={} reason=preload_disabled",
+                            database_id,
+                            table_id,
+                        );
+                    } else {
+                        log::info!(
+                            "runtime index bootstrap equality warm skipped database={} table={} live_rows={} max_live_rows={}",
+                            database_id,
+                            table_id,
+                            live_row_count,
+                            runtime_index_bootstrap_accessor_preload_max_live_rows(),
+                        );
+                    }
                     0
                 };
 
@@ -1334,13 +1347,7 @@ impl RuntimeIndexStore {
                     );
                 }
 
-                set_runtime_index_bootstrap_progress(|progress| {
-                    progress.tables_completed = progress.tables_completed.saturating_add(1);
-                    progress.current_database_id.clear();
-                    progress.current_table_id.clear();
-                    progress.current_table_started_epoch_ms = 0;
-                    progress.last_update_epoch_ms = epoch_ms!();
-                });
+                mark_runtime_index_bootstrap_table_complete();
             
             }
         
@@ -1718,7 +1725,7 @@ fn build_bootstrap_index_entries(
 
     let should_parallel = available > 1
         && tracked_indexes.len() > 1
-        && live_rows.len() >= RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS;
+        && live_rows.len() >= runtime_index_parallel_build_min_rows();
 
     if !should_parallel {
 
@@ -1811,7 +1818,7 @@ fn build_snapshot_index_entries(
 
     let should_parallel = available > 1
         && tracked_indexes.len() > 1
-        && snapshot.live_row_count >= RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS;
+        && snapshot.live_row_count >= runtime_index_parallel_build_min_rows();
 
     if !should_parallel {
         return tracked_indexes
@@ -1920,7 +1927,7 @@ fn runtime_index_materialize_non_primary() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 
 }
 

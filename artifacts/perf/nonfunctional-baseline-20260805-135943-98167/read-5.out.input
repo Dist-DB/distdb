@@ -1,0 +1,5 @@
+show peers;
+password root;
+use perfdb;
+select payload from events where id = 5;
+quit;

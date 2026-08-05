@@ -1,0 +1,5 @@
+show peers;
+password root;
+use perfdb;
+insert into events (id, payload) values (298, 'mixed-write:38');
+quit;
