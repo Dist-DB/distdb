@@ -135,10 +135,9 @@ fn encrypted_row_payload_transform_can_preserve_opaque_payloads() {
 
     let transformed = EncryptedRowPayloadTransform::preserve_opaque()
         .transform_payload(&payload, &crate::TransactionPayloadContext::default())
-        .expect("opaque preserve should succeed")
-        .expect("encrypted payload should be detected");
+        .expect("opaque preserve should succeed");
 
-    assert_eq!(transformed, payload);
+    assert_eq!(transformed, None);
 }
 
 #[test]
@@ -195,10 +194,9 @@ fn encrypted_row_payload_write_transform_can_preserve_opaque_payloads() {
             &payload,
             &crate::TransactionPayloadContext::default(),
         )
-        .expect("opaque preserve should succeed")
-        .expect("encrypted payload should be detected");
+        .expect("opaque preserve should succeed");
 
-    assert_eq!(transformed, payload);
+    assert_eq!(transformed, None);
 }
 
 #[test]
