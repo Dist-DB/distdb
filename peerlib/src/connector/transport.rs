@@ -1330,6 +1330,28 @@ fn load_tls_root_store_from_reader<R: Read>(
 
 }
 
+fn load_system_tls_root_store() -> Result<RootCertStore, ConnectorError> {
+    let certs = rustls_native_certs::load_native_certs();
+
+    if certs.certs.is_empty() {
+        return Err(ConnectorError::Transport(
+            "system trust store is empty".to_string(),
+        ));
+    }
+
+    let mut roots = RootCertStore::empty();
+
+    for cert in certs.certs {
+        roots.add(cert).map_err(|err| {
+            ConnectorError::Transport(format!(
+                "failed to add system trust anchor: {err}"
+            ))
+        })?;
+    }
+
+    Ok(roots)
+}
+
 fn server_names_from_socket_addr(socket_addr: &str) -> Vec<String> {
 
     let host = socket_addr
@@ -1418,7 +1440,19 @@ fn connect_tls_stream(
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth()
     } else {
-        let roots = load_tls_root_store_from_pem(platform_tls_root_cert_pem())?;
+        let mut roots = load_system_tls_root_store().unwrap_or_else(|err| {
+            log::warn!(
+                "connector failed to load system trust store; falling back to platform roots: {}",
+                err
+            );
+            RootCertStore::empty()
+        });
+
+        let platform_roots = load_tls_root_store_from_pem(platform_tls_root_cert_pem())?;
+        for cert in platform_roots.roots {
+            roots.roots.push(cert);
+        }
+
         ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth()

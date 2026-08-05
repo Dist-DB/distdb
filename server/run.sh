@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TLS_SERVER_ADDR="${TLS_SERVER_ADDR:-127.0.0.1:5443}"
-TLS_SANS="${TLS_SANS:-localhost,provision.distdb.com}"
+TLS_SANS="${TLS_SANS:-localhost}"
 
 # Unified startup profile switch:
 # - minimum (default): smallest memory footprint for bootstrap/runtime index.

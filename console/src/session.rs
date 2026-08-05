@@ -7,6 +7,7 @@ use peerlib::{
     ConnectorP2pConfig, ConnectorP2pRuntime, ConnectorP2pTransport, ConnectorPeer,
     ConnectorTlsConfig,
 };
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::utils::{
@@ -50,6 +51,71 @@ pub struct ConsoleSession {
     request_seq: u64,
     log_seq: u64,
     log_entries: Vec<ConsoleLogEntry>,
+}
+
+fn host_from_socket_addr(addr: &str) -> Option<String> {
+    let trimmed = addr.trim();
+
+    if trimmed.starts_with("/") {
+        let parts = trimmed.split('/').filter(|value| !value.is_empty()).collect::<Vec<_>>();
+        if parts.len() >= 2 && matches!(parts[0], "dns" | "dns4" | "dns6" | "ip4" | "ip6") {
+            let host = parts[1].trim().to_ascii_lowercase();
+            if !host.is_empty() {
+                return Some(host);
+            }
+        }
+    }
+
+    let host = addr
+        .trim()
+        .trim_matches('[')
+        .trim_matches(']')
+        .rsplit_once(':')
+        .map(|(value, _)| value)
+        .unwrap_or(addr)
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_ascii_lowercase();
+
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+fn is_cloud_gateway_addr(addr: &str) -> bool {
+    host_from_socket_addr(addr)
+        .is_some_and(|host| host == "app.distdb.com" || host.ends_with(".cloud.distdb.com"))
+}
+
+fn normalize_discovered_addrs_for_gateway(
+    source_peer_addrs: &[String],
+    discovered_addrs: Vec<String>,
+) -> Vec<String> {
+    let source_gateway_addrs = source_peer_addrs
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && is_cloud_gateway_addr(value))
+        .collect::<Vec<_>>();
+
+    if source_gateway_addrs.is_empty() {
+        return discovered_addrs;
+    }
+
+    if discovered_addrs.iter().any(|value| is_cloud_gateway_addr(value)) {
+        return discovered_addrs;
+    }
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for addr in source_gateway_addrs {
+        if seen.insert(addr.clone()) {
+            deduped.push(addr);
+        }
+    }
+
+    deduped
 }
 
 impl ConsoleSession {
@@ -508,6 +574,8 @@ impl ConsoleSession {
                     .map(|addr| addr.trim().to_string())
                     .filter(|addr| !addr.is_empty())
                     .collect::<Vec<_>>();
+
+                let addrs = normalize_discovered_addrs_for_gateway(&peer.addrs, addrs);
 
                 if addrs.is_empty() {
                     continue;
