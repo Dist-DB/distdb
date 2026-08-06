@@ -25,6 +25,7 @@ pub struct CursorDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SqlCursorFrame {
     current_row: Option<HashMap<String, Vec<u8>>>,
+    current_row_value_cache: HashMap<String, Vec<u8>>,
     local_bindings: HashMap<String, Vec<u8>>,
     pub diagnostics: CursorDiagnostics,
 }
@@ -239,12 +240,30 @@ impl SqlCursorFrame {
 
     fn set_current_row(&mut self, row: HashMap<String, Vec<u8>>) {
         self.current_row = Some(row);
+        self.current_row_value_cache.clear();
+
+        if let Some(row) = self.current_row.as_ref() {
+            for (field_name, value) in row.iter() {
+                let normalized = common::normalize_identifier!(field_name);
+                self.current_row_value_cache
+                    .entry(normalized.clone())
+                    .or_insert_with(|| value.clone());
+
+                if let Some((_, column_name)) = normalized.split_once('.') {
+                    self.current_row_value_cache
+                        .entry(column_name.to_string())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
+
         self.diagnostics.not_found = false;
         self.diagnostics.fetched_rows += 1;
     }
 
     fn mark_not_found(&mut self) {
         self.current_row = None;
+        self.current_row_value_cache.clear();
         self.diagnostics.not_found = true;
     }
 
@@ -263,13 +282,17 @@ impl ConditionValueProvider for SqlCursorFrame {
         }
 
         if let Some(row) = self.current_row.as_ref() {
-
-            if let Some(value) = row.get(&normalized) {
+            if let Some(value) = self.current_row_value_cache.get(&normalized) {
                 return Some(value);
             }
 
             if let Some((_, unqualified)) = normalized.split_once('.')
-                && let Some(value) = row.get(unqualified) {
+                && let Some(value) = self.current_row_value_cache.get(unqualified) {
+                    return Some(value);
+                }
+
+            if !normalized.contains('.')
+                && let Some(value) = self.current_row_value_cache.get(&normalized) {
                     return Some(value);
                 }
 

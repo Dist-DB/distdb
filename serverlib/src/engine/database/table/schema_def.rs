@@ -1,15 +1,50 @@
 
 use common::schema::{normalize_field_name, validate_field_kind};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::database::field_def::FieldDef;
 use crate::engine::database::schema::error::{SchemaError, SchemaResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TableSchemaSerde {
+    fields: Vec<FieldDef>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TableSchema {
     pub fields: Vec<FieldDef>,
-    #[serde(default, skip)]
     field_indexes_by_name: HashMap<String, usize>,
+}
+
+impl PartialEq for TableSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields == other.fields
+    }
+}
+
+impl Eq for TableSchema {}
+
+impl Serialize for TableSchema {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        TableSchemaSerde {
+            fields: self.fields.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TableSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let serde_schema = TableSchemaSerde::deserialize(deserializer)?;
+        Ok(Self::new(serde_schema.fields))
+    }
 }
 
 impl TableSchema {

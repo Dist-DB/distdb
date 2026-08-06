@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::hint::black_box;
+use std::time::Instant;
 
 use super::{
     execute_sql_cursor, CursorDirective, SelectReadPlanCursorSource,
@@ -279,6 +281,44 @@ fn sql_cursor_frame_resolves_qualified_and_local_bindings() {
     assert_eq!(frame.value("users.id"), Some(&b"7".to_vec()));
     assert_eq!(frame.value("id"), Some(&b"7".to_vec()));
     assert_eq!(frame.value("item_count"), Some(&b"42".to_vec()));
+}
+
+#[test]
+fn sql_cursor_frame_value_lookup_benchmark_style() {
+    let mut frame = SqlCursorFrame::new();
+    let row = (0..2_000)
+        .map(|index| (format!("users.field_{index}"), vec![index as u8]))
+        .collect::<HashMap<_, _>>();
+
+    frame.set_current_row(row.clone());
+
+    let baseline_start = Instant::now();
+    let baseline = black_box((0..5_000).fold(0usize, |acc, _| {
+        acc + usize::from(
+            row.iter().find(|(field_name, _)| {
+                field_name
+                    .split_once('.')
+                    .is_some_and(|(_, column_name)| column_name == "field_1999")
+            })
+            .is_some(),
+        )
+    }));
+    let baseline_elapsed = baseline_start.elapsed();
+
+    let optimized_start = Instant::now();
+    let optimized = black_box((0..5_000).fold(0usize, |acc, _| {
+        acc + usize::from(frame.value("field_1999").is_some())
+    }));
+    let optimized_elapsed = optimized_start.elapsed();
+
+    assert!(baseline > 0);
+    assert!(optimized > 0);
+
+    println!(
+        "sql_cursor_frame_value_lookup_benchmark_style baseline_elapsed_ns={} optimized_elapsed_ns={}",
+        baseline_elapsed.as_nanos(),
+        optimized_elapsed.as_nanos(),
+    );
 }
 
 #[test]
