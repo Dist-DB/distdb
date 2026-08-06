@@ -39,6 +39,7 @@ impl ServerRuntimeConfig {
         data_dir: PathBuf,
         listen_addr: impl Into<String>,
     ) -> Self {
+
         Self {
             node_id: DEFAULT_LOCAL_NODE_ID.to_string(),
             swarm_id: DEFAULT_LOCAL_SWARM_ID.to_string(),
@@ -47,6 +48,7 @@ impl ServerRuntimeConfig {
             tls_mode: common::TlsMode::Required,
             tls: ServerTlsConfig::default(),
         }
+        
     }
 
     pub fn to_node_config(&self) -> NodeConfig {

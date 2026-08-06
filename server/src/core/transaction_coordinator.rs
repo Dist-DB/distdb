@@ -121,7 +121,9 @@ impl TransactionCoordinator {
         session_id: &str,
         table_ids: Vec<String>,
     ) -> Result<(), &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+        
         self.sender
             .send(CoordinatorCommand::BeginWithTableLocks {
                 session_id: session_id.to_string(),
@@ -129,22 +131,28 @@ impl TransactionCoordinator {
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+        
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")?
+
     }
 
     pub fn is_active(&self, session_id: &str) -> Result<bool, &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::IsActive {
                 session_id: session_id.to_string(),
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")
+
     }
 
     pub fn route_query(
@@ -153,7 +161,9 @@ impl TransactionCoordinator {
         query: DataQuery,
         can_stage: bool,
     ) -> Result<QueryRoutingDecision, &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::RouteQuery {
                 session_id: session_id.to_string(),
@@ -162,13 +172,17 @@ impl TransactionCoordinator {
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")?
+
     }
 
     pub fn stage_query(&self, session_id: &str, query: DataQuery) -> Result<(), &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::Stage {
                 session_id: session_id.to_string(),
@@ -176,48 +190,62 @@ impl TransactionCoordinator {
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")?
+
     }
 
     pub fn staged_queries(&self, session_id: &str) -> Result<Vec<DataQuery>, &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::GetStaged {
                 session_id: session_id.to_string(),
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")?
+
     }
 
     pub fn take_for_commit(&self, session_id: &str) -> Result<Vec<DataQuery>, &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::TakeForCommit {
                 session_id: session_id.to_string(),
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")?
+
     }
 
     pub fn rollback(&self, session_id: &str) -> Result<bool, &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::Rollback {
                 session_id: session_id.to_string(),
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")
+
     }
 
     pub fn restore_after_failed_commit(
@@ -225,7 +253,9 @@ impl TransactionCoordinator {
         session_id: &str,
         staged: Vec<DataQuery>,
     ) -> Result<(), &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::RestoreAfterFailedCommit {
                 session_id: session_id.to_string(),
@@ -233,25 +263,32 @@ impl TransactionCoordinator {
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")?
+
     }
 
     pub fn finalize_commit(&self, session_id: &str) -> Result<(), &'static str> {
+
         let (reply_tx, reply_rx) = mpsc::channel();
+
         self.sender
             .send(CoordinatorCommand::FinalizeCommit {
                 session_id: session_id.to_string(),
                 reply: reply_tx,
             })
             .map_err(|_| "transaction coordinator unavailable")?;
+
         reply_rx
             .recv()
             .map_err(|_| "transaction coordinator unavailable")?
+
     }
 
     pub fn apply_remote_table_locks(&self, owner_id: &str, table_ids: Vec<String>) {
+
         let (reply_tx, reply_rx) = mpsc::channel();
 
         if self
@@ -265,9 +302,11 @@ impl TransactionCoordinator {
         {
             let _ = reply_rx.recv();
         }
+
     }
 
     pub fn release_remote_table_locks(&self, owner_id: &str, table_ids: Vec<String>) {
+
         let (reply_tx, reply_rx) = mpsc::channel();
 
         if self
@@ -281,11 +320,13 @@ impl TransactionCoordinator {
         {
             let _ = reply_rx.recv();
         }
+
     }
 
 }
 
 fn normalize_unique_table_ids(table_ids: Vec<String>) -> Vec<String> {
+
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
 
@@ -305,6 +346,7 @@ fn normalize_unique_table_ids(table_ids: Vec<String>) -> Vec<String> {
 }
 
 fn dml_table_ids_for_query(query: &DataQuery) -> Vec<String> {
+
     let Ok(statements) = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) else {
         return Vec::new();
     };
@@ -327,6 +369,7 @@ fn dml_table_ids_for_query(query: &DataQuery) -> Vec<String> {
     }
 
     normalize_unique_table_ids(table_ids)
+
 }
 
 fn release_session_locks(
@@ -334,6 +377,7 @@ fn release_session_locks(
     table_locks_by_table: &mut HashMap<String, String>,
     locked_tables_by_session: &mut HashMap<String, HashSet<String>>,
 ) {
+
     let Some(locked_tables) = locked_tables_by_session.remove(owner_id) else {
         return;
     };
@@ -346,6 +390,7 @@ fn release_session_locks(
             table_locks_by_table.remove(&table_id);
         }
     }
+    
 }
 
 fn run_coordinator_loop(receiver: Receiver<CoordinatorCommand>) {

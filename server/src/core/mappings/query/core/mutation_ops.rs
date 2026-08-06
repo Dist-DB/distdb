@@ -55,6 +55,7 @@ fn record_mutation_access_plan(
     matched_rows: usize,
     diagnostics: &serverlib::RelationAccessPlanDiagnostics,
 ) {
+
     let count = MUTATION_ACCESS_PLAN_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
     if !should_emit_diagnostics(count, 10, 64) {
@@ -106,6 +107,7 @@ fn record_mutation_access_plan(
         diagnostics.candidates.len(),
         prioritization,
     );
+
 }
 
 #[expect(clippy::too_many_arguments, reason="diagnostic stage breakdown is explicit by design")]
@@ -123,6 +125,7 @@ fn record_mutation_execution_breakdown(
     total_ms: u128,
     uses_joins: bool,
 ) {
+
     let count = MUTATION_EXECUTION_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let should_log = should_emit_diagnostics(count, 10, 64) || total_ms >= 500;
 
@@ -145,6 +148,7 @@ fn record_mutation_execution_breakdown(
         total_ms,
         uses_joins,
     );
+
 }
 
 fn record_mutation_write_guard_timing(
@@ -157,6 +161,7 @@ fn record_mutation_write_guard_timing(
     finalize_ms: u128,
     total_ms: u128,
 ) {
+
     let count = MUTATION_WRITE_GUARD_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let should_log = should_emit_diagnostics(count, 10, 64) || total_ms >= 500;
 
@@ -175,6 +180,7 @@ fn record_mutation_write_guard_timing(
         finalize_ms,
         total_ms,
     );
+
 }
 
 fn record_insert_fallback_live_row_load(
@@ -182,6 +188,7 @@ fn record_insert_fallback_live_row_load(
     live_rows: usize,
     detail: Option<&str>,
 ) {
+
     let load_count = INSERT_FALLBACK_LIVE_ROW_LOAD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let total_rows = INSERT_FALLBACK_LIVE_ROW_MATERIALIZED_TOTAL
         .fetch_add(live_rows as u64, Ordering::Relaxed)
@@ -207,6 +214,7 @@ fn record_insert_fallback_live_row_load(
             );
         }
     }
+
 }
 
 fn record_insert_select_source_materialization(
@@ -215,6 +223,7 @@ fn record_insert_select_source_materialization(
     columns: usize,
     elapsed_ms: u128,
 ) {
+
     let count = INSERT_SELECT_SOURCE_MATERIALIZATION_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let should_log = should_emit_diagnostics(count, 5, 32) || elapsed_ms >= 500 || rows == 0;
 
@@ -228,6 +237,7 @@ fn record_insert_select_source_materialization(
             elapsed_ms,
         );
     }
+
 }
 
 fn build_insert_payload_row(
@@ -237,6 +247,7 @@ fn build_insert_payload_row(
     insert_column_fields: &[(&str, &serverlib::FieldDef)],
     missing_field_defaults: &[(&str, Option<&Vec<u8>>, bool)],
 ) -> Result<HashMap<String, Vec<u8>>, String> {
+
     if row.len() != columns_len {
         return Err(format!(
             "insert failed: row has {} values but {} columns were specified",
@@ -278,6 +289,7 @@ fn build_insert_payload_row(
     }
 
     Ok(payload_row)
+
 }
 
 fn encode_insert_payload(
@@ -374,7 +386,9 @@ where
     let block_rows = INSERT_VALUE_BLOCK_MAX_ROWS.max(1);
 
     match prepared_row_maps {
+
         Some(row_maps) => {
+
             if row_maps.len() != payloads.len() {
                 return Err("row map preparation mismatch for insert value blocks".to_string());
             }
@@ -383,19 +397,24 @@ where
             let mut row_map_iter = row_maps.into_iter();
 
             loop {
+
                 let mut payload_block = Vec::with_capacity(block_rows);
                 let mut row_map_block = Vec::with_capacity(block_rows);
 
                 for _ in 0..block_rows {
                     match (payload_iter.next(), row_map_iter.next()) {
+                        
                         (Some(payload), Some(row_map)) => {
                             payload_block.push(payload);
                             row_map_block.push(row_map);
-                        }
+                        },
+                        
                         (None, None) => break,
+
                         _ => {
                             return Err("row map preparation mismatch for insert value blocks".to_string());
                         }
+
                     }
                 }
 
@@ -415,6 +434,7 @@ where
                     timestamp_epoch_ms,
                     group_id,
                 )?;
+
             }
         }
 
@@ -447,11 +467,15 @@ where
                     timestamp_epoch_ms,
                     group_id,
                 )?;
+
             }
+        
         }
+
     }
 
     Ok(())
+
 }
 
 trait ReturningRowRef {
@@ -738,6 +762,7 @@ fn execute_insert_locked(
             let track_runtime_indexes_for_insert = derived_indexes_for_table(&table).next().is_some();
             let mut staged_pk_keys = HashSet::<Vec<Vec<u8>>>::with_capacity(insert_rows.len());
             let mut staged_pk_positions = HashMap::<Vec<Vec<u8>>, usize>::with_capacity(insert_rows.len());
+
             let primary_key_details = primary_key_index(&table).map(|pk_index| {
                 let pk_fields = if pk_index.field_names.is_empty() && !pk_index.field_name.is_empty() {
                     vec![pk_index.field_name.as_str()]
@@ -810,6 +835,7 @@ fn execute_insert_locked(
             if fast_path_append_only {
 
                 for row in insert_rows.iter() {
+
                     let payload_row = match build_insert_payload_row(
                         &schema,
                         row,
@@ -882,6 +908,7 @@ fn execute_insert_locked(
 
             let mut unique_fast_path_context = fast_path_simple_values_insert
                 .then(|| {
+
                     let mut runtime_indexes_for_unique = Vec::with_capacity(unique_indexes.len());
 
                     for index in &unique_indexes {
@@ -905,6 +932,7 @@ fn execute_insert_locked(
                     }
 
                     Some(runtime_indexes_for_unique)
+
                 })
                 .flatten();
 
@@ -923,8 +951,8 @@ fn execute_insert_locked(
                 rebuild_runtime_indexes_for_table(catalog, &table, wal, runtime_indexes);
 
                 unique_fast_path_context = {
-                    let mut runtime_indexes_for_unique = Vec::with_capacity(unique_indexes.len());
 
+                    let mut runtime_indexes_for_unique = Vec::with_capacity(unique_indexes.len());
                     let mut ready = true;
 
                     for index in &unique_indexes {
@@ -936,7 +964,7 @@ fn execute_insert_locked(
                             // Cardinality may legitimately be zero when a table has no live rows.
                             Some(runtime_index) => {
                                 runtime_indexes_for_unique.push((*index, runtime_index));
-                            }
+                            },
 
                             None => {
                                 ready = false;
@@ -968,6 +996,7 @@ fn execute_insert_locked(
                     .collect::<HashMap<&str, HashSet<Vec<Vec<u8>>>>>();
 
                 for row in insert_rows.iter() {
+
                     let payload_row = match build_insert_payload_row(
                         &schema,
                         row,
@@ -975,30 +1004,39 @@ fn execute_insert_locked(
                         &insert_column_fields,
                         &missing_field_defaults,
                     ) {
+                        
                         Ok(payload_row) => payload_row,
+                        
                         Err(message) => {
                             return ConnectorResponse::rejected(request_id.to_string(), message);
                         }
+
                     };
 
                     let encoded = match encode_insert_payload(&schema, &payload_row) {
+
                         Ok(encoded) => encoded,
+
                         Err(message) => {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
                                 message,
                             );
                         }
+
                     };
 
                     let canonical_row = match decode_insert_payload(&schema, &encoded) {
+
                         Ok(row) => row,
+
                         Err(message) => {
                             return ConnectorResponse::rejected(
                                 request_id.to_string(),
                                 message,
                             );
                         }
+
                     };
 
                     for (index, runtime_index) in &unique_runtime_indexes {
@@ -1129,6 +1167,7 @@ fn execute_insert_locked(
                     table.table_id.as_str(),
                     "insert_primary_fast_path_cold_index",
                 );
+
                 rebuild_runtime_indexes_for_table(catalog, &table, wal, runtime_indexes);
 
                 fast_path_context = primary_key_details
@@ -1143,6 +1182,7 @@ fn execute_insert_locked(
             if let Some((pk_fields, pk_runtime)) = fast_path_context {
 
                 for row in insert_rows.iter() {
+
                     let payload_row = match build_insert_payload_row(
                         &schema,
                         row,
@@ -1250,6 +1290,7 @@ fn execute_insert_locked(
             let mut existing_pk_keys = HashSet::<Vec<Vec<u8>>>::new();
             let mut existing_pk_rows = HashMap::<Vec<Vec<u8>>, (u64, MutationRowMap)>::new();
             let payload_context = payload_context_for_table(catalog, &plan.table_id);
+
             let current_live_rows = load_live_rows_with_context(
                 wal,
                 &table_stream_id,
@@ -1266,6 +1307,7 @@ fn execute_insert_locked(
                 .saturating_add(1);
 
             let fallback_detail = if should_emit_diagnostics(fallback_count_hint, 5, 32) {
+
                 let unique_stats = unique_indexes
                     .iter()
                     .map(|index| {
@@ -1292,6 +1334,7 @@ fn execute_insert_locked(
                     unique_indexes.len(),
                     unique_stats,
                 ))
+
             } else {
                 None
             };
@@ -1350,14 +1393,15 @@ fn execute_insert_locked(
                 })
                 .collect::<HashMap<&str, HashMap<Vec<Vec<u8>>, usize>>>();
 
-            let insert_requires_row_map = plan.returning.is_some()
-                || track_runtime_indexes_for_insert
-                || plan.replace_into
-                || !plan.on_duplicate_update.is_empty()
-                || primary_key_details.is_some()
-                || !non_primary_unique_indexes.is_empty();
+            let insert_requires_row_map = plan.returning.is_some() ||
+                track_runtime_indexes_for_insert ||
+                plan.replace_into ||
+                !plan.on_duplicate_update.is_empty() ||
+                primary_key_details.is_some() ||
+                !non_primary_unique_indexes.is_empty();
 
             for row in insert_rows.iter() {
+
                 let payload_row = match build_insert_payload_row(
                     &schema,
                     row,
@@ -1372,13 +1416,16 @@ fn execute_insert_locked(
                 };
 
                 let encoded = match encode_insert_payload(&schema, &payload_row) {
+                    
                     Ok(encoded) => encoded,
+
                     Err(message) => {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
                             message,
                         );
                     }
+
                 };
 
                 if !insert_requires_row_map {
@@ -1388,20 +1435,25 @@ fn execute_insert_locked(
                 }
 
                 let canonical_row = match decode_insert_payload(&schema, &encoded) {
+                    
                     Ok(row) => row,
+
                     Err(message) => {
                         return ConnectorResponse::rejected(
                             request_id.to_string(),
                             message,
                         );
                     }
+
                 };
 
                 let find_unique_conflict = |candidate_row: &HashMap<String, Vec<u8>>| {
+
                     let mut persisted_conflict = None;
                     let mut staged_conflict_position = None;
 
                     for index in &unique_indexes {
+
                         let index_id = index.index_id.0.as_str();
                         let key = index_value_tuple(index, candidate_row);
 
@@ -1422,6 +1474,7 @@ fn execute_insert_locked(
                             persisted_conflict = Some((row_id, row));
                             break;
                         }
+
                     }
 
                     (persisted_conflict, staged_conflict_position)
@@ -1564,13 +1617,16 @@ fn execute_insert_locked(
                                 &plan.on_duplicate_update,
                                 &canonical_row,
                             ) {
+                                
                                 Ok(result) => result,
+
                                 Err(message) => {
                                     return ConnectorResponse::rejected(
                                         request_id.to_string(),
                                         message,
                                     );
                                 }
+
                             };
 
                         if let Err(err) = append_row_payload_record_with_live_row_ids_and_prepared_row_map(
@@ -1652,13 +1708,16 @@ fn execute_insert_locked(
                                 &plan.on_duplicate_update,
                                 &canonical_row,
                             ) {
+
                                 Ok(result) => result,
+
                                 Err(message) => {
                                     return ConnectorResponse::rejected(
                                         request_id.to_string(),
                                         message,
                                     );
                                 }
+
                             };
 
                         staged_payloads[position] = insert_payload;
@@ -1723,6 +1782,7 @@ fn execute_insert_locked(
                         has_non_primary_unique_conflict = true;
 
                         if !plan.ignore {
+
                             let unique_display = index
                                 .field_names
                                 .iter()
@@ -1738,6 +1798,7 @@ fn execute_insert_locked(
                                 .join(", ");
 
                             non_primary_unique_conflict = Some(unique_display);
+
                         }
 
                         break;
@@ -1775,22 +1836,25 @@ fn execute_insert_locked(
 
                     if pk_runtime
                         .map(|idx| idx.contains(&incoming_pk))
-                        .unwrap_or(false)
-                        || existing_pk_keys.contains(&incoming_pk)
-                        || staged_pk_keys.contains(&incoming_pk)
+                        .unwrap_or(false) ||
+                            existing_pk_keys.contains(&incoming_pk) ||
+                            staged_pk_keys.contains(&incoming_pk)
                     {
                         if !plan.on_duplicate_update.is_empty() {
 
                             if let Some((row_id, existing_row)) = existing_pk_rows.get(&incoming_pk).cloned() {
 
                                 let delete_payload = match encode_row_payload(&schema, existing_row.as_ref()) {
+                                    
                                     Ok(encoded) => encoded,
+
                                     Err(err) => {
                                         return ConnectorResponse::rejected(
                                             request_id.to_string(),
                                             format!("insert duplicate update payload encode failed: {err}"),
                                         );
                                     }
+
                                 };
 
                                 let (insert_payload, updated_row) =
@@ -1800,13 +1864,16 @@ fn execute_insert_locked(
                                         &plan.on_duplicate_update,
                                         &canonical_row,
                                     ) {
+
                                         Ok(result) => result,
+
                                         Err(message) => {
                                             return ConnectorResponse::rejected(
                                                 request_id.to_string(),
                                                 message,
                                             );
                                         }
+
                                     };
 
                                 if let Err(err) = append_row_payload_record_with_live_row_ids_and_prepared_row_map(
@@ -1869,13 +1936,16 @@ fn execute_insert_locked(
                                         &plan.on_duplicate_update,
                                         &canonical_row,
                                     ) {
+
                                         Ok(result) => result,
+
                                         Err(message) => {
                                             return ConnectorResponse::rejected(
                                                 request_id.to_string(),
                                                 message,
                                             );
                                         }
+
                                     };
 
                                 staged_payloads[position] = insert_payload;
@@ -2025,6 +2095,7 @@ fn materialize_insert_source_rows<'a>(
         serverlib::InsertRowsSource::Values(rows) => Ok(Cow::Borrowed(rows.as_slice())),
 
         serverlib::InsertRowsSource::Select(read_plan) => {
+
             let source_materialize_started_at = std::time::Instant::now();
             let select_result = execute_select_with_ctes(
                 catalog,
@@ -2197,11 +2268,15 @@ fn execute_update_locked(
         &plan.joins,
         plan.where_condition.as_ref(),
     ) {
+        
         Ok(rows) => rows,
+
         Err(message) => {
             return ConnectorResponse::rejected(request_id.to_string(), message);
         }
+
     };
+
     let target_load_ms = target_load_started.elapsed().as_millis();
 
     let order_limit_started = std::time::Instant::now();
@@ -2239,9 +2314,9 @@ fn execute_update_locked(
         HashSet::new()
     };
 
-    let update_requires_canonical_row = primary_key.is_some()
-        || plan.returning.is_some()
-        || derived_indexes_for_table(&table).next().is_some();
+    let update_requires_canonical_row = primary_key.is_some() ||
+        plan.returning.is_some() ||
+        derived_indexes_for_table(&table).next().is_some();
 
     let current_live_row_ids = current_live_rows
         .iter()
@@ -2273,6 +2348,7 @@ fn execute_update_locked(
             };
 
             for (row_id, row_map) in current_live_rows {
+
                 let predicate_started = std::time::Instant::now();
 
                 if !mutation_uses_joins
@@ -2287,6 +2363,7 @@ fn execute_update_locked(
                     predicate_recheck_ms += predicate_started.elapsed().as_millis();
                     continue;
                 }
+
                 predicate_recheck_ms += predicate_started.elapsed().as_millis();
 
                 let row_prepare_started = std::time::Instant::now();
@@ -2320,19 +2397,24 @@ fn execute_update_locked(
                                 &updated_row,
                                 None,
                             ) {
+
                                 Ok(value) => value,
+
                                 Err(message) => {
                                     return ConnectorResponse::rejected(
                                         request_id.to_string(),
                                         format!("update failed: {message}"),
                                     );
                                 }
+
                             }
                         },
 
                         serverlib::UpdateAssignmentValue::ExistingColumn(column_name) => {
                             match updated_row.get(column_name).cloned() {
+
                                 Some(value) => Some(value),
+
                                 None => {
                                     return ConnectorResponse::rejected(
                                         request_id.to_string(),
@@ -2342,18 +2424,22 @@ fn execute_update_locked(
                                         ),
                                     );
                                 }
+
                             }
                         },
 
                         serverlib::UpdateAssignmentValue::Arithmetic { left, op, right } => {
                             match evaluate_update_assignment_arithmetic(&updated_row, left, *op, right) {
+
                                 Ok(value) => Some(value),
+
                                 Err(message) => {
                                     return ConnectorResponse::rejected(
                                         request_id.to_string(),
                                         format!("update failed: {message}"),
                                     );
                                 }
+
                             }
                         }
 
@@ -2431,6 +2517,7 @@ fn execute_update_locked(
                     let new_pk = index_value_tuple(pk_index, updated_row);
 
                     if old_pk != new_pk && pk_keys.contains(&new_pk) {
+
                         let pk_display = primary_key_fields
                             .as_ref()
                             .expect("primary key fields should exist when primary key index is present")
@@ -2444,15 +2531,18 @@ fn execute_update_locked(
                             request_id.to_string(),
                             format!("update failed: duplicate primary key ({})", pk_display),
                         );
+
                     }
 
                     pk_keys.remove(&old_pk);
                     pk_keys.insert(new_pk);
 
                 }
+
                 row_prepare_ms += row_prepare_started.elapsed().as_millis();
 
                 let wal_delete_started = std::time::Instant::now();
+
                 if let Err(err) = append_row_payload_record_with_live_row_ids_and_prepared_row_map(
                     catalog,
                     wal,
@@ -2472,9 +2562,11 @@ fn execute_update_locked(
                         format!("update delete WAL append failed: {err}"),
                     );
                 }
+
                 wal_delete_ms += wal_delete_started.elapsed().as_millis();
 
                 let wal_insert_started = std::time::Instant::now();
+
                 if let Err(err) = append_row_payload_record_with_prepared_row_map(
                     catalog,
                     wal,
@@ -2493,6 +2585,7 @@ fn execute_update_locked(
                         format!("update insert WAL append failed: {err}"),
                     );
                 }
+                
                 wal_insert_ms += wal_insert_started.elapsed().as_millis();
 
                 if plan.returning.is_some() {
