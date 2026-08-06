@@ -14,22 +14,27 @@ const USER_CREDENTIAL_WAL_PREFIX: &[u8] = b"distdb:security:user-credential:v1:\
 impl ServerApp {
 
     pub fn encode_user_credential_wal_payload(credential: &UserCredential) -> Result<Vec<u8>, String> {
+        
         let encoded = bincode::serialize(credential)
             .map_err(|err| format!("failed to encode user credential WAL payload: {}", err))?;
 
         let mut payload = Vec::with_capacity(USER_CREDENTIAL_WAL_PREFIX.len() + encoded.len());
         payload.extend_from_slice(USER_CREDENTIAL_WAL_PREFIX);
         payload.extend_from_slice(&encoded);
+        
         Ok(payload)
+
     }
 
     pub fn decode_user_credential_wal_payload(payload: &[u8]) -> Result<UserCredential, String> {
+
         let Some(encoded) = payload.strip_prefix(USER_CREDENTIAL_WAL_PREFIX) else {
             return Err("user credential WAL payload prefix mismatch".to_string());
         };
 
         bincode::deserialize(encoded)
             .map_err(|err| format!("failed to decode user credential WAL payload: {}", err))
+
     }
 
     pub fn append_user_credential_change_record(
@@ -78,22 +83,27 @@ impl ServerApp {
     }
 
     pub fn encode_account_acl_wal_payload(entry: &AccountAclEntry) -> Result<Vec<u8>, String> {
+
         let encoded = bincode::serialize(entry)
             .map_err(|err| format!("failed to encode ACL WAL payload: {}", err))?;
 
         let mut payload = Vec::with_capacity(ACCOUNT_ACL_WAL_PREFIX.len() + encoded.len());
         payload.extend_from_slice(ACCOUNT_ACL_WAL_PREFIX);
         payload.extend_from_slice(&encoded);
+        
         Ok(payload)
+
     }
 
     pub fn decode_account_acl_wal_payload(payload: &[u8]) -> Result<AccountAclEntry, String> {
+
         let Some(encoded) = payload.strip_prefix(ACCOUNT_ACL_WAL_PREFIX) else {
             return Err("ACL WAL payload prefix mismatch".to_string());
         };
 
         bincode::deserialize(encoded)
             .map_err(|err| format!("failed to decode ACL WAL payload: {}", err))
+
     }
 
     pub fn append_account_acl_change_record(
@@ -176,16 +186,21 @@ impl ServerApp {
     }
 
     pub fn first_wal_record_timestamp_for_database(&self, database_id: &str) -> Option<u64> {
+
         let wal_id = self.resolve_catalog_wal_stream_for_database(database_id);
+
         self.wal
             .since(&wal_id, None)
             .first()
             .map(|record| record.timestamp_epoch_ms)
+
     }
 
     pub(super) fn seed_sandbox_wal(&self, sandbox_wal: &ConcurrentWalManager) -> Result<(), String> {
+
         for catalog in self.catalogs.values() {
             for table_id in catalog.table_ids() {
+
                 let Some(table) = catalog.table(&table_id) else {
                     continue;
                 };
@@ -199,10 +214,12 @@ impl ServerApp {
                     table.schema(),
                     sandbox_wal,
                 )?;
+
             }
         }
 
         Ok(())
+
     }
 
     fn seed_table_stream_from_live_rows(
@@ -217,6 +234,7 @@ impl ServerApp {
         }
 
         let live_rows = serverlib::load_live_rows(&self.wal, table_id, table_id, schema);
+        
         if live_rows.is_empty() {
             return Ok(());
         }
@@ -225,6 +243,7 @@ impl ServerApp {
         let mut records = Vec::with_capacity(live_rows.len());
 
         for (idx, (_, row_map)) in live_rows.into_iter().enumerate() {
+
             let payload = serverlib::encode_row_payload(schema, &row_map)
                 .map_err(|err| format!("failed to encode snapshot row for table '{}': {}", table_id, err))?;
 
@@ -276,6 +295,7 @@ impl ServerApp {
         };
 
         let mut stream_ids: Vec<String> = vec![database_key];
+
         stream_ids.extend(
             catalog
                 .table_ids()
@@ -288,7 +308,9 @@ impl ServerApp {
         );
 
         let mut frames = Vec::new();
+
         for stream_id in stream_ids {
+
             if !self.wal.is_stream_replicable(&stream_id) {
                 continue;
             }
@@ -297,11 +319,13 @@ impl ServerApp {
                 Some(map) => map.get(&stream_id).copied(),
                 None => from,
             };
-            let mut records = self.wal.since(&stream_id, stream_from);
-            records.sort_by_key(|record| record.id.0);
+
+            let records = self.wal.since(&stream_id, stream_from);
+
             for record in records {
                 frames.push((stream_id.clone(), record));
             }
+
         }
 
         frames.sort_by(|a, b| {

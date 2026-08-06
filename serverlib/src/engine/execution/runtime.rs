@@ -27,6 +27,7 @@ pub struct JoinedRowMember {
 #[derive(Debug, Clone)]
 pub struct JoinedRowTuple {
     pub members: Vec<JoinedRowMember>,
+    member_indexes_by_qualifier: HashMap<String, usize>,
 }
 
 pub trait ConditionValueProvider {
@@ -119,6 +120,10 @@ impl ConditionValueProvider for UnqualifiedFieldFallbackProvider<'_> {
 
 impl JoinedRowTuple {
 
+    fn member_index_by_qualifier(&self, qualifier: &str) -> Option<usize> {
+        self.member_indexes_by_qualifier.get(qualifier).copied()
+    }
+
     pub fn from_relation_row(relation: &SelectRelation, row: MaterializedRelationRow) -> Self {
 
         Self {
@@ -127,6 +132,7 @@ impl JoinedRowTuple {
                 row_id: Some(row.row_id),
                 row_map: Some(row.row_map),
             }],
+            member_indexes_by_qualifier: HashMap::from([(relation_qualifier(relation).to_string(), 0)]),
         }
 
     }
@@ -142,32 +148,54 @@ impl JoinedRowTuple {
                     row_map: None,
                 })
                 .collect(),
+            member_indexes_by_qualifier: relations
+                .iter()
+                .enumerate()
+                .map(|(index, relation)| (relation_qualifier(relation).to_string(), index))
+                .collect(),
         }
+
     }
 
     pub fn append(&self, relation: &SelectRelation, row: &MaterializedRelationRow) -> Self {
 
         let mut members = self.members.clone();
+        let qualifier = relation_qualifier(relation).to_string();
+        
         members.push(JoinedRowMember {
-            qualifier: relation_qualifier(relation).to_string(),
+            qualifier: qualifier.clone(),
             row_id: Some(row.row_id),
             row_map: Some(Arc::clone(&row.row_map)),
         });
+
+        let mut member_indexes_by_qualifier = self.member_indexes_by_qualifier.clone();
+        member_indexes_by_qualifier.insert(qualifier, members.len() - 1);
         
-        Self { members }
+        Self {
+            members,
+            member_indexes_by_qualifier,
+        }
 
     }
 
     pub fn append_missing_relation(&self, relation: &SelectRelation) -> Self {
 
         let mut members = self.members.clone();
+        let qualifier = relation_qualifier(relation).to_string();
+
         members.push(JoinedRowMember {
-            qualifier: relation_qualifier(relation).to_string(),
+            qualifier: qualifier.clone(),
             row_id: None,
             row_map: None,
         });
+
+        let mut member_indexes_by_qualifier = self.member_indexes_by_qualifier.clone();
+        member_indexes_by_qualifier.insert(qualifier, members.len() - 1);
         
-        Self { members }
+        Self {
+            members,
+            member_indexes_by_qualifier,
+        }
 
     }
 
@@ -185,9 +213,8 @@ impl JoinedRowTuple {
 
         let (qualifier, column_name) = field_name.split_once('.')?;
 
-        self.members
-            .iter()
-            .find(|member| member.qualifier == qualifier)
+        self.member_index_by_qualifier(qualifier)
+            .and_then(|index| self.members.get(index))
             .and_then(|member| member.row_map.as_ref())
             .and_then(|row_map| row_map.get(column_name))
 

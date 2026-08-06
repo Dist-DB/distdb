@@ -744,6 +744,12 @@ fn join_field_can_be_null_extended(
         return false;
     };
 
+    let relation_qualifiers = relations
+        .iter()
+        .map(|relation| relation_qualifier(relation).to_string())
+        .collect::<Vec<_>>();
+    let relation_index_lookup = build_relation_qualifier_lookup(&relation_qualifiers);
+
     for (join_index, join) in joins.iter().enumerate() {
 
         let left_relations = &relations[..=join_index];
@@ -751,7 +757,8 @@ fn join_field_can_be_null_extended(
         if matches!(join.kind, SelectJoinKind::Right | SelectJoinKind::Full)
             && left_relations
                 .iter()
-                .any(|relation| relation_qualifier(relation) == qualifier)
+                .enumerate()
+                .any(|(index, _)| relation_index_lookup.get(qualifier).is_some_and(|indices| indices.contains(&index)))
         {
             return true;
         }
@@ -930,6 +937,16 @@ fn function_is_count_star(function: &Function) -> bool {
 
 }
 
+fn build_relation_qualifier_lookup(qualifiers: &[String]) -> HashMap<String, Vec<usize>> {
+    let mut lookup = HashMap::new();
+
+    for (index, qualifier) in qualifiers.iter().enumerate() {
+        lookup.entry(qualifier.clone()).or_insert_with(Vec::new).push(index);
+    }
+
+    lookup
+}
+
 fn expand_join_projection_items(
     catalog: &DatabaseCatalog,
     relations: &[SelectRelation],
@@ -937,6 +954,11 @@ fn expand_join_projection_items(
 ) -> Result<Vec<SelectProjectionItem>, String> {
     
     let mut expanded = Vec::new();
+    let relation_qualifiers = relations
+        .iter()
+        .map(|relation| relation_qualifier(relation).to_string())
+        .collect::<Vec<_>>();
+    let relation_index_lookup = build_relation_qualifier_lookup(&relation_qualifiers);
 
     for projection_item in projection_items {
 
@@ -945,10 +967,15 @@ fn expand_join_projection_items(
             SelectProjectionItem::Wildcard { relation } => {
 
                 let target_relations: Vec<&SelectRelation> = match relation {
-                    Some(qualifier) => relations
-                        .iter()
-                        .filter(|candidate| relation_qualifier(candidate) == qualifier)
-                        .collect(),
+                    Some(qualifier) => relation_index_lookup
+                        .get(qualifier)
+                        .map(|indices| {
+                            indices
+                                .iter()
+                                .filter_map(|index| relations.get(*index))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
 
                     None => relations.iter().collect(),
                 };

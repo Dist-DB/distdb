@@ -208,7 +208,7 @@ fn recursive_cte_execution_settings_persist_in_catalog_file() {
 fn duplicate_table_registration_is_rejected() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
-    let schema = TableSchema { fields: Vec::new() };
+    let schema = TableSchema::new(Vec::new());
 
     let first = catalog.register_table("users", schema.clone());
     let second = catalog.register_table("users", schema);
@@ -235,7 +235,7 @@ fn cross_type_entity_id_collision_is_rejected() {
 fn catalog_and_table_start_in_load_state() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
-    let schema = TableSchema { fields: Vec::new() };
+    let schema = TableSchema::new(Vec::new());
 
     catalog
         .register_table("users", schema)
@@ -286,7 +286,7 @@ fn create_table_moves_load_sync_ready() {
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
     catalog
-        .create_table("users", TableSchema { fields: Vec::new() })
+        .create_table("users", TableSchema::new(Vec::new()))
         .expect("create table should succeed");
 
     assert_eq!(catalog.table_status("users"), Some(ObjectStatus::Ready));
@@ -313,7 +313,7 @@ fn write_requires_database_and_table_ready() {
         DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
 
     catalog
-        .create_table("users", TableSchema { fields: Vec::new() })
+        .create_table("users", TableSchema::new(Vec::new()))
         .expect("create table should succeed");
 
     let denied = catalog.ensure_ready_for_write("users");

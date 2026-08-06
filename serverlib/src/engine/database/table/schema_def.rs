@@ -1,6 +1,6 @@
 
 use common::schema::{normalize_field_name, validate_field_kind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::engine::database::field_def::FieldDef;
 use crate::engine::database::schema::error::{SchemaError, SchemaResult};
@@ -8,17 +8,37 @@ use crate::engine::database::schema::error::{SchemaError, SchemaResult};
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
     pub fields: Vec<FieldDef>,
+    #[serde(default, skip)]
+    field_indexes_by_name: HashMap<String, usize>,
 }
 
 impl TableSchema {
 
     pub fn new(fields: Vec<FieldDef>) -> Self {
-        Self { fields }
+        let mut schema = Self {
+            fields,
+            field_indexes_by_name: HashMap::new(),
+        };
+        schema.rebuild_field_index_cache();
+        schema
+    }
+
+    fn rebuild_field_index_cache(&mut self) {
+        self.field_indexes_by_name.clear();
+
+        for (index, field) in self.fields.iter().enumerate() {
+            self.field_indexes_by_name
+                .entry(field.field_name.clone())
+                .or_insert(index);
+        }
     }
 
     pub fn field(&self, name: &str) -> Option<&FieldDef> {
         let normalized = name.trim().to_ascii_lowercase();
-        self.fields.iter().find(|f| f.field_name == normalized)
+        self.field_indexes_by_name
+            .get(&normalized)
+            .and_then(|index| self.fields.get(*index))
+            .or_else(|| self.fields.iter().find(|f| f.field_name == normalized))
     }
 
     /// Validate schema-level invariants required by row and schema-change
@@ -67,6 +87,7 @@ impl TableSchema {
         }
 
         self.fields.push(field);
+        self.rebuild_field_index_cache();
 
         Ok(())
 
@@ -83,6 +104,7 @@ impl TableSchema {
             .ok_or(SchemaError::FieldNotFound)?;
 
         self.fields.remove(pos);
+        self.rebuild_field_index_cache();
         
         Ok(())
 
@@ -114,6 +136,7 @@ impl TableSchema {
         }
 
         self.fields[target_idx] = field;
+        self.rebuild_field_index_cache();
         
         Ok(())
 

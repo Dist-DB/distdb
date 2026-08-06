@@ -2118,12 +2118,13 @@ pub fn derive_relation_pushdown_conditions(
         return vec![None; relation_bindings.len()];
     };
 
+    let relation_indexes = build_relation_index_lookup(relation_bindings);
     let clauses = flatten_and_clauses(condition);
 
     #[expect(clippy::single_match, reason="the function may be extended in the future to support more condition types that can be pushed down, but currently only one type is supported")]
     for clause in clauses {
 
-        match relation_index_for_condition(clause, relation_bindings) {
+        match relation_index_for_condition(clause, &relation_indexes) {
             
             Some(index) => {
                 if is_safe_relation_pushdown(index, joins)
@@ -2175,9 +2176,28 @@ fn combine_conditions(conditions: Vec<SelectCondition>) -> Option<SelectConditio
 
 }
 
+fn build_relation_index_lookup(relation_bindings: &[SelectRelationBinding]) -> HashMap<String, usize> {
+    let mut relation_indexes = HashMap::with_capacity(relation_bindings.len() * 2);
+
+    for (index, binding) in relation_bindings.iter().enumerate() {
+        
+        if !relation_indexes.contains_key(&binding.table_id) {
+            relation_indexes.insert(binding.table_id.clone(), index);
+        }
+
+        if let Some(alias) = binding.alias.as_deref()
+            && !relation_indexes.contains_key(alias) {
+                relation_indexes.insert(alias.to_string(), index);
+            }
+
+    }
+
+    relation_indexes
+}
+
 fn relation_index_for_condition(
     condition: &SelectCondition,
-    relation_bindings: &[SelectRelationBinding],
+    relation_indexes: &HashMap<String, usize>,
 ) -> Option<usize> {
 
     let field_name = match condition {
@@ -2200,18 +2220,18 @@ fn relation_index_for_condition(
 
     let (qualifier, _) = field_name.split_once('.')?;
 
-    relation_bindings.iter().position(|binding| {
-        binding.alias.as_deref() == Some(qualifier) || binding.table_id == qualifier
-    })
+    relation_indexes.get(qualifier).copied()
 
 }
 
 fn is_safe_relation_pushdown(relation_index: usize, joins: &[SelectJoin]) -> bool {
+
     if joins.is_empty() || relation_index == 0 {
         return true;
     }
 
     joins.iter().all(|join| matches!(join.kind, SelectJoinKind::Inner))
+    
 }
 
 fn localize_condition_for_relation(condition: &SelectCondition) -> Option<SelectCondition> {

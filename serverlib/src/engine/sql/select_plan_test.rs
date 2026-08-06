@@ -1,3 +1,6 @@
+use std::hint::black_box;
+use std::time::Instant;
+
 use super::*;
 
 fn set_query_branch_plans(steps: &[SelectSetQueryStep]) -> Vec<&SelectReadPlan> {
@@ -131,6 +134,147 @@ fn select_where_computed_expression_comparison_parses() {
     assert_eq!(common::normalize_identifier!(expression_sql.as_str()), "abs(id)");
     assert_eq!(op, SelectComparisonOp::LtEq);
     assert_eq!(value, b"10".to_vec());
+}
+
+#[test]
+fn derive_relation_pushdown_conditions_resolves_alias_qualified_conditions() {
+    let relation_bindings = vec![
+        SelectRelation {
+            table_id: "users".to_string(),
+            alias: Some("u".to_string()),
+        },
+        SelectRelation {
+            table_id: "orders".to_string(),
+            alias: Some("o".to_string()),
+        },
+    ];
+
+    let condition = SelectCondition::Predicate(SelectPredicate::Comparison {
+        field_name: "o.id".to_string(),
+        op: SelectComparisonOp::Eq,
+        value: b"7".to_vec(),
+    });
+
+    let per_relation = derive_relation_pushdown_conditions(
+        Some(&condition),
+        &relation_bindings,
+        &[],
+    );
+
+    assert!(per_relation[0].is_none());
+    assert!(matches!(
+        per_relation[1].as_ref(),
+        Some(SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. })) if field_name == "id"
+    ));
+}
+
+#[test]
+fn derive_relation_pushdown_conditions_benchmark_style_outperforms_linear_scan() {
+    let relation_bindings = (0..200)
+        .map(|index| SelectRelation {
+            table_id: format!("table_{index}"),
+            alias: None,
+        })
+        .collect::<Vec<_>>();
+
+    let condition = SelectCondition::And(
+        (0..200)
+            .map(|index| SelectCondition::Predicate(SelectPredicate::Comparison {
+                field_name: format!("table_{index}.id"),
+                op: SelectComparisonOp::Eq,
+                value: vec![index as u8],
+            }))
+            .collect::<Vec<_>>(),
+    );
+
+    fn derive_relation_pushdown_conditions_linear_scan(
+        condition: Option<&SelectCondition>,
+        relation_bindings: &[SelectRelationBinding],
+        joins: &[SelectJoin],
+    ) -> Vec<Option<SelectCondition>> {
+        if relation_bindings.is_empty() {
+            return Vec::new();
+        }
+
+        let mut per_relation = vec![Vec::new(); relation_bindings.len()];
+
+        let Some(condition) = condition else {
+            return vec![None; relation_bindings.len()];
+        };
+
+        for clause in flatten_and_clauses(condition) {
+            let Some(field_name) = (match clause {
+                SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. })
+                | SelectCondition::Predicate(SelectPredicate::Like { field_name, .. })
+                | SelectCondition::Predicate(SelectPredicate::Regex { field_name, .. })
+                | SelectCondition::Predicate(SelectPredicate::InList { field_name, .. })
+                | SelectCondition::Predicate(SelectPredicate::IsNull { field_name, .. })
+                | SelectCondition::Predicate(SelectPredicate::InSubquery { field_name, .. })
+                | SelectCondition::Predicate(SelectPredicate::ScalarSubqueryComparison {
+                    field_name,
+                    ..
+                })
+                | SelectCondition::Predicate(SelectPredicate::AnySubqueryComparison {
+                    field_name,
+                    ..
+                })
+                | SelectCondition::Predicate(SelectPredicate::AllSubqueryComparison {
+                    field_name,
+                    ..
+                }) => Some(field_name),
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            let Some((qualifier, _)) = field_name.split_once('.') else {
+                continue;
+            };
+
+            let Some(index) = relation_bindings.iter().enumerate().find_map(|(index, binding)| {
+                (binding.table_id == qualifier || binding.alias.as_deref() == Some(qualifier))
+                    .then_some(index)
+            }) else {
+                continue;
+            };
+
+            if is_safe_relation_pushdown(index, joins)
+                && let Some(localized) = localize_condition_for_relation(clause)
+            {
+                per_relation[index].push(localized);
+            }
+        }
+
+        per_relation
+            .into_iter()
+            .map(combine_conditions)
+            .collect::<Vec<_>>()
+    }
+
+    let legacy_start = Instant::now();
+    let legacy = black_box(derive_relation_pushdown_conditions_linear_scan(
+        Some(&condition),
+        &relation_bindings,
+        &[],
+    ));
+    let legacy_elapsed = legacy_start.elapsed();
+
+    let optimized_start = Instant::now();
+    let optimized = black_box(derive_relation_pushdown_conditions(
+        Some(&condition),
+        &relation_bindings,
+        &[],
+    ));
+    let optimized_elapsed = optimized_start.elapsed();
+
+    assert_eq!(legacy.len(), optimized.len());
+    assert_eq!(legacy.iter().filter(|entry| entry.is_some()).count(), optimized.iter().filter(|entry| entry.is_some()).count());
+
+    println!(
+        "derive_relation_pushdown_conditions_benchmark_style legacy_elapsed_ns={} optimized_elapsed_ns={}",
+        legacy_elapsed.as_nanos(),
+        optimized_elapsed.as_nanos(),
+    );
 }
 
 #[test]

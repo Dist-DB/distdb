@@ -142,15 +142,21 @@ fn tls_certificate_uid_from_cert_pem(cert_pem: &str) -> Result<String, String> {
 }
 
 fn ip_addr_from_san_bytes(raw: &[u8]) -> Option<IpAddr> {
+    
     match raw.len() {
+        
         4 => Some(IpAddr::from([raw[0], raw[1], raw[2], raw[3]])),
+
         16 => {
             let mut octets = [0u8; 16];
             octets.copy_from_slice(raw);
             Some(IpAddr::from(octets))
-        }
+        },
+
         _ => None,
+        
     }
+
 }
 
 fn certificate_params_for_node(
@@ -165,6 +171,7 @@ fn certificate_params_for_node(
     let san_candidates = sanitize_subject_alt_names(address_hint, extra_subject_alt_names);
     let mut params = CertificateParams::new(vec![])
         .map_err(|err| format!("failed building leaf cert params: {err}"))?;
+
     params.distinguished_name = leaf_dn;
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
@@ -184,6 +191,7 @@ fn certificate_params_for_node(
 }
 
 fn cert_contains_san(cert_pem: &str, expected_san: &str) -> bool {
+    
     let cert = match CertificateParams::from_ca_cert_pem(cert_pem) {
         Ok(params) => params,
         Err(_) => return false,
@@ -194,9 +202,11 @@ fn cert_contains_san(cert_pem: &str, expected_san: &str) -> bool {
         SanType::IpAddress(ip) => ip.to_string() == expected_san,
         _ => false,
     })
+
 }
 
 fn cert_contains_placeholder_san(cert_pem: &str) -> bool {
+    
     let cert = match CertificateParams::from_ca_cert_pem(cert_pem) {
         Ok(params) => params,
         Err(_) => return true,
@@ -207,6 +217,7 @@ fn cert_contains_placeholder_san(cert_pem: &str) -> bool {
         SanType::IpAddress(ip) => is_placeholder_host(&ip.to_string()),
         _ => false,
     })
+
 }
 
 fn should_refresh_leaf_cert(cert_path: &Path, address_hint: &str, extra_subject_alt_names: &[String]) -> bool {
@@ -238,12 +249,15 @@ fn certificate_material_is_valid(
     let Ok(cert_pem) = fs::read_to_string(cert_path) else {
         return false;
     };
+    
     let Ok(key_pem) = fs::read_to_string(key_path) else {
         return false;
     };
+
     let Ok(ca_cert_pem) = fs::read_to_string(ca_cert_path) else {
         return false;
     };
+
     let Ok(ca_key_pem) = fs::read_to_string(ca_key_path) else {
         return false;
     };
@@ -251,17 +265,28 @@ fn certificate_material_is_valid(
     let Ok(leaf_cert) = X509::from_pem(cert_pem.as_bytes()) else {
         return false;
     };
+
     let Ok(ca_cert) = X509::from_pem(ca_cert_pem.as_bytes()) else {
         return false;
     };
-    let Ok(_leaf_key) = PKey::private_key_from_pem(key_pem.as_bytes()) else {
+
+    let Ok(leaf_key) = PKey::private_key_from_pem(key_pem.as_bytes()) else {
         return false;
     };
+
     let Ok(_ca_key) = PKey::private_key_from_pem(ca_key_pem.as_bytes()) else {
         return false;
     };
 
     let Ok(ca_public_key) = ca_cert.public_key() else {
+        return false;
+    };
+
+    let Ok(leaf_public_key_der) = leaf_cert.public_key().and_then(|k| k.public_key_to_der()) else {
+        return false;
+    };
+
+    let Ok(leaf_private_public_key_der) = leaf_key.public_key_to_der() else {
         return false;
     };
 
@@ -271,6 +296,7 @@ fn certificate_material_is_valid(
     let ca_subject = ca_cert.subject_name().to_der().ok();
 
     leaf_cert.verify(&ca_public_key).is_ok()
+        && leaf_public_key_der == leaf_private_public_key_der
         && leaf_subject_key_id != ca_subject_key_id
         && leaf_issuer.as_ref() == ca_subject.as_ref()
 
@@ -367,6 +393,7 @@ fn persist_ca_fingerprint_file(tls_dir: &Path, ca_cert_pem: &str) -> Result<(), 
     }
 
     let fingerprint_path = tls_dir.join(CA_FINGERPRINT_FILE_NAME);
+    
     std::fs::write(&fingerprint_path, format!("{}\n", fingerprint)).map_err(|err| {
         format!(
             "failed writing CA fingerprint '{}': {}",
@@ -374,6 +401,7 @@ fn persist_ca_fingerprint_file(tls_dir: &Path, ca_cert_pem: &str) -> Result<(), 
             err
         )
     })
+
 }
 
 pub fn build_tls_enrollment_request(
@@ -408,6 +436,7 @@ pub fn sign_tls_enrollment_csr(
     let _ = node_data_dir;
 
     let (ca_cert, ca_key) = load_embedded_platform_issuing_ca()?;
+
     let csr = CertificateSigningRequestParams::from_pem(csr_pem)
         .map_err(|err| format!("failed parsing CSR PEM: {err}"))?;
 
@@ -431,6 +460,7 @@ pub fn install_signed_p2p_tls(
 ) -> Result<AutoTlsPaths, String> {
 
     let (tls_dir, ca_cert_path, ca_key_path) = cluster_tls_paths(node_data_dir);
+
     std::fs::create_dir_all(&tls_dir)
         .map_err(|err| format!("failed to create tls dir '{}': {}", tls_dir.display(), err))?;
 

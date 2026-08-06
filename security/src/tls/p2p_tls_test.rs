@@ -135,6 +135,44 @@ fn certificate_material_is_valid_rejects_unrelated_leaf_certificate() {
 }
 
 #[test]
+fn certificate_material_is_valid_rejects_mismatched_leaf_private_key() {
+    let dir = std::path::Path::new("../../target/test-data-key-mismatch");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::create_dir_all(dir);
+
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::default();
+    ca_params.distinguished_name = DistinguishedName::new();
+    ca_params.distinguished_name.push(DnType::CommonName, "test-ca");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let mut leaf_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    leaf_params.distinguished_name = DistinguishedName::new();
+    leaf_params.distinguished_name.push(DnType::CommonName, "test-leaf");
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+
+    let cert_path = dir.join("leaf-cert.pem");
+    let key_path = dir.join("leaf-key.pem");
+    let ca_cert_path = dir.join("ca-cert.pem");
+    let ca_key_path = dir.join("ca-key.pem");
+
+    fs::write(&cert_path, leaf_cert.pem()).unwrap();
+    fs::write(&key_path, rcgen::KeyPair::generate().unwrap().serialize_pem()).unwrap();
+    fs::write(&ca_cert_path, ca_cert.pem()).unwrap();
+    fs::write(&ca_key_path, ca_key.serialize_pem()).unwrap();
+
+    assert!(!certificate_material_is_valid(
+        &cert_path,
+        &key_path,
+        &ca_cert_path,
+        &ca_key_path,
+    ));
+}
+
+#[test]
 fn generated_tls_material_includes_rustls_compatible_key_usage_extensions() {
     let dir = std::path::Path::new("../../target/test-data-key-usage");
     let _ = fs::remove_dir_all(dir);

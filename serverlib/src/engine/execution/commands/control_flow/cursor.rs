@@ -192,7 +192,10 @@ impl SelectReadPlanCursorSource {
                     .enumerate()
                     .filter_map(|(index, value)| {
                         execution_result.columns.get(index).map(|column| {
-                            (common::normalize_identifier!(&column.field_name), value)
+                            (
+                                common::normalize_identifier!(&column.field_name),
+                                value,
+                            )
                         })
                     })
                     .collect::<HashMap<String, Vec<u8>>>()
@@ -216,13 +219,13 @@ impl SqlCursorFrame {
     }
 
     pub fn set_local_binding(&mut self, binding_name: impl Into<String>, value: Vec<u8>) {
-        self.local_bindings
-            .insert(common::normalize_identifier!(binding_name.into()), value);
+        let normalized = common::normalize_identifier!(binding_name.into());
+        self.local_bindings.insert(normalized, value);
     }
 
     pub fn remove_local_binding(&mut self, binding_name: &str) {
-        self.local_bindings
-            .remove(&common::normalize_identifier!(binding_name));
+        let normalized = common::normalize_identifier!(binding_name);
+        self.local_bindings.remove(&normalized);
     }
 
     pub fn clear_local_bindings(&mut self) {
@@ -230,8 +233,8 @@ impl SqlCursorFrame {
     }
 
     pub fn local_binding(&self, binding_name: &str) -> Option<&Vec<u8>> {
-        self.local_bindings
-            .get(&common::normalize_identifier!(binding_name))
+        let normalized = common::normalize_identifier!(binding_name);
+        self.local_bindings.get(&normalized)
     }
 
     fn set_current_row(&mut self, row: HashMap<String, Vec<u8>>) {

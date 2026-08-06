@@ -21,6 +21,7 @@ impl ServerApp {
         let mut touched_tables: HashSet<(String, String)> = HashSet::new();
 
         for query in staged_queries {
+
             let Ok(parsed) = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id) else {
                 continue;
             };
@@ -39,9 +40,11 @@ impl ServerApp {
                     touched_tables.insert((query.database_id.clone(), table_id));
                 }
             }
+
         }
 
         for (database_id, table_id) in touched_tables {
+
             let Some(catalog_key) = self.resolve_catalog_key(&database_id) else {
                 continue;
             };
@@ -63,6 +66,7 @@ impl ServerApp {
                     table_id
                 ));
             }
+
         }
 
         None
@@ -78,6 +82,7 @@ impl ServerApp {
         let observations = self.tx_read_observations_by_session.get(session_id)?;
 
         for observation in observations {
+
             let Some(catalog_key) = self.resolve_catalog_key(&observation.database_id) else {
                 continue;
             };
@@ -100,6 +105,7 @@ impl ServerApp {
                     observation.database_id, observation.table_id
                 ));
             }
+
         }
 
         None
@@ -177,7 +183,9 @@ impl ServerApp {
         let mut session_variable_overrides = self.take_session_variable_overrides(session_id);
 
         for (idx, staged_query) in staged_queries.iter().enumerate() {
+
             let apply_request_id = format!("{}::txread{}", request_id, idx + 1);
+            
             let response = handle_query_command_in_write_group_with_session_variables(
                 &apply_request_id,
                 staged_query,
@@ -199,6 +207,7 @@ impl ServerApp {
                     "failed to apply staged writes for transactional read",
                 );
             }
+
         }
 
         if !touched_tables.is_empty()
@@ -268,7 +277,9 @@ impl ServerApp {
                             stream_id, err
                         )
                     })?;
+            
             }
+
         }
 
         Ok(())

@@ -171,6 +171,10 @@ fn into_owned_payload(payload: Option<Cow<'_, [u8]>>) -> Option<Vec<u8>> {
 
 }
 
+fn first_record_index_after_id(entries: &[TransactionRecord], from: TransactionId) -> usize {
+    entries.partition_point(|entry| entry.id.0 <= from.0)
+}
+
 fn record_for_storage_with_payload(
     record: &TransactionRecord,
     payload: Option<Vec<u8>>,
@@ -805,11 +809,10 @@ impl TransactionLog for ConcurrentWalManager {
             .get(&stream_key)
             .map(|entries| {
                 match from {
-                    Some(min_id) => entries
-                        .iter()
-                        .filter(|entry| entry.id.0 > min_id.0)
-                        .cloned()
-                        .collect(),
+                    Some(min_id) => {
+                        let start_idx = first_record_index_after_id(entries, min_id);
+                        entries[start_idx..].to_vec()
+                    },
                     None => entries.clone(),
                 }
             })
@@ -1497,20 +1500,27 @@ fn compact_entries_to_latest_schema_and_metadata(
 
     let last_id = entries.last().map(|record| record.id).unwrap_or(TransactionId(0));
 
-    let latest_schema = entries
-        .iter()
-        .rev()
-        .find(|record| record.kind == TransactionKind::SchemaChange)
-        .cloned();
+    let mut latest_schema = None;
+    let mut latest_metadata = None;
 
-    let latest_metadata = entries
-        .iter()
-        .rev()
-        .find(|record| {
-            record.kind == TransactionKind::MetadataChange
-                || record.kind == TransactionKind::SecurityChange
-        })
-        .cloned();
+    for record in entries.iter().rev() {
+        if latest_schema.is_none() && record.kind == TransactionKind::SchemaChange {
+            latest_schema = Some(record.clone());
+        }
+
+        if latest_metadata.is_none()
+            && matches!(
+                record.kind,
+                TransactionKind::MetadataChange | TransactionKind::SecurityChange
+            )
+        {
+            latest_metadata = Some(record.clone());
+        }
+
+        if latest_schema.is_some() && latest_metadata.is_some() {
+            break;
+        }
+    }
 
     let mut retained_ids = std::collections::HashSet::new();
     if let Some(schema) = latest_schema.as_ref() {

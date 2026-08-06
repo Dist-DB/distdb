@@ -65,6 +65,12 @@ pub fn apply_select_post_processing(
         })
         .collect::<Vec<_>>();
 
+    let column_indexes = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column.field_name.clone(), index))
+        .collect::<HashMap<_, _>>();
+
     if read_plan.distinct {
 
         let mut unique_rows = Vec::with_capacity(rows.len());
@@ -105,8 +111,8 @@ pub fn apply_select_post_processing(
         let mut order_indexes = Vec::with_capacity(read_plan.order_by.len());
 
         for item in &read_plan.order_by {
-            if let Some(index) = columns.iter().position(|column| column.field_name == item.field_name) {
-                order_indexes.push((index, item.descending));
+            if let Some(index) = column_indexes.get(&item.field_name) {
+                order_indexes.push((*index, item.descending));
             }
         }
 
@@ -237,11 +243,14 @@ fn apply_top_with_ties_post_filter(
 
 fn resolve_order_by_projection_index(columns: &[FieldDef], field_name: &str) -> Option<usize> {
 
-    if let Some(index) = columns
+    let direct_index = columns
         .iter()
-        .position(|column| column.field_name.eq_ignore_ascii_case(field_name))
-    {
-        return Some(index);
+        .enumerate()
+        .find(|(_, column)| column.field_name.eq_ignore_ascii_case(field_name))
+        .map(|(index, _)| index);
+
+    if direct_index.is_some() {
+        return direct_index;
     }
 
     let (_, unqualified) = field_name.split_once('.')?;

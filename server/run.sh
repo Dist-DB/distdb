@@ -39,4 +39,4 @@ fi
 
 cargo build --release
 killall server || true
-./target/release/server datadir=./data -- wss=on tls_san="$TLS_SANS" tls_server="$TLS_SERVER_ADDR" &
+./../target/release/server datadir=./data -- wss=on tls_san="$TLS_SANS" tls_server="$TLS_SERVER_ADDR" &

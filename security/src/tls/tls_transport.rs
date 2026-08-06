@@ -41,7 +41,9 @@ fn load_tls_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, St
 }
 
 fn load_tls_certificates_from_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>, String> {
+
     let mut reader = std::io::Cursor::new(pem.as_bytes());
+
     let certs = rustls_pemfile::certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("failed to parse tls certificate PEM: {err}"))?;
@@ -55,7 +57,9 @@ fn load_tls_certificates_from_pem(pem: &str) -> Result<Vec<CertificateDer<'stati
 }
 
 fn load_tls_private_key_from_pem(pem: &str) -> Result<PrivateKeyDer<'static>, String> {
+
     let mut reader = std::io::Cursor::new(pem.as_bytes());
+
     rustls_pemfile::private_key(&mut reader)
         .map_err(|err| format!("failed to parse tls private key PEM: {err}"))?
         .ok_or_else(|| "tls private key PEM does not contain a supported private key".to_string())
@@ -147,7 +151,9 @@ struct StaticServerCertResolver {
 }
 
 impl StaticServerCertResolver {
+
     fn new(cert_chain: Vec<CertificateDer<'static>>, private_key: PrivateKeyDer<'static>) -> Result<Self, String> {
+
         let provider = rustls::crypto::ring::default_provider();
         let cert = Arc::new(
             CertifiedKey::from_der(cert_chain, private_key, &provider)
@@ -155,13 +161,17 @@ impl StaticServerCertResolver {
         );
 
         Ok(Self { cert })
+
     }
+
 }
 
 impl ResolvesServerCert for StaticServerCertResolver {
+
     fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(Arc::clone(&self.cert))
     }
+
 }
 
 pub fn certificate_matches_server_name(cert_der: &[u8], server_name: &str) -> bool {
@@ -304,6 +314,7 @@ pub fn build_tls_client_config_from_pem(ca_pem: &str) -> Result<Arc<ClientConfig
     let mut client = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
+    
     client.alpn_protocols = vec![b"distdb-p2p/1".to_vec()];
 
     Ok(Arc::new(client))

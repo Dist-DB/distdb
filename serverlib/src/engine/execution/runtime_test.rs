@@ -101,6 +101,76 @@ fn compare_provider_fields_reads_from_tuple_and_candidate_provider() {
 }
 
 #[test]
+fn joined_row_tuple_resolves_qualified_field_names_without_linear_scan() {
+    let relation = relation("users", "u");
+
+    let mut row_map = HashMap::new();
+    row_map.insert("id".to_string(), b"1".to_vec());
+    let tuple = JoinedRowTuple::from_relation_row(
+        &relation,
+        MaterializedRelationRow {
+            row_id: 1,
+            row_map: Arc::new(row_map),
+        },
+    );
+
+    assert_eq!(tuple.value("u.id"), Some(&b"1".to_vec()));
+}
+
+#[test]
+fn joined_row_tuple_value_lookup_benchmark_style() {
+    let mut tuple = JoinedRowTuple::from_relation_row(
+        &relation("users", "u"),
+        MaterializedRelationRow {
+            row_id: 1,
+            row_map: Arc::new(HashMap::new()),
+        },
+    );
+
+    for index in 0..4096 {
+        let relation = relation(&format!("tbl{index}"), &format!("r{index}"));
+        let mut row_map = HashMap::new();
+        row_map.insert("id".to_string(), index.to_string().into_bytes());
+        tuple = tuple.append(
+            &relation,
+            &MaterializedRelationRow {
+                row_id: index as u64 + 10,
+                row_map: Arc::new(row_map),
+            },
+        );
+    }
+
+    let field_name = "r2048.id";
+
+    let start = std::time::Instant::now();
+    for _ in 0..200_000 {
+        let _ = tuple.value(field_name);
+    }
+    let cached_elapsed = start.elapsed();
+
+    let start = std::time::Instant::now();
+    for _ in 0..200_000 {
+        let (qualifier, column_name) = field_name.split_once('.').unwrap();
+        let _ = tuple
+            .members
+            .iter()
+            .find(|member| member.qualifier == qualifier)
+            .and_then(|member| member.row_map.as_ref())
+            .and_then(|row_map| row_map.get(column_name));
+    }
+    let linear_elapsed = start.elapsed();
+
+    println!(
+        "joined_row_tuple_value_lookup_benchmark_style cached={cached_elapsed:?} linear={linear_elapsed:?}"
+    );
+
+    let speedup = linear_elapsed.as_nanos() as f64 / cached_elapsed.as_nanos().max(1) as f64;
+    println!("joined_row_tuple_value_lookup_benchmark_style speedup={speedup:.2}x");
+
+    assert!(cached_elapsed < linear_elapsed, "expected cached lookup to be faster than linear scan");
+}
+
+#[test]
 fn joined_row_tuple_missing_relation_helpers_preserve_available_rows() {
     
     let relation = relation("users", "u");

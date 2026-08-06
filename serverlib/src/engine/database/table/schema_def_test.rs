@@ -1,4 +1,7 @@
 
+use std::hint::black_box;
+use std::time::Instant;
+
 use super::*;
 use crate::engine::database::field_types::{FieldIndex, FieldType};
 
@@ -12,6 +15,47 @@ fn text_field(seqno: u32, name: &str) -> FieldDef {
         default_value: None,
         metadata: None,
     }
+}
+
+#[test]
+fn field_lookup_cache_is_rebuilt_after_mutation() {
+    let mut schema = TableSchema::new(vec![text_field(1, "email"), text_field(2, "name")]);
+
+    assert_eq!(schema.field_indexes_by_name.get("email"), Some(&0));
+    assert_eq!(schema.field_indexes_by_name.get("name"), Some(&1));
+
+    schema.add_field(text_field(3, "phone")).unwrap();
+    assert_eq!(schema.field_indexes_by_name.get("phone"), Some(&2));
+
+    schema.remove_field("name").unwrap();
+    assert!(!schema.field_indexes_by_name.contains_key("name"));
+    assert_eq!(schema.field("email"), Some(&text_field(1, "email")));
+}
+
+#[test]
+fn table_schema_field_lookup_benchmark_style() {
+    let schema = TableSchema::new((0..2_000).map(|index| text_field(index + 1, &format!("field_{index}"))).collect::<Vec<_>>());
+
+    let baseline_start = Instant::now();
+    let baseline = black_box((0..5_000).fold(0usize, |acc, _| {
+        acc + usize::from(schema.fields.iter().any(|field| field.field_name == "field_1999"))
+    }));
+    let baseline_elapsed = baseline_start.elapsed();
+
+    let optimized_start = Instant::now();
+    let optimized = black_box((0..5_000).fold(0usize, |acc, _| {
+        acc + usize::from(schema.field("field_1999").is_some())
+    }));
+    let optimized_elapsed = optimized_start.elapsed();
+
+    assert!(baseline > 0);
+    assert!(optimized > 0);
+
+    println!(
+        "table_schema_field_lookup_benchmark_style baseline_elapsed_ns={} optimized_elapsed_ns={}",
+        baseline_elapsed.as_nanos(),
+        optimized_elapsed.as_nanos(),
+    );
 }
 
 #[test]

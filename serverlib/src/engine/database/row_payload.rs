@@ -499,6 +499,16 @@ fn field_names_by_ordinal(schema: &TableSchema) -> Vec<String> {
 
 }
 
+fn field_name_index_by_ordinal(schema: &TableSchema) -> HashMap<String, usize> {
+    let ordered_field_names = field_names_by_ordinal(schema);
+
+    ordered_field_names
+        .into_iter()
+        .enumerate()
+        .map(|(index, field_name)| (field_name, index))
+        .collect()
+}
+
 enum CompatibleRowPayload {
     Ordinal(OrdinalRowPayload),
     LegacyMap(HashMap<String, Vec<u8>>),
@@ -614,8 +624,8 @@ pub fn decode_row_field_value(
     field_name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
 
-    let ordered_field_names = field_names_by_ordinal(schema);
-    let position = ordered_field_names.iter().position(|name| name == field_name);
+    let field_name_indexes = field_name_index_by_ordinal(schema);
+    let position = field_name_indexes.get(field_name).copied();
 
     match decode_compatible_row_payload_shape(payload)? {
         CompatibleRowPayload::Ordinal(ordinal_row) => {

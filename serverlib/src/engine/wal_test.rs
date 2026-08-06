@@ -1,4 +1,7 @@
 
+use std::hint::black_box;
+use std::time::Instant;
+
 use super::*;
 
 fn make_record(id: u64, kind: TransactionKind, actor: &UserId) -> TransactionRecord {
@@ -11,6 +14,106 @@ fn make_record(id: u64, kind: TransactionKind, actor: &UserId) -> TransactionRec
         kind,
         vec![id as u8],
     )
+}
+
+#[test]
+fn since_offset_for_monotonic_transaction_ids_returns_suffix_start() {
+    let actor = UserId::from_username("tester");
+    let entries = vec![
+        make_record(1, TransactionKind::Insert, &actor),
+        make_record(2, TransactionKind::Insert, &actor),
+        make_record(3, TransactionKind::Insert, &actor),
+        make_record(4, TransactionKind::Insert, &actor),
+        make_record(5, TransactionKind::Insert, &actor),
+    ];
+
+    let offset = first_record_index_after_id(&entries, TransactionId(3));
+
+    assert_eq!(offset, 3);
+    assert_eq!(entries[offset].id, TransactionId(4));
+}
+
+#[test]
+fn since_from_transaction_id_benchmark_matches_linear_scan() {
+    let actor = UserId::from_username("tester");
+    let mut entries = Vec::with_capacity(50_000);
+
+    for id in 1..=50_000u64 {
+        entries.push(make_record(id, TransactionKind::Insert, &actor));
+    }
+
+    let cutoff = TransactionId(49_900);
+
+    let legacy_start = Instant::now();
+    let legacy = black_box(
+        entries
+            .iter()
+            .filter(|entry| entry.id.0 > cutoff.0)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let legacy_elapsed = legacy_start.elapsed();
+
+    let optimized_start = Instant::now();
+    let offset = first_record_index_after_id(&entries, cutoff);
+    let optimized = black_box(entries[offset..].to_vec());
+    let optimized_elapsed = optimized_start.elapsed();
+
+    assert_eq!(legacy.len(), optimized.len());
+    assert_eq!(legacy.first().map(|record| record.id), optimized.first().map(|record| record.id));
+    assert_eq!(legacy.last().map(|record| record.id), optimized.last().map(|record| record.id));
+
+    println!(
+        "legacy_elapsed_ns={} optimized_elapsed_ns={}",
+        legacy_elapsed.as_nanos(),
+        optimized_elapsed.as_nanos(),
+    );
+}
+
+#[test]
+fn wal_hydration_benchmark_style_avoids_reloading_disk_state() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-wal-hydration-benchmark-{}-{}",
+        std::process::id(),
+        common::epoch_nanos!()
+    ));
+
+    std::fs::create_dir_all(&temp_root).expect("temp wal dir should be created");
+
+    let wal = ConcurrentWalManager::with_data_dir(temp_root.clone());
+    let actor = UserId::from_username("tester");
+
+    for id in 1..=10_000u64 {
+        wal.append("users", make_record(id, TransactionKind::Insert, &actor))
+            .expect("append should succeed");
+    }
+
+    let stream_key = super::obfuscated_stream_key("users").expect("stream key should resolve");
+    let wal_file = temp_root.join(FileKind::Data.file_name(&stream_key));
+    assert!(wal_file.exists(), "wal file should exist after appends");
+
+    let baseline_start = Instant::now();
+    let baseline = black_box((0..100).fold(0u64, |acc, _| {
+        let records = load_records_from_file(&wal_file);
+        acc + records.len() as u64
+    }));
+    let baseline_elapsed = baseline_start.elapsed();
+
+    let optimized_start = Instant::now();
+    let _optimized = black_box((0..100).fold(0u64, |acc, _| {
+        acc + u64::from(wal.has_write_after("users", 0))
+    }));
+    let optimized_elapsed = optimized_start.elapsed();
+
+    assert!(baseline > 0);
+
+    println!(
+        "wal_hydration_benchmark_style baseline_elapsed_ns={} optimized_elapsed_ns={}",
+        baseline_elapsed.as_nanos(),
+        optimized_elapsed.as_nanos(),
+    );
+
+    let _ = std::fs::remove_dir_all(temp_root);
 }
 
 #[test]

@@ -74,12 +74,18 @@ pub fn apply_limit_by_rows(
         return Ok(rows);
     };
 
+    let column_indexes = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column.field_name.clone(), index))
+        .collect::<HashMap<_, _>>();
+
     let mut key_indexes = Vec::with_capacity(limit_by.fields.len());
     for field_name in &limit_by.fields {
-        let Some(index) = columns.iter().position(|column| column.field_name == *field_name) else {
+        let Some(index) = column_indexes.get(field_name) else {
             return Err(format!("{missing_column_error_prefix} '{}'", field_name));
         };
-        key_indexes.push(index);
+        key_indexes.push(*index);
     }
 
     let mut per_key_counts = HashMap::<Vec<Vec<u8>>, usize>::new();

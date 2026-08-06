@@ -754,6 +754,12 @@ fn window_partition_and_order_indexes(
     columns: &[FieldDef],
 ) -> Result<(Vec<usize>, Vec<(usize, bool)>), String> {
 
+    let column_indexes = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column.field_name.to_ascii_lowercase(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+
     let mut partition_indexes = Vec::with_capacity(window_spec.partition_by.len());
 
     for expression in &window_spec.partition_by {
@@ -793,14 +799,11 @@ fn window_partition_and_order_indexes(
 
         };
 
-        let Some(column_index) = columns
-            .iter()
-            .position(|column| column.field_name.eq_ignore_ascii_case(&field_name))
-        else {
+        let Some(column_index) = column_indexes.get(&field_name) else {
             return Err(format!("window ROW_NUMBER PARTITION BY references unknown output field '{}'", field_name));
         };
 
-        partition_indexes.push(column_index);
+        partition_indexes.push(*column_index);
 
     }
 
@@ -842,14 +845,11 @@ fn window_partition_and_order_indexes(
             return Err("window ROW_NUMBER ORDER BY does not support NULLS FIRST/LAST or WITH FILL yet".to_string());
         }
 
-        let Some(column_index) = columns
-            .iter()
-            .position(|column| column.field_name.eq_ignore_ascii_case(&field_name))
-        else {
+        let Some(column_index) = column_indexes.get(&field_name) else {
             return Err(format!("window ROW_NUMBER ORDER BY references unknown output field '{}'", field_name));
         };
 
-        order_indexes.push((column_index, expression.asc == Some(false)));
+        order_indexes.push((*column_index, expression.asc == Some(false)));
 
     }
 
