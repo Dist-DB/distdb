@@ -26,7 +26,9 @@ pub enum WssFrameError {
 }
 
 impl std::fmt::Display for WssFrameError {
+
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
         match self {
             Self::UnsupportedMessageType => write!(f, "unsupported websocket message type"),
             Self::MissingPayload => write!(f, "missing websocket payload"),
@@ -34,7 +36,9 @@ impl std::fmt::Display for WssFrameError {
             Self::Encode(message) => write!(f, "encode failed: {message}"),
             Self::TlsPolicy(message) => write!(f, "tls policy violation: {message}"),
         }
+
     }
+
 }
 
 impl std::error::Error for WssFrameError {}
@@ -48,14 +52,18 @@ pub enum WssHandlerError {
 }
 
 impl std::fmt::Display for WssHandlerError {
+
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
         match self {
             Self::Frame(err) => write!(f, "frame error: {err}"),
             Self::Transport(message) => write!(f, "transport error: {message}"),
             Self::Protocol(message) => write!(f, "protocol error: {message}"),
             Self::Executor(message) => write!(f, "executor error: {message}"),
         }
+
     }
+
 }
 
 impl std::error::Error for WssHandlerError {}
@@ -90,6 +98,7 @@ where
     F: FnMut(ConnectorRequest) -> Fut,
     Fut: Future<Output = Result<ConnectorResponse, String>>,
 {
+
     if surface.supports_service_control_plane() {
         return Err(WssHandlerError::Protocol(
             "wss inbound surface must not enable service control-plane routing".to_string(),
@@ -217,6 +226,7 @@ fn render_text_response(response: &ConnectorResponse) -> String {
         }),
 
         ConnectorResult::Query(result) => {
+
             let columns = result
                 .columns
                 .iter()
@@ -257,6 +267,7 @@ fn render_text_response(response: &ConnectorResponse) -> String {
                     "row_count": result.rows.len(),
                 }
             })
+            
         }
 
     };

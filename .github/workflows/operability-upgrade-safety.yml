@@ -41,8 +41,8 @@ jobs:
       - name: Build current binaries
         run: |
           set -euo pipefail
-          (cd server && cargo build --quiet)
-          (cd console && cargo build --quiet)
+          cargo build --quiet -p server
+          cargo build --quiet -p console
 
       - name: Build previous server binary
         env:
@@ -53,14 +53,14 @@ jobs:
           previous_ref="${OPERABILITY_OLD_REF_OVERRIDE:-$OPERABILITY_MATRIX_OLD_REF}"
           prev_tree="$RUNNER_TEMP/distdb-prev"
           git worktree add --detach "$prev_tree" "$previous_ref"
-          (cd "$prev_tree/server" && cargo build --quiet)
-          cp "$prev_tree/server/target/debug/server" "$RUNNER_TEMP/server-old"
+          (cd "$prev_tree" && cargo build --quiet -p server)
+          cp "$prev_tree/target/debug/server" "$RUNNER_TEMP/server-old"
           git worktree remove --force "$prev_tree"
 
       - name: Run cross-version rolling restart and upgrade-safety drill
         env:
           DISTDB_SERVER_BIN_OLD: ${{ runner.temp }}/server-old
-          DISTDB_SERVER_BIN_NEW: ${{ github.workspace }}/server/target/debug/server
+          DISTDB_SERVER_BIN_NEW: ${{ github.workspace }}/target/debug/server
           OPERABILITY_WINDOW_LABEL: ${{ matrix.window_label }}
           OPERABILITY_OLD_REF: ${{ inputs.old_ref_override || matrix.old_ref }}
         run: bash scripts/e2e/rolling_restart_upgrade_safety.sh

@@ -95,6 +95,44 @@
 
     }
 
+    #[test]
+    fn node_announce_fanout_targets_excludes_source_addrs_and_duplicates() {
+        let node = PeerNode {
+            id: "node-a".to_string(),
+            addrs: vec![
+                "/ip4/127.0.0.1/tcp/9001".to_string(),
+                "/ip4/127.0.0.2/tcp/9002".to_string(),
+            ],
+            is_local: true,
+        };
+
+        let peers = vec![
+            PeerNode {
+                id: "node-b".to_string(),
+                addrs: vec![
+                    "/ip4/127.0.0.3/tcp/9003".to_string(),
+                    "/ip4/127.0.0.1/tcp/9001".to_string(),
+                ],
+                is_local: false,
+            },
+            PeerNode {
+                id: "node-c".to_string(),
+                addrs: vec![
+                    "/ip4/127.0.0.3/tcp/9003".to_string(),
+                    "/ip4/127.0.0.4/tcp/9004".to_string(),
+                ],
+                is_local: false,
+            },
+        ];
+
+        let targets = node_announce_fanout_targets(&node, &peers);
+
+        assert_eq!(targets, vec![
+            "/ip4/127.0.0.3/tcp/9003".to_string(),
+            "/ip4/127.0.0.4/tcp/9004".to_string(),
+        ]);
+    }
+
     #[tokio::test]
     async fn multi_catalog_query_fanout_merges_rows() {
 

@@ -16,19 +16,23 @@ use serverlib::{
 const SERVICE_MESSAGE_MAGIC: &[u8; 4] = b"SDSP";
 
 pub fn node_descriptor_to_peer_node(node: &NodeDescriptor) -> PeerNode {
+    
     PeerNode {
         id: node.id.0.clone(),
         addrs: node.addrs.clone(),
         is_local: node.is_local,
     }
+
 }
 
 pub fn peer_node_to_node_descriptor(node: &PeerNode) -> NodeDescriptor {
+    
     NodeDescriptor {
         id: NodeId(node.id.clone()),
         addrs: node.addrs.clone(),
         is_local: node.is_local,
     }
+
 }
 
 pub fn transaction_id_to_wire(tx_id: TransactionId) -> WireTransactionId {
@@ -40,22 +44,27 @@ pub fn wire_transaction_id_to_transaction_id(tx_id: WireTransactionId) -> Transa
 }
 
 fn affinity_member_status_to_wire(status: AffinityMemberStatus) -> WireAffinityMemberStatus {
+
     match status {
         AffinityMemberStatus::Online => WireAffinityMemberStatus::Online,
         AffinityMemberStatus::Offline => WireAffinityMemberStatus::Offline,
         AffinityMemberStatus::Unknown => WireAffinityMemberStatus::Unknown,
     }
+
 }
 
 fn wire_affinity_member_status_to_domain(status: WireAffinityMemberStatus) -> AffinityMemberStatus {
+
     match status {
         WireAffinityMemberStatus::Online => AffinityMemberStatus::Online,
         WireAffinityMemberStatus::Offline => AffinityMemberStatus::Offline,
         WireAffinityMemberStatus::Unknown => AffinityMemberStatus::Unknown,
     }
+
 }
 
 pub fn affinity_document_to_wire(document: &AffinityDocument) -> WireAffinityDocument {
+
     WireAffinityDocument {
         affinity_id: document.affinity_id.clone(),
         affinity_revision: document.affinity_revision,
@@ -85,9 +94,11 @@ pub fn affinity_document_to_wire(document: &AffinityDocument) -> WireAffinityDoc
             updated_epoch_ms: document.replication_security.updated_epoch_ms,
         },
     }
+
 }
 
 pub fn wire_affinity_document_to_domain(document: &WireAffinityDocument) -> AffinityDocument {
+
     AffinityDocument {
         affinity_id: document.affinity_id.clone(),
         affinity_revision: document.affinity_revision,
@@ -117,6 +128,7 @@ pub fn wire_affinity_document_to_domain(document: &WireAffinityDocument) -> Affi
             updated_epoch_ms: document.replication_security.updated_epoch_ms,
         },
     }
+
 }
 
 fn is_placeholder_host(value: &str) -> bool {
@@ -130,6 +142,7 @@ fn is_loopback_host(value: &str) -> bool {
 }
 
 fn looks_like_public_hostname(value: &str) -> bool {
+
     let trimmed = value.trim();
     if trimmed.is_empty() || is_placeholder_host(trimmed) || is_loopback_host(trimmed) {
         return false;
@@ -221,6 +234,7 @@ fn extract_public_host_from_server_entry(entry: &str) -> Option<String> {
 }
 
 fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
+
     args.iter()
         .find_map(|arg| arg.strip_prefix("servers=").map(str::trim))
         .and_then(|server_list| server_list.split(',').find_map(extract_public_host_from_server_entry))
@@ -228,6 +242,7 @@ fn resolve_public_host_from_server_list(args: &[String]) -> Option<String> {
 }
 
 fn resolve_public_host_from_tls_sans(args: &[String]) -> Option<String> {
+
     args.iter()
         .find_map(|arg| arg.strip_prefix("tls_san=").map(str::trim))
         .and_then(|san_list| {
@@ -241,6 +256,7 @@ fn resolve_public_host_from_tls_sans(args: &[String]) -> Option<String> {
                     }
                 })
         })
+
 }
 
 fn extract_public_hostname_from_hosts_content(content: &str) -> Option<String> {
@@ -341,19 +357,19 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
 
     if let Some(positional_host) = args.iter().skip(1).find_map(|arg| {
         let trimmed = arg.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("listen_addr=")
-            || trimmed.starts_with("advertise_addr=")
-            || trimmed.starts_with("port=")
-            || trimmed.starts_with("node_id=")
-            || trimmed.starts_with("datadir=")
-            || trimmed.starts_with("swarm_id=")
-            || trimmed.starts_with("servers=")
-            || trimmed.starts_with("affinity=")
-            || trimmed.starts_with("tls_san=")
-            || trimmed.starts_with("ca_root")
-            || trimmed.starts_with("service=")
-            || trimmed.starts_with("wss")
+        if trimmed.is_empty() ||
+            trimmed.starts_with("listen_addr=") ||
+            trimmed.starts_with("advertise_addr=") ||
+            trimmed.starts_with("port=") ||
+            trimmed.starts_with("node_id=") ||
+            trimmed.starts_with("datadir=") ||
+            trimmed.starts_with("swarm_id=") ||
+            trimmed.starts_with("servers=") ||
+            trimmed.starts_with("affinity=") ||
+            trimmed.starts_with("tls_san=") ||
+            trimmed.starts_with("ca_root") ||
+            trimmed.starts_with("service=") ||
+            trimmed.starts_with("wss")
         {
             None
         } else {
@@ -545,11 +561,15 @@ pub fn multiaddr_to_socket_addr(addr: &str) -> Option<String> {
 }
 
 pub fn encode_service_message(message: &ServiceMessage) -> Option<Vec<u8>> {
+
     let encoded = bincode::serialize(message).ok()?;
+    
     let mut payload = Vec::with_capacity(SERVICE_MESSAGE_MAGIC.len() + encoded.len());
     payload.extend_from_slice(SERVICE_MESSAGE_MAGIC);
     payload.extend_from_slice(&encoded);
+    
     Some(payload)
+
 }
 
 pub fn decode_service_message(payload: &[u8]) -> Option<ServiceMessage> {

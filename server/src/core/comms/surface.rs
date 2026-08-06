@@ -40,20 +40,26 @@ pub struct ConnectorSurfaceContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectorSurfaceContractError {
+    
     ProtocolVersionMismatch {
         provider: &'static str,
         expected: &'static str,
         actual: &'static str,
     },
+    
     MissingCapabilities {
         provider: &'static str,
         missing: BTreeSet<ConnectorSurfaceCapability>,
     },
+
 }
 
 impl std::fmt::Display for ConnectorSurfaceContractError {
+    
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
         match self {
+
             Self::ProtocolVersionMismatch {
                 provider,
                 expected,
@@ -63,13 +69,17 @@ impl std::fmt::Display for ConnectorSurfaceContractError {
                 "surface contract version mismatch for provider='{}': expected='{}' actual='{}'",
                 provider, expected, actual
             ),
+
             Self::MissingCapabilities { provider, missing } => write!(
                 f,
                 "surface contract capability mismatch for provider='{}': missing={:?}",
                 provider, missing
             ),
+            
         }
+    
     }
+
 }
 
 impl std::error::Error for ConnectorSurfaceContractError {}
@@ -125,16 +135,22 @@ pub struct RustP2pInboundSurface;
 pub struct RustWssInboundSurface;
 
 impl ConnectorSurfaceContract {
+
     pub fn rust_connector_v1() -> Self {
+
         Self {
             protocol_version: "rust-connector-v1",
             required_capabilities: core_capabilities(),
         }
+    
     }
+
 }
 
 impl ConnectorSurfaceProvider for RustP2pSurface {
+    
     fn describe_surface(&self) -> ConnectorSurfaceDescriptor {
+
         let mut optional_capabilities = BTreeSet::new();
         optional_capabilities.insert(ConnectorSurfaceCapability::ServiceControlPlane);
 
@@ -145,11 +161,15 @@ impl ConnectorSurfaceProvider for RustP2pSurface {
             required_capabilities: core_capabilities(),
             optional_capabilities,
         }
+    
     }
+
 }
 
 impl ConnectorSurfaceProvider for RustWssSurface {
+
     fn describe_surface(&self) -> ConnectorSurfaceDescriptor {
+
         ConnectorSurfaceDescriptor {
             provider_name: "rust/wss",
             route: ConnectorSurfaceRoute::RustWss,
@@ -157,10 +177,13 @@ impl ConnectorSurfaceProvider for RustWssSurface {
             required_capabilities: core_capabilities(),
             optional_capabilities: BTreeSet::new(),
         }
+
     }
+
 }
 
 impl InboundChannelSurface for RustP2pInboundSurface {
+
     fn route(&self) -> ConnectorSurfaceRoute {
         ConnectorSurfaceRoute::RustP2p
     }
@@ -173,6 +196,7 @@ impl InboundChannelSurface for RustP2pInboundSurface {
         &self,
         payload: &[u8],
     ) -> Result<InboundChannelMessage, String> {
+
         if let Some(message) = decode_service_message(payload) {
             return Ok(InboundChannelMessage::Service(message));
         }
@@ -180,10 +204,13 @@ impl InboundChannelSurface for RustP2pInboundSurface {
         bincode::deserialize::<ConnectorRequest>(payload)
             .map(InboundChannelMessage::Connector)
             .map_err(|err| err.to_string())
+    
     }
+
 }
 
 impl InboundChannelSurface for RustWssInboundSurface {
+
     fn route(&self) -> ConnectorSurfaceRoute {
         ConnectorSurfaceRoute::RustWss
     }
@@ -200,16 +227,20 @@ impl InboundChannelSurface for RustWssInboundSurface {
         &self,
         payload: &[u8],
     ) -> Result<InboundChannelMessage, String> {
+
         bincode::deserialize::<ConnectorRequest>(payload)
             .map(InboundChannelMessage::Connector)
             .map_err(|err| err.to_string())
+
     }
+
 }
 
 pub fn validate_surface_contract<P: ConnectorSurfaceProvider>(
     provider: &P,
     contract: &ConnectorSurfaceContract,
 ) -> Result<(), ConnectorSurfaceContractError> {
+
     let descriptor = provider.describe_surface();
 
     if descriptor.protocol_version != contract.protocol_version {
@@ -234,6 +265,7 @@ pub fn validate_surface_contract<P: ConnectorSurfaceProvider>(
     }
 
     Ok(())
+
 }
 
 pub fn default_surface_descriptors() -> Vec<ConnectorSurfaceDescriptor> {

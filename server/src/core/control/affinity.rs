@@ -325,7 +325,6 @@ pub async fn execute_affinity_join_sequence(
                 
                 merge_affinity_documents_from_responses(&mut updated_doc, responses);
                 
-                proc.apply_affinity_document(updated_doc.clone());
                 proc.mark_sync_step_completed(0);
 
                 if let Err(err) = affinity_storage.save(&updated_doc) {
@@ -338,11 +337,14 @@ pub async fn execute_affinity_join_sequence(
                     );
                 }
 
+                proc.apply_affinity_document(updated_doc);
+
                 if let Some(checkpoint) = proc.checkpoint()
                     && let Err(err) = affinity_storage.save_checkpoint(checkpoint)
                 {
                     log::error!("failed to save checkpoint after join: {}", err);
                 }
+                
             }
 
     }

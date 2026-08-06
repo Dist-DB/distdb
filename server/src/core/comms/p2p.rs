@@ -29,10 +29,13 @@ impl TcpServerTransport {
 impl Transport for TcpServerTransport {
 
     fn send(&mut self, peer_id: &str, message: ServiceMessage) -> PeerResult<()> {
+        
         let addr = multiaddr_to_socket_addr(peer_id)
             .ok_or_else(|| PeerError::Network(format!("invalid peer address '{peer_id}'")))?;
+
         send_service_message_to_addr(&addr, &message)
             .map_err(|err| PeerError::Network(err.to_string()))
+            
     }
 
     fn broadcast(&mut self, message: ServiceMessage) -> PeerResult<()> {
@@ -42,21 +45,27 @@ impl Transport for TcpServerTransport {
         }
 
         let mut success_count = 0usize;
+
         for peer in &self.peer_addrs {
+
             let Some(addr) = multiaddr_to_socket_addr(peer) else {
                 log::warn!("server p2p transport cannot parse peer addr='{}'", peer);
                 continue;
             };
 
             match send_service_message_to_addr(&addr, &message) {
+
                 Ok(()) => {
                     success_count += 1;
                     log::debug!("server p2p transport delivered message to {}", addr);
-                }
+                },
+
                 Err(err) => {
                     log::debug!("server p2p transport delivery failed to {}: {}", addr, err);
                 }
+            
             }
+
         }
 
         if success_count == 0 {
@@ -117,6 +126,7 @@ pub fn spawn_p2p_heartbeat_task(
         let mut ticker = interval(Duration::from_secs(30));
 
         loop {
+
             ticker.tick().await;
 
             let mut runtime = runtime.lock().await;
@@ -130,6 +140,7 @@ pub fn spawn_p2p_heartbeat_task(
 
             let peer_count = runtime.network().discover_peers().len();
             log::debug!("server p2p heartbeat ok discovered_peers={}", peer_count);
+
         }
 
     })
@@ -147,6 +158,7 @@ pub fn spawn_service_announce_task(
         let mut ticker = interval(Duration::from_secs(30));
 
         loop {
+
             ticker.tick().await;
 
             let timestamp_epoch_ms = std::time::SystemTime::now()
@@ -159,30 +171,32 @@ pub fn spawn_service_announce_task(
                 runtime.network().discover_peers()
             };
 
+            let mut targets = Vec::with_capacity(peers.len());
             for peer in peers {
                 if peer.is_local {
                     continue;
                 }
+                targets.extend(peer.addrs);
+            }
 
-                for addr in peer.addrs {
-                    let mut runtime = runtime.lock().await;
-                    if let Err(err) = runtime.network_mut().send_message(
-                        &addr,
-                        ServiceMessage::ServiceAnnounce(ServiceAnnounce {
-                            node_id: local_node.id.0.clone(),
-                            addrs: local_node.addrs.clone(),
-                            services: services.clone(),
-                            timestamp_epoch_ms,
-                        }),
-                    ) {
-                        log::debug!(
-                            "server service announce send failed to {}: {}",
-                            addr,
-                            err
-                        );
-                    }
+            let announce_message = ServiceMessage::ServiceAnnounce(ServiceAnnounce {
+                node_id: local_node.id.0.clone(),
+                addrs: local_node.addrs.clone(),
+                services: services.clone(),
+                timestamp_epoch_ms,
+            });
+
+            let mut runtime = runtime.lock().await;
+            for addr in targets {
+                if let Err(err) = runtime.network_mut().send_message(&addr, announce_message.clone()) {
+                    log::debug!(
+                        "server service announce send failed to {}: {}",
+                        addr,
+                        err
+                    );
                 }
             }
+
         }
 
     })

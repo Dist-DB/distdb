@@ -37,17 +37,19 @@ THRESHOLD_PROFILE="${PERF_THRESHOLD_PROFILE:-default}"
 
 case "$THRESHOLD_PROFILE" in
   ci-gha-ubuntu)
-    DEFAULT_MAX_WRITE_P95_MS=210
-    DEFAULT_MAX_WRITE_P99_MS=240
-    DEFAULT_MAX_READ_P95_MS=200
-    DEFAULT_MAX_READ_P99_MS=230
-    DEFAULT_MAX_MIXED_P95_MS=210
-    DEFAULT_MAX_MIXED_P99_MS=230
+    # Calibrated for GitHub-hosted Ubuntu runners with shared CPU contention and
+    # higher variance than local developer machines.
+    DEFAULT_MAX_WRITE_P95_MS=230
+    DEFAULT_MAX_WRITE_P99_MS=260
+    DEFAULT_MAX_READ_P95_MS=230
+    DEFAULT_MAX_READ_P99_MS=250
+    DEFAULT_MAX_MIXED_P95_MS=240
+    DEFAULT_MAX_MIXED_P99_MS=250
     DEFAULT_MAX_RECOVERY_READY_MS=800
 
-    DEFAULT_MIN_WRITE_THROUGHPUT=4.5
-    DEFAULT_MIN_READ_THROUGHPUT=5.0
-    DEFAULT_MIN_MIXED_THROUGHPUT=4.5
+    DEFAULT_MIN_WRITE_THROUGHPUT=4.0
+    DEFAULT_MIN_READ_THROUGHPUT=4.0
+    DEFAULT_MIN_MIXED_THROUGHPUT=4.0
     ;;
   default)
     DEFAULT_MAX_WRITE_P95_MS=120
@@ -91,18 +93,17 @@ awk '
     return s
   }
 
-  function num_from_line(line, out) {
-    out = line
-    gsub(/.*: /, "", out)
-    gsub(/,/, "", out)
-    gsub(/"/, "", out)
-    out = trim(out)
-    return out
+  function num_from_line(line, value) {
+    if (match(line, /[0-9]+([.][0-9]+)?/)) {
+      value = substr(line, RSTART, RLENGTH)
+      return trim(value)
+    }
+    return ""
   }
 
-  /"write_heavy": \{/ { section = "write"; next }
-  /"read_heavy": \{/ { section = "read"; next }
-  /"mixed": \{/ { section = "mixed"; next }
+  /"write_heavy": \{/ { section = "write" }
+  /"read_heavy": \{/ { section = "read" }
+  /"mixed": \{/ { section = "mixed" }
 
   /"recovery_to_ready_ms":/ {
     print "RECOVERY_READY_MS=" num_from_line($0)

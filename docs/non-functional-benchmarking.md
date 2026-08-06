@@ -142,6 +142,6 @@ All budgets are overrideable via environment variables (`PERF_MAX_*`, `PERF_MIN_
 `check_nonfunctional_thresholds.sh` supports `PERF_THRESHOLD_PROFILE` to choose default budgets before any explicit `PERF_MAX_*` and `PERF_MIN_*` overrides:
 
 - `default` (strict local baseline; current default)
-- `ci-gha-ubuntu` (calibrated for GitHub-hosted Ubuntu runners)
+- `ci-gha-ubuntu` (calibrated for GitHub-hosted Ubuntu runners with shared-resource variance)
 
 Use this profile in scheduled CI/nightly runs where shared-runner variance is materially higher than local/dev hosts.

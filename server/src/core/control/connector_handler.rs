@@ -1061,6 +1061,7 @@ async fn execute_app_request_for_session(
 ) -> ConnectorResponse {
 
     if matches!(access_mode, CatalogAccessMode::Read) {
+
         let app_read = app.read().await;
         let session_exists = app_read.get_session(session_id).is_some();
 
@@ -1084,6 +1085,7 @@ async fn execute_app_request_for_session(
                 return response;
             }
         }
+
     }
 
     let mut app = app.write().await;
@@ -1870,12 +1872,14 @@ fn discovery_peers_with_local_preferred(
     peers: Vec<PeerNode>,
     local_node: &NodeDescriptor,
 ) -> Vec<PeerNode> {
+
     if !is_valid_server_node(&node_descriptor_to_peer_node(local_node)) {
         return peers;
     }
 
     let local_peer = node_descriptor_to_peer_node(local_node);
     let local_peer_id = local_peer.id.clone();
+
     let mut filtered = peers
         .into_iter()
         .filter(|peer| peer.id != local_peer_id)
@@ -1887,6 +1891,28 @@ fn discovery_peers_with_local_preferred(
         .into_iter()
         .filter(|peer| seen_ids.insert(peer.id.clone()))
         .collect()
+
+}
+
+fn node_announce_fanout_targets(node: &PeerNode, peers: &[PeerNode]) -> Vec<String> {
+    let node_addrs = node.addrs.iter().cloned().collect::<HashSet<_>>();
+
+    let mut target_addrs = HashSet::new();
+    for peer in peers {
+        if peer.id == node.id {
+            continue;
+        }
+
+        for addr in &peer.addrs {
+            if !node_addrs.contains(addr) {
+                target_addrs.insert(addr.clone());
+            }
+        }
+    }
+
+    let mut targets = target_addrs.into_iter().collect::<Vec<_>>();
+    targets.sort();
+    targets
 }
 
 pub async fn maybe_server_peer_discovery_response(
@@ -2034,10 +2060,7 @@ pub async fn handle_connector_stream(
         let first_wal_ts = app_read.first_wal_record_timestamp_for_database("main");
         configure_bootstrap_crypto_context(local_node.id.0.clone(), first_wal_ts);
     } else {
-        log::debug!(
-            "connector bootstrap crypto context deferred: app lock busy peer_addr={}",
-            peer_addr
-        );
+        log::debug!("connector bootstrap crypto context deferred: app lock busy peer_addr={peer_addr}");
     }
 
     let mut session = ServerConnectionSession::new(peer_addr.clone(), connection_id);
@@ -2521,19 +2544,14 @@ pub async fn handle_connector_stream(
 
                     }
 
-                    let mut target_addrs = HashSet::new();
-
-                    for peer in runtime.network().discover_peers() {
-                        for addr in peer.addrs {
-                            if !node.addrs.contains(&addr) {
-                                target_addrs.insert(addr);
-                            }
-                        }
-                    }
+                    let fanout_targets = node_announce_fanout_targets(
+                        &node,
+                        &runtime.network().discover_peers(),
+                    );
 
                     drop(runtime);
 
-                    for target in target_addrs {
+                    for target in fanout_targets {
 
                         let Some(target_addr) = multiaddr_to_socket_addr(&target) else {
                             continue;
@@ -2564,6 +2582,8 @@ pub async fn handle_connector_stream(
             continue;
         };
 
+        let bootstrap_ready_for_request = bootstrap_ready.load(Ordering::SeqCst);
+
         log::debug!(
             "server handling connector request_id={} from {}",
             request.request_id,
@@ -2587,7 +2607,7 @@ pub async fn handle_connector_stream(
 
         if let Some(response) = maybe_bootstrap_status_response(
             &request,
-            bootstrap_ready.load(Ordering::SeqCst),
+            bootstrap_ready_for_request,
         ) {
             write_response_or_rollback(
                 &mut stream,
@@ -2605,7 +2625,7 @@ pub async fn handle_connector_stream(
             &request,
             &app,
             &node_data_dir,
-            bootstrap_ready.load(Ordering::SeqCst),
+            bootstrap_ready_for_request,
         )
         .await
         {
@@ -2624,7 +2644,7 @@ pub async fn handle_connector_stream(
         if let Some(response) = maybe_show_catalog_workers_response(
             &request,
             &catalog_dispatcher,
-            bootstrap_ready.load(Ordering::SeqCst),
+            bootstrap_ready_for_request,
         )
         .await
         {
@@ -2761,7 +2781,7 @@ pub async fn handle_connector_stream(
 
         }
 
-        if !bootstrap_ready.load(Ordering::SeqCst)
+        if !bootstrap_ready_for_request
             && !request_allowed_during_bootstrap(&request)
         {
 

@@ -299,6 +299,31 @@ pub fn spawn_affinity_replication_task(
 
 }
 
+async fn collect_remote_peer_targets(
+    p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
+    target_addr: Option<&str>,
+) -> Vec<String> {
+
+    let runtime = p2p_runtime.lock().await;
+    let peers = runtime.network().discover_peers();
+
+    let mut targets = Vec::with_capacity(peers.len());
+    for peer in peers {
+        if peer.is_local {
+            continue;
+        }
+
+        for addr in peer.addrs {
+            if target_addr.map(|target| target == addr).unwrap_or(true) {
+                targets.push(addr);
+            }
+        }
+    }
+
+    targets
+    
+}
+
 pub async fn execute_live_schema_catalog_sync(
     app: &Arc<RwLock<ServerApp>>,
     p2p_runtime: &Arc<Mutex<ServerP2pRuntime<TcpServerTransport>>>,
@@ -323,25 +348,7 @@ pub async fn execute_live_schema_catalog_sync(
         let _ = app_guard.set_affinity_catalog_database_name(database_id, database_name);
     }
 
-    let peer_targets = {
-
-        let runtime = p2p_runtime.lock().await;
-        let peers = runtime.network().discover_peers();
-
-        let mut targets = Vec::new();
-        for peer in peers {
-            if peer.is_local {
-                continue;
-            }
-
-            for addr in peer.addrs {
-                targets.push(addr);
-            }
-        }
-        
-        targets
-
-    };
+    let peer_targets = collect_remote_peer_targets(p2p_runtime, None).await;
 
     if peer_targets.is_empty() {
         log::debug!(
@@ -449,27 +456,7 @@ pub async fn execute_live_wal_catchup_sync(
 
     let request_id = format!("wal-sync-{}-{}", database_id, epoch_ms!());
 
-    let peer_targets = {
-
-        let runtime = p2p_runtime.lock().await;
-        let peers = runtime.network().discover_peers();
-
-        let mut targets = Vec::new();
-        for peer in peers {
-            if peer.is_local {
-                continue;
-            }
-
-            for addr in peer.addrs {
-                if target_addr.map(|target| target == addr).unwrap_or(true) {
-                    targets.push(addr);
-                }
-            }
-        }
-
-        targets
-
-    };
+    let peer_targets = collect_remote_peer_targets(p2p_runtime, target_addr).await;
 
     if peer_targets.is_empty() {
         log::debug!(
