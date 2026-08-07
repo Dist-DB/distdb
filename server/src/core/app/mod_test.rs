@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -4069,6 +4069,7 @@ fn authorization_parallel_reader_writer_contention_preserves_revoke_effectivenes
     let barrier = Arc::new(Barrier::new(session_ids.len() + 1));
     let applied_total = Arc::new(AtomicUsize::new(0));
     let rejected_total = Arc::new(AtomicUsize::new(0));
+    let grant_window_opened = Arc::new(AtomicBool::new(false));
 
     let mut readers = Vec::new();
     for session_id in session_ids.clone() {
@@ -4076,9 +4077,15 @@ fn authorization_parallel_reader_writer_contention_preserves_revoke_effectivenes
         let barrier_reader = Arc::clone(&barrier);
         let applied_reader = Arc::clone(&applied_total);
         let rejected_reader = Arc::clone(&rejected_total);
+        let grant_window_reader = Arc::clone(&grant_window_opened);
 
         readers.push(thread::spawn(move || {
             barrier_reader.wait();
+
+            while !grant_window_reader.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+
             for iteration in 0..120 {
                 let request = ConnectorRequest {
                     request_id: format!("parallel-read-{session_id}-{iteration}"),
@@ -4110,12 +4117,16 @@ fn authorization_parallel_reader_writer_contention_preserves_revoke_effectivenes
                 if iteration % 8 == 0 {
                     thread::yield_now();
                 }
+
+                // Avoid starving the writer thread under heavy lock contention.
+                thread::sleep(Duration::from_micros(200));
             }
         }));
     }
 
     let app_writer = Arc::clone(&app);
     let barrier_writer = Arc::clone(&barrier);
+    let grant_window_writer = Arc::clone(&grant_window_opened);
     let writer = thread::spawn(move || {
         barrier_writer.wait();
         for cycle in 0..45 {
@@ -4144,6 +4155,11 @@ fn authorization_parallel_reader_writer_contention_preserves_revoke_effectivenes
                 guard.handle_connector_request_for_session(&grant, "root-session").status
             };
             assert_eq!(grant_status, ResponseStatus::Applied);
+
+            if cycle == 0 {
+                grant_window_writer.store(true, Ordering::Release);
+                thread::sleep(Duration::from_millis(6));
+            }
 
             thread::sleep(Duration::from_millis(1));
 

@@ -1,24 +1,31 @@
 {
   "folders": [
-    { "name": "util_lib",
-      "path": "./../../util_lib"
+    {
+      "name": "util_lib",
+      "path": "../../util_lib"
     },
-    { "name": "httpserver",
-      "path": "./../../httpserver"
+    {
+      "name": "httpserver",
+      "path": "../../httpserver"
     },
-    { "name": "papers",
-      "path": "./../papers"
+    {
+      "name": "papers",
+      "path": "../papers"
     },
-    { "name": "connectors",
-      "path": "./../connectors"
+    {
+      "name": "connectors",
+      "path": "../connectors"
     },
-    { "name": "distdb-cloud",
-      "path": "./../distdb-cloud"
+    {
+      "name": "distdb-cloud",
+      "path": "../distdb-cloud"
     },
-    { "name": "distdb-web",
-      "path": "./../distdb-web"
+    {
+      "name": "distdb-web",
+      "path": "../distdb-web"
     },
-    { "name": "distdb",
+    {
+      "name": "distdb",
       "path": "."
     }
   ],
