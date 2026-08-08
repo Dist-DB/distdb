@@ -46,10 +46,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::time::timeout;
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_PEER_DISCOVERY_SQL: &str = "__distdb_show_server_peers__";
@@ -59,7 +59,17 @@ const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
 const MAX_SEEN_NODE_ANNOUNCES: usize = 8192;
 const MAX_SESSION_ROUTE_ENTRIES: usize = 65536;
 const MAX_SERVICE_REGISTRY_ENTRIES: usize = 8192;
+const CONNECTOR_IDLE_READ_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_IDLE_READ_TIMEOUT_SECS";
+const CONNECTOR_IDLE_READ_TIMEOUT_SECS_DEFAULT: u64 = 120;
 static BOOTSTRAP_STATUS_STARTED_AT: OnceLock<Instant> = OnceLock::new();
+
+fn connector_idle_read_timeout_secs() -> u64 {
+    std::env::var(CONNECTOR_IDLE_READ_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(5, 3600))
+        .unwrap_or(CONNECTOR_IDLE_READ_TIMEOUT_SECS_DEFAULT)
+}
 
 pub fn mark_bootstrap_status_started() {
     let _ = BOOTSTRAP_STATUS_STARTED_AT.get_or_init(Instant::now);
@@ -2079,11 +2089,29 @@ pub async fn handle_connector_stream(
         return Err(err);
     }
 
+    let idle_read_timeout = Duration::from_secs(connector_idle_read_timeout_secs());
+
     loop {
 
         let mut len_buf = [0u8; 4];
 
-        if let Err(err) = stream.read_exact(&mut len_buf).await {
+        let read_len_result = timeout(idle_read_timeout, stream.read_exact(&mut len_buf)).await;
+
+        let read_len_result = match read_len_result {
+            Ok(result) => result,
+            Err(_) => {
+                log::info!(
+                    "connector idle read timeout peer_addr={} connection_id={} timeout_secs={}",
+                    peer_addr,
+                    connection_id,
+                    idle_read_timeout.as_secs()
+                );
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node)
+                    .await;
+            }
+        };
+
+        if let Err(err) = read_len_result {
             
             if matches!(
                 err.kind(),
@@ -2100,7 +2128,24 @@ pub async fn handle_connector_stream(
         let frame_len = u32::from_le_bytes(len_buf) as usize;
         let mut payload = vec![0u8; frame_len];
 
-        if let Err(err) = stream.read_exact(&mut payload).await {
+        let read_payload_result = timeout(idle_read_timeout, stream.read_exact(&mut payload)).await;
+
+        let read_payload_result = match read_payload_result {
+            Ok(result) => result,
+            Err(_) => {
+                log::info!(
+                    "connector payload read timeout peer_addr={} connection_id={} frame_len={} timeout_secs={}",
+                    peer_addr,
+                    connection_id,
+                    frame_len,
+                    idle_read_timeout.as_secs()
+                );
+                return finalize_service_message(&mut session, &app, &p2p_runtime, &local_node)
+                    .await;
+            }
+        };
+
+        if let Err(err) = read_payload_result {
             rollback_active_session_transaction(&app, &p2p_runtime, &local_node, &session.session_id).await;
             return Err(Box::new(err));
         }

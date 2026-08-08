@@ -25,7 +25,7 @@ const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
 const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 300;
 const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 1;
-const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 5;
+const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 20;
 const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
 const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
@@ -120,7 +120,7 @@ fn connector_handshake_timeout_secs() -> u64 {
     std::env::var(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|value| value.clamp(1, 30))
+    .map(|value| value.clamp(1, 120))
         .unwrap_or(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT)
 }
 

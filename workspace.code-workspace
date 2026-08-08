@@ -64,7 +64,8 @@
         "approve": true,
         "matchCommandLine": true
       },
-      "ssh": true
+      "ssh": true,
+      "pgrep": true
     }
   }
 }
