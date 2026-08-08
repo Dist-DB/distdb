@@ -283,6 +283,9 @@ pub(crate) fn import_transport_error_is_retryable(message: &str) -> bool {
         || normalized.contains("failed to read response length")
         || normalized.contains("no active peer connection")
         || normalized.contains("connection reset")
+        || normalized.contains("connection refused")
+        || normalized.contains("unexpected-eof")
+        || normalized.contains("close_notify")
         || normalized.contains("broken pipe")
 }
 

@@ -305,6 +305,12 @@ fn import_transport_error_retry_classifier_matches_expected_errors() {
     assert!(import_transport_error_is_retryable(
         "transport error: no queued response for request_id"
     ));
+    assert!(import_transport_error_is_retryable(
+        "transport error: failed to connect to provision.cloud.distdb.com:4001: Connection refused (os error 61)"
+    ));
+    assert!(import_transport_error_is_retryable(
+        "transport error: failed to read response length: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
+    ));
     assert!(!import_transport_error_is_retryable(
         "command rejected: sql parse failed"
     ));

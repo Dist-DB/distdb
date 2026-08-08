@@ -63,7 +63,8 @@
       "/^cd '/Users/samcolak/Source Code/rust/distdb/distdb' && bash scripts/coverage\\.sh$/": {
         "approve": true,
         "matchCommandLine": true
-      }
+      },
+      "ssh": true
     }
   }
 }

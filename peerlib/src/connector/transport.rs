@@ -25,7 +25,7 @@ const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
 const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 300;
 const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 1;
-const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 1;
+const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 5;
 const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
 const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
@@ -1462,11 +1462,14 @@ fn connect_tls_stream(
 
     let mut tcp = connect_tcp_with_timeout(socket_addr)?;
     let handshake_timeout_secs = connector_handshake_timeout_secs();
+    let handshake_deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(handshake_timeout_secs);
+    let io_timeout = std::time::Duration::from_millis(500);
 
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
+    tcp.set_read_timeout(Some(io_timeout))
         .map_err(|e| ConnectorError::Transport(format!("failed to set read timeout: {e}")))?;
     
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(handshake_timeout_secs)))
+    tcp.set_write_timeout(Some(io_timeout))
         .map_err(|e| ConnectorError::Transport(format!("failed to set write timeout: {e}")))?;
     
     tcp.set_nodelay(true)
@@ -1483,9 +1486,32 @@ fn connect_tls_stream(
     })?;
 
     while connection.is_handshaking() {
-        connection
-            .complete_io(&mut tcp)
-            .map_err(|e| ConnectorError::Transport(format!("TLS handshake failed: {e}")))?;
+
+        match connection.complete_io(&mut tcp) {
+            
+            Ok(_) => {},
+            
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if std::time::Instant::now() >= handshake_deadline {
+                    return Err(ConnectorError::Transport(format!(
+                        "TLS handshake timed out after {}s: {err}",
+                        handshake_timeout_secs,
+                    )));
+                }
+                continue;
+            },
+
+            Err(err) => {
+                return Err(ConnectorError::Transport(format!("TLS handshake failed: {err}")));
+            }
+
+        }
+
     }
 
     Ok(ConnectorWireStream::Tls(StreamOwned::new(connection, tcp)))
