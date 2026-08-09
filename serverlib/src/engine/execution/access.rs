@@ -2853,13 +2853,15 @@ fn should_use_direct_scan_for_equality_probe(
         return true;
     }
 
-    // For cold durable streams with a saved live-row checkpoint, prefer the
-    // accessor-miss restore path to avoid first-query full WAL replay.
+    // For cold durable streams, only prefer accessor/checkpoint restore when
+    // the checkpointed table size is small enough that a snapshot-style load is
+    // expected to be cheaper than a filtered direct WAL scan.
     if wal.stream_mode(table_stream_id) == WalStreamMode::Durable
         && let Some(data_dir) = wal.data_dir_path()
-        && load_live_row_count_checkpoint(&data_dir, table_stream_id, table_id, schema).is_some()
+        && let Some((_, live_row_count)) =
+            load_live_row_count_checkpoint(&data_dir, table_stream_id, table_id, schema)
     {
-        return false;
+        return live_row_count > accessor_snapshot_max_live_rows();
     }
 
     true
