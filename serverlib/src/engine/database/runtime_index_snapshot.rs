@@ -651,14 +651,14 @@ fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, St
 }
 
 fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<(T, bool)> {
-    if let Ok(decoded) = common::helpers::bincode_compat::deserialize::<T>(payload) {
-        return Some((decoded, true));
-    }
-
     let decoder = ZlibDecoder::new(payload);
     let mut reader = BufReader::new(decoder);
 
-    common::helpers::bincode_compat::deserialize_from::<_, T>(&mut reader)
+    if let Ok(decoded) = common::helpers::bincode_compat::deserialize_from::<_, T>(&mut reader) {
+        return Some((decoded, false));
+    }
+
+    common::helpers::bincode_compat::deserialize::<T>(payload)
         .ok()
-        .map(|decoded| (decoded, false))
+        .map(|decoded| (decoded, true))
 }
