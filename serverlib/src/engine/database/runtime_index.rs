@@ -168,7 +168,7 @@ fn runtime_index_preload_accessors_on_bootstrap() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
         
 }
 
@@ -178,7 +178,7 @@ fn runtime_index_bootstrap_accessor_preload_max_live_rows() -> usize {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(150_000)
+        .unwrap_or(usize::MAX)
 
 }
 
@@ -192,7 +192,7 @@ fn runtime_index_background_prewarm_skipped_accessors() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 
 }
 
