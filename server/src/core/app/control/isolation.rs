@@ -129,7 +129,45 @@ impl ServerApp {
             };
 
             let snapshot_catalogs = snapshot.catalogs.clone();
-            let snapshot_runtime_indexes = snapshot.runtime_indexes.clone();
+            let snapshot_runtime_indexes = if snapshot.runtime_indexes.is_empty() {
+                let table_ids = serverlib::parse_mysql8_sql_requests(&query.sql, &query.database_id)
+                    .map(|requests| {
+                        let mut table_ids = HashSet::new();
+
+                        for request in requests {
+                            for object_name in request.referenced_object_names() {
+                                let trimmed = object_name.trim();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
+
+                                let normalized = common::normalize_identifier!(trimmed);
+                                if !normalized.is_empty() {
+                                    table_ids.insert(normalized);
+                                }
+
+                                if let Some(unqualified) = trimmed.rsplit('.').next() {
+                                    let normalized_unqualified = common::normalize_identifier!(unqualified);
+                                    if !normalized_unqualified.is_empty() {
+                                        table_ids.insert(normalized_unqualified);
+                                    }
+                                }
+                            }
+                        }
+
+                        table_ids
+                    })
+                    .unwrap_or_default();
+
+                if table_ids.is_empty() {
+                    RuntimeIndexStore::new()
+                } else {
+                    self.runtime_indexes
+                        .clone_for_tables(&snapshot_catalogs, &table_ids)
+                }
+            } else {
+                snapshot.runtime_indexes.clone()
+            };
             let snapshot_wal = ConcurrentWalManager::new();
 
             if let Err(err) = self.seed_sandbox_wal_from_source(

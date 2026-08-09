@@ -487,6 +487,10 @@ impl RuntimeIndexStore {
 
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.indexes.is_empty()
+    }
+
     pub fn should_track_index(&self, index: &DatabaseIndex) -> bool {
         
         if index.is_temporary() {

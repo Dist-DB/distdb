@@ -32,6 +32,20 @@ use crate::core::transaction_coordinator::QueryRoutingDecision;
 
 impl ServerApp {
 
+    fn capture_runtime_indexes_in_tx_snapshot() -> bool {
+
+        std::env::var("DISTDB_TX_SNAPSHOT_CAPTURE_RUNTIME_INDEXES")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+
+    }
+
     fn parse_query_requests(query: &connector::DataQuery) -> Result<Vec<SqlRequest>, String> {
         parse_mysql8_sql_requests(&query.sql, &query.database_id)
             .map_err(|err| err.to_string())
@@ -1404,6 +1418,8 @@ impl ServerApp {
         parse_ms: u64,
     ) -> ConnectorResponse {
 
+        self.enforce_transaction_snapshot_limits("request_dispatch_preparsed");
+
         if self.get_session(session_id).is_none() {
             #[cfg(test)]
             {
@@ -1598,6 +1614,8 @@ impl ServerApp {
         request: &ConnectorRequest,
         session_id: &str,
     ) -> ConnectorResponse {
+
+        self.enforce_transaction_snapshot_limits("request_dispatch");
 
         if self.get_session(session_id).is_none() {
             #[cfg(test)]
@@ -1797,6 +1815,11 @@ impl ServerApp {
             if !is_lightweight_import_begin {
 
                 let snapshot_wal = ConcurrentWalManager::new();
+                let snapshot_runtime_indexes = if Self::capture_runtime_indexes_in_tx_snapshot() {
+                    self.runtime_indexes.clone()
+                } else {
+                    RuntimeIndexStore::new()
+                };
 
                 if let Err(err) = self.seed_sandbox_wal(&snapshot_wal) {
                     let _ = self.transaction_coordinator.rollback(session_id);
@@ -1811,7 +1834,7 @@ impl ServerApp {
                     session_id.to_string(),
                     SessionSnapshot {
                         catalogs: self.catalogs.clone(),
-                        runtime_indexes: self.runtime_indexes.clone(),
+                        runtime_indexes: snapshot_runtime_indexes,
                         wal: snapshot_wal,
                     },
                 );
@@ -2112,12 +2135,18 @@ impl ServerApp {
 
         let validation_plan = Self::staged_query_validation_plan(staged_queries);
 
-        let (mut sandbox_catalogs, snapshot_runtime_indexes, snapshot_wal) =        
+        let (mut sandbox_catalogs, snapshot_runtime_indexes, snapshot_wal) =
             if let Some(snapshot) = self.tx_snapshot_by_session.get(session_id) {
+
+                let runtime_indexes = if snapshot.runtime_indexes.is_empty() {
+                    None
+                } else {
+                    Some(snapshot.runtime_indexes.clone())
+                };
                 
                 (
                     snapshot.catalogs.clone(),
-                    snapshot.runtime_indexes.clone(),
+                    runtime_indexes,
                     Some(&snapshot.wal),
                 )
 
@@ -2129,7 +2158,7 @@ impl ServerApp {
                 
                 (
                     self.catalogs.clone(),
-                    self.runtime_indexes.clone(),
+                    Some(self.runtime_indexes.clone()),
                     None,
                 )
 
@@ -2143,7 +2172,10 @@ impl ServerApp {
 
         let mut sandbox_indexes = if let Some((table_ids, skip_wal_seed)) = validation_plan {
 
-            let scoped_indexes = snapshot_runtime_indexes.clone_for_tables(&sandbox_catalogs, &table_ids);
+            let source_indexes = snapshot_runtime_indexes
+                .as_ref()
+                .unwrap_or(&self.runtime_indexes);
+            let scoped_indexes = source_indexes.clone_for_tables(&sandbox_catalogs, &table_ids);
 
             if skip_wal_seed {
 
@@ -2167,7 +2199,7 @@ impl ServerApp {
             self.seed_sandbox_wal_from_source(&sandbox_catalogs, source_wal, &sandbox_wal)
                 .map_err(|err| format!("failed to seed validation WAL snapshot: {}", err))?;
     
-            snapshot_runtime_indexes
+            snapshot_runtime_indexes.unwrap_or_else(|| self.runtime_indexes.clone())
 
         };
 

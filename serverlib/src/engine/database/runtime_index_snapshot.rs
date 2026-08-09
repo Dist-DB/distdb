@@ -24,6 +24,7 @@ const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
 const LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrcnt";
 const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";
 const LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS: usize = 150_000;
+const ACCESSOR_SNAPSHOT_PERSIST_ROWS_DEFAULT: bool = false;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RuntimeIndexTableSnapshot {
@@ -85,6 +86,20 @@ pub(crate) struct TableAccessorCacheSnapshot {
 pub(crate) struct RuntimeIndexSnapshotService;
 
 impl RuntimeIndexSnapshotService {
+
+    fn accessor_snapshot_persist_rows() -> bool {
+
+        std::env::var("DISTDB_ACCESSOR_SNAPSHOT_PERSIST_ROWS")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(ACCESSOR_SNAPSHOT_PERSIST_ROWS_DEFAULT)
+
+    }
 
     fn live_row_checkpoint_compress_max_rows() -> usize {
 
@@ -337,6 +352,10 @@ impl RuntimeIndexSnapshotService {
             return None;
         }
 
+        if snapshot.live_row_count > 0 && snapshot.cache.rows_by_id.is_empty() {
+            return None;
+        }
+
         Some(snapshot)
 
     }
@@ -508,6 +527,10 @@ impl RuntimeIndexSnapshotService {
         warm_fields: &[String],
         cache_scope_id: usize,
     ) -> Result<(), String> {
+
+        if !Self::accessor_snapshot_persist_rows() {
+            return Ok(());
+        }
 
         let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
             .ok_or_else(|| "wal fingerprint unavailable".to_string())?;

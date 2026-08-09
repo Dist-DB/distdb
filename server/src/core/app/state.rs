@@ -55,7 +55,97 @@ pub(super) struct ReadObservation {
     pub(super) observed_row_ids: HashSet<u64>,
 }
 
+const TX_SNAPSHOT_TTL_SECONDS_DEFAULT: u64 = 900;
+const TX_SNAPSHOT_MAX_SESSIONS_DEFAULT: usize = 256;
+
 impl ServerApp {
+
+    fn transaction_snapshot_ttl_nanos() -> u64 {
+
+        let ttl_seconds = std::env::var("DISTDB_TX_SNAPSHOT_TTL_SECONDS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(TX_SNAPSHOT_TTL_SECONDS_DEFAULT);
+
+        ttl_seconds.saturating_mul(1_000_000_000)
+
+    }
+
+    fn transaction_snapshot_max_sessions() -> usize {
+
+        std::env::var("DISTDB_TX_SNAPSHOT_MAX_SESSIONS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(TX_SNAPSHOT_MAX_SESSIONS_DEFAULT)
+
+    }
+
+    pub(super) fn enforce_transaction_snapshot_limits(&mut self, reason: &str) {
+
+        if self.tx_snapshot_by_session.is_empty() {
+            return;
+        }
+
+        let mut sessions_to_remove = Vec::new();
+
+        let ttl_nanos = Self::transaction_snapshot_ttl_nanos();
+        if ttl_nanos > 0 {
+            let now_nanos = common::epoch_nanos!();
+
+            for (session_id, begin_epoch_nanos) in &self.tx_begin_epoch_ms_by_session {
+                let age_nanos = now_nanos.saturating_sub(*begin_epoch_nanos);
+                if age_nanos >= ttl_nanos {
+                    sessions_to_remove.push(session_id.clone());
+                }
+            }
+        }
+
+        let max_sessions = Self::transaction_snapshot_max_sessions();
+        if max_sessions > 0 && self.tx_snapshot_by_session.len() > max_sessions {
+            let mut sessions_by_age = self
+                .tx_snapshot_by_session
+                .keys()
+                .map(|session_id| {
+                    let begin_epoch = self
+                        .tx_begin_epoch_ms_by_session
+                        .get(session_id)
+                        .copied()
+                        .unwrap_or(0);
+                    (session_id.clone(), begin_epoch)
+                })
+                .collect::<Vec<_>>();
+
+            sessions_by_age.sort_by_key(|(_, begin_epoch)| *begin_epoch);
+
+            let overflow = self.tx_snapshot_by_session.len() - max_sessions;
+            for (session_id, _) in sessions_by_age.into_iter().take(overflow) {
+                if !sessions_to_remove.iter().any(|id| id == &session_id) {
+                    sessions_to_remove.push(session_id);
+                }
+            }
+        }
+
+        if sessions_to_remove.is_empty() {
+            return;
+        }
+
+        for session_id in &sessions_to_remove {
+            let _ = self.transaction_coordinator.rollback(session_id);
+            self.tx_begin_epoch_ms_by_session.remove(session_id);
+            self.tx_snapshot_by_session.remove(session_id);
+            self.tx_read_observations_by_session.remove(session_id);
+        }
+
+        log::warn!(
+            "transaction snapshot cleanup reason={} removed_sessions={} remaining_sessions={} ttl_seconds={} max_sessions={}",
+            reason,
+            sessions_to_remove.len(),
+            self.tx_snapshot_by_session.len(),
+            ttl_nanos / 1_000_000_000,
+            max_sessions,
+        );
+
+    }
 
     pub fn new(config: ServerRuntimeConfig) -> Result<Self, ServerAppError> {
 

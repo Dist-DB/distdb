@@ -74,11 +74,13 @@ const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_POSTINGS: usize = 50_000;
 const ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS: usize = 250_000;
 const ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS: usize = 150_000;
 const ACCESSOR_POSTINGS_PARALLEL_MIN_ROWS: usize = 200_000;
+const ACCESSOR_CACHE_MAX_ROWS_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 struct EqualityTableCacheEntry {
     latest_tx_id: u64,
     rows_by_id: AHashMap<u64, HashMap<String, Vec<u8>>>,
+    approx_rows_bytes: usize,
     row_ids_by_field_value: AHashMap<String, AHashMap<Vec<u8>, Vec<u64>>>,
     string_index_by_field: AHashMap<String, TPHashSet<Vec<u64>>>,
     string_index_ci_by_field: AHashMap<String, TPHashSet<Vec<u64>>>,
@@ -101,6 +103,80 @@ static EQUALITY_TABLE_CACHE: OnceLock<Mutex<EqualityCacheScopeMap>> =
 type EqualityCacheTableMap = AHashMap<String, EqualityTableCacheEntry>;
 type EqualityCacheScopeMap = AHashMap<usize, EqualityCacheTableMap>;
 type LiveRow = (u64, HashMap<String, Vec<u8>>);
+
+const ACCESSOR_SOURCE_LOG_INTERVAL_MS: u64 = 30_000;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct AccessorLoadSourceStats {
+    snapshot_loads: u64,
+    checkpoint_loads: u64,
+    wal_scan_loads: u64,
+    total_live_rows: u64,
+    max_live_rows: usize,
+    total_elapsed_ms: u128,
+    max_elapsed_ms: u128,
+    last_log_epoch_ms: u64,
+}
+
+static ACCESSOR_LOAD_SOURCE_STATS: OnceLock<Mutex<AHashMap<String, AccessorLoadSourceStats>>> =
+    OnceLock::new();
+
+fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: usize, elapsed_ms: u128) {
+
+    let stats_map = ACCESSOR_LOAD_SOURCE_STATS.get_or_init(|| Mutex::new(AHashMap::new()));
+
+    let Ok(mut guard) = stats_map.lock() else {
+        return;
+    };
+
+    let now_ms = common::epoch_ms!();
+    let stats = guard.entry(table_stream_id.to_string()).or_default();
+
+    match source {
+        "accessor_snapshot" => stats.snapshot_loads = stats.snapshot_loads.saturating_add(1),
+        "live_row_checkpoint" => stats.checkpoint_loads = stats.checkpoint_loads.saturating_add(1),
+        "wal_scan" => stats.wal_scan_loads = stats.wal_scan_loads.saturating_add(1),
+        _ => {}
+    }
+
+    stats.total_live_rows = stats.total_live_rows.saturating_add(live_rows as u64);
+    stats.max_live_rows = std::cmp::max(stats.max_live_rows, live_rows);
+    stats.total_elapsed_ms = stats.total_elapsed_ms.saturating_add(elapsed_ms);
+    stats.max_elapsed_ms = std::cmp::max(stats.max_elapsed_ms, elapsed_ms);
+
+    let total_loads = stats
+        .snapshot_loads
+        .saturating_add(stats.checkpoint_loads)
+        .saturating_add(stats.wal_scan_loads);
+
+    if total_loads == 0 {
+        return;
+    }
+
+    let should_log = stats.last_log_epoch_ms == 0
+        || now_ms.saturating_sub(stats.last_log_epoch_ms) >= ACCESSOR_SOURCE_LOG_INTERVAL_MS;
+
+    if should_log {
+        let avg_live_rows = stats.total_live_rows / total_loads;
+        let avg_elapsed_ms = stats.total_elapsed_ms / (total_loads as u128);
+
+        log::info!(
+            "accessor load source stats stream={} total_loads={} snapshot_loads={} checkpoint_loads={} wal_scan_loads={} avg_live_rows={} max_live_rows={} avg_elapsed_ms={} max_elapsed_ms={}",
+            table_stream_id,
+            total_loads,
+            stats.snapshot_loads,
+            stats.checkpoint_loads,
+            stats.wal_scan_loads,
+            avg_live_rows,
+            stats.max_live_rows,
+            avg_elapsed_ms,
+            stats.max_elapsed_ms,
+        );
+
+        stats.last_log_epoch_ms = now_ms;
+    }
+
+}
 
 fn equality_cache_table_map_mut(
     cache_guard: &mut EqualityCacheScopeMap,
@@ -207,8 +283,12 @@ fn with_matching_equality_cache_entry<R>(
 fn insert_scoped_equality_cache_entry(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
-    entry: EqualityTableCacheEntry,
+    mut entry: EqualityTableCacheEntry,
 ) {
+
+    if !enforce_entry_row_budget(&mut entry, table_stream_id, "insert") {
+        return;
+    }
 
     let cache_scope_id = wal.cache_scope_id();
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
@@ -250,6 +330,82 @@ fn range_intersection_diagnostics_enabled() -> bool {
             )
         })
         .unwrap_or(false)
+
+}
+
+fn accessor_cache_rows_max_bytes() -> usize {
+
+    std::env::var("DISTDB_ACCESSOR_CACHE_MAX_ROWS_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(ACCESSOR_CACHE_MAX_ROWS_BYTES)
+
+}
+
+fn estimate_row_map_bytes(row_map: &HashMap<String, Vec<u8>>) -> usize {
+
+    let mut bytes = 64usize;
+
+    for (field_name, value) in row_map {
+        bytes = bytes
+            .saturating_add(48)
+            .saturating_add(field_name.len())
+            .saturating_add(value.len());
+    }
+
+    bytes
+
+}
+
+fn estimate_rows_by_id_bytes(rows_by_id: &AHashMap<u64, HashMap<String, Vec<u8>>>) -> usize {
+
+    let mut bytes = rows_by_id
+        .capacity()
+        .saturating_mul(std::mem::size_of::<(u64, HashMap<String, Vec<u8>>)>())
+        .saturating_add(64);
+
+    for row_map in rows_by_id.values() {
+        bytes = bytes.saturating_add(estimate_row_map_bytes(row_map));
+    }
+
+    bytes
+
+}
+
+fn clear_cache_entry_payload(entry: &mut EqualityTableCacheEntry) {
+
+    entry.rows_by_id.clear();
+    entry.approx_rows_bytes = 0;
+    entry.row_ids_by_field_value.clear();
+    entry.string_index_by_field.clear();
+    entry.string_index_ci_by_field.clear();
+    entry.range_row_ids_cache.clear();
+
+}
+
+fn enforce_entry_row_budget(
+    entry: &mut EqualityTableCacheEntry,
+    table_id: &str,
+    reason: &str,
+) -> bool {
+
+    let max_bytes = accessor_cache_rows_max_bytes();
+
+    if max_bytes == 0 || entry.approx_rows_bytes <= max_bytes {
+        return true;
+    }
+
+    log::warn!(
+        "accessor cache entry evicted table={} reason={} row_bytes={} max_row_bytes={} live_rows={}",
+        table_id,
+        reason,
+        entry.approx_rows_bytes,
+        max_bytes,
+        entry.rows_by_id.len(),
+    );
+
+    clear_cache_entry_payload(entry);
+    false
 
 }
 
@@ -358,9 +514,12 @@ fn cache_entry_from_snapshot(snapshot: EqualityTableCacheSnapshot) -> EqualityTa
         }
     }
 
+    let approx_rows_bytes = estimate_rows_by_id_bytes(&rows_by_id);
+
     EqualityTableCacheEntry {
         latest_tx_id,
         rows_by_id,
+        approx_rows_bytes,
         row_ids_by_field_value,
         string_index_by_field,
         string_index_ci_by_field,
@@ -842,6 +1001,7 @@ fn build_warm_equality_cache_serial(
 
     EqualityTableCacheEntry {
         latest_tx_id: 0,
+        approx_rows_bytes: estimate_rows_by_id_bytes(&rows_by_id),
         rows_by_id,
         row_ids_by_field_value,
         string_index_by_field: AHashMap::new(),
@@ -947,6 +1107,7 @@ fn build_warm_equality_cache_parallel(
 
     EqualityTableCacheEntry {
         latest_tx_id: 0,
+        approx_rows_bytes: estimate_rows_by_id_bytes(&rows_by_id),
         rows_by_id,
         row_ids_by_field_value,
         string_index_by_field: AHashMap::new(),
@@ -1269,6 +1430,11 @@ pub fn warm_equality_cache_from_live_rows(
     warm_string_like_accessors(&mut entry, &fields, schema);
 
     entry.latest_tx_id = latest_tx_id;
+    entry.approx_rows_bytes = estimate_rows_by_id_bytes(&entry.rows_by_id);
+
+    if !enforce_entry_row_budget(&mut entry, table_id, "warm") {
+        return;
+    }
 
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
@@ -1316,7 +1482,16 @@ fn apply_cached_row_insert(
 
     entry.range_row_ids_cache.clear();
 
+    if let Some(previous) = entry.rows_by_id.get(&row_id) {
+        entry.approx_rows_bytes = entry
+            .approx_rows_bytes
+            .saturating_sub(estimate_row_map_bytes(previous));
+    }
+
     entry.rows_by_id.insert(row_id, row_map.clone());
+    entry.approx_rows_bytes = entry
+        .approx_rows_bytes
+        .saturating_add(estimate_row_map_bytes(row_map));
 
     for (field_name, value) in row_map {
 
@@ -1353,6 +1528,12 @@ fn apply_cached_row_delete(
 ) {
 
     entry.range_row_ids_cache.clear();
+
+    if let Some(previous) = entry.rows_by_id.get(&row_id) {
+        entry.approx_rows_bytes = entry
+            .approx_rows_bytes
+            .saturating_sub(estimate_row_map_bytes(previous));
+    }
 
     entry.rows_by_id.remove(&row_id);
 
@@ -1407,6 +1588,8 @@ pub fn apply_equality_cache_row_mutation(
             _ => {}
         }
 
+        let _ = enforce_entry_row_budget(entry, table_id, "mutation");
+
     }
     
 }
@@ -1454,6 +1637,8 @@ where
             _ => {}
 
         }
+
+        let _ = enforce_entry_row_budget(entry, table_id, "mutation_batch");
 
     }
 
@@ -3200,6 +3385,12 @@ fn load_live_rows_for_accessor_miss(
                     elapsed_ms,
                 );
             }
+            record_accessor_load_source(
+                table_stream_id,
+                "accessor_snapshot",
+                live_rows.len(),
+                elapsed_ms,
+            );
             return (latest_tx_id, live_rows);
         }
 
@@ -3232,6 +3423,12 @@ fn load_live_rows_for_accessor_miss(
                 elapsed_ms,
             );
         }
+        record_accessor_load_source(
+            table_stream_id,
+            "live_row_checkpoint",
+            live_rows.len(),
+            elapsed_ms,
+        );
         return (latest_tx_id, live_rows);
     }
 
@@ -3256,6 +3453,12 @@ fn load_live_rows_for_accessor_miss(
                 elapsed_ms,
             );
         }
+        record_accessor_load_source(
+            table_stream_id,
+            "accessor_snapshot",
+            live_rows.len(),
+            elapsed_ms,
+        );
         return (latest_tx_id, live_rows);
     }
 
@@ -3286,6 +3489,8 @@ fn load_live_rows_for_accessor_miss(
             elapsed_ms,
         );
     }
+
+    record_accessor_load_source(table_stream_id, "wal_scan", live_rows.len(), elapsed_ms);
 
     (latest_tx_id, live_rows)
 
@@ -3429,6 +3634,7 @@ fn build_cold_accessor_cache_entry(
     };
 
     entry.latest_tx_id = latest_tx_id;
+    entry.approx_rows_bytes = estimate_rows_by_id_bytes(&entry.rows_by_id);
     entry
 
 }
@@ -3442,6 +3648,7 @@ fn build_rows_only_cache_entry(
 
     EqualityTableCacheEntry {
         latest_tx_id,
+        approx_rows_bytes: estimate_rows_by_id_bytes(&rows_by_id),
         rows_by_id,
         row_ids_by_field_value: AHashMap::new(),
         string_index_by_field: AHashMap::new(),

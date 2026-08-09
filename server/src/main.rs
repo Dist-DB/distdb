@@ -874,7 +874,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
 
                                 let attempts_now = tls_handshake_attempts.load(Ordering::SeqCst);
-                                if attempts_now % 25 == 0 {
+                                if attempts_now.is_multiple_of(25) {
                                     log::info!(
                                         "connector tls handshake counter snapshot attempts={} success={} failure={} eof_failure={}",
                                         attempts_now,
