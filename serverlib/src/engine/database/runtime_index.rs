@@ -1218,7 +1218,8 @@ impl RuntimeIndexStore {
                     let snapshot = &snapshot_info.snapshot;
                     bootstrapped_tables += 1;
                     bootstrapped_indexes += tracked_indexes.len();
-                    bootstrapped_rows += snapshot.live_row_count;
+                    let mut effective_live_row_count = snapshot.live_row_count;
+                    let mut snapshot_table_mode = "snapshot";
 
                     let mut restored_index_count = 0usize;
                     let mut restored_entry_count = 0usize;
@@ -1284,7 +1285,71 @@ impl RuntimeIndexStore {
                             tracked_indexes.len(),
                             restored_index_count,
                         );
+
+                        let (latest_tx_id, live_rows, live_rows_mode, live_rows_elapsed_ms) =
+                            load_bootstrap_live_rows(
+                                snapshot_data_dir.as_ref(),
+                                wal,
+                                &table,
+                                &table_stream_id,
+                                wal_fingerprint,
+                                snapshot.latest_tx_id,
+                            );
+
+                        let rebuild_started_at = Instant::now();
+                        rebuild_bootstrap_indexes_from_live_rows(
+                            self,
+                            &table_stream_id,
+                            &tracked_indexes,
+                            &live_rows,
+                        );
+                        let rebuild_elapsed_ms = rebuild_started_at.elapsed().as_millis();
+
+                        effective_live_row_count = live_rows.len();
+                        snapshot_table_mode = "snapshot_backfill";
+
+                        persist_live_row_checkpoint_if_from_wal(
+                            snapshot_data_dir.as_ref(),
+                            &table,
+                            &table_stream_id,
+                            latest_tx_id,
+                            wal_fingerprint,
+                            live_rows_mode,
+                            &live_rows,
+                            &table_id,
+                        );
+
+                        if let Some(data_dir) = snapshot_data_dir.as_ref()
+                            && let Err(err) = persist_runtime_index_snapshot(
+                                self,
+                                data_dir,
+                                &table,
+                                &table_stream_id,
+                                latest_tx_id,
+                                effective_live_row_count,
+                                wal_fingerprint,
+                                &tracked_indexes,
+                            )
+                        {
+                            log::warn!(
+                                "runtime index snapshot save skipped table={} reason={}",
+                                table_id,
+                                err,
+                            );
+                        }
+
+                        log::warn!(
+                            "runtime index snapshot restore backfill database={} table={} source={} live_rows={} live_row_materialization_ms={} index_rebuild_ms={}",
+                            database_id,
+                            table_id,
+                            live_rows_mode,
+                            effective_live_row_count,
+                            live_rows_elapsed_ms,
+                            rebuild_elapsed_ms,
+                        );
                     }
+
+                    bootstrapped_rows += effective_live_row_count;
 
                     log::info!(
                         "runtime index snapshot restore database={} table={} restored_indexes={} index_tuples={} live_rows={}",
@@ -1353,7 +1418,7 @@ impl RuntimeIndexStore {
                                 database_id,
                                 table_id,
                                 tracked_indexes.len(),
-                                snapshot.live_row_count,
+                                effective_live_row_count,
                                 table_started_at.elapsed().as_millis(),
                             );
 
@@ -1412,7 +1477,7 @@ impl RuntimeIndexStore {
                                 database_id,
                                 table_id,
                                 tracked_indexes.len(),
-                                snapshot.live_row_count,
+                                effective_live_row_count,
                                 table_started_at.elapsed().as_millis(),
                             );
 
@@ -1493,11 +1558,12 @@ impl RuntimeIndexStore {
                     }
 
                     log::info!(
-                        "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=snapshot elapsed_ms={}",
+                        "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode={} elapsed_ms={}",
                         database_id,
                         table_id,
                         tracked_indexes.len(),
-                        snapshot.live_row_count,
+                        effective_live_row_count,
+                        snapshot_table_mode,
                         table_started_at.elapsed().as_millis(),
                     );
 
