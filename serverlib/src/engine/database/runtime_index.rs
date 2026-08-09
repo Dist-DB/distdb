@@ -24,6 +24,8 @@ use crate::{
 
 const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: usize = 1_000_000;
 const RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS: usize = 1;
+const RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS_DEFAULT: usize = 0;
+const RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS_DEFAULT: usize = 65_536;
 static RUNTIME_INDEX_BOOTSTRAP_PROGRESS: OnceLock<Mutex<RuntimeIndexBootstrapProgress>> = OnceLock::new();
 
 #[derive(Debug, Clone, Default)]
@@ -193,6 +195,25 @@ fn runtime_index_background_prewarm_skipped_accessors() -> bool {
             )
         })
         .unwrap_or(false)
+
+}
+
+fn runtime_index_bootstrap_live_row_checkpoint_max_rows() -> usize {
+
+    std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS_DEFAULT)
+
+}
+
+fn runtime_index_bootstrap_index_build_chunk_rows() -> usize {
+
+    std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS_DEFAULT)
 
 }
 
@@ -1340,17 +1361,13 @@ impl RuntimeIndexStore {
                 }
 
                 let rebuild_started_at = Instant::now();
-                let rebuilt = build_bootstrap_index_entries(&tracked_indexes, &live_rows);
+                rebuild_bootstrap_indexes_from_live_rows(
+                    self,
+                    &table_stream_id,
+                    &tracked_indexes,
+                    &live_rows,
+                );
                 let rebuild_elapsed_ms = rebuild_started_at.elapsed().as_millis();
-
-                for item in rebuilt {
-                    let state = self.index_mut_for_table(&table_stream_id, &item.index_id);
-                    state.index = tracked_indexes
-                        .iter()
-                        .find(|index| index.index_id.0 == item.index_id)
-                        .cloned();
-                    state.rebuild_with_row_refs(item.entries, item.row_refs);
-                }
 
                 persist_live_row_checkpoint_if_from_wal(
                     snapshot_data_dir.as_ref(),
@@ -1681,6 +1698,28 @@ fn load_bootstrap_live_rows(
     let checkpoint_started_at = Instant::now();
     let checkpoint_rows = snapshot_data_dir
         .and_then(|data_dir| {
+
+            let live_row_checkpoint_max_rows = runtime_index_bootstrap_live_row_checkpoint_max_rows();
+            if live_row_checkpoint_max_rows > 0
+                && let Some((_latest_tx_id, live_row_count)) = RuntimeIndexSnapshotService::load_live_row_count_checkpoint(
+                    data_dir,
+                    table_stream_id,
+                    &table.table_id,
+                    &table.schema,
+                )
+                && live_row_count > live_row_checkpoint_max_rows
+            {
+                log::info!(
+                    "runtime index bootstrap live-row checkpoint skipped table={} stream={} live_rows={} max_live_rows={} source=count_checkpoint",
+                    table.table_id,
+                    table_stream_id,
+                    live_row_count,
+                    live_row_checkpoint_max_rows,
+                );
+
+                return None;
+            }
+
             RuntimeIndexSnapshotService::load_live_row_checkpoint(
                 data_dir,
                 table,
@@ -1856,103 +1895,39 @@ fn snapshot_indexes_for_table(
 
 }
 
-fn build_bootstrap_index_entries(
+fn rebuild_bootstrap_indexes_from_live_rows(
+    store: &mut RuntimeIndexStore,
+    table_stream_id: &str,
     tracked_indexes: &[DatabaseIndex],
     live_rows: &[(u64, HashMap<String, Vec<u8>>)],
-) -> Vec<RuntimeIndexRebuildItem> {
+) {
 
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let chunk_rows = runtime_index_bootstrap_index_build_chunk_rows();
 
-    let should_parallel = available > 1
-        && tracked_indexes.len() > 1
-        && live_rows.len() >= runtime_index_parallel_build_min_rows();
+    for index in tracked_indexes {
 
-    if !should_parallel {
+        let mut entries = AHashSet::with_capacity(live_rows.len());
+        let mut row_refs = if index.is_unique_key() {
+            Some(AHashMap::with_capacity(live_rows.len()))
+        } else {
+            None
+        };
 
-        return tracked_indexes
-            .iter()
-            .map(|index| {
-                let mut entries = AHashSet::with_capacity(live_rows.len());
-                let mut row_refs = AHashMap::with_capacity(live_rows.len());
-                for (row_id, row_map) in live_rows {
-                    let key = index_value_tuple(index, row_map);
+        for live_rows_chunk in live_rows.chunks(chunk_rows) {
+            for (row_id, row_map) in live_rows_chunk {
+                let key = index_value_tuple(index, row_map);
+                if let Some(row_refs) = row_refs.as_mut() {
                     row_refs.insert(key.clone(), *row_id);
-                    entries.insert(key);
                 }
-                RuntimeIndexRebuildItem {
-                    index_id: index.index_id.0.clone(),
-                    entries,
-                    row_refs,
-                }
-            })
-            .collect();
+                entries.insert(key);
+            }
+        }
+
+        let state = store.index_mut_for_table(table_stream_id, &index.index_id.0);
+        state.index = Some(index.clone());
+        state.rebuild_with_row_refs(entries, row_refs.unwrap_or_default());
 
     }
-
-    let workers = std::cmp::min(
-        std::cmp::min(available, runtime_index_parallel_build_max_workers()),
-        tracked_indexes.len(),
-    );
-
-    let chunk_size = tracked_indexes.len().div_ceil(workers);
-
-    let rebuilt = std::thread::scope(|scope| {
-
-        let mut handles = Vec::new();
-
-        for worker_idx in 0..workers {
-            
-            let start = worker_idx * chunk_size;
-            if start >= tracked_indexes.len() {
-                break;
-            }
-
-            let end = std::cmp::min(start + chunk_size, tracked_indexes.len());
-            let indexes = &tracked_indexes[start..end];
-
-            handles.push(scope.spawn(move || {
-
-                let mut chunk = Vec::with_capacity(indexes.len());
-                
-                for index in indexes {
-
-                    let mut entries = AHashSet::with_capacity(live_rows.len());
-                    let mut row_refs = AHashMap::with_capacity(live_rows.len());
-                    for (row_id, row_map) in live_rows {
-                        let key = index_value_tuple(index, row_map);
-                        row_refs.insert(key.clone(), *row_id);
-                        entries.insert(key);
-                    }
-                    chunk.push(RuntimeIndexRebuildItem {
-                        index_id: index.index_id.0.clone(),
-                        entries,
-                        row_refs,
-                    });
-                
-                }
-                
-                (start, chunk)
-
-            }));
-
-        }
-
-        let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
-        
-        for handle in handles {
-            if let Ok(chunk) = handle.join() {
-                let (_, mut items) = chunk;
-                rebuilt.append(&mut items);
-            }
-        }
-        
-        rebuilt
-
-    });
-
-    rebuilt
 
 }
 
