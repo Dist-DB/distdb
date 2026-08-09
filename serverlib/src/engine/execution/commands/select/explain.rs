@@ -51,6 +51,108 @@ fn format_lookup_key_part(part: &[u8]) -> String {
     hex
 }
 
+fn single_field_index_id(table: &DatabaseTable, field_name: &str) -> Option<String> {
+    table
+        .indexes
+        .values()
+        .find(|index| {
+            (index.field_names.len() == 1 && index.field_names[0] == field_name)
+                || (index.field_names.is_empty() && index.field_name == field_name)
+        })
+        .map(|index| index.index_id.0.clone())
+}
+
+fn explain_row_ref_hydration_hint(
+    table_scope_id: &str,
+    table: Option<&DatabaseTable>,
+    access_plan: Option<&RelationAccessPlan>,
+    runtime_indexes: &RuntimeIndexStore,
+) -> String {
+
+    let Some(table) = table else {
+        return "n/a".to_string();
+    };
+
+    let Some(plan) = access_plan else {
+        return "n/a".to_string();
+    };
+
+    match &plan.strategy {
+        RelationAccessStrategy::RuntimeIndexLookup { index_id, lookup_key } => {
+            let Some(index) = table
+                .indexes
+                .values()
+                .find(|index| index.index_id.0 == *index_id)
+            else {
+                return "fallback_missing_index_metadata".to_string();
+            };
+
+            if !index.is_unique_key() {
+                return "fallback_non_unique_index".to_string();
+            }
+
+            let Some(state) = runtime_indexes.index_for_table(table_scope_id, index_id) else {
+                return "fallback_missing_runtime_state".to_string();
+            };
+
+            if !state.contains(lookup_key) {
+                return "fallback_key_not_present".to_string();
+            }
+
+            if state.row_ref(lookup_key).is_some() {
+                "eligible_direct_row_ref".to_string()
+            } else {
+                "fallback_missing_row_ref".to_string()
+            }
+        }
+
+        RelationAccessStrategy::EqualityProbe {
+            field_name,
+            lookup_value,
+            source,
+            equality_filters,
+        } => {
+            if !matches!(source, crate::EqualityProbeSource::ExistingIndex) {
+                return "fallback_temporary_index".to_string();
+            }
+
+            if equality_filters.len() != 1 {
+                return "fallback_multi_filter_probe".to_string();
+            }
+
+            let Some(index_id) = single_field_index_id(table, field_name) else {
+                return "fallback_missing_index_metadata".to_string();
+            };
+
+            let Some(index) = table
+                .indexes
+                .values()
+                .find(|index| index.index_id.0 == index_id)
+            else {
+                return "fallback_missing_index_metadata".to_string();
+            };
+
+            if !index.is_unique_key() {
+                return "fallback_non_unique_index".to_string();
+            }
+
+            let Some(state) = runtime_indexes.index_for_table(table_scope_id, &index_id) else {
+                return "fallback_missing_runtime_state".to_string();
+            };
+
+            let key = vec![lookup_value.clone()];
+
+            if state.row_ref(&key).is_some() {
+                "eligible_direct_row_ref".to_string()
+            } else {
+                "fallback_missing_row_ref".to_string()
+            }
+        }
+
+        _ => "n/a".to_string(),
+    }
+}
+
 pub fn explain_select_plan_result(
     table_id: &str,
     filter_count: usize,
@@ -166,6 +268,15 @@ pub fn explain_select_plan_result(
         FieldDef {
             seqno: 12,
             field_name: "index_prioritization".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 13,
+            field_name: "row_ref_hydration".to_string(),
             field_type: FieldType::Text,
             nullable: false,
             indexed: FieldIndex::None,
@@ -337,6 +448,13 @@ pub fn explain_select_plan_result(
         index_id = chosen_index_hint;
     }
 
+    let row_ref_hydration = explain_row_ref_hydration_hint(
+        table_scope_id,
+        table,
+        access_plan,
+        runtime_indexes,
+    );
+
     let rows = vec![vec![
         table_id.as_bytes().to_vec(),
         access_path.into_bytes(),
@@ -350,6 +468,7 @@ pub fn explain_select_plan_result(
         advice.reasons.into_bytes(),
         planner_score.into_bytes(),
         index_prioritization.into_bytes(),
+        row_ref_hydration.into_bytes(),
     ]];
 
     SelectExecutionResult { columns, rows }

@@ -264,3 +264,51 @@ fn runtime_index_store_batch_record_and_remove_restores_cardinality() {
         Some(0),
     );
 }
+
+#[test]
+fn runtime_index_store_keeps_row_refs_for_unique_indexes_only() {
+    let mut store = RuntimeIndexStore {
+        indexes: AHashMap::new(),
+        materialize_non_primary: true,
+        non_primary_field_allowlist: AHashSet::new(),
+        non_primary_index_allowlist: AHashSet::new(),
+        incremental_persist_last_saved_ms: AHashMap::new(),
+    };
+
+    let primary = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::PrimaryKey,
+        vec!["id".to_string()],
+    );
+
+    let non_unique = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["city".to_string()],
+    );
+
+    let table_scope_id = "users_stream";
+    store.register_index_for_table(table_scope_id, &primary);
+    store.register_index_for_table(table_scope_id, &non_unique);
+
+    let row = HashMap::from([
+        ("id".to_string(), b"42".to_vec()),
+        ("city".to_string(), b"berlin".to_vec()),
+    ]);
+
+    store.record_row_for_table(table_scope_id, &primary, &row, Some(101));
+    store.record_row_for_table(table_scope_id, &non_unique, &row, Some(202));
+
+    let primary_key = vec![b"42".to_vec()];
+    let city_key = vec![b"berlin".to_vec()];
+
+    let primary_state = store
+        .index_for_table(table_scope_id, &primary.index_id.0)
+        .expect("primary state");
+    assert_eq!(primary_state.row_ref(&primary_key), Some(101));
+
+    let non_unique_state = store
+        .index_for_table(table_scope_id, &non_unique.index_id.0)
+        .expect("non-unique state");
+    assert_eq!(non_unique_state.row_ref(&city_key), None);
+}

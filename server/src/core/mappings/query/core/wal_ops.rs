@@ -93,7 +93,12 @@ where
 
         TransactionKind::Insert | 
         TransactionKind::Update => {
-            runtime_indexes.record_table_rows_batch(stream_id, derived_indexes, row_maps);
+            runtime_indexes.record_table_rows_batch_with_first_row_ref(
+                stream_id,
+                derived_indexes,
+                first_row_id,
+                row_maps,
+            );
         },
 
         _ => {}
@@ -370,7 +375,13 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
             _ => next_id.0,
         };
 
-        runtime_indexes.apply_table_row_mutation(&stream_id, derived_indexes, kind, row_map);
+        runtime_indexes.apply_table_row_mutation(
+            &stream_id,
+            derived_indexes,
+            kind,
+            latest_tx_id,
+            row_map,
+        );
         
         serverlib::apply_equality_cache_row_mutation(
             wal.cache_scope_id(),
@@ -848,12 +859,19 @@ pub(super) fn rebuild_runtime_indexes_for_table(
             continue;
         }
 
-        runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0).rebuild(
-            live_rows
-                .iter()
-                .map(|(_, row_map)| index_value_tuple(index, row_map))
-                .collect(),
-        );
+        let entries = live_rows
+            .iter()
+            .map(|(_, row_map)| index_value_tuple(index, row_map))
+            .collect();
+
+        let row_refs = live_rows
+            .iter()
+            .map(|(row_id, row_map)| (index_value_tuple(index, row_map), *row_id))
+            .collect();
+
+        let state = runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0);
+        state.index = Some(index.clone());
+        state.rebuild_with_row_refs(entries, row_refs);
 
     }
 

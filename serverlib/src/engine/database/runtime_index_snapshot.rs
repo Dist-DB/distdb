@@ -43,6 +43,8 @@ pub(crate) struct RuntimeIndexTableSnapshot {
 pub(crate) struct RuntimeIndexSnapshotIndex {
     pub(crate) index_id: String,
     pub(crate) entries: Vec<Vec<Vec<u8>>>,
+    #[serde(default)]
+    pub(crate) row_refs: Vec<(Vec<Vec<u8>>, u64)>,
 }
 
 #[derive(Debug, Clone)]

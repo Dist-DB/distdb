@@ -427,6 +427,10 @@ fn with_matching_equality_cache_entry<R>(
     f: impl FnOnce(&mut EqualityTableCacheEntry) -> R,
 ) -> Option<R> {
 
+    if disable_accessor_row_cache() {
+        return None;
+    }
+
     let cache_scope_id = wal.cache_scope_id();
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
@@ -450,6 +454,10 @@ fn insert_scoped_equality_cache_entry(
     mut entry: EqualityTableCacheEntry,
 ) {
 
+    if disable_accessor_row_cache() {
+        return;
+    }
+
     if !enforce_entry_row_budget(&mut entry, table_stream_id, "insert") {
         return;
     }
@@ -470,6 +478,20 @@ fn accessor_cold_direct_scan_min_rows() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS)
+
+}
+
+fn disable_accessor_row_cache() -> bool {
+
+    std::env::var("DISTDB_DISABLE_ACCESSOR_ROW_CACHE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 
 }
 
@@ -846,6 +868,10 @@ pub fn snapshot_equality_cache(
     table_id: &str,
 ) -> Option<EqualityTableCacheSnapshot> {
 
+    if disable_accessor_row_cache() {
+        return None;
+    }
+
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     let cache_guard = cache.lock().ok()?;
     let entry = equality_cache_entry(&cache_guard, cache_scope_id, table_id)?;
@@ -859,6 +885,10 @@ pub fn restore_equality_cache_from_snapshot(
     table_id: &str,
     snapshot: EqualityTableCacheSnapshot,
 ) {
+
+    if disable_accessor_row_cache() {
+        return;
+    }
     
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     
@@ -5107,6 +5137,60 @@ fn score_string_like_probe(source: EqualityProbeSource) -> u32 {
 
 }
 
+fn find_record_by_transaction_id(
+    records: &[TransactionRecord],
+    tx_id: u64,
+) -> Option<&TransactionRecord> {
+
+    let mut low = 0usize;
+    let mut high = records.len();
+
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let current = records[mid].id.0;
+
+        if current < tx_id {
+            low = mid.saturating_add(1);
+        } else {
+            high = mid;
+        }
+    }
+
+    records
+        .get(low)
+        .filter(|record| record.id.0 == tx_id)
+
+}
+
+fn load_live_row_by_runtime_index_row_ref(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    lookup_value: &[u8],
+    row_ref: u64,
+) -> Option<(u64, HashMap<String, Vec<u8>>)> {
+
+    wal.with_records(table_stream_id, |records| {
+        let record = find_record_by_transaction_id(records, row_ref)?;
+
+        if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
+            return None;
+        }
+
+        let payload = record.payload_logical()?;
+        let row_map = decode_row_payload(schema, payload).ok()?;
+
+        let row_value = row_map.get(field_name)?;
+        if row_value.as_slice() != lookup_value {
+            return None;
+        }
+
+        Some((record.id.0, row_map))
+    })?
+
+}
+
 pub fn materialize_relation_rows<T, S>(
     wal: &ConcurrentWalManager,
     table: T,
@@ -5130,6 +5214,13 @@ where
             index_id,
             lookup_key,
         } => {
+
+            let runtime_lookup_index_is_unique = table
+                .indexes
+                .values()
+                .find(|index| index.index_id.0 == *index_id)
+                .map(|index| index.is_unique_key())
+                .unwrap_or(false);
 
             let single_field_name = if lookup_key.len() == 1 {
                 table
@@ -5174,6 +5265,34 @@ where
                     table.table_id,
                     index_id,
                 );
+
+                if runtime_lookup_index_is_unique
+                    && let Some(single_field_name) = single_field_name
+                    && let Some(row_ref) = state.row_ref(lookup_key)
+                    && let Some(row) = load_live_row_by_runtime_index_row_ref(
+                        wal,
+                        table_stream_id,
+                        schema,
+                        single_field_name,
+                        &lookup_key[0],
+                        row_ref,
+                    )
+                {
+                    log::debug!(
+                        "relation runtime index lookup table={} index_id={} row_ref_direct=true",
+                        table.table_id,
+                        index_id,
+                    );
+                    return vec![row];
+                }
+
+                if runtime_lookup_index_is_unique {
+                    log::debug!(
+                        "relation runtime index lookup table={} index_id={} row_ref_direct=false reason=fallback_scan",
+                        table.table_id,
+                        index_id,
+                    );
+                }
 
             } else {
                 log::debug!(
@@ -5228,6 +5347,49 @@ where
                     EqualityProbeSource::TemporaryIndex => "temporary_index",
                 }
             );
+
+            if matches!(source, EqualityProbeSource::ExistingIndex)
+                && equality_filters.len() == 1
+                && let Some(index_id) = single_field_index_id(table, field_name)
+                && table
+                    .indexes
+                    .values()
+                    .find(|index| index.index_id.0 == index_id)
+                    .is_some_and(|index| index.is_unique_key())
+                && let Some(state) = runtime_indexes.index_for_table(table_stream_id, &index_id)
+            {
+                let key = vec![lookup_value.clone()];
+
+                if let Some(row_ref) = state.row_ref(&key)
+                    && let Some((row_id, row_map)) = load_live_row_by_runtime_index_row_ref(
+                        wal,
+                        table_stream_id,
+                        schema,
+                        field_name,
+                        lookup_value,
+                        row_ref,
+                    )
+                    && equality_filters.iter().all(|(filter_field_name, filter_lookup_value)| {
+                        row_map
+                            .get(filter_field_name)
+                            .map(|row_value| row_value.as_slice() == filter_lookup_value.as_slice())
+                            .unwrap_or(false)
+                    })
+                {
+                    log::debug!(
+                        "relation equality probe table={} field={} row_ref_direct=true",
+                        table.table_id,
+                        field_name,
+                    );
+                    return vec![(row_id, row_map)];
+                }
+
+                log::debug!(
+                    "relation equality probe table={} field={} row_ref_direct=false reason=fallback_scan",
+                    table.table_id,
+                    field_name,
+                );
+            }
 
             if equality_filters.len() > 1 {
                 load_live_rows_by_equality_filters(

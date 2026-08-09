@@ -2353,6 +2353,7 @@ fn explain_select_plan_lists_indexed_equality_filters_for_equality_probe() {
     assert_eq!(result.rows[0][1], b"equality_probe".to_vec());
     assert_eq!(result.columns[10].field_name, "planner_score");
     assert_eq!(result.columns[11].field_name, "index_prioritization");
+    assert_eq!(result.columns[12].field_name, "row_ref_hydration");
 
     let index_ids = String::from_utf8(result.rows[0][2].clone())
         .expect("index ids should be UTF-8 text");
@@ -2364,6 +2365,75 @@ fn explain_select_plan_lists_indexed_equality_filters_for_equality_probe() {
         .expect("index prioritization should be UTF-8 text");
     assert!(prioritization.contains("equality_probe"));
     assert!(prioritization.contains("full_scan"));
+
+    let row_ref_hydration = String::from_utf8(result.rows[0][12].clone())
+        .expect("row_ref_hydration should be UTF-8 text");
+    assert!(!row_ref_hydration.is_empty());
+}
+
+#[test]
+fn explain_select_plan_reports_row_ref_hydration_for_uid_runtime_lookup() {
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let places_schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("places", places_schema)
+        .expect("places table should register");
+
+    let table = catalog.table("places").expect("places table should exist");
+
+    let primary_index = table
+        .indexes
+        .values()
+        .find(|index| index.is_primary_key())
+        .cloned()
+        .expect("primary index should exist");
+
+    let uid_key = vec![4980768_u64.to_le_bytes().to_vec()];
+
+    let table_scope_id = if table.entity_id.is_empty() {
+        "places".to_string()
+    } else {
+        table.entity_id.clone()
+    };
+
+    let state = runtime_indexes.index_mut_for_table(&table_scope_id, &primary_index.index_id.0);
+    state.index = Some(primary_index.clone());
+    state.insert_with_row_ref(uid_key.clone(), Some(4980768));
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "explain select * from places where uid=4980768",
+    )
+    .expect("explain relation plan should parse");
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::RuntimeIndexLookup {
+            index_id: primary_index.index_id.0.clone(),
+            lookup_key: uid_key,
+        },
+    };
+
+    let result = explain_select_plan_result(
+        "places",
+        1,
+        Some(&access_plan),
+        None,
+        &runtime_indexes,
+        &read_plan,
+        Some(&table),
+    );
+
+    assert_eq!(result.rows.len(), 1);
+
+    let row_ref_hydration = String::from_utf8(result.rows[0][12].clone())
+        .expect("row_ref_hydration should be UTF-8 text");
+    assert_eq!(row_ref_hydration, "eligible_direct_row_ref");
 }
 
 #[test]

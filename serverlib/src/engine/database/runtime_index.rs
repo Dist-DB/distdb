@@ -168,7 +168,7 @@ fn runtime_index_preload_accessors_on_bootstrap() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
         
 }
 
@@ -178,7 +178,7 @@ fn runtime_index_bootstrap_accessor_preload_max_live_rows() -> usize {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(usize::MAX)
+        .unwrap_or(150_000)
 
 }
 
@@ -192,7 +192,7 @@ fn runtime_index_background_prewarm_skipped_accessors() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 
 }
 
@@ -265,6 +265,7 @@ fn spawn_background_accessor_prewarm_from_checkpoint(
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
     entries: AHashSet<Vec<Vec<u8>>>,
+    row_refs: AHashMap<Vec<Vec<u8>>, u64>,
 }
 
 impl RuntimeIndexState {
@@ -278,10 +279,24 @@ impl RuntimeIndexState {
     }
 
     pub fn insert(&mut self, pk_val: Vec<Vec<u8>>) {
+        self.insert_with_row_ref(pk_val, None);
+    }
+
+    pub fn insert_with_row_ref(&mut self, pk_val: Vec<Vec<u8>>, row_ref: Option<u64>) {
+        if let Some(row_ref) = row_ref
+            && self
+                .index
+                .as_ref()
+                .map(|index| index.is_unique_key())
+                .unwrap_or(true)
+        {
+            self.row_refs.insert(pk_val.clone(), row_ref);
+        }
         self.entries.insert(pk_val);
     }
 
     pub fn remove(&mut self, pk_val: &[Vec<u8>]) {
+        self.row_refs.remove(pk_val);
         self.entries.remove(pk_val);
     }
 
@@ -295,6 +310,29 @@ impl RuntimeIndexState {
 
     pub fn rebuild(&mut self, entries: AHashSet<Vec<Vec<u8>>>) {
         self.entries = entries;
+        self.row_refs.clear();
+    }
+
+    pub fn rebuild_with_row_refs(
+        &mut self,
+        entries: AHashSet<Vec<Vec<u8>>>,
+        mut row_refs: AHashMap<Vec<Vec<u8>>, u64>,
+    ) {
+        row_refs.retain(|key, _| entries.contains(key));
+        self.entries = entries;
+        self.row_refs = if self
+            .index
+            .as_ref()
+            .is_some_and(|index| !index.is_unique_key())
+        {
+            AHashMap::new()
+        } else {
+            row_refs
+        };
+    }
+
+    pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
+        self.row_refs.get(pk_val).copied()
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
@@ -587,6 +625,7 @@ impl RuntimeIndexStore {
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index),
             entries: AHashSet::new(),
+            row_refs: AHashMap::new(),
         });
 
     }
@@ -601,6 +640,7 @@ impl RuntimeIndexStore {
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index.clone()),
             entries: AHashSet::new(),
+            row_refs: AHashMap::new(),
         });
 
     }
@@ -621,6 +661,7 @@ impl RuntimeIndexStore {
         table_scope_id: &str,
         index: &DatabaseIndex,
         row_map: &HashMap<String, Vec<u8>>,
+        row_ref: Option<u64>,
     ) {
 
         if !self.should_track_index(index) {
@@ -628,8 +669,9 @@ impl RuntimeIndexStore {
         }
 
         let key = index_value_tuple(index, row_map);
-        self.index_mut_for_table(table_scope_id, &index.index_id.0)
-            .insert(key);
+        let state = self.index_mut_for_table(table_scope_id, &index.index_id.0);
+        state.index = Some(index.clone());
+        state.insert_with_row_ref(key, row_ref);
 
     }
 
@@ -647,6 +689,7 @@ impl RuntimeIndexStore {
         table_scope_id: &str,
         indexes: I,
         row_map: &HashMap<String, Vec<u8>>,
+        row_ref: Option<u64>,
     )
     where
         I: IntoIterator<Item = &'a DatabaseIndex>,
@@ -658,8 +701,9 @@ impl RuntimeIndexStore {
             }
 
             let key = index_value_tuple(index, row_map);
-            self.index_mut_for_table(table_scope_id, &index.index_id.0)
-                .insert(key);
+            let state = self.index_mut_for_table(table_scope_id, &index.index_id.0);
+            state.index = Some(index.clone());
+            state.insert_with_row_ref(key, row_ref);
 
         }
     }
@@ -725,6 +769,7 @@ impl RuntimeIndexStore {
             }
 
             let state = self.index_mut_for_table(table_scope_id, &index.index_id.0);
+            state.index = Some((*index).clone());
 
             state.reserve_entries(row_maps.len());
 
@@ -733,6 +778,43 @@ impl RuntimeIndexStore {
                 state.insert(key);
             }
         
+        }
+
+    }
+
+    pub fn record_table_rows_batch_with_first_row_ref<R>(
+        &mut self,
+        table_scope_id: &str,
+        indexes: &[&DatabaseIndex],
+        first_row_ref: u64,
+        row_maps: &[R],
+    )
+    where
+        R: Borrow<HashMap<String, Vec<u8>>>,
+    {
+
+        if row_maps.is_empty() {
+            return;
+        }
+
+        for index in indexes {
+
+            if !self.should_track_index(index) {
+                continue;
+            }
+
+            let state = self.index_mut_for_table(table_scope_id, &index.index_id.0);
+            state.index = Some((*index).clone());
+
+            state.reserve_entries(row_maps.len());
+
+            let mut row_ref = first_row_ref;
+            for row_map in row_maps {
+                let key = index_value_tuple(index, row_map.borrow());
+                state.insert_with_row_ref(key, Some(row_ref));
+                row_ref = row_ref.saturating_add(1);
+            }
+
         }
 
     }
@@ -796,6 +878,7 @@ impl RuntimeIndexStore {
         table_scope_id: &str,
         indexes: I,
         kind: TransactionKind,
+        latest_tx_id: u64,
         row_map: &HashMap<String, Vec<u8>>,
     )
     where
@@ -810,7 +893,7 @@ impl RuntimeIndexStore {
 
             TransactionKind::Insert |
             TransactionKind::Update => {
-                self.record_table_row_for_table(table_scope_id, indexes, row_map)
+                self.record_table_row_for_table(table_scope_id, indexes, row_map, Some(latest_tx_id))
             },
 
             _ => {}
@@ -974,7 +1057,7 @@ impl RuntimeIndexStore {
                     let restored_index_count = restored.len();
                     let restored_entry_count = restored
                         .iter()
-                        .map(|(_, entries)| entries.len())
+                        .map(|(_, entries, _)| entries.len())
                         .sum::<usize>();
 
                     if restored_index_count != tracked_indexes.len() {
@@ -987,9 +1070,13 @@ impl RuntimeIndexStore {
                         );
                     }
 
-                    for (index_id, entries) in restored {
+                    for (index_id, entries, row_refs) in restored {
                         let state = self.index_mut_for_table(&table_stream_id, &index_id);
-                        state.rebuild(entries);
+                        state.index = tracked_indexes
+                            .iter()
+                            .find(|index| index.index_id.0 == index_id)
+                            .cloned();
+                        state.rebuild_with_row_refs(entries, row_refs);
                     }
 
                     log::info!(
@@ -1229,9 +1316,13 @@ impl RuntimeIndexStore {
                 let rebuilt = build_bootstrap_index_entries(&tracked_indexes, &live_rows);
                 let rebuild_elapsed_ms = rebuild_started_at.elapsed().as_millis();
 
-                for (index_id, entries) in rebuilt {
+                for (index_id, entries, row_refs) in rebuilt {
                     let state = self.index_mut_for_table(&table_stream_id, &index_id);
-                    state.rebuild(entries);
+                    state.index = tracked_indexes
+                        .iter()
+                        .find(|index| index.index_id.0 == index_id)
+                        .cloned();
+                    state.rebuild_with_row_refs(entries, row_refs);
                 }
 
                 persist_live_row_checkpoint_if_from_wal(
@@ -1711,6 +1802,11 @@ fn snapshot_indexes_for_table(
         indexes.push(RuntimeIndexSnapshotIndex {
             index_id: index.index_id.0.clone(),
             entries: state.entries.iter().cloned().collect(),
+            row_refs: state
+                .row_refs
+                .iter()
+                .map(|(key, row_ref)| (key.clone(), *row_ref))
+                .collect(),
         });
     }
 
@@ -1721,7 +1817,7 @@ fn snapshot_indexes_for_table(
 fn build_bootstrap_index_entries(
     tracked_indexes: &[DatabaseIndex],
     live_rows: &[(u64, HashMap<String, Vec<u8>>)],
-) -> Vec<(String, AHashSet<Vec<Vec<u8>>>)> {
+) -> Vec<(String, AHashSet<Vec<Vec<u8>>>, AHashMap<Vec<Vec<u8>>, u64>)> {
 
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -1737,10 +1833,13 @@ fn build_bootstrap_index_entries(
             .iter()
             .map(|index| {
                 let mut entries = AHashSet::with_capacity(live_rows.len());
-                for (_, row_map) in live_rows {
-                    entries.insert(index_value_tuple(index, row_map));
+                let mut row_refs = AHashMap::with_capacity(live_rows.len());
+                for (row_id, row_map) in live_rows {
+                    let key = index_value_tuple(index, row_map);
+                    row_refs.insert(key.clone(), *row_id);
+                    entries.insert(key);
                 }
-                (index.index_id.0.clone(), entries)
+                (index.index_id.0.clone(), entries, row_refs)
             })
             .collect();
 
@@ -1774,10 +1873,13 @@ fn build_bootstrap_index_entries(
                 for index in indexes {
 
                     let mut entries = AHashSet::with_capacity(live_rows.len());
-                    for (_, row_map) in live_rows {
-                        entries.insert(index_value_tuple(index, row_map));
+                    let mut row_refs = AHashMap::with_capacity(live_rows.len());
+                    for (row_id, row_map) in live_rows {
+                        let key = index_value_tuple(index, row_map);
+                        row_refs.insert(key.clone(), *row_id);
+                        entries.insert(key);
                     }
-                    chunk.push((index.index_id.0.clone(), entries));
+                    chunk.push((index.index_id.0.clone(), entries, row_refs));
                 
                 }
                 
@@ -1814,7 +1916,7 @@ fn build_bootstrap_index_entries(
 fn build_snapshot_index_entries(
     tracked_indexes: &[DatabaseIndex],
     snapshot: &RuntimeIndexTableSnapshot,
-) -> Vec<(String, AHashSet<Vec<Vec<u8>>>)> {
+) -> Vec<(String, AHashSet<Vec<Vec<u8>>>, AHashMap<Vec<Vec<u8>>, u64>)> {
 
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -1837,6 +1939,7 @@ fn build_snapshot_index_entries(
                         (
                             index.index_id.0.clone(),
                             item.entries.iter().cloned().collect::<AHashSet<_>>(),
+                            item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
                         )
                     })
 
@@ -1880,6 +1983,7 @@ fn build_snapshot_index_entries(
                     chunk.push((
                         index.index_id.0.clone(),
                         item.entries.iter().cloned().collect::<AHashSet<_>>(),
+                        item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
                     ));
                 }
 

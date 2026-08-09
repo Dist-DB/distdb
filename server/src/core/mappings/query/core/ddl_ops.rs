@@ -925,8 +925,8 @@ pub(super) fn execute_truncate_table_impl(
         }
 
         let state = runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0);
-        state.rebuild(Default::default());
         state.index = Some(index.clone());
+        state.rebuild_with_row_refs(Default::default(), Default::default());
     }
 
     ConnectorResponse::applied(
