@@ -55,8 +55,8 @@ pub(super) struct ReadObservation {
     pub(super) observed_row_ids: HashSet<u64>,
 }
 
-const TX_SNAPSHOT_TTL_SECONDS_DEFAULT: u64 = 900;
-const TX_SNAPSHOT_MAX_SESSIONS_DEFAULT: usize = 256;
+const TX_SNAPSHOT_TTL_SECONDS_DEFAULT: u64 = 0;
+const TX_SNAPSHOT_MAX_SESSIONS_DEFAULT: usize = 0;
 
 impl ServerApp {
 
@@ -86,9 +86,16 @@ impl ServerApp {
             return;
         }
 
+        let ttl_nanos = Self::transaction_snapshot_ttl_nanos();
+        let max_sessions = Self::transaction_snapshot_max_sessions();
+
+        // Limits are opt-in. By default, do not auto-evict transaction snapshots.
+        if ttl_nanos == 0 && max_sessions == 0 {
+            return;
+        }
+
         let mut sessions_to_remove = Vec::new();
 
-        let ttl_nanos = Self::transaction_snapshot_ttl_nanos();
         if ttl_nanos > 0 {
             let now_nanos = common::epoch_nanos!();
 
@@ -100,7 +107,6 @@ impl ServerApp {
             }
         }
 
-        let max_sessions = Self::transaction_snapshot_max_sessions();
         if max_sessions > 0 && self.tx_snapshot_by_session.len() > max_sessions {
             let mut sessions_by_age = self
                 .tx_snapshot_by_session

@@ -135,7 +135,9 @@ fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: u
     match source {
         "accessor_snapshot" => stats.snapshot_loads = stats.snapshot_loads.saturating_add(1),
         "live_row_checkpoint" => stats.checkpoint_loads = stats.checkpoint_loads.saturating_add(1),
-        "wal_scan" => stats.wal_scan_loads = stats.wal_scan_loads.saturating_add(1),
+        "wal_scan" | "wal_scan_filtered" => {
+            stats.wal_scan_loads = stats.wal_scan_loads.saturating_add(1)
+        },
         _ => {}
     }
 
@@ -2654,6 +2656,126 @@ fn collect_live_rows_from_records(
 
 }
 
+fn equality_probe_direct_scan_enabled() -> bool {
+
+    std::env::var("DISTDB_EQUALITY_PROBE_DIRECT_SCAN")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+
+}
+
+fn row_matches_equality_filters(
+    row_map: &HashMap<String, Vec<u8>>,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> bool {
+
+    equality_filters.iter().all(|(field_name, lookup_value)| {
+        row_map
+            .get(field_name)
+            .map(|row_value| row_value.as_slice() == lookup_value.as_slice())
+            .unwrap_or(false)
+    })
+
+}
+
+fn load_live_rows_by_equality_filters_direct_wal_scan(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if equality_filters.is_empty() {
+        return Vec::new();
+    }
+
+    let started_at = Instant::now();
+
+    let rows = wal
+        .with_records(table_stream_id, |records| {
+            let mut live_rows = AHashMap::with_capacity(equality_filters.len().saturating_mul(32));
+            let mut row_order = Vec::with_capacity(equality_filters.len().saturating_mul(32));
+            let mut committed_groups = AHashSet::with_capacity(records.len() / 8 + 1);
+            let mut aborted_groups = AHashSet::with_capacity(records.len() / 8 + 1);
+
+            for record in records {
+                match record.kind {
+                    TransactionKind::WriteCommit => {
+                        if let Some(group_id) = record.groupid {
+                            committed_groups.insert(group_id.0);
+                        }
+                    },
+                    TransactionKind::WriteAbort => {
+                        if let Some(group_id) = record.groupid {
+                            aborted_groups.insert(group_id.0);
+                        }
+                    },
+                    _ => {}
+                }
+            }
+
+            for record in records {
+                if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                    continue;
+                }
+
+                match record.kind {
+                    TransactionKind::Insert | TransactionKind::Update => {
+                        let Some(payload) = record.payload_logical() else {
+                            continue;
+                        };
+
+                        let Ok(row_map) = decode_row_payload(schema, payload) else {
+                            continue;
+                        };
+
+                        if row_matches_equality_filters(&row_map, equality_filters) {
+                            row_order.push(record.id.0);
+                            live_rows.insert(record.id.0, row_map);
+                        }
+                    },
+
+                    TransactionKind::Delete => {
+                        if let Some(refid) = record.refid {
+                            live_rows.remove(&refid.0);
+                        }
+                    },
+
+                    _ => {}
+                }
+            }
+
+            row_order
+                .into_iter()
+                .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+
+    if elapsed_ms >= 100 {
+        log::info!(
+            "equality probe direct scan stream={} filters={} live_rows={} elapsed_ms={}",
+            table_stream_id,
+            equality_filters.len(),
+            rows.len(),
+            elapsed_ms,
+        );
+    }
+
+    record_accessor_load_source(table_stream_id, "wal_scan_filtered", rows.len(), elapsed_ms);
+
+    rows
+
+}
+
 #[expect(clippy::type_complexity, reason="returning a vector of tuples with row ID and row map")]
 pub fn load_live_rows_with_context(
     wal: &ConcurrentWalManager,
@@ -2722,6 +2844,15 @@ pub fn load_live_rows_by_equality_filters(
         rows_for_field_values(entry, equality_filters)
     }) {
         return result;
+    }
+
+    if equality_probe_direct_scan_enabled() {
+        return load_live_rows_by_equality_filters_direct_wal_scan(
+            wal,
+            table_stream_id,
+            schema,
+            equality_filters,
+        );
     }
 
     let warm_fields = equality_filters
