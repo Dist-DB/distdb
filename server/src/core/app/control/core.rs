@@ -1161,35 +1161,43 @@ impl ServerApp {
             })
             .map(|(_, count)| count);
 
-        let matched_rows = runtime_index_cardinality
-            .or(checkpoint_count)
-            .unwrap_or_else(|| load_live_row_count(&self.wal, &table_stream_id));
+        let matched_rows = load_live_row_count(&self.wal, &table_stream_id);
 
-        if let Some(cardinality) = runtime_index_cardinality {
-            log::info!(
-                "strict count source request_id={} table={} source=runtime_index cardinality={} bootstrap_done={}",
+        if let Some(cardinality) = runtime_index_cardinality
+            && cardinality != matched_rows
+        {
+            log::warn!(
+                "strict count source mismatch request_id={} table={} runtime_index_cardinality={} wal_live_row_count={} bootstrap_done={}",
                 request.request_id,
                 read_plan.table_id,
                 cardinality,
+                matched_rows,
                 runtime_bootstrap_done,
             );
-        } else if let Some(count) = checkpoint_count {
-            log::info!(
-                "strict count source request_id={} table={} source=live_row_count_checkpoint count={} bootstrap_done={}",
+        }
+
+        if let Some(count) = checkpoint_count
+            && count != matched_rows
+        {
+            log::warn!(
+                "strict count source mismatch request_id={} table={} checkpoint_count={} wal_live_row_count={} bootstrap_done={}",
                 request.request_id,
                 read_plan.table_id,
                 count,
+                matched_rows,
                 runtime_bootstrap_done,
             );
-        } else if runtime_bootstrap_done {
+        }
+
+        if runtime_bootstrap_done {
             log::info!(
-                "strict count source request_id={} table={} source=wal_scan reason=runtime_index_missing",
+                "strict count source request_id={} table={} source=wal_scan reason=authoritative",
                 request.request_id,
                 read_plan.table_id,
             );
         } else {
             log::info!(
-                "strict count source request_id={} table={} source=wal_scan reason=runtime_index_bootstrap_incomplete",
+                "strict count source request_id={} table={} source=wal_scan reason=bootstrap_incomplete_authoritative",
                 request.request_id,
                 read_plan.table_id,
             );

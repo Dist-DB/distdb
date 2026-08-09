@@ -4621,15 +4621,15 @@ pub fn load_live_row_count(
 ) -> usize {
 
     let cache_scope_id = wal.cache_scope_id();
+    let latest_tx_id_if_loaded = wal.latest_transaction_id_if_loaded(table_id).map(|tx| tx.0);
 
     let cache = LIVE_ROW_COUNT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(cache_guard) = cache.lock()
         && let Some((cached_latest_tx_id, cached_count)) =
             cached_live_row_count(&cache_guard, cache_scope_id, table_id)
-        && wal
-            .latest_transaction_id_if_loaded(table_id)
-            .map(|tx| tx.0 == *cached_latest_tx_id)
-            .unwrap_or(true)
+        && latest_tx_id_if_loaded
+            .map(|tx_id| tx_id == *cached_latest_tx_id)
+            .unwrap_or(false)
     {
         return *cached_count;
     }
