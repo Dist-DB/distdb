@@ -328,6 +328,22 @@ impl RuntimeIndexSnapshotService {
             return None;
         }
 
+        let (index_count, entry_count, key_bytes, row_refs_legacy_count, row_refs_compact_count) =
+            snapshot_memory_shape(&snapshot);
+
+        log::info!(
+            "runtime index snapshot restore shape table={} stream={} file_bytes={} indexes={} entries={} key_bytes={} row_refs_legacy={} row_refs_compact={} legacy_plain_encoding={}",
+            table.table_id,
+            table_stream_id,
+            bytes.len(),
+            index_count,
+            entry_count,
+            key_bytes,
+            row_refs_legacy_count,
+            row_refs_compact_count,
+            legacy_plain_encoding,
+        );
+
         Some(LoadedRuntimeIndexSnapshot {
             snapshot,
             legacy_plain_encoding,
@@ -772,4 +788,42 @@ fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Op
     common::helpers::bincode_compat::deserialize::<T>(payload)
         .ok()
         .map(|decoded| (decoded, true))
+}
+
+fn snapshot_memory_shape(snapshot: &RuntimeIndexTableSnapshot) -> (usize, usize, usize, usize, usize) {
+    let index_count = snapshot.indexes.len();
+
+    let entry_count = snapshot
+        .indexes
+        .iter()
+        .map(|index| index.entries.len())
+        .sum::<usize>();
+
+    let key_bytes = snapshot
+        .indexes
+        .iter()
+        .flat_map(|index| index.entries.iter())
+        .flat_map(|key_tuple| key_tuple.iter())
+        .map(|part| part.len())
+        .sum::<usize>();
+
+    let row_refs_legacy_count = snapshot
+        .indexes
+        .iter()
+        .map(|index| index.row_refs.len())
+        .sum::<usize>();
+
+    let row_refs_compact_count = snapshot
+        .indexes
+        .iter()
+        .map(|index| index.row_refs_by_entry.iter().filter(|item| **item != 0).count())
+        .sum::<usize>();
+
+    (
+        index_count,
+        entry_count,
+        key_bytes,
+        row_refs_legacy_count,
+        row_refs_compact_count,
+    )
 }

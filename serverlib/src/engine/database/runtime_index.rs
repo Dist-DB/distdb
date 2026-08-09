@@ -299,6 +299,86 @@ fn unpack_row_ref(row_ref: Option<NonZeroU64>) -> Option<u64> {
     row_ref.map(|row_ref| row_ref.get().saturating_sub(1))
 }
 
+fn log_runtime_index_bootstrap_table_memory_profile(
+    store: &RuntimeIndexStore,
+    table_scope_id: &str,
+    database_id: &str,
+    table_id: &str,
+    tracked_indexes: &[DatabaseIndex],
+) {
+    let mut index_profiles = Vec::with_capacity(tracked_indexes.len());
+
+    for index in tracked_indexes {
+        let Some(state) = store.index_for_table(table_scope_id, &index.index_id.0) else {
+            continue;
+        };
+
+        let entry_count = state.entries.len();
+        let row_ref_count = state
+            .entries
+            .values()
+            .filter(|row_ref| row_ref.is_some())
+            .count();
+        let key_bytes = state
+            .entries
+            .keys()
+            .map(|key| key.len())
+            .sum::<usize>();
+
+        index_profiles.push((
+            index.index_id.0.clone(),
+            entry_count,
+            row_ref_count,
+            key_bytes,
+        ));
+    }
+
+    if index_profiles.is_empty() {
+        return;
+    }
+
+    let total_entries = index_profiles
+        .iter()
+        .map(|(_, entry_count, _, _)| *entry_count)
+        .sum::<usize>();
+    let total_row_refs = index_profiles
+        .iter()
+        .map(|(_, _, row_ref_count, _)| *row_ref_count)
+        .sum::<usize>();
+    let total_key_bytes = index_profiles
+        .iter()
+        .map(|(_, _, _, key_bytes)| *key_bytes)
+        .sum::<usize>();
+
+    index_profiles.sort_by(|left, right| right.3.cmp(&left.3));
+
+    let top_indexes = index_profiles
+        .iter()
+        .take(5)
+        .map(|(index_id, entry_count, row_ref_count, key_bytes)| {
+            format!(
+                "{}:entries={} row_refs={} key_bytes={}",
+                index_id,
+                entry_count,
+                row_ref_count,
+                key_bytes,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    log::info!(
+        "runtime index bootstrap memory profile database={} table={} indexes={} entries={} row_refs={} key_bytes={} top_indexes={}",
+        database_id,
+        table_id,
+        index_profiles.len(),
+        total_entries,
+        total_row_refs,
+        total_key_bytes,
+        top_indexes,
+    );
+}
+
 fn encode_runtime_index_entry_key(key: &[Vec<u8>]) -> Option<Vec<u8>> {
     common::helpers::bincode_compat::serialize(&key).ok()
 }
@@ -1264,6 +1344,14 @@ impl RuntimeIndexStore {
                                 table_started_at.elapsed().as_millis(),
                             );
 
+                            log_runtime_index_bootstrap_table_memory_profile(
+                                self,
+                                &table_stream_id,
+                                database_id,
+                                &table_id,
+                                &tracked_indexes,
+                            );
+
                             mark_runtime_index_bootstrap_table_complete();
 
                             continue;
@@ -1313,6 +1401,14 @@ impl RuntimeIndexStore {
                                 tracked_indexes.len(),
                                 snapshot.live_row_count,
                                 table_started_at.elapsed().as_millis(),
+                            );
+
+                            log_runtime_index_bootstrap_table_memory_profile(
+                                self,
+                                &table_stream_id,
+                                database_id,
+                                &table_id,
+                                &tracked_indexes,
                             );
 
                             mark_runtime_index_bootstrap_table_complete();
@@ -1390,6 +1486,14 @@ impl RuntimeIndexStore {
                         tracked_indexes.len(),
                         snapshot.live_row_count,
                         table_started_at.elapsed().as_millis(),
+                    );
+
+                    log_runtime_index_bootstrap_table_memory_profile(
+                        self,
+                        &table_stream_id,
+                        database_id,
+                        &table_id,
+                        &tracked_indexes,
                     );
 
                     mark_runtime_index_bootstrap_table_complete();
@@ -1539,6 +1643,14 @@ impl RuntimeIndexStore {
                     rebuild_elapsed_ms,
                     warm_elapsed_ms,
                     table_elapsed_ms,
+                );
+
+                log_runtime_index_bootstrap_table_memory_profile(
+                    self,
+                    &table_stream_id,
+                    database_id,
+                    &table_id,
+                    &tracked_indexes,
                 );
 
                 #[expect(clippy::manual_is_multiple_of, reason="Readable logging of progress every 10 tables")]
