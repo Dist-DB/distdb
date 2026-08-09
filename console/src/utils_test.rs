@@ -3,6 +3,7 @@ use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, Connector
 use std::sync::{Mutex, OnceLock};
 
 const TIMEOUT_ENV: &str = "DISTDB_CONSOLE_SHOW_PEERS_TIMEOUT_SECS";
+const SQL_TIMEOUT_ENV: &str = "DISTDB_CONSOLE_SQL_TIMEOUT_SECS";
 
 fn timeout_env_guard() -> &'static Mutex<()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
@@ -39,6 +40,39 @@ fn show_peers_timeout_clamps_env_value() {
 
     unsafe {
         std::env::remove_var(TIMEOUT_ENV);
+    }
+}
+
+#[test]
+fn sql_timeout_uses_default_when_env_missing() {
+    let _lock = timeout_env_guard()
+        .lock()
+        .expect("timeout env test mutex should lock");
+    unsafe {
+        std::env::remove_var(SQL_TIMEOUT_ENV);
+    }
+
+    assert_eq!(sql_request_timeout_secs(), 300);
+}
+
+#[test]
+fn sql_timeout_clamps_env_value() {
+    let _lock = timeout_env_guard()
+        .lock()
+        .expect("timeout env test mutex should lock");
+
+    unsafe {
+        std::env::set_var(SQL_TIMEOUT_ENV, "10");
+    }
+    assert_eq!(sql_request_timeout_secs(), 30);
+
+    unsafe {
+        std::env::set_var(SQL_TIMEOUT_ENV, "5000");
+    }
+    assert_eq!(sql_request_timeout_secs(), 3600);
+
+    unsafe {
+        std::env::remove_var(SQL_TIMEOUT_ENV);
     }
 }
 

@@ -3,8 +3,18 @@ use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, Connector
 use peerlib::ConnectorTlsConfig;
 
 pub(crate) const AUTH_FALLBACK_DATABASE: &str = "main";
+const SQL_REQUEST_TIMEOUT_SECS_DEFAULT: u64 = 300;
+const SQL_REQUEST_TIMEOUT_SECS_ENV: &str = "DISTDB_CONSOLE_SQL_TIMEOUT_SECS";
 const SHOW_PEERS_REQUEST_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const SHOW_PEERS_REQUEST_TIMEOUT_SECS_ENV: &str = "DISTDB_CONSOLE_SHOW_PEERS_TIMEOUT_SECS";
+
+pub(crate) fn sql_request_timeout_secs() -> u64 {
+    std::env::var(SQL_REQUEST_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(30, 3600))
+        .unwrap_or(SQL_REQUEST_TIMEOUT_SECS_DEFAULT)
+}
 
 pub(crate) fn show_peers_request_timeout_secs() -> u64 {
     std::env::var(SHOW_PEERS_REQUEST_TIMEOUT_SECS_ENV)

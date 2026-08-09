@@ -12,12 +12,12 @@ use std::time::Duration;
 
 use crate::utils::{
     auth_password_input, extract_password_token_input, resolve_database_for_sql,
-    show_peers_request_timeout_secs, validate_use_database_probe_response, ConsoleRequestExt,
+    show_peers_request_timeout_secs, sql_request_timeout_secs,
+    validate_use_database_probe_response, ConsoleRequestExt,
     AUTH_FALLBACK_DATABASE,
 };
 use crate::{
-    import, output, ConsoleCommand, DEFAULT_CONNECTOR_IO_TIMEOUT_SECS,
-    SERVER_PEER_DISCOVERY_SQL, SQL_TRANSPORT_RETRY_LIMIT,
+    import, output, ConsoleCommand, SERVER_PEER_DISCOVERY_SQL, SQL_TRANSPORT_RETRY_LIMIT,
 };
 
 #[path = "session_import.rs"]
@@ -295,6 +295,12 @@ impl ConsoleSession {
             }
 
             ConsoleCommand::UseDatabase(database) => {
+                let sql_timeout_secs = sql_request_timeout_secs();
+                let _ = self.runtime.transport().set_active_connection_timeouts(
+                    Some(Duration::from_secs(sql_timeout_secs)),
+                    Some(Duration::from_secs(sql_timeout_secs)),
+                );
+
                 let probe_request = ConnectorRequest::new(
                     self.next_request_id(),
                     ConnectorCommand::Query {
@@ -334,6 +340,8 @@ impl ConsoleSession {
     }
 
     fn execute_sql(&mut self, sql: String) -> Result<bool, Box<dyn std::error::Error>> {
+        let sql_timeout_secs = sql_request_timeout_secs();
+
         let auth_password_for_session = auth_password_input(&sql);
         let auth_token_for_session = extract_password_token_input(&sql).map(md5_hash);
         let is_auth_request = auth_password_for_session.is_some();
@@ -363,6 +371,11 @@ impl ConsoleSession {
 
         for attempt in 0..=SQL_TRANSPORT_RETRY_LIMIT {
             let request_start = std::time::Instant::now();
+
+            let _ = self.runtime.transport().set_active_connection_timeouts(
+                Some(Duration::from_secs(sql_timeout_secs)),
+                Some(Duration::from_secs(sql_timeout_secs)),
+            );
 
             match self.runtime.transport().request(&request) {
                 Ok(mut current_response) => {
@@ -534,8 +547,8 @@ impl ConsoleSession {
 
                 Err(err) => {
                     let _ = self.runtime.transport().set_active_connection_timeouts(
-                        Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
-                        Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
+                        Some(Duration::from_secs(sql_request_timeout_secs())),
+                        Some(Duration::from_secs(sql_request_timeout_secs())),
                     );
 
                     last_refresh_error = Some(err.to_string());
@@ -551,8 +564,8 @@ impl ConsoleSession {
             };
 
             let _ = self.runtime.transport().set_active_connection_timeouts(
-                Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
-                Some(Duration::from_secs(DEFAULT_CONNECTOR_IO_TIMEOUT_SECS)),
+                Some(Duration::from_secs(sql_request_timeout_secs())),
+                Some(Duration::from_secs(sql_request_timeout_secs())),
             );
 
             let ConnectorResult::Query(result) = response.result else {

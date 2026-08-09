@@ -283,6 +283,133 @@ impl ConcurrentWalManager {
 
     }
 
+    pub fn scan_durable_records_if_unloaded<F>(
+        &self,
+        wal_id: &str,
+        mut on_record: F,
+    ) -> Result<bool, &'static str>
+    where
+        F: FnMut(TransactionRecord),
+    {
+
+        let stream_key = obfuscated_stream_key(wal_id)?;
+
+        if self.stream_mode(wal_id) != WalStreamMode::Durable {
+            return Ok(false);
+        }
+
+        let stream_loaded = self
+            .storage
+            .lock()
+            .map_err(|_| "failed to lock WAL storage")?
+            .contains_key(&stream_key);
+
+        if stream_loaded {
+            return Ok(false);
+        }
+
+        let Some(data_dir) = &self.data_dir else {
+            return Ok(false);
+        };
+
+        let wal_path = data_dir.join(FileKind::Data.file_name(&stream_key));
+        if !wal_path.exists() {
+            return Ok(false);
+        }
+
+        let file = fs::File::open(&wal_path).map_err(|_| "failed to open WAL file")?;
+        let mut reader = BufReader::new(file);
+
+        let mut header = [0u8; HEADER_SIZE];
+        reader
+            .read_exact(&mut header)
+            .map_err(|_| "failed to read WAL header")?;
+
+        verify_header(FileKind::Data, &header)
+            .map_err(|_| "invalid WAL header/version")?;
+
+        let context = default_transaction_payload_context();
+        let mut frame_offset = HEADER_SIZE as u64;
+        let mut len_buf = [0u8; 8];
+        let mut frame = Vec::new();
+        let max_frame_size = wal_max_frame_size_bytes();
+
+        loop {
+            match reader.read_exact(&mut len_buf) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                Err(err) => {
+                    log::warn!(
+                        "failed to read WAL frame length at byte offset {}: {}",
+                        frame_offset,
+                        err,
+                    );
+                    break;
+                }
+            }
+
+            frame_offset = frame_offset.saturating_add(8);
+
+            let len_u64 = u64::from_le_bytes(len_buf);
+
+            if len_u64 > usize::MAX as u64 {
+                log::warn!(
+                    "invalid WAL frame length {} at byte offset {}, stopping replay",
+                    len_u64,
+                    frame_offset,
+                );
+                break;
+            }
+
+            let len = len_u64 as usize;
+
+            if len > max_frame_size {
+                log::warn!(
+                    "WAL frame length {} exceeds max {} at byte offset {}, stopping replay",
+                    len,
+                    max_frame_size,
+                    frame_offset,
+                );
+                break;
+            }
+
+            frame.resize(len, 0);
+
+            if let Err(err) = reader.read_exact(&mut frame[..]) {
+                if err.kind() == ErrorKind::UnexpectedEof {
+                    log::warn!(
+                        "truncated WAL frame at byte offset {}, stopping replay",
+                        frame_offset,
+                    );
+                } else {
+                    log::warn!(
+                        "failed to read WAL frame at byte offset {}: {}",
+                        frame_offset,
+                        err,
+                    );
+                }
+                break;
+            }
+
+            match decode_record_from_storage_with_context(&frame, context) {
+                Ok(record) => on_record(record),
+                Err(err) => {
+                    log::error!(
+                        "failed to deserialize WAL frame at byte {}: {}",
+                        frame_offset,
+                        err,
+                    );
+                    break;
+                }
+            }
+
+            frame_offset = frame_offset.saturating_add(len_u64);
+        }
+
+        Ok(true)
+
+    }
+
     fn stream_entries_handle(&self, stream_key: &str) -> Option<Arc<Mutex<Vec<TransactionRecord>>>> {
 
         let store = self.storage.lock().ok()?;

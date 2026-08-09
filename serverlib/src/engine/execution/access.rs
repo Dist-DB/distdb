@@ -3014,6 +3014,128 @@ fn row_matches_equality_filters(
 
 }
 
+fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
+
+    let mut committed_groups = AHashSet::new();
+    let mut aborted_groups = AHashSet::new();
+
+    match wal.scan_durable_records_if_unloaded(table_stream_id, |record| {
+        match record.kind {
+            TransactionKind::WriteCommit => {
+                if let Some(group_id) = record.groupid {
+                    committed_groups.insert(group_id.0);
+                }
+            }
+            TransactionKind::WriteAbort => {
+                if let Some(group_id) = record.groupid {
+                    aborted_groups.insert(group_id.0);
+                }
+            }
+            _ => {}
+        }
+    }) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(err) => {
+            log::warn!(
+                "cold equality WAL scan pre-pass failed stream={}: {}",
+                table_stream_id,
+                err,
+            );
+            return None;
+        }
+    }
+
+    let mut live_rows = AHashMap::with_capacity(equality_filters.len().saturating_mul(32));
+    let mut row_order = Vec::with_capacity(equality_filters.len().saturating_mul(32));
+    let schema_cache = row_payload_schema_cache(schema);
+    let single_filter = if equality_filters.len() == 1 {
+        equality_filters
+            .iter()
+            .next()
+            .map(|(field_name, value)| (field_name.as_str(), value.as_slice()))
+    } else {
+        None
+    };
+
+    match wal.scan_durable_records_if_unloaded(table_stream_id, |record| {
+        if !record_visible_for_live_row_apply(&record, &committed_groups, &aborted_groups) {
+            return;
+        }
+
+        match record.kind {
+            TransactionKind::Insert | TransactionKind::Update => {
+                let Some(payload) = record.payload_logical() else {
+                    return;
+                };
+
+                if let Some((field_name, lookup_value)) = single_filter {
+                    let Ok(maybe_row_map) = decode_row_payload_if_field_equals_with_schema_cache(
+                        &schema_cache,
+                        payload,
+                        field_name,
+                        lookup_value,
+                    ) else {
+                        return;
+                    };
+
+                    let Some(row_map) = maybe_row_map else {
+                        return;
+                    };
+
+                    if row_matches_equality_filters(&row_map, equality_filters) {
+                        row_order.push(record.id.0);
+                        live_rows.insert(record.id.0, row_map);
+                    }
+
+                    return;
+                }
+
+                let Ok(row_map) = decode_row_payload(schema, payload) else {
+                    return;
+                };
+
+                if row_matches_equality_filters(&row_map, equality_filters) {
+                    row_order.push(record.id.0);
+                    live_rows.insert(record.id.0, row_map);
+                }
+            }
+
+            TransactionKind::Delete => {
+                if let Some(refid) = record.refid {
+                    live_rows.remove(&refid.0);
+                }
+            }
+
+            _ => {}
+        }
+    }) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(err) => {
+            log::warn!(
+                "cold equality WAL scan apply-pass failed stream={}: {}",
+                table_stream_id,
+                err,
+            );
+            return None;
+        }
+    }
+
+    let rows = row_order
+        .into_iter()
+        .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
+        .collect::<Vec<_>>();
+
+    Some(rows)
+
+}
+
 fn load_live_rows_by_equality_filters_direct_wal_scan(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
@@ -3026,10 +3148,19 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
     }
 
     let started_at = Instant::now();
-    let schema_cache = row_payload_schema_cache(schema);
 
-    let rows = wal
-        .with_records(table_stream_id, |records| {
+    let rows = if let Some(rows) = load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
+        wal,
+        table_stream_id,
+        schema,
+        equality_filters,
+    ) {
+        rows
+    } else {
+        let schema_cache = row_payload_schema_cache(schema);
+
+        wal
+            .with_records(table_stream_id, |records| {
             let mut live_rows = AHashMap::with_capacity(equality_filters.len().saturating_mul(32));
             let mut row_order = Vec::with_capacity(equality_filters.len().saturating_mul(32));
             let mut committed_groups = AHashSet::with_capacity(records.len() / 8 + 1);
@@ -3184,7 +3315,8 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                 .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
     let elapsed_ms = started_at.elapsed().as_millis();
 
@@ -4999,6 +5131,24 @@ where
             lookup_key,
         } => {
 
+            let single_field_name = if lookup_key.len() == 1 {
+                table
+                    .indexes
+                    .values()
+                    .find(|index| index.index_id.0 == *index_id)
+                    .and_then(|index| {
+                        if index.field_names.len() == 1 {
+                            Some(index.field_names[0].as_str())
+                        } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+                            Some(index.field_name.as_str())
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                None
+            };
+
             if let Some(state) = runtime_indexes.index_for_table(table_stream_id, index_id) {
 
                 if state.cardinality() == 0 {
@@ -5032,25 +5182,6 @@ where
                     index_id,
                 );
 
-                return load_live_rows(wal, table_stream_id, &table.table_id, schema);
-
-            }
-
-            if lookup_key.len() == 1
-                && let Some(index) = table
-                    .indexes
-                    .values()
-                    .find(|index| index.index_id.0 == *index_id)
-            {
-
-                let single_field_name = if index.field_names.len() == 1 {
-                    Some(index.field_names[0].as_str())
-                } else if index.field_names.is_empty() && !index.field_name.is_empty() {
-                    Some(index.field_name.as_str())
-                } else {
-                    None
-                };
-
                 if let Some(single_field_name) = single_field_name {
                     return load_live_rows_by_equality(
                         wal,
@@ -5062,6 +5193,19 @@ where
                     );
                 }
 
+                return load_live_rows(wal, table_stream_id, &table.table_id, schema);
+
+            }
+
+            if let Some(single_field_name) = single_field_name {
+                return load_live_rows_by_equality(
+                    wal,
+                    table_stream_id,
+                    &table.table_id,
+                    schema,
+                    single_field_name,
+                    &lookup_key[0],
+                );
             }
 
             load_live_rows(wal, table_stream_id, &table.table_id, schema)
