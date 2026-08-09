@@ -117,7 +117,7 @@ pub trait InboundChannelSurface {
         &self,
         response: &ConnectorResponse,
     ) -> Result<Vec<u8>, String> {
-        bincode::serialize(response).map_err(|err| err.to_string())
+        common::helpers::bincode_compat::serialize(response).map_err(|err| err.to_string())
     }
     
 }
@@ -201,7 +201,7 @@ impl InboundChannelSurface for RustP2pInboundSurface {
             return Ok(InboundChannelMessage::Service(message));
         }
 
-        bincode::deserialize::<ConnectorRequest>(payload)
+        common::helpers::bincode_compat::deserialize::<ConnectorRequest>(payload)
             .map(InboundChannelMessage::Connector)
             .map_err(|err| err.to_string())
     
@@ -228,7 +228,7 @@ impl InboundChannelSurface for RustWssInboundSurface {
         payload: &[u8],
     ) -> Result<InboundChannelMessage, String> {
 
-        bincode::deserialize::<ConnectorRequest>(payload)
+        common::helpers::bincode_compat::deserialize::<ConnectorRequest>(payload)
             .map(InboundChannelMessage::Connector)
             .map_err(|err| err.to_string())
 

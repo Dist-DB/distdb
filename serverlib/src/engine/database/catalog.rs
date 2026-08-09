@@ -2179,7 +2179,7 @@ impl DatabaseCatalog {
             return Err(DatabaseError::CatalogPayloadMissing);
         }
 
-        let snapshot = bincode::deserialize::<DatabaseCatalogSnapshot>(&bytes[common::helpers::format::HEADER_SIZE..])
+        let snapshot = common::helpers::bincode_compat::deserialize::<DatabaseCatalogSnapshot>(&bytes[common::helpers::format::HEADER_SIZE..])
             .map_err(|_| DatabaseError::CatalogDeserialize)?;
 
         let mut catalog = Self {
@@ -2300,7 +2300,7 @@ impl DatabaseCatalog {
             !matches!(entity, DatabaseEntity::Table(table) if table.is_temporary())
         });
 
-        let payload = bincode::serialize(&snapshot).map_err(|_| DatabaseError::CatalogSerialize)?;
+        let payload = common::helpers::bincode_compat::serialize(&snapshot).map_err(|_| DatabaseError::CatalogSerialize)?;
         
         let mut file = Vec::with_capacity(common::helpers::format::HEADER_SIZE + payload.len());
         file.extend_from_slice(&common::helpers::format::make_header(FileKind::Catalog));

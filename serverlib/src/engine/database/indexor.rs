@@ -36,7 +36,7 @@ impl IndexorIndexSpec for DatabaseIndex {
                 .collect::<Vec<_>>()
         };
 
-        bincode::serialize(&tuple).ok()
+        common::helpers::bincode_compat::serialize(&tuple).ok()
         
     }
 
@@ -465,11 +465,11 @@ impl DatabaseIndexor {
     }
 
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>, IndexorSnapshotError> {
-        bincode::serialize(&self.snapshot()).map_err(|_| IndexorSnapshotError::SerializeFailed)
+        common::helpers::bincode_compat::serialize(&self.snapshot()).map_err(|_| IndexorSnapshotError::SerializeFailed)
     }
 
     pub fn from_snapshot_bytes(payload: &[u8]) -> Result<Self, IndexorSnapshotError> {
-        let snapshot = bincode::deserialize::<IndexorSnapshot>(payload)
+        let snapshot = common::helpers::bincode_compat::deserialize::<IndexorSnapshot>(payload)
             .map_err(|_| IndexorSnapshotError::DeserializeFailed)?;
         Self::from_snapshot(&snapshot)
     }

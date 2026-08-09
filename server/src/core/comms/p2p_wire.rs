@@ -562,7 +562,7 @@ pub fn multiaddr_to_socket_addr(addr: &str) -> Option<String> {
 
 pub fn encode_service_message(message: &ServiceMessage) -> Option<Vec<u8>> {
 
-    let encoded = bincode::serialize(message).ok()?;
+    let encoded = common::helpers::bincode_compat::serialize(message).ok()?;
     
     let mut payload = Vec::with_capacity(SERVICE_MESSAGE_MAGIC.len() + encoded.len());
     payload.extend_from_slice(SERVICE_MESSAGE_MAGIC);
@@ -582,7 +582,7 @@ pub fn decode_service_message(payload: &[u8]) -> Option<ServiceMessage> {
         return None;
     }
 
-    bincode::deserialize(&payload[SERVICE_MESSAGE_MAGIC.len()..]).ok()
+    common::helpers::bincode_compat::deserialize(&payload[SERVICE_MESSAGE_MAGIC.len()..]).ok()
     
 }
 

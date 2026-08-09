@@ -56,9 +56,11 @@ fn cached_live_row_count<'a>(
     cache_scope_id: usize,
     table_id: &str,
 ) -> Option<&'a (u64, usize)> {
+
     cache_guard
         .get(&cache_scope_id)
         .and_then(|tables| tables.get(table_id))
+        
 }
 
 fn cache_live_row_count(

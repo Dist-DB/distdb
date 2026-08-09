@@ -117,6 +117,186 @@ fn wal_hydration_benchmark_style_avoids_reloading_disk_state() {
 }
 
 #[test]
+fn wal_decode_slice_vs_chunk_copy_benchmark_style() {
+    let actor = UserId::from_username("tester");
+    let total_records = 40_000u64;
+    let measure_runs = 5u32;
+
+    let mut wal_bytes = make_header(FileKind::Data).to_vec();
+    for id in 1..=total_records {
+        let record = TransactionRecord::with_payload(
+            TransactionId(id),
+            None,
+            None,
+            id,
+            actor.clone(),
+            TransactionKind::Insert,
+            vec![id as u8; 64],
+        );
+        let frame = frame_record(&record).expect("frame encode should succeed");
+        wal_bytes.extend_from_slice(&frame);
+    }
+
+    fn decode_all_no_copy(bytes: &[u8]) -> usize {
+        let mut pos = HEADER_SIZE;
+        let mut decoded = 0usize;
+
+        while pos + 8 <= bytes.len() {
+            let len = u64::from_le_bytes(
+                bytes[pos..pos + 8]
+                    .try_into()
+                    .expect("slice is exactly 8 bytes"),
+            ) as usize;
+            pos += 8;
+
+            if pos + len > bytes.len() {
+                break;
+            }
+
+            let record = decode_record_from_storage(&bytes[pos..pos + len])
+                .expect("slice decode should succeed");
+            black_box(record);
+            decoded += 1;
+            pos += len;
+        }
+
+        decoded
+    }
+
+    fn decode_all_with_copy(bytes: &[u8]) -> usize {
+        let mut pos = HEADER_SIZE;
+        let mut decoded = 0usize;
+
+        while pos + 8 <= bytes.len() {
+            let len = u64::from_le_bytes(
+                bytes[pos..pos + 8]
+                    .try_into()
+                    .expect("slice is exactly 8 bytes"),
+            ) as usize;
+            pos += 8;
+
+            if pos + len > bytes.len() {
+                break;
+            }
+
+            let copied = bytes[pos..pos + len].to_vec();
+            let record = decode_record_from_storage(&copied)
+                .expect("copied-frame decode should succeed");
+            black_box(record);
+            decoded += 1;
+            pos += len;
+        }
+
+        decoded
+    }
+
+    assert_eq!(decode_all_no_copy(&wal_bytes), total_records as usize);
+    assert_eq!(decode_all_with_copy(&wal_bytes), total_records as usize);
+
+    let mut slice_ns = 0u128;
+    let mut copy_ns = 0u128;
+
+    for _ in 0..measure_runs {
+        let start = Instant::now();
+        let decoded = decode_all_no_copy(&wal_bytes);
+        slice_ns += start.elapsed().as_nanos();
+        black_box(decoded);
+    }
+
+    for _ in 0..measure_runs {
+        let start = Instant::now();
+        let decoded = decode_all_with_copy(&wal_bytes);
+        copy_ns += start.elapsed().as_nanos();
+        black_box(decoded);
+    }
+
+    let avg_slice_ns = slice_ns / measure_runs as u128;
+    let avg_copy_ns = copy_ns / measure_runs as u128;
+
+    let slice_per_record_ns = avg_slice_ns as f64 / total_records as f64;
+    let copy_per_record_ns = avg_copy_ns as f64 / total_records as f64;
+    let delta_pct = ((avg_copy_ns as f64 - avg_slice_ns as f64) / avg_slice_ns as f64) * 100.0;
+
+    println!(
+        "wal_decode_slice_vs_chunk_copy records={} runs={} avg_slice_ns={} avg_copy_ns={} slice_per_record_ns={:.2} copy_per_record_ns={:.2} copy_vs_slice_delta_pct={:.2}",
+        total_records,
+        measure_runs,
+        avg_slice_ns,
+        avg_copy_ns,
+        slice_per_record_ns,
+        copy_per_record_ns,
+        delta_pct,
+    );
+}
+
+#[test]
+fn wal_decode_default_context_inline_vs_local_benchmark_style() {
+    let actor = UserId::from_username("tester");
+    let record = TransactionRecord::with_payload(
+        TransactionId(1),
+        None,
+        None,
+        1,
+        actor,
+        TransactionKind::Insert,
+        vec![42; 256],
+    );
+
+    let encoded = encode_record_for_storage(&record).expect("record should encode");
+    let iterations = 200_000usize;
+    let runs = 8u32;
+
+    fn decode_inline_default(encoded: &[u8]) -> TransactionRecord {
+        decode_record_from_storage_with_context(encoded, &TransactionPayloadContext::default())
+            .expect("inline default decode should succeed")
+    }
+
+    fn decode_local_default(encoded: &[u8]) -> TransactionRecord {
+        let context = TransactionPayloadContext::default();
+        decode_record_from_storage_with_context(encoded, &context)
+            .expect("local default decode should succeed")
+    }
+
+    assert_eq!(decode_inline_default(&encoded), decode_local_default(&encoded));
+
+    let mut inline_ns = 0u128;
+    let mut local_ns = 0u128;
+
+    for _ in 0..runs {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(decode_inline_default(&encoded));
+        }
+        inline_ns += start.elapsed().as_nanos();
+    }
+
+    for _ in 0..runs {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(decode_local_default(&encoded));
+        }
+        local_ns += start.elapsed().as_nanos();
+    }
+
+    let avg_inline_ns = inline_ns / runs as u128;
+    let avg_local_ns = local_ns / runs as u128;
+    let inline_per_op_ns = avg_inline_ns as f64 / iterations as f64;
+    let local_per_op_ns = avg_local_ns as f64 / iterations as f64;
+    let delta_pct = ((avg_inline_ns as f64 - avg_local_ns as f64) / avg_local_ns as f64) * 100.0;
+
+    println!(
+        "wal_decode_default_context_inline_vs_local iterations={} runs={} avg_inline_ns={} avg_local_ns={} inline_per_op_ns={:.2} local_per_op_ns={:.2} inline_vs_local_delta_pct={:.2}",
+        iterations,
+        runs,
+        avg_inline_ns,
+        avg_local_ns,
+        inline_per_op_ns,
+        local_per_op_ns,
+        delta_pct,
+    );
+}
+
+#[test]
 fn compact_keeps_latest_schema_metadata_and_appends_truncate_marker() {
     let wal = ConcurrentWalManager::new();
     let actor = UserId::from_username("tester");
@@ -407,7 +587,7 @@ fn encoded_storage_record_roundtrip_handles_large_payloads() {
 
     let stored = super::encode_record_for_storage(&record).expect("record should encode");
     let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
-    let raw = bincode::serialize(&record).expect("record should serialize");
+    let raw = common::helpers::bincode_compat::serialize(&record).expect("record should serialize");
 
     assert_eq!(decoded, record);
     assert!(stored.len() < raw.len());
@@ -426,7 +606,7 @@ fn decode_storage_record_accepts_legacy_uncompressed_bytes() {
         vec![1, 2, 3],
     );
 
-    let legacy_raw = bincode::serialize(&record).expect("legacy record should serialize");
+    let legacy_raw = common::helpers::bincode_compat::serialize(&record).expect("legacy record should serialize");
     let decoded =
         super::decode_record_from_storage(&legacy_raw).expect("legacy record should decode");
 
@@ -449,9 +629,9 @@ fn encoded_storage_record_compresses_small_non_encrypted_payloads() {
     let stored = super::encode_record_for_storage(&record).expect("record should encode");
     let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
     let stored_record: TransactionRecord =
-        bincode::deserialize(&stored).expect("stored record should deserialize");
+        common::helpers::bincode_compat::deserialize(&stored).expect("stored record should deserialize");
 
-    assert_ne!(stored, bincode::serialize(&record).expect("record should serialize"));
+    assert_ne!(stored, common::helpers::bincode_compat::serialize(&record).expect("record should serialize"));
     assert!(
         stored_record
             .payload()
@@ -503,7 +683,7 @@ fn encoded_storage_record_skips_compression_for_encrypted_mutation_payloads() {
         encrypted_payload,
     );
 
-    let raw = bincode::serialize(&record).expect("record should serialize");
+    let raw = common::helpers::bincode_compat::serialize(&record).expect("record should serialize");
     let stored = super::encode_record_for_storage(&record).expect("record should encode");
     let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
 
@@ -527,7 +707,7 @@ fn storage_write_and_read_chains_roundtrip_plaintext_payload() {
     let stored = super::encode_record_for_storage(&record).expect("record should encode");
     let decoded = super::decode_record_from_storage(&stored).expect("record should decode");
     let stored_record: TransactionRecord =
-        bincode::deserialize(&stored).expect("stored record should deserialize");
+        common::helpers::bincode_compat::deserialize(&stored).expect("stored record should deserialize");
 
     assert_eq!(decoded.payload_logical(), record.payload_raw());
     assert_ne!(stored_record.payload_raw(), record.payload_raw());
@@ -554,7 +734,7 @@ fn storage_encode_with_encryption_context_encrypts_payload() {
         .expect("encryption should succeed with configured provider");
 
     let stored_record: TransactionRecord =
-        bincode::deserialize(&stored).expect("stored record should deserialize");
+        common::helpers::bincode_compat::deserialize(&stored).expect("stored record should deserialize");
 
     let stored_payload = stored_record
         .payload_raw()

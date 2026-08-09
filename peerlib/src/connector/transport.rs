@@ -1289,7 +1289,7 @@ fn send_request_frame(
     request: &ConnectorRequest,
 ) -> Result<ConnectorResponse, ConnectorError> {
 
-    let payload = bincode::serialize(request).map_err(|e| {
+    let payload = common::helpers::bincode_compat::serialize(request).map_err(|e| {
         ConnectorError::Transport(format!("failed to serialize request payload: {e}"))
     })?;
 
@@ -1322,7 +1322,7 @@ fn read_response_frame(stream: &mut ConnectorWireStream) -> Result<ConnectorResp
         .read_exact(&mut response_buf)
         .map_err(|e| ConnectorError::Transport(format!("failed to read response payload: {e}")))?;
 
-    bincode::deserialize::<ConnectorResponse>(&response_buf)
+    common::helpers::bincode_compat::deserialize::<ConnectorResponse>(&response_buf)
         .map_err(|e| ConnectorError::Transport(format!("failed to decode response payload: {e}")))
 
 }

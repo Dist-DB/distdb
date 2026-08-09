@@ -1,0 +1,18 @@
+{
+  "run_id": "20260809-152038-49408",
+  "kind": "nonfunctional_baseline",
+  "status": "fail",
+  "exit_code": 1,
+  "started_at_utc": "2026-08-09T13:20:38Z",
+  "finished_at_utc": "2026-08-09T13:20:39Z",
+  "git_sha": "unknown",
+  "artifacts_dir": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152038-49408",
+  "summary_json": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152038-49408/summary.json",
+  "profiles": ["write_heavy", "read_heavy", "mixed", "recovery"],
+  "config": {
+    "write_ops": 12,
+    "read_ops": 18,
+    "mixed_ops": 16,
+    "seed_rows": 120
+  }
+}

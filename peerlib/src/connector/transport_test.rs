@@ -18,7 +18,7 @@
     }
 
     fn write_frame(stream: &mut std::net::TcpStream, response: &ConnectorResponse) {
-        let payload = bincode::serialize(response).expect("response should serialize");
+        let payload = common::helpers::bincode_compat::serialize(response).expect("response should serialize");
         let len = payload.len() as u32;
         stream
             .write_all(&len.to_le_bytes())
@@ -59,7 +59,7 @@
         stream
             .read_exact(&mut payload)
             .expect("request payload should read");
-        bincode::deserialize::<ConnectorRequest>(&payload).expect("request should decode")
+        common::helpers::bincode_compat::deserialize::<ConnectorRequest>(&payload).expect("request should decode")
     }
 
     fn read_len_prefixed_payload(stream: &mut std::net::TcpStream) -> Vec<u8> {

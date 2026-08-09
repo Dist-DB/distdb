@@ -28,11 +28,11 @@ pub trait SerdeTransactionPayload: Sized + Serialize + DeserializeOwned {
 pub trait SerdeTransactionPayloadCodec: SerdeTransactionPayload {
 
     fn encode_payload_serde(&self) -> Result<Vec<u8>, &'static str> {
-        bincode::serialize(self).map_err(|_| Self::ENCODE_ERROR)
+        common::helpers::bincode_compat::serialize(self).map_err(|_| Self::ENCODE_ERROR)
     }
 
     fn decode_payload_serde(payload: &[u8]) -> Result<Self, &'static str> {
-        bincode::deserialize(payload).map_err(|_| Self::DECODE_ERROR)
+        common::helpers::bincode_compat::deserialize(payload).map_err(|_| Self::DECODE_ERROR)
     }
     
 }

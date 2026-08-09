@@ -54,7 +54,7 @@ fn decode_connector_request_message_decodes_binary_bincode() {
         },
     );
 
-    let payload = bincode::serialize(&request).expect("request must serialize");
+    let payload = common::helpers::bincode_compat::serialize(&request).expect("request must serialize");
     let decoded = decode_connector_request_message(Message::Binary(payload))
         .expect("binary frame should decode");
 
@@ -96,7 +96,7 @@ fn encode_connector_response_message_emits_binary_payload() {
     };
 
     let decoded: ConnectorResponse =
-        bincode::deserialize(&payload).expect("payload should decode");
+        common::helpers::bincode_compat::deserialize(&payload).expect("payload should decode");
 
     assert_eq!(decoded.request_id, "req-2");
     assert_eq!(decoded.status, ResponseStatus::Applied);
@@ -126,7 +126,7 @@ async fn handle_wss_inbound_stream_processes_connector_roundtrip() {
             database_name: "main".to_string(),
         },
     );
-    let payload = bincode::serialize(&request).expect("request should serialize");
+    let payload = common::helpers::bincode_compat::serialize(&request).expect("request should serialize");
 
     client_ws
         .send(Message::Binary(payload))
@@ -145,7 +145,7 @@ async fn handle_wss_inbound_stream_processes_connector_roundtrip() {
     };
 
     let response: ConnectorResponse =
-        bincode::deserialize(&response_payload).expect("response payload should deserialize");
+        common::helpers::bincode_compat::deserialize(&response_payload).expect("response payload should deserialize");
 
     assert_eq!(response.request_id, "req-wss-1");
     assert_eq!(response.status, ResponseStatus::Applied);
@@ -241,7 +241,7 @@ async fn integration_wss_handler_roundtrip_over_tcp_websocket() {
         },
     );
 
-    let payload = bincode::serialize(&request).expect("request should serialize");
+    let payload = common::helpers::bincode_compat::serialize(&request).expect("request should serialize");
     client_ws
         .send(Message::Binary(payload))
         .await
@@ -259,7 +259,7 @@ async fn integration_wss_handler_roundtrip_over_tcp_websocket() {
     };
 
     let response: ConnectorResponse =
-        bincode::deserialize(&response_payload).expect("response payload should deserialize");
+        common::helpers::bincode_compat::deserialize(&response_payload).expect("response payload should deserialize");
 
     assert_eq!(response.request_id, "req-int-1");
     assert_eq!(response.status, ResponseStatus::Applied);

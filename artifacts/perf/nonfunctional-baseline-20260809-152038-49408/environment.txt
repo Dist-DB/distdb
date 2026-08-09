@@ -1,0 +1,30 @@
+run_id=20260809-152038-49408
+captured_at_utc=2026-08-09T13:20:38Z
+hostname=SamuelsacStudio.fritz.box
+uname=Darwin SamuelsacStudio.fritz.box 25.6.0 Darwin Kernel Version 25.6.0: Sat Jul 11 15:26:21 PDT 2026; root:xnu-12377.161.13~4/RELEASE_ARM64_T6000 arm64
+cpu_count=10
+loadavg=unknown
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    32981.
+Pages active:                                 593236.
+Pages inactive:                               570052.
+Pages speculative:                             23530.
+Pages throttled:                                   0.
+Pages wired down:                             255216.
+Pages purgeable:                               39449.
+"Translation faults":                      551720550.
+Pages copy-on-write:                        33292715.
+Pages zero filled:                         557372803.
+Pages reactivated:                          12662885.
+Pages purged:                               13297133.
+File-backed pages:                            454608.
+Anonymous pages:                              732210.
+Pages stored in compressor:                  1348162.
+Pages occupied by compressor:                 585993.
+Decompressions:                             10939780.
+Compressions:                               16291367.
+Pageins:                                    12850227.
+Pageouts:                                     124968.
+Swapins:                                           0.
+Swapouts:                                          0.
+disk_usage=/dev/disk3s1   460Gi   149Gi   290Gi    34%    1.5M  3.0G    0%   /System/Volumes/Data 

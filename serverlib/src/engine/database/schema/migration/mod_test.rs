@@ -225,7 +225,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
         1,
         actor,
         TransactionKind::Insert,
-        bincode::serialize(&row).expect("row should encode"),
+        common::helpers::bincode_compat::serialize(&row).expect("row should encode"),
     )];
 
     let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
@@ -251,7 +251,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
     assert_eq!(rewritten.len(), 1);
 
     let out_row: HashMap<String, Vec<u8>> =
-        bincode::deserialize(
+        common::helpers::bincode_compat::deserialize(
             rewritten[0]
                 .payload()
                 .expect("payload should be present"),
@@ -307,7 +307,7 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
         1,
         actor,
         TransactionKind::Insert,
-        bincode::serialize(&row).expect("row should encode"),
+        common::helpers::bincode_compat::serialize(&row).expect("row should encode"),
     )];
 
     let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
@@ -377,7 +377,7 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
         1,
         actor,
         TransactionKind::Insert,
-        bincode::serialize(&row).expect("row should encode"),
+        common::helpers::bincode_compat::serialize(&row).expect("row should encode"),
     )];
 
     let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
@@ -405,7 +405,7 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
 
     let rewritten = load_records_from_path(&wal_path).expect("rewritten wal should load");
     let out_row: HashMap<String, Vec<u8>> =
-        bincode::deserialize(
+        common::helpers::bincode_compat::deserialize(
             rewritten[0]
                 .payload()
                 .expect("payload should be present"),

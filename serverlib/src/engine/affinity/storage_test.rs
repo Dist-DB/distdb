@@ -38,8 +38,8 @@ fn storage_path_generation() {
 #[test]
 fn document_serialization_roundtrip() {
     let doc = create_test_document();
-    let serialized = bincode::serialize(&doc).expect("serialize");
-    let deserialized: AffinityDocument = bincode::deserialize(&serialized).expect("deserialize");
+    let serialized = common::helpers::bincode_compat::serialize(&doc).expect("serialize");
+    let deserialized: AffinityDocument = common::helpers::bincode_compat::deserialize(&serialized).expect("deserialize");
 
     assert_eq!(deserialized.affinity_id, doc.affinity_id);
     assert_eq!(deserialized.affinity_revision, doc.affinity_revision);
@@ -57,8 +57,8 @@ fn checkpoint_serialization() {
     checkpoint.mark_step_completed(0);
     checkpoint.mark_step_completed(1);
 
-    let serialized = bincode::serialize(&checkpoint).expect("serialize");
-    let deserialized: CheckpointMetadata = bincode::deserialize(&serialized).expect("deserialize");
+    let serialized = common::helpers::bincode_compat::serialize(&checkpoint).expect("serialize");
+    let deserialized: CheckpointMetadata = common::helpers::bincode_compat::deserialize(&serialized).expect("deserialize");
 
     assert_eq!(deserialized.affinity_id, checkpoint.affinity_id);
     assert_eq!(deserialized.current_phase, checkpoint.current_phase);

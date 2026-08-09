@@ -119,7 +119,7 @@ fn inbound_surface_parity_supports_connector_payload_decode_for_both_channels() 
             database_name: "main".to_string(),
         },
     );
-    let payload = bincode::serialize(&request).expect("request payload should serialize");
+    let payload = common::helpers::bincode_compat::serialize(&request).expect("request payload should serialize");
 
     let p2p = RustP2pInboundSurface;
     let wss = RustWssInboundSurface;

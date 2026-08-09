@@ -211,7 +211,7 @@ async fn handle_wss_connection(
     };
 
     let challenge = ConnectorResponse::rejected("__p2p_password_challenge__", challenge_message);
-    let challenge_payload = bincode::serialize(&challenge)?;
+    let challenge_payload = common::helpers::bincode_compat::serialize(&challenge)?;
     ws_stream
         .send(Message::Binary(challenge_payload))
         .await

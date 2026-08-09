@@ -5,6 +5,7 @@ pub mod io;
 pub mod base64;
 pub mod aes;
 pub mod hash;
+pub mod bincode_compat;
 pub mod macros;
 pub mod password;
 pub mod tphashset;

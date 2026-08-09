@@ -162,7 +162,7 @@ impl RuntimeIndexSnapshotService {
             && checkpoint.live_rows.len() > Self::live_row_checkpoint_compress_max_rows()
         {
             let mut rewritten = make_header(FileKind::Entity).to_vec();
-            if let Ok(payload) = bincode::serialize(&checkpoint) {
+            if let Ok(payload) = common::helpers::bincode_compat::serialize(&checkpoint) {
                 rewritten.extend_from_slice(&payload);
                 if let Err(err) = write_bytes_atomic(&checkpoint_path, &rewritten) {
                     log::debug!(
@@ -442,7 +442,7 @@ impl RuntimeIndexSnapshotService {
         let mut content = make_header(FileKind::Entity).to_vec();
         let compress_threshold = Self::live_row_checkpoint_compress_max_rows();
         let payload = if live_rows.len() > compress_threshold {
-            bincode::serialize(&checkpoint)
+            common::helpers::bincode_compat::serialize(&checkpoint)
                 .map_err(|_| "snapshot serialization failed".to_string())?
         } else {
             encode_snapshot_payload(&checkpoint)?
@@ -625,7 +625,7 @@ fn table_schema_fingerprint_for_parts(
     table_id: &str,
     schema: &TableSchema,
 ) -> Option<String> {
-    let encoded = bincode::serialize(schema).ok()?;
+    let encoded = common::helpers::bincode_compat::serialize(schema).ok()?;
 
     let hex = encoded
         .iter()
@@ -636,7 +636,7 @@ fn table_schema_fingerprint_for_parts(
 }
 
 fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, String> {
-    let raw = bincode::serialize(value)
+    let raw = common::helpers::bincode_compat::serialize(value)
         .map_err(|_| "snapshot serialization failed".to_string())?;
 
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -651,14 +651,14 @@ fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, St
 }
 
 fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<(T, bool)> {
-    if let Ok(decoded) = bincode::deserialize::<T>(payload) {
+    if let Ok(decoded) = common::helpers::bincode_compat::deserialize::<T>(payload) {
         return Some((decoded, true));
     }
 
     let decoder = ZlibDecoder::new(payload);
     let mut reader = BufReader::new(decoder);
 
-    bincode::deserialize_from::<_, T>(&mut reader)
+    common::helpers::bincode_compat::deserialize_from::<_, T>(&mut reader)
         .ok()
         .map(|decoded| (decoded, false))
 }

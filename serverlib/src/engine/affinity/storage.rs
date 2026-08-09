@@ -45,7 +45,7 @@ impl AffinityStorage {
             ))
         })?;
 
-        let document: AffinityDocument = bincode::deserialize(&contents).map_err(|err| {
+        let document: AffinityDocument = common::helpers::bincode_compat::deserialize(&contents).map_err(|err| {
             ServerLibError::Storage(format!(
                 "failed to deserialize affinity document: {}",
                 err
@@ -67,7 +67,7 @@ impl AffinityStorage {
 
         let path = self.affinity_document_path(&document.affinity_id);
 
-        let contents = bincode::serialize(document).map_err(|err| {
+        let contents = common::helpers::bincode_compat::serialize(document).map_err(|err| {
             ServerLibError::Storage(format!(
                 "failed to serialize affinity document: {}",
                 err
@@ -140,7 +140,7 @@ impl AffinityStorage {
             ))
         })?;
 
-        let checkpoint: CheckpointMetadata = bincode::deserialize(&contents).map_err(|err| {
+        let checkpoint: CheckpointMetadata = common::helpers::bincode_compat::deserialize(&contents).map_err(|err| {
             ServerLibError::Storage(format!(
                 "failed to deserialize checkpoint metadata: {}",
                 err
@@ -163,7 +163,7 @@ impl AffinityStorage {
 
         let path = self.checkpoint_path(&checkpoint.affinity_id);
 
-        let contents = bincode::serialize(checkpoint).map_err(|err| {
+        let contents = common::helpers::bincode_compat::serialize(checkpoint).map_err(|err| {
             ServerLibError::Storage(format!(
                 "failed to serialize checkpoint metadata: {}",
                 err

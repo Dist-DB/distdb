@@ -28,7 +28,7 @@ fn wal_frame_roundtrip_uses_base64() {
 #[test]
 fn wal_frame_decode_accepts_legacy_hex() {
     let frame = sample_frame();
-    let bytes = bincode::serialize(&frame).expect("serialize should succeed");
+    let bytes = common::helpers::bincode_compat::serialize(&frame).expect("serialize should succeed");
     let legacy_hex = bytes
         .iter()
         .map(|b| format!("{:02x}", b))

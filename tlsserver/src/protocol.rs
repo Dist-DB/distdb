@@ -18,7 +18,7 @@ pub struct TlsCertificateResponse {
 }
 
 pub fn encode_tls_certificate_request(request: &TlsCertificateRequest) -> Option<Vec<u8>> {
-    let payload = bincode::serialize(request).ok()?;
+    let payload = bincode::serde::encode_to_vec(request, bincode::config::legacy()).ok()?;
     let mut out = TLS_CERTIFICATE_MAGIC.to_vec();
     out.extend_from_slice(&payload);
     Some(out)
@@ -33,12 +33,17 @@ pub fn decode_tls_certificate_request(payload: &[u8]) -> Option<TlsCertificateRe
         return None;
     }
 
-    bincode::deserialize(&payload[TLS_CERTIFICATE_MAGIC.len()..]).ok()
+    bincode::serde::decode_from_slice(
+        &payload[TLS_CERTIFICATE_MAGIC.len()..],
+        bincode::config::legacy(),
+    )
+    .ok()
+    .map(|(value, _)| value)
     
 }
 
 pub fn encode_tls_certificate_response(response: &TlsCertificateResponse) -> Option<Vec<u8>> {
-    let payload = bincode::serialize(response).ok()?;
+    let payload = bincode::serde::encode_to_vec(response, bincode::config::legacy()).ok()?;
     let mut out = TLS_CERTIFICATE_MAGIC.to_vec();
     out.extend_from_slice(&payload);
     Some(out)
@@ -53,6 +58,11 @@ pub fn decode_tls_certificate_response(payload: &[u8]) -> Option<TlsCertificateR
         return None;
     }
 
-    bincode::deserialize(&payload[TLS_CERTIFICATE_MAGIC.len()..]).ok()
+    bincode::serde::decode_from_slice(
+        &payload[TLS_CERTIFICATE_MAGIC.len()..],
+        bincode::config::legacy(),
+    )
+    .ok()
+    .map(|(value, _)| value)
 
 }

@@ -1,0 +1,30 @@
+Distdb server (www.distdb.com)
+Copyright (c) 2026 Sam Colak. All rights reserved.
+[2026-08-09T13:20:56Z INFO  server] loaded cached p2p tls material from /Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288/p2p-tls
+[2026-08-09T13:20:56Z INFO  server] loaded p2p tls material from tls-server=127.0.0.1:19443 extra_sans=localhost,127.0.0.1
+[2026-08-09T13:20:56Z INFO  server] starting server node_id=perf-baseline-node with runtime config: data_dir=/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288, listen_addr=127.0.0.1, port=19401, tls=required, ca_root=false, services=affinity.replication,p2p.discovery,sql.query
+[2026-08-09T13:20:56Z INFO  server::core::app::state] node data directory: /Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288/perf-baseline-node
+[2026-08-09T13:20:56Z INFO  server::core::app::state] server app created for node_id=perf-baseline-node
+[2026-08-09T13:20:56Z INFO  server] connector request listener bound at 127.0.0.1:19401
+[2026-08-09T13:20:56Z INFO  server::core::app::lifecycle] loaded catalog '/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288/perf-baseline-node/0840568abacd8454.dbcat' for database='0840568abacd8454' with 0 table identifier(s) before WAL replay
+[2026-08-09T13:20:56Z INFO  server::core::app::lifecycle] loaded catalog '/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288/perf-baseline-node/6959545634f300eb.dbcat' for database='6959545634f300eb' with 0 table identifier(s) before WAL replay
+[2026-08-09T13:20:56Z INFO  server::core::app::lifecycle] default system catalog 'main' already present in loaded catalogs
+[2026-08-09T13:20:56Z INFO  server::core::app::lifecycle] replayed 3 catalog transaction(s) for database='0840568abacd8454' elapsed_ms=0 tables_after_replay=1
+[2026-08-09T13:20:56Z INFO  server::core::app::lifecycle] catalog replay complete catalogs=2 tables=1 transactions=3 elapsed_ms=0
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=0840568abacd8454 previous=Ready next=Indexing
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Load next=Indexing
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Ready next=Indexing
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap mode materialize_non_primary=false preload_accessors_on_bootstrap=false preload_accessor_max_live_rows=150000 warm_equality_cache_on_bootstrap=false non_primary_field_allowlist=<none> non_primary_index_allowlist=<none>
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap table complete database=0840568abacd8454 table=events indexes=1 live_rows=140 live_row_materialization_ms=0 index_rebuild_ms=0 equality_warm_ms=0 elapsed_ms=40
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap complete tables=1 indexes=1 live_rows=140 elapsed_ms=40
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=0840568abacd8454 previous=Indexing next=Ready
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Indexing next=Ready
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Indexing next=Ready
+[2026-08-09T13:20:56Z INFO  server::core::app::state] server bootstrap complete for node_id=perf-baseline-node data_dir=/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288/perf-baseline-node catalogs=2 tables=1 load_catalogs_ms=0 replay_catalog_wal_ms=0 runtime_index_bootstrap_ms=41 total_ms=42
+[2026-08-09T13:20:56Z INFO  server] server runtime initialized for node=perf-baseline-node with 2 active WAL worker(s) and 1 probe records
+[2026-08-09T13:20:56Z INFO  server] connector bootstrap gate opened; server is ready to accept requests
+[2026-08-09T13:20:56Z INFO  server] server process is running; press Ctrl+C to shutdown
+[2026-08-09T13:20:56Z INFO  server] connector peer connected from 127.0.0.1:62789 (active_connections=1)
+[2026-08-09T13:20:56Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62789 (attempt=1 elapsed_ms=2 counters: attempts=1 success=1 failure=0 eof_failure=0)
+[2026-08-09T13:20:56Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:56Z INFO  server] connector peer disconnected from 127.0.0.1:62789 (active_connections=0)

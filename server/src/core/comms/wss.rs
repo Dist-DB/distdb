@@ -314,7 +314,7 @@ pub fn is_wss_path(path: &str) -> bool {
 pub fn encode_connector_response_message(
     response: &ConnectorResponse,
 ) -> Result<Message, WssFrameError> {
-    let payload = bincode::serialize(response)
+    let payload = common::helpers::bincode_compat::serialize(response)
         .map_err(|err| WssFrameError::Encode(err.to_string()))?;
     Ok(Message::Binary(payload))
 }
@@ -339,7 +339,7 @@ pub fn decode_connector_request_message(
         return Err(WssFrameError::MissingPayload);
     }
 
-    bincode::deserialize::<ConnectorRequest>(&payload)
+    common::helpers::bincode_compat::deserialize::<ConnectorRequest>(&payload)
         .map_err(|err| WssFrameError::Decode(err.to_string()))
         
 }

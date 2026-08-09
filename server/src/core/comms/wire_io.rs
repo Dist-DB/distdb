@@ -9,7 +9,7 @@ pub async fn write_response_frame(
     response: ConnectorResponse,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
-    let payload = bincode::serialize(&response)?;
+    let payload = common::helpers::bincode_compat::serialize(&response)?;
     let len = payload.len() as u32;
     
     stream.write_all(&len.to_le_bytes()).await?;

@@ -48,7 +48,7 @@ fn encode_uses_seqno_ordinal_and_null_slots() {
 
     let encoded = encode_row_payload(&schema, &row).expect("row should encode");
     let decoded: Vec<Option<Vec<u8>>> =
-        bincode::deserialize(&encoded).expect("ordinal row should decode");
+        common::helpers::bincode_compat::deserialize(&encoded).expect("ordinal row should decode");
 
     assert_eq!(decoded.len(), 3);
     assert_ne!(decoded[0], Some(b"1".to_vec()));
@@ -63,7 +63,7 @@ fn decode_round_trips_ordinal_with_nulls() {
     let schema = test_schema();
     let payload = vec![Some(b"1".to_vec()), Some(b"sam@example.com".to_vec()), None];
 
-    let encoded = bincode::serialize(&payload).expect("payload should encode");
+    let encoded = common::helpers::bincode_compat::serialize(&payload).expect("payload should encode");
     let row = decode_row_payload(&schema, &encoded).expect("row should decode");
 
     assert_eq!(row.get("id"), Some(&b"1".to_vec()));
@@ -78,7 +78,7 @@ fn decode_accepts_legacy_name_map() {
     legacy.insert("id".to_string(), b"2".to_vec());
     legacy.insert("email".to_string(), b"legacy@example.com".to_vec());
 
-    let encoded = bincode::serialize(&legacy).expect("legacy row should encode");
+    let encoded = common::helpers::bincode_compat::serialize(&legacy).expect("legacy row should encode");
     let row = decode_row_payload(&schema, &encoded).expect("legacy row should decode");
 
     assert_eq!(row.get("id").cloned(), Some(b"2".to_vec()));
@@ -94,7 +94,7 @@ fn compatible_row_payload_decoder_handles_legacy_map_payloads() {
     let mut legacy = HashMap::new();
     legacy.insert("email".to_string(), b"legacy@example.com".to_vec());
 
-    let encoded = bincode::serialize(&legacy).expect("legacy row should encode");
+    let encoded = common::helpers::bincode_compat::serialize(&legacy).expect("legacy row should encode");
     let row = decode_compatible_row_payload(&schema, &encoded)
         .expect("compatible row payload should decode");
 

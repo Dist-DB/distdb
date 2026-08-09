@@ -410,7 +410,7 @@ fn indexor_recovery_rejects_invalid_unique_snapshot_payload() {
         }],
     };
 
-    let payload = bincode::serialize(&snapshot).expect("snapshot should encode");
+    let payload = common::helpers::bincode_compat::serialize(&snapshot).expect("snapshot should encode");
     let recovered = DatabaseIndexor::from_snapshot_bytes(&payload);
 
     assert!(matches!(
@@ -478,7 +478,7 @@ fn indexor_can_insert_rows_directly_from_database_index_definition() {
         .insert_indexed_row(&composite_index, &row_b, 11)
         .expect("second insert should succeed");
 
-    let lookup_key = bincode::serialize(&vec![
+    let lookup_key = common::helpers::bincode_compat::serialize(&vec![
         b"sam@example.com".to_vec(),
         b"acme".to_vec(),
     ])

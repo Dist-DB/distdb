@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Instant;
 
@@ -33,9 +34,14 @@ use crate::engine::database::transaction::{TransactionId, TransactionLog, Transa
 use crate::TransactionKind;
 
 static NEXT_WAL_CACHE_SCOPE_ID: AtomicUsize = AtomicUsize::new(1);
+static DEFAULT_TRANSACTION_PAYLOAD_CONTEXT: OnceLock<TransactionPayloadContext> = OnceLock::new();
 
 fn next_wal_cache_scope_id() -> usize {
     NEXT_WAL_CACHE_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn default_transaction_payload_context() -> &'static TransactionPayloadContext {
+    DEFAULT_TRANSACTION_PAYLOAD_CONTEXT.get_or_init(TransactionPayloadContext::default)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -81,6 +87,12 @@ fn resolve_wal_storage_payload<'a>(
     let Some(payload) = raw_payload else {
         return Ok(None);
     };
+
+    // Hot path: default-context reads of plain payload bytes can bypass the
+    // transform chain entirely.
+    if context == default_transaction_payload_context() && !looks_like_zlib_payload(payload) {
+        return Ok(Some(Cow::Borrowed(payload)));
+    }
 
     let mut resolver = ChainedTransactionPayloadResolver::new();
     resolver.push_transform(WalCompressionPayloadTransform);
@@ -222,7 +234,7 @@ enum WalCommand {
 #[derive(Debug)]
 pub struct ConcurrentWalManager {
     workers: Mutex<HashMap<String, Sender<WalCommand>>>,
-    storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
+    storage: Arc<Mutex<HashMap<String, Arc<Mutex<Vec<TransactionRecord>>>>>>,
     cache_scope_id: usize,
     write_high_water_by_stream: Mutex<HashMap<String, u64>>,
     stream_modes: Mutex<HashMap<String, WalStreamMode>>,
@@ -263,10 +275,17 @@ impl ConcurrentWalManager {
 
         self.hydrate_stream_if_needed(wal_id, &stream_key);
 
-        let store = self.storage.lock().ok()?;
-        let entries = store.get(&stream_key)?;
-        
+        let entries = self.stream_entries_handle(&stream_key)?;
+        let entries = entries.lock().ok()?;
+
         Some(func(entries.as_slice()))
+
+    }
+
+    fn stream_entries_handle(&self, stream_key: &str) -> Option<Arc<Mutex<Vec<TransactionRecord>>>> {
+
+        let store = self.storage.lock().ok()?;
+        store.get(stream_key).cloned()
 
     }
 
@@ -296,23 +315,35 @@ impl ConcurrentWalManager {
                 // repeated disk-existence checks on hot read paths.
                 store
                     .entry(stream_key.to_string())
-                    .or_insert_with(Vec::new);
+                    .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
             }
             return;
         }
 
         let existing = load_records_from_file(&wal_path);
-        if let Ok(mut store) = self.storage.lock() {
-            store.entry(stream_key.to_string()).or_insert(existing);
+        let entries_handle = if let Ok(mut store) = self.storage.lock() {
+            store
+                .entry(stream_key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+                .clone()
+        } else {
+            return;
+        };
+
+        if let Ok(mut entries) = entries_handle.lock()
+            && entries.is_empty()
+        {
+            entries.extend(existing);
         }
 
-        if let (Ok(store), Ok(mut high_water)) = (
-            self.storage.lock(),
+        if let (Some(entries_handle), Ok(mut high_water)) = (
+            self.stream_entries_handle(stream_key),
             self.write_high_water_by_stream.lock(),
         ) {
-            let max_ts = store
-                .get(stream_key)
-                .and_then(|entries| latest_write_timestamp(entries));
+            let max_ts = entries_handle
+                .lock()
+                .ok()
+                .and_then(|entries| latest_write_timestamp(entries.as_slice()));
 
             match max_ts {
                 Some(ts) => {
@@ -341,14 +372,15 @@ impl ConcurrentWalManager {
             }
 
         let max_ts = {
-            let store = match self.storage.lock() {
-                Ok(store) => store,
-                Err(_) => return false,
+            let entries = match self.stream_entries_handle(&stream_key) {
+                Some(entries) => entries,
+                None => return false,
             };
 
-            store
-                .get(&stream_key)
-                .and_then(|entries| latest_write_timestamp(entries))
+            entries
+                .lock()
+                .ok()
+                .and_then(|entries| latest_write_timestamp(entries.as_slice()))
         };
 
         if let Ok(mut high_water) = self.write_high_water_by_stream.lock() {
@@ -487,14 +519,15 @@ impl ConcurrentWalManager {
 
         let stream_key = obfuscated_stream_key(wal_id)?;
 
-        if let (Ok(store), Ok(mut high_water)) = (
-            self.storage.lock(),
+        if let (Some(entries), Ok(mut high_water)) = (
+            self.stream_entries_handle(&stream_key),
             self.write_high_water_by_stream.lock(),
         ) {
-            
-            let max_ts = store
-                .get(&stream_key)
-                .and_then(|entries| latest_write_timestamp(entries));
+
+            let max_ts = entries
+                .lock()
+                .ok()
+                .and_then(|entries| latest_write_timestamp(entries.as_slice()));
 
             match max_ts {
 
@@ -674,10 +707,9 @@ impl ConcurrentWalManager {
 
         self.hydrate_stream_if_needed(wal_id, &stream_key);
 
-        let store = self.storage.lock().ok()?;
-        store
-            .get(&stream_key)
-            .and_then(|entries| entries.last().map(|entry| entry.id))
+        let entries = self.stream_entries_handle(&stream_key)?;
+        let entries = entries.lock().ok()?;
+        entries.last().map(|entry| entry.id)
 
     }
 
@@ -685,11 +717,9 @@ impl ConcurrentWalManager {
 
         let stream_key = obfuscated_stream_key(wal_id).ok()?;
 
-        let store = self.storage.lock().ok()?;
-        
-        store
-            .get(&stream_key)
-            .and_then(|entries| entries.last().map(|entry| entry.id))
+        let entries = self.stream_entries_handle(&stream_key)?;
+        let entries = entries.lock().ok()?;
+        entries.last().map(|entry| entry.id)
 
     }
 
@@ -699,8 +729,7 @@ impl ConcurrentWalManager {
         records: Vec<TransactionRecord>,
     ) -> Result<(), &'static str> {
 
-        let context = TransactionPayloadContext::default();
-        self.append_batch_with_context(wal_id, records, &context)
+        self.append_batch_with_context(wal_id, records, default_transaction_payload_context())
 
     }
 
@@ -759,7 +788,7 @@ impl ConcurrentWalManager {
         context: &TransactionPayloadContext,
     ) -> Result<Vec<TransactionRecord>, &'static str> {
         
-        if context == &TransactionPayloadContext::default() {
+        if context == default_transaction_payload_context() {
             return Ok(self.since(wal_id, from));
         }
 
@@ -786,8 +815,7 @@ impl TransactionLog for ConcurrentWalManager {
 
     fn append(&self, wal_id: &str, record: TransactionRecord) -> Result<(), &'static str> {
 
-        let context = TransactionPayloadContext::default();
-        self.append_with_context(wal_id, record, &context)
+        self.append_with_context(wal_id, record, default_transaction_payload_context())
 
     }
 
@@ -800,23 +828,23 @@ impl TransactionLog for ConcurrentWalManager {
 
         self.hydrate_stream_if_needed(wal_id, &stream_key);
 
-        let store = match self.storage.lock() {
-            Ok(store) => store,
+        let entries = match self.stream_entries_handle(&stream_key) {
+            Some(entries) => entries,
+            None => return Vec::new(),
+        };
+
+        let entries = match entries.lock() {
+            Ok(entries) => entries,
             Err(_) => return Vec::new(),
         };
 
-        store
-            .get(&stream_key)
-            .map(|entries| {
-                match from {
-                    Some(min_id) => {
-                        let start_idx = first_record_index_after_id(entries, min_id);
-                        entries[start_idx..].to_vec()
-                    },
-                    None => entries.clone(),
-                }
-            })
-            .unwrap_or_default()
+        match from {
+            Some(min_id) => {
+                let start_idx = first_record_index_after_id(entries.as_slice(), min_id);
+                entries[start_idx..].to_vec()
+            },
+            None => entries.clone(),
+        }
 
     }
 
@@ -832,15 +860,15 @@ impl TransactionLog for ConcurrentWalManager {
 
         self.hydrate_stream_if_needed(wal_id, &stream_key);
 
-        let store = match self.storage.lock() {
-            Ok(store) => store,
-            Err(_) => return func(&[]),
+        let Some(entries) = self.stream_entries_handle(&stream_key) else {
+            return func(&[]);
         };
 
-        match store.get(&stream_key) {
-            Some(entries) => func(entries),
-            None => func(&[]),
-        }
+        let Ok(entries) = entries.lock() else {
+            return func(&[]);
+        };
+
+        func(entries.as_slice())
 
     }
 
@@ -862,30 +890,30 @@ impl TransactionLog for ConcurrentWalManager {
 
         self.hydrate_stream_if_needed(wal_id, &stream_key);
 
-        let store = match self.storage.lock() {
-            Ok(store) => store,
+        let entries = match self.stream_entries_handle(&stream_key) {
+            Some(entries) => entries,
+            None => return Vec::new(),
+        };
+
+        let entries = match entries.lock() {
+            Ok(entries) => entries,
             Err(_) => return Vec::new(),
         };
 
-        store
-            .get(&stream_key)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|entry| {
-                        let kind_matched = match kinds {
-                            [kind] => entry.kind == *kind,
-                            [first, second] => entry.kind == *first || entry.kind == *second,
-                            _ => kinds.contains(&entry.kind),
-                        };
+        entries
+            .iter()
+            .filter(|entry| {
+                let kind_matched = match kinds {
+                    [kind] => entry.kind == *kind,
+                    [first, second] => entry.kind == *first || entry.kind == *second,
+                    _ => kinds.contains(&entry.kind),
+                };
 
-                        from.map(|min_id| entry.id.0 > min_id.0).unwrap_or(true)
-                            && kind_matched
-                    })
-                    .cloned()
-                    .collect()
+                from.map(|min_id| entry.id.0 > min_id.0).unwrap_or(true)
+                    && kind_matched
             })
-            .unwrap_or_default()
+            .cloned()
+            .collect()
 
     }
 
@@ -938,8 +966,7 @@ impl ConcurrentWalManager {
 
 fn frame_record(record: &TransactionRecord) -> Result<Vec<u8>, &'static str> {
 
-    let context = TransactionPayloadContext::default();
-    frame_record_with_context(record, &context)
+    frame_record_with_context(record, default_transaction_payload_context())
 
 }
 
@@ -962,8 +989,7 @@ fn frame_record_with_context(
 pub(crate) fn encode_record_for_storage(
     record: &TransactionRecord,
 ) -> Result<Vec<u8>, &'static str> {
-    let context = TransactionPayloadContext::default();
-    encode_record_for_storage_with_context(record, &context)
+    encode_record_for_storage_with_context(record, default_transaction_payload_context())
 }
 
 pub(crate) fn encode_record_for_storage_with_context(
@@ -976,10 +1002,10 @@ pub(crate) fn encode_record_for_storage_with_context(
 
     if let Some(payload) = into_owned_payload(stored_payload) {
         let record_for_storage = record_for_storage_with_payload(record, Some(payload));
-        return bincode::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record");
+        return common::helpers::bincode_compat::serialize(&record_for_storage).map_err(|_| "failed to serialize WAL record");
     }
 
-    bincode::serialize(record).map_err(|_| "failed to serialize WAL record")
+    common::helpers::bincode_compat::serialize(record).map_err(|_| "failed to serialize WAL record")
 
 }
 
@@ -987,8 +1013,7 @@ pub(crate) fn decode_record_from_storage(
     encoded: &[u8],
 ) -> Result<TransactionRecord, &'static str> {
 
-    let context = TransactionPayloadContext::default();
-    decode_record_from_storage_with_context(encoded, &context)
+    decode_record_from_storage_with_context(encoded, default_transaction_payload_context())
 
 }
 
@@ -997,13 +1022,20 @@ fn decode_record_from_storage_internal(
     context: &TransactionPayloadContext,
 ) -> Result<TransactionRecord, &'static str> {
 
-    let mut record = bincode::deserialize::<TransactionRecord>(encoded)
-        .map_err(|_| "failed to deserialize WAL record")?;
+    let mut record = match bincode::serde::decode_from_slice::<TransactionRecord, _>(
+        encoded,
+        bincode::config::legacy(),
+    ) {
+        Ok((record, consumed)) if consumed == encoded.len() => record,
+        Ok(_) => return Err("failed to deserialize WAL record"),
+        Err(_) => common::helpers::bincode_compat::deserialize::<TransactionRecord>(encoded)
+            .map_err(|_| "failed to deserialize WAL record")?,
+    };    
 
-    let resolved_payload = resolve_wal_storage_payload(record.payload_raw(), context)
-        .map_err(map_payload_transform_error)?;
-
-    if let Some(payload) = into_owned_payload(resolved_payload) {
+    if let Some(payload) = into_owned_payload(
+        resolve_wal_storage_payload(record.payload_raw(), context)
+            .map_err(map_payload_transform_error)?,
+    ) {
         record.set_payload(Some(payload));
     }
 
@@ -1015,6 +1047,7 @@ pub(crate) fn decode_record_from_storage_with_context(
     encoded: &[u8],
     context: &TransactionPayloadContext,
 ) -> Result<TransactionRecord, &'static str> {
+
     decode_record_from_storage_internal(encoded, context)
 
 }
@@ -1130,15 +1163,14 @@ fn latest_write_timestamp(entries: &[TransactionRecord]) -> Option<u64> {
 
 }
 
-fn get_or_insert_stream_entries<'a>(
-    state: &'a mut HashMap<String, Vec<TransactionRecord>>,
+fn get_or_insert_stream_entries_handle(
+    state: &mut HashMap<String, Arc<Mutex<Vec<TransactionRecord>>>>,
     stream_key: &str,
-) -> &'a mut Vec<TransactionRecord> {
-    if !state.contains_key(stream_key) {
-        state.insert(stream_key.to_string(), Vec::new());
-    }
-
-    state.get_mut(stream_key).expect("WAL stream entry should exist")
+) -> Arc<Mutex<Vec<TransactionRecord>>> {
+    state
+        .entry(stream_key.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+        .clone()
 }
 
 fn obfuscated_stream_key(wal_id: &str) -> Result<String, &'static str> {
@@ -1153,139 +1185,55 @@ fn obfuscated_stream_key(wal_id: &str) -> Result<String, &'static str> {
 
 }
 
-const WAL_PARALLEL_DECODE_MIN_FRAMES: usize = 100_000;
-const WAL_PARALLEL_DECODE_MAX_WORKERS: usize = 32;
-
-fn wal_parallel_decode_max_workers() -> usize {
-
-    std::env::var("DISTDB_WAL_PARALLEL_DECODE_WORKERS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(WAL_PARALLEL_DECODE_MAX_WORKERS)
-
-}
-
-#[derive(Debug)]
-struct WalDecodeChunkResult {
-    start_frame_idx: usize,
-    records: Vec<TransactionRecord>,
-    first_error: Option<(usize, &'static str)>,
-}
-
 fn decode_record_from_frame(
     bytes: &[u8],
     offset: usize,
     len: usize,
+    context: &TransactionPayloadContext,
 ) -> Result<TransactionRecord, &'static str> {
-    decode_record_from_storage(&bytes[offset..offset + len])
-}
-
-fn decode_records_sequential(
-    bytes: &[u8],
-    frame_ranges: &[(usize, usize)],
-) -> Vec<TransactionRecord> {
-
-    let mut records = Vec::with_capacity(frame_ranges.len());
-
-    for &(offset, len) in frame_ranges {
-
-        match decode_record_from_frame(bytes, offset, len) {
-
-            Ok(record) => records.push(record),
-
-            Err(e) => {
-                log::error!("failed to deserialize WAL frame at byte {}: {}", offset, e);
-                break;
-            }
-
-        }
-
-    }
-
-    records
+    
+    decode_record_from_storage_with_context(&bytes[offset..offset + len], context)
 
 }
 
-fn decode_records_parallel(
+fn decode_records_sequential_from_bytes(bytes: &[u8]) -> Vec<TransactionRecord> {
+
+    decode_records_sequential_from_bytes_with_context(bytes, default_transaction_payload_context())
+
+}
+
+fn decode_records_sequential_from_bytes_with_context(
     bytes: &[u8],
-    frame_ranges: &[(usize, usize)],
-    workers: usize,
+    context: &TransactionPayloadContext,
 ) -> Vec<TransactionRecord> {
 
-    let chunk_size = frame_ranges.len().div_ceil(workers);
+    let mut records = Vec::new();
+    let mut pos = HEADER_SIZE;
 
-    let mut chunks = std::thread::scope(|scope| {
+    while pos + 8 <= bytes.len() {
 
-        let mut handles = Vec::new();
+        let len = u64::from_le_bytes(
+            bytes[pos..pos + 8]
+                .try_into()
+                .expect("slice is exactly 8 bytes"),
+        ) as usize;
 
-        for worker_idx in 0..workers {
+        pos += 8;
 
-            let start = worker_idx * chunk_size;
-            if start >= frame_ranges.len() {
-                break;
-            }
-
-            let end = std::cmp::min(start + chunk_size, frame_ranges.len());
-            let ranges = &frame_ranges[start..end];
-
-            handles.push(scope.spawn(move || {
-                
-                let mut records = Vec::with_capacity(ranges.len());
-                let mut first_error = None;
-
-                for &(offset, len) in ranges {
-                    match decode_record_from_frame(bytes, offset, len) {
-                        Ok(record) => records.push(record),
-                        Err(e) => {
-                            first_error = Some((offset, e));
-                            break;
-                        }
-                    }
-                }
-
-                WalDecodeChunkResult {
-                    start_frame_idx: start,
-                    records,
-                    first_error,
-                }
-
-            }));
-
-        }
-
-        let mut decoded = Vec::with_capacity(handles.len());
-
-        for handle in handles {
-
-            match handle.join() {
-                
-                Ok(chunk) => decoded.push(chunk),
-                
-                Err(_) => {
-                    log::error!("parallel WAL decode worker panicked; falling back to partial results");
-                }
-
-            }
-
-        }
-
-        decoded
-
-    });
-
-    chunks.sort_by_key(|chunk| chunk.start_frame_idx);
-
-    let mut records = Vec::with_capacity(frame_ranges.len());
-
-    for chunk in chunks {
-
-        records.extend(chunk.records);
-
-        if let Some((offset, err)) = chunk.first_error {
-            log::error!("failed to deserialize WAL frame at byte {}: {}", offset, err);
+        if pos + len > bytes.len() {
+            log::warn!("truncated WAL frame at byte offset {}, stopping replay", pos);
             break;
         }
+
+        match decode_record_from_frame(bytes, pos, len, context) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                log::error!("failed to deserialize WAL frame at byte {}: {}", pos, e);
+                break;
+            }
+        }
+
+        pos += len;
 
     }
 
@@ -1310,53 +1258,9 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
         return Vec::new();
     }
 
-    let mut pos = HEADER_SIZE;
-    let mut frame_ranges: Vec<(usize, usize)> = Vec::new();
-
-    while pos + 8 <= bytes.len() {
-
-        let len = u64::from_le_bytes(
-            bytes[pos..pos + 8]
-                .try_into()
-                .expect("slice is exactly 8 bytes"),
-        ) as usize;
-
-        pos += 8;
-
-        if pos + len > bytes.len() {
-            log::warn!("truncated WAL frame at byte offset {}, stopping replay", pos);
-            break;
-        }
-
-        frame_ranges.push((pos, len));
-        pos += len;
-        
-    }
-
     let decode_started_at = Instant::now();
-
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-
-    let should_parallel_decode =
-        available > 1 && frame_ranges.len() >= WAL_PARALLEL_DECODE_MIN_FRAMES;
-
-    let records = if should_parallel_decode {
-
-        let max_workers = wal_parallel_decode_max_workers();
-        let workers = std::cmp::min(
-            std::cmp::min(available, max_workers),
-            frame_ranges.len(),
-        );
-        
-        decode_records_parallel(&bytes, &frame_ranges, workers)
-
-    } else {
-
-        decode_records_sequential(&bytes, &frame_ranges)
-
-    };
+    let context = default_transaction_payload_context();
+    let records = decode_records_sequential_from_bytes_with_context(&bytes, context);
 
     let decode_elapsed_ms = decode_started_at.elapsed().as_millis();
     let total_elapsed_ms = started_at.elapsed().as_millis();
@@ -1444,8 +1348,7 @@ fn append_wal_bytes(
 }
 
 fn rewrite_wal_file(path: &Path, records: &[TransactionRecord]) -> Result<(), &'static str> {
-    let context = TransactionPayloadContext::default();
-    rewrite_wal_file_with_context(path, records, &context)
+    rewrite_wal_file_with_context(path, records, default_transaction_payload_context())
 }
 
 fn rewrite_wal_file_with_context(
@@ -1504,6 +1407,7 @@ fn compact_entries_to_latest_schema_and_metadata(
     let mut latest_metadata = None;
 
     for record in entries.iter().rev() {
+
         if latest_schema.is_none() && record.kind == TransactionKind::SchemaChange {
             latest_schema = Some(record.clone());
         }
@@ -1596,7 +1500,7 @@ fn exact_record_duplicate_at_or_after(
 
 fn spawn_worker(
     stream_key: String,
-    storage: Arc<Mutex<HashMap<String, Vec<TransactionRecord>>>>,
+    storage: Arc<Mutex<HashMap<String, Arc<Mutex<Vec<TransactionRecord>>>>>>,
     wal_path: Option<PathBuf>,
 ) -> (Sender<WalCommand>, mpsc::Receiver<()>) {
     
@@ -1618,8 +1522,13 @@ fn spawn_worker(
             let existing = load_records_from_file(path);
             let mut count = 0usize;
 
-            if let Ok(mut state) = storage.lock() {
-                let entries = get_or_insert_stream_entries(&mut state, &stream_key);
+            let entries = if let Ok(mut state) = storage.lock() {
+                get_or_insert_stream_entries_handle(&mut state, &stream_key)
+            } else {
+                Arc::new(Mutex::new(Vec::new()))
+            };
+
+            if let Ok(mut entries) = entries.lock() {
                 if entries.is_empty() {
                     count = existing.len();
                     entries.extend(existing);
@@ -1646,9 +1555,20 @@ fn spawn_worker(
 
                 WalCommand::Append { record, context, ack } => {
 
-                    if let Ok(mut state) = storage.lock() {
+                    let entries = if let Ok(mut state) = storage.lock() {
+                        get_or_insert_stream_entries_handle(&mut state, &stream_key)
+                    } else {
+                        log::error!(
+                            "failed to acquire WAL storage lock for stream={}",
+                            stream_key
+                        );
 
-                        let entries = get_or_insert_stream_entries(&mut state, &stream_key);
+                        let _ = ack.send(Err("failed to lock WAL storage"));
+
+                        break;
+                    };
+
+                    if let Ok(mut entries) = entries.lock() {
                         let is_ordered = entries
                             .last()
                             .map(|last| record.id.0 > last.id.0)
@@ -1692,7 +1612,7 @@ fn spawn_worker(
                                 .binary_search_by_key(&record.id.0, |existing| existing.id.0)
                                 .unwrap_or_else(|idx| idx);
 
-                            if exact_record_duplicate_at_or_after(entries, &record, base_pos) {
+                            if exact_record_duplicate_at_or_after(entries.as_slice(), &record, base_pos) {
                                 // Exact duplicate already present; treat as idempotent success.
                                 let _ = ack.send(Ok(()));
                                 continue;
@@ -1763,9 +1683,20 @@ fn spawn_worker(
                         continue;
                     }
 
-                    if let Ok(mut state) = storage.lock() {
+                    let entries = if let Ok(mut state) = storage.lock() {
+                        get_or_insert_stream_entries_handle(&mut state, &stream_key)
+                    } else {
+                        log::error!(
+                            "failed to acquire WAL storage lock for batch stream={}",
+                            stream_key
+                        );
 
-                        let entries = get_or_insert_stream_entries(&mut state, &stream_key);
+                        let _ = ack.send(Err("failed to lock WAL storage"));
+
+                        break;
+                    };
+
+                    if let Ok(mut entries) = entries.lock() {
 
                         let mut previous_id = entries.last().map(|last| last.id.0);
 
@@ -1841,7 +1772,11 @@ fn spawn_worker(
                                 staged
                             });
 
-                        let working_entries = staged_entries.as_mut().unwrap_or(entries);
+                        let working_entries: &mut Vec<TransactionRecord> = if let Some(staged) = staged_entries.as_mut() {
+                            staged
+                        } else {
+                            &mut entries
+                        };
 
                         for record in records {
 
@@ -1943,18 +1878,27 @@ fn spawn_worker(
                     ack,
                 } => {
 
-                    if let Ok(mut state) = storage.lock() {
+                    let entries = if let Ok(mut state) = storage.lock() {
+                        get_or_insert_stream_entries_handle(&mut state, &stream_key)
+                    } else {
+                        log::error!(
+                            "failed to acquire WAL storage lock during compact for stream={}",
+                            stream_key
+                        );
+                        let _ = ack.send(Err("failed to lock WAL storage"));
+                        break;
+                    };
 
-                        let entries = get_or_insert_stream_entries(&mut state, &stream_key);
+                    if let Ok(mut entries) = entries.lock() {
 
                         compact_entries_to_latest_schema_and_metadata(
-                            entries,
+                            &mut entries,
                             actor,
                             timestamp_epoch_ms,
                         );
 
                         if let Some(ref path) = wal_path
-                            && let Err(e) = rewrite_wal_file(path, entries) {
+                            && let Err(e) = rewrite_wal_file(path, entries.as_slice()) {
                                 log::error!(
                                     "failed to rewrite compacted WAL for stream={}: {}",
                                     stream_key,

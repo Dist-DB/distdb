@@ -2100,7 +2100,7 @@ fn persist_entity_snapshot(
         .entity(&normalized_entity_id)
         .ok_or_else(|| format!("entity '{}' not found in catalog", normalized_entity_id))?;
 
-    let payload = bincode::serialize(&entity)
+    let payload = common::helpers::bincode_compat::serialize(&entity)
         .map_err(|_| "failed to serialize entity snapshot".to_string())?;
 
     let mut file = Vec::with_capacity(HEADER_SIZE + payload.len());

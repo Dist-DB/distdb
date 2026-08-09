@@ -53,8 +53,8 @@
             },
         };
 
-        let encoded = bincode::serialize(&result).expect("query result should serialize");
-        let decoded: QueryResult = bincode::deserialize(&encoded).expect("query result should deserialize");
+        let encoded = common::helpers::bincode_compat::serialize(&result).expect("query result should serialize");
+        let decoded: QueryResult = common::helpers::bincode_compat::deserialize(&encoded).expect("query result should deserialize");
 
         assert_eq!(decoded, result);
     }
@@ -69,13 +69,13 @@
             reason: QueryCacheBypassReason::UnsupportedShape,
         };
 
-        let miss_encoded = bincode::serialize(&miss).expect("cache miss should serialize");
+        let miss_encoded = common::helpers::bincode_compat::serialize(&miss).expect("cache miss should serialize");
         let miss_decoded: QueryCacheObservation =
-            bincode::deserialize(&miss_encoded).expect("cache miss should deserialize");
+            common::helpers::bincode_compat::deserialize(&miss_encoded).expect("cache miss should deserialize");
         assert_eq!(miss_decoded, miss);
 
-        let bypassed_encoded = bincode::serialize(&bypassed).expect("cache bypass should serialize");
+        let bypassed_encoded = common::helpers::bincode_compat::serialize(&bypassed).expect("cache bypass should serialize");
         let bypassed_decoded: QueryCacheObservation =
-            bincode::deserialize(&bypassed_encoded).expect("cache bypass should deserialize");
+            common::helpers::bincode_compat::deserialize(&bypassed_encoded).expect("cache bypass should deserialize");
         assert_eq!(bypassed_decoded, bypassed);
     }

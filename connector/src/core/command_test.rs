@@ -10,9 +10,9 @@
             },
         );
 
-        let bytes = bincode::serialize(&req).expect("request should serialize");
+        let bytes = common::helpers::bincode_compat::serialize(&req).expect("request should serialize");
         let decoded: ConnectorRequest =
-            bincode::deserialize(&bytes).expect("request should deserialize");
+            common::helpers::bincode_compat::deserialize(&bytes).expect("request should deserialize");
 
         assert_eq!(decoded, req);
     }

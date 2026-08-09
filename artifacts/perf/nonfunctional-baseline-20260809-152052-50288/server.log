@@ -1,0 +1,653 @@
+Distdb server (www.distdb.com)
+Copyright (c) 2026 Sam Colak. All rights reserved.
+[2026-08-09T13:20:53Z INFO  server] tls enrollment succeeded via tls-server=127.0.0.1:19443 sans=localhost,127.0.0.1
+[2026-08-09T13:20:53Z INFO  server] loaded p2p tls material from tls-server=127.0.0.1:19443 extra_sans=localhost,127.0.0.1
+[2026-08-09T13:20:53Z INFO  server] starting server node_id=perf-baseline-node with runtime config: data_dir=/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288, listen_addr=127.0.0.1, port=19401, tls=required, ca_root=false, services=affinity.replication,p2p.discovery,sql.query
+[2026-08-09T13:20:53Z INFO  server::core::app::state] node data directory: /Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288/perf-baseline-node
+[2026-08-09T13:20:53Z INFO  server::core::app::state] server app created for node_id=perf-baseline-node
+[2026-08-09T13:20:53Z INFO  server] connector request listener bound at 127.0.0.1:19401
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Load next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::app::lifecycle] initialized default system catalog database='main'
+[2026-08-09T13:20:53Z INFO  server::core::app::lifecycle] catalog replay complete catalogs=1 tables=0 transactions=0 elapsed_ms=0
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Ready next=Indexing
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap mode materialize_non_primary=false preload_accessors_on_bootstrap=false preload_accessor_max_live_rows=150000 warm_equality_cache_on_bootstrap=false non_primary_field_allowlist=<none> non_primary_index_allowlist=<none>
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::runtime_index] runtime index bootstrap complete tables=0 indexes=0 live_rows=0 elapsed_ms=0
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=6959545634f300eb previous=Indexing next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::app::state] server bootstrap complete for node_id=perf-baseline-node data_dir=/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/perf/nonfunctional-baseline-20260809-152052-50288/perf-baseline-node catalogs=1 tables=0 load_catalogs_ms=1 replay_catalog_wal_ms=0 runtime_index_bootstrap_ms=0 total_ms=2
+[2026-08-09T13:20:53Z INFO  server] server runtime initialized for node=perf-baseline-node with 2 active WAL worker(s) and 1 probe records
+[2026-08-09T13:20:53Z INFO  server] connector bootstrap gate opened; server is ready to accept requests
+[2026-08-09T13:20:53Z INFO  server] server process is running; press Ctrl+C to shutdown
+[2026-08-09T13:20:53Z INFO  server] connector peer connected from 127.0.0.1:62719 (active_connections=1)
+[2026-08-09T13:20:53Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62719 (attempt=1 elapsed_ms=4 counters: attempts=1 success=1 failure=0 eof_failure=0)
+[2026-08-09T13:20:53Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:53Z INFO  server] connector peer disconnected from 127.0.0.1:62719 (active_connections=0)
+[2026-08-09T13:20:53Z INFO  server] connector peer connected from 127.0.0.1:62720 (active_connections=1)
+[2026-08-09T13:20:53Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62720 (attempt=2 elapsed_ms=2 counters: attempts=2 success=2 failure=0 eof_failure=0)
+[2026-08-09T13:20:53Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=0840568abacd8454 previous=Load next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::catalog] database catalog status changed: database_id=0840568abacd8454 previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Load next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::wal] WAL worker started for stream=98e9846cc98f64ee (replayed 0 record(s) from disk)
+[2026-08-09T13:20:53Z INFO  serverlib::engine::wal] WAL worker started for stream=f96e8a46c9dc0d42 (replayed 0 record(s) from disk)
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: runtime index rebuild table=events reason=insert_unique_fast_path_cold_index rebuild_count=1
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=4 finalize_ms=0 total_ms=4
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=6 finalize_ms=0 total_ms=6
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z WARN  serverlib::engine::database::runtime_index] runtime index snapshot save skipped table=events reason=wal fingerprint changed after snapshot write
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=3 finalize_ms=0 total_ms=3
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=4 finalize_ms=0 total_ms=4
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=2 finalize_ms=0 total_ms=3
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=4 finalize_ms=0 total_ms=4
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=4 finalize_ms=0 total_ms=4
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=4 finalize_ms=0 total_ms=4
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=3 finalize_ms=0 total_ms=4
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=4 finalize_ms=0 total_ms=4
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:53Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=4 finalize_ms=0 total_ms=5
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62720 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62737 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62737 (attempt=3 elapsed_ms=2 counters: attempts=3 success=3 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62737 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62738 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62738 (attempt=4 elapsed_ms=2 counters: attempts=4 success=4 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62738 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62739 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62739 (attempt=5 elapsed_ms=2 counters: attempts=5 success=5 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62739 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62740 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62740 (attempt=6 elapsed_ms=2 counters: attempts=6 success=6 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62740 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62741 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62741 (attempt=7 elapsed_ms=2 counters: attempts=7 success=7 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62741 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62742 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62742 (attempt=8 elapsed_ms=2 counters: attempts=8 success=8 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62742 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62743 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62743 (attempt=9 elapsed_ms=2 counters: attempts=9 success=9 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62743 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62744 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62744 (attempt=10 elapsed_ms=2 counters: attempts=10 success=10 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server::core::mappings::query::core::mutation_ops] mutation diagnostics: table_write_guard table=events applied=true defer_finalize=false already_locked=false lock_ms=0 execute_ms=5 finalize_ms=0 total_ms=5
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62744 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62745 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62745 (attempt=11 elapsed_ms=2 counters: attempts=11 success=11 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62745 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62746 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62746 (attempt=12 elapsed_ms=2 counters: attempts=12 success=12 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62746 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62747 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62747 (attempt=13 elapsed_ms=1 counters: attempts=13 success=13 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62747 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62748 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62748 (attempt=14 elapsed_ms=2 counters: attempts=14 success=14 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:54Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62748 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62749 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62749 (attempt=15 elapsed_ms=2 counters: attempts=15 success=15 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  serverlib::engine::execution::access] accessor load source stats stream=0840568abacd8454:019fe6aef5fa7862bd143c622a52573e total_loads=1 snapshot_loads=0 checkpoint_loads=0 wal_scan_loads=1 avg_live_rows=132 max_live_rows=132 avg_elapsed_ms=18 max_elapsed_ms=18
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62749 (active_connections=0)
+[2026-08-09T13:20:54Z INFO  server] connector peer connected from 127.0.0.1:62750 (active_connections=1)
+[2026-08-09T13:20:54Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62750 (attempt=16 elapsed_ms=2 counters: attempts=16 success=16 failure=0 eof_failure=0)
+[2026-08-09T13:20:54Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:54Z INFO  server] connector peer disconnected from 127.0.0.1:62750 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62751 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62751 (attempt=17 elapsed_ms=2 counters: attempts=17 success=17 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62751 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62752 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62752 (attempt=18 elapsed_ms=2 counters: attempts=18 success=18 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62752 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62753 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62753 (attempt=19 elapsed_ms=2 counters: attempts=19 success=19 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62753 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62754 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62754 (attempt=20 elapsed_ms=2 counters: attempts=20 success=20 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62754 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62755 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62755 (attempt=21 elapsed_ms=2 counters: attempts=21 success=21 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62755 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62756 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62756 (attempt=22 elapsed_ms=2 counters: attempts=22 success=22 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62756 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62757 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62757 (attempt=23 elapsed_ms=2 counters: attempts=23 success=23 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62757 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62758 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62758 (attempt=24 elapsed_ms=2 counters: attempts=24 success=24 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62758 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62759 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62759 (attempt=25 elapsed_ms=2 counters: attempts=25 success=25 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62759 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62760 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62760 (attempt=26 elapsed_ms=2 counters: attempts=26 success=26 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62760 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62761 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62761 (attempt=27 elapsed_ms=2 counters: attempts=27 success=27 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62761 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62762 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62762 (attempt=28 elapsed_ms=2 counters: attempts=28 success=28 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62762 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62763 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62763 (attempt=29 elapsed_ms=2 counters: attempts=29 success=29 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62763 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62764 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62764 (attempt=30 elapsed_ms=2 counters: attempts=30 success=30 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62764 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62765 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62765 (attempt=31 elapsed_ms=2 counters: attempts=31 success=31 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62765 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62766 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62766 (attempt=32 elapsed_ms=2 counters: attempts=32 success=32 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62766 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62768 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62768 (attempt=33 elapsed_ms=2 counters: attempts=33 success=33 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62768 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62769 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62769 (attempt=34 elapsed_ms=2 counters: attempts=34 success=34 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62769 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62770 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62770 (attempt=35 elapsed_ms=2 counters: attempts=35 success=35 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62770 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62771 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62771 (attempt=36 elapsed_ms=2 counters: attempts=36 success=36 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62771 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62772 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62772 (attempt=37 elapsed_ms=2 counters: attempts=37 success=37 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62772 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62773 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62773 (attempt=38 elapsed_ms=2 counters: attempts=38 success=38 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62773 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62774 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62774 (attempt=39 elapsed_ms=2 counters: attempts=39 success=39 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62774 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62775 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62775 (attempt=40 elapsed_ms=2 counters: attempts=40 success=40 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62775 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62776 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62776 (attempt=41 elapsed_ms=2 counters: attempts=41 success=41 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62776 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62777 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62777 (attempt=42 elapsed_ms=2 counters: attempts=42 success=42 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62777 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62778 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62778 (attempt=43 elapsed_ms=2 counters: attempts=43 success=43 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62778 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62779 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62779 (attempt=44 elapsed_ms=2 counters: attempts=44 success=44 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62779 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62780 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62780 (attempt=45 elapsed_ms=2 counters: attempts=45 success=45 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62780 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62781 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62781 (attempt=46 elapsed_ms=2 counters: attempts=46 success=46 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:55Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62781 (active_connections=0)
+[2026-08-09T13:20:55Z INFO  server] connector peer connected from 127.0.0.1:62782 (active_connections=1)
+[2026-08-09T13:20:55Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62782 (attempt=47 elapsed_ms=2 counters: attempts=47 success=47 failure=0 eof_failure=0)
+[2026-08-09T13:20:55Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:55Z INFO  server] connector peer disconnected from 127.0.0.1:62782 (active_connections=0)
+[2026-08-09T13:20:56Z INFO  server] connector peer connected from 127.0.0.1:62783 (active_connections=1)
+[2026-08-09T13:20:56Z INFO  server] connector tls handshake succeeded for 127.0.0.1:62783 (attempt=48 elapsed_ms=2 counters: attempts=48 success=48 failure=0 eof_failure=0)
+[2026-08-09T13:20:56Z INFO  server::core::control::connector_handler] server peer discovery row peer_id=perf-baseline-node local_node_addrs=["/ip4/127.0.0.1/tcp/19401"] peer_addrs=["/ip4/127.0.0.1/tcp/19401"]
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Ready next=Lock
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Lock next=Sync
+[2026-08-09T13:20:56Z INFO  serverlib::engine::database::table] database entity status changed: kind=table entity_id=019fe6aef5fa7862bd143c622a52573e table_id=events previous=Sync next=Ready
+[2026-08-09T13:20:56Z INFO  server] connector peer disconnected from 127.0.0.1:62783 (active_connections=0)

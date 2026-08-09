@@ -424,7 +424,7 @@ pub fn encode_encrypted_row_payload_envelope(
 ) -> Result<Vec<u8>, String> {
     
     let envelope = EncryptedRowPayloadEnvelope::new(key_version, nonce, auth_tag, ciphertext);
-    bincode::serialize(&envelope).map_err(|err| err.to_string())
+    common::helpers::bincode_compat::serialize(&envelope).map_err(|err| err.to_string())
 
 }
 
@@ -432,12 +432,12 @@ pub fn decode_encrypted_row_payload_envelope(
     payload: &[u8],
 ) -> Result<Option<EncryptedRowPayloadEnvelope>, String> {
 
-    if let Ok(envelope) = bincode::deserialize::<EncryptedRowPayloadEnvelope>(payload)
+    if let Ok(envelope) = common::helpers::bincode_compat::deserialize::<EncryptedRowPayloadEnvelope>(payload)
         && looks_like_valid_encrypted_payload_envelope(&envelope) {
             return Ok(Some(envelope));
         }
 
-    let Ok(legacy_envelope) = bincode::deserialize::<LegacyEncryptedRowPayloadEnvelope>(payload) else {
+    let Ok(legacy_envelope) = common::helpers::bincode_compat::deserialize::<LegacyEncryptedRowPayloadEnvelope>(payload) else {
         return Ok(None);
     };
 
@@ -586,15 +586,15 @@ fn schema_ordinal_cache_entry(schema: &TableSchema) -> SchemaOrdinalCacheEntry {
 
 fn decode_compatible_row_payload_shape(payload: &[u8]) -> Result<CompatibleRowPayload, String> {
 
-    if let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
+    if let Ok(ordinal_row) = common::helpers::bincode_compat::deserialize::<OrdinalRowPayload>(payload) {
         return Ok(CompatibleRowPayload::Ordinal(ordinal_row));
     }
 
-    if let Ok(legacy_row) = bincode::deserialize::<HashMap<String, Vec<u8>>>(payload) {
+    if let Ok(legacy_row) = common::helpers::bincode_compat::deserialize::<HashMap<String, Vec<u8>>>(payload) {
         return Ok(CompatibleRowPayload::LegacyMap(legacy_row));
     }
 
-    if let Ok(legacy_ordinal_row) = bincode::deserialize::<Vec<Vec<u8>>>(payload) {
+    if let Ok(legacy_ordinal_row) = common::helpers::bincode_compat::deserialize::<Vec<Vec<u8>>>(payload) {
         return Ok(CompatibleRowPayload::LegacyOrdinal(legacy_ordinal_row));
     }
 
@@ -677,7 +677,7 @@ pub fn encode_row_payload(
     let ordered_field_names = field_names_by_ordinal(schema);
 
     if ordered_field_names.is_empty() && !row_map.is_empty() {
-        return bincode::serialize(row_map).map_err(|err| err.to_string());
+        return common::helpers::bincode_compat::serialize(row_map).map_err(|err| err.to_string());
     }
 
     let payload = ordered_field_names
@@ -699,7 +699,7 @@ pub fn encode_row_payload(
         })
         .collect::<OrdinalRowPayload>();
 
-    bincode::serialize(&payload).map_err(|err| err.to_string())
+    common::helpers::bincode_compat::serialize(&payload).map_err(|err| err.to_string())
 
 }
 

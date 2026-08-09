@@ -15,7 +15,7 @@ impl ServerApp {
 
     pub fn encode_user_credential_wal_payload(credential: &UserCredential) -> Result<Vec<u8>, String> {
         
-        let encoded = bincode::serialize(credential)
+        let encoded = common::helpers::bincode_compat::serialize(credential)
             .map_err(|err| format!("failed to encode user credential WAL payload: {}", err))?;
 
         let mut payload = Vec::with_capacity(USER_CREDENTIAL_WAL_PREFIX.len() + encoded.len());
@@ -32,7 +32,7 @@ impl ServerApp {
             return Err("user credential WAL payload prefix mismatch".to_string());
         };
 
-        bincode::deserialize(encoded)
+        common::helpers::bincode_compat::deserialize(encoded)
             .map_err(|err| format!("failed to decode user credential WAL payload: {}", err))
 
     }
@@ -84,7 +84,7 @@ impl ServerApp {
 
     pub fn encode_account_acl_wal_payload(entry: &AccountAclEntry) -> Result<Vec<u8>, String> {
 
-        let encoded = bincode::serialize(entry)
+        let encoded = common::helpers::bincode_compat::serialize(entry)
             .map_err(|err| format!("failed to encode ACL WAL payload: {}", err))?;
 
         let mut payload = Vec::with_capacity(ACCOUNT_ACL_WAL_PREFIX.len() + encoded.len());
@@ -101,7 +101,7 @@ impl ServerApp {
             return Err("ACL WAL payload prefix mismatch".to_string());
         };
 
-        bincode::deserialize(encoded)
+        common::helpers::bincode_compat::deserialize(encoded)
             .map_err(|err| format!("failed to decode ACL WAL payload: {}", err))
 
     }
