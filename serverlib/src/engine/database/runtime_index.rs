@@ -2164,7 +2164,7 @@ fn runtime_index_materialize_non_primary() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 
 }
 

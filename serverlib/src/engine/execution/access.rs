@@ -177,7 +177,7 @@ static EQUALITY_PROBE_RESULT_CACHE: OnceLock<Mutex<EqualityProbeResultCacheScope
 type EqualityProbeResultCacheTableMap = AHashMap<EqualityProbeCacheKey, EqualityProbeCacheEntry>;
 type EqualityProbeResultCacheScopeMap = AHashMap<(usize, String), EqualityProbeResultCacheTableMap>;
 
-const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE: usize = 0;
+const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE: usize = 256;
 const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_ROWS: usize = 10_000;
 const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -535,7 +535,7 @@ fn disable_accessor_row_cache() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 
 }
 
