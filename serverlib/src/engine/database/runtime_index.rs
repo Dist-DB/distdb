@@ -1905,27 +1905,20 @@ fn rebuild_bootstrap_indexes_from_live_rows(
     let chunk_rows = runtime_index_bootstrap_index_build_chunk_rows();
 
     for index in tracked_indexes {
+        let state = store.index_mut_for_table(table_stream_id, &index.index_id.0);
+        state.index = Some(index.clone());
 
-        let mut entries = AHashSet::with_capacity(live_rows.len());
-        let mut row_refs = if index.is_unique_key() {
-            Some(AHashMap::with_capacity(live_rows.len()))
-        } else {
-            None
-        };
+        // Rebuild directly into index state to avoid temporary duplicate key
+        // structures during bootstrap (set + row-ref map + final map).
+        state.entries.clear();
+        state.reserve_entries(live_rows.len());
 
         for live_rows_chunk in live_rows.chunks(chunk_rows) {
             for (row_id, row_map) in live_rows_chunk {
                 let key = index_value_tuple(index, row_map);
-                if let Some(row_refs) = row_refs.as_mut() {
-                    row_refs.insert(key.clone(), *row_id);
-                }
-                entries.insert(key);
+                state.insert_with_row_ref(key, Some(*row_id));
             }
         }
-
-        let state = store.index_mut_for_table(table_stream_id, &index.index_id.0);
-        state.index = Some(index.clone());
-        state.rebuild_with_row_refs(entries, row_refs.unwrap_or_default());
 
     }
 
