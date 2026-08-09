@@ -2704,6 +2704,13 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
             let mut committed_groups = AHashSet::with_capacity(records.len() / 8 + 1);
             let mut aborted_groups = AHashSet::with_capacity(records.len() / 8 + 1);
 
+            let available_workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            let apply_workers = std::cmp::min(available_workers, live_row_apply_max_workers());
+            let should_parallel_apply =
+                apply_workers > 1 && records.len() >= LIVE_ROW_APPLY_PARALLEL_MIN_RECORDS;
+
             for record in records {
                 match record.kind {
                     TransactionKind::WriteCommit => {
@@ -2720,35 +2727,83 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                 }
             }
 
-            for record in records {
-                if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
-                    continue;
+            if should_parallel_apply {
+
+                for chunk in records.chunks(LIVE_ROW_APPLY_PARALLEL_CHUNK_SIZE) {
+
+                    let decoded_chunk = decode_live_row_chunk(
+                        chunk,
+                        schema,
+                        &committed_groups,
+                        &aborted_groups,
+                        apply_workers,
+                    );
+
+                    let mut decoded_iter = decoded_chunk.into_iter().peekable();
+
+                    for (offset, record) in chunk.iter().enumerate() {
+                        match record.kind {
+
+                            TransactionKind::Insert | TransactionKind::Update => {
+                                if let Some((decoded_offset, _)) = decoded_iter.peek()
+                                    && *decoded_offset == offset
+                                    && let Some((_, row_map)) = decoded_iter.next()
+                                    && row_matches_equality_filters(&row_map, equality_filters)
+                                {
+                                    row_order.push(record.id.0);
+                                    live_rows.insert(record.id.0, row_map);
+                                }
+                            },
+
+                            TransactionKind::Delete => {
+                                if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                                    continue;
+                                }
+
+                                if let Some(refid) = record.refid {
+                                    live_rows.remove(&refid.0);
+                                }
+                            },
+
+                            _ => {}
+                        }
+                    }
+
                 }
 
-                match record.kind {
-                    TransactionKind::Insert | TransactionKind::Update => {
-                        let Some(payload) = record.payload_logical() else {
-                            continue;
-                        };
+            } else {
 
-                        let Ok(row_map) = decode_row_payload(schema, payload) else {
-                            continue;
-                        };
+                for record in records {
+                    if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                        continue;
+                    }
 
-                        if row_matches_equality_filters(&row_map, equality_filters) {
-                            row_order.push(record.id.0);
-                            live_rows.insert(record.id.0, row_map);
-                        }
-                    },
+                    match record.kind {
+                        TransactionKind::Insert | TransactionKind::Update => {
+                            let Some(payload) = record.payload_logical() else {
+                                continue;
+                            };
 
-                    TransactionKind::Delete => {
-                        if let Some(refid) = record.refid {
-                            live_rows.remove(&refid.0);
-                        }
-                    },
+                            let Ok(row_map) = decode_row_payload(schema, payload) else {
+                                continue;
+                            };
 
-                    _ => {}
+                            if row_matches_equality_filters(&row_map, equality_filters) {
+                                row_order.push(record.id.0);
+                                live_rows.insert(record.id.0, row_map);
+                            }
+                        },
+
+                        TransactionKind::Delete => {
+                            if let Some(refid) = record.refid {
+                                live_rows.remove(&refid.0);
+                            }
+                        },
+
+                        _ => {}
+                    }
                 }
+
             }
 
             row_order
