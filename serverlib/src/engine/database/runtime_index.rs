@@ -706,12 +706,16 @@ impl RuntimeIndexStore {
         lookup_key: &[Vec<u8>],
     ) -> Option<(&'a str, &'a RuntimeIndexState)> {
 
+        let normalized_index_id = common::normalize_identifier!(index_id);
+
         self.indexes
             .iter()
             .filter_map(|(scoped_id, state)| {
                 scoped_id
                     .rsplit_once("::")
-                    .filter(|(_, scoped_index_id)| *scoped_index_id == index_id)
+                    .filter(|(_, scoped_index_id)| {
+                        common::normalize_identifier!(scoped_index_id) == normalized_index_id
+                    })
                     .map(|(scope_id, _)| (scope_id, state))
             })
             .find(|(_, state)| state.contains(lookup_key))
@@ -720,12 +724,16 @@ impl RuntimeIndexStore {
 
     pub fn has_scoped_index_state(&self, index_id: &str) -> bool {
 
+        let normalized_index_id = common::normalize_identifier!(index_id);
+
         self.indexes
             .keys()
             .any(|scoped_id| {
                 scoped_id
                     .rsplit_once("::")
-                    .map(|(_, scoped_index_id)| scoped_index_id == index_id)
+                    .map(|(_, scoped_index_id)| {
+                        common::normalize_identifier!(scoped_index_id) == normalized_index_id
+                    })
                     .unwrap_or(false)
             })
 
