@@ -45,6 +45,8 @@ pub(crate) struct RuntimeIndexSnapshotIndex {
     pub(crate) index_id: String,
     pub(crate) entries: Vec<Vec<Vec<u8>>>,
     #[serde(default)]
+    pub(crate) row_refs_by_entry: Vec<u64>,
+    #[serde(default)]
     pub(crate) row_refs: Vec<(Vec<Vec<u8>>, u64)>,
 }
 

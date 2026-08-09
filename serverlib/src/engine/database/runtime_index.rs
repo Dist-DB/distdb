@@ -1146,23 +1146,40 @@ impl RuntimeIndexStore {
                         state.entries.clear();
                         state.reserve_entries(snapshot_index.entries.len());
 
-                        let row_refs_lookup = if index.is_unique_key() {
-                            Some(
-                                snapshot_index
-                                    .row_refs
-                                    .iter()
-                                    .map(|(key, row_ref)| (key, *row_ref))
-                                    .collect::<AHashMap<_, _>>()
-                            )
+                        if index.is_unique_key()
+                            && snapshot_index.row_refs_by_entry.len() == snapshot_index.entries.len()
+                        {
+                            for (key, packed_row_ref) in snapshot_index
+                                .entries
+                                .iter()
+                                .zip(snapshot_index.row_refs_by_entry.iter())
+                            {
+                                let row_ref = if *packed_row_ref == 0 {
+                                    None
+                                } else {
+                                    Some(packed_row_ref.saturating_sub(1))
+                                };
+                                state.insert_with_row_ref(key.clone(), row_ref);
+                            }
                         } else {
-                            None
-                        };
+                            let row_refs_lookup = if index.is_unique_key() {
+                                Some(
+                                    snapshot_index
+                                        .row_refs
+                                        .iter()
+                                        .map(|(key, row_ref)| (key, *row_ref))
+                                        .collect::<AHashMap<_, _>>()
+                                )
+                            } else {
+                                None
+                            };
 
-                        for key in &snapshot_index.entries {
-                            let row_ref = row_refs_lookup
-                                .as_ref()
-                                .and_then(|lookup| lookup.get(key).copied());
-                            state.insert_with_row_ref(key.clone(), row_ref);
+                            for key in &snapshot_index.entries {
+                                let row_ref = row_refs_lookup
+                                    .as_ref()
+                                    .and_then(|lookup| lookup.get(key).copied());
+                                state.insert_with_row_ref(key.clone(), row_ref);
+                            }
                         }
                     }
 
@@ -1929,21 +1946,25 @@ fn snapshot_indexes_for_table(
                 )
             })?;
 
+        let mut entries = Vec::with_capacity(state.entries.len());
+        let mut row_refs_by_entry = Vec::with_capacity(state.entries.len());
+
+        for (key, row_ref) in &state.entries {
+            if let Some(decoded_key) = decode_runtime_index_entry_key(key) {
+                entries.push(decoded_key);
+                let packed_row_ref = unpack_row_ref(*row_ref)
+                    .and_then(|row_ref| row_ref.checked_add(1))
+                    .unwrap_or(0);
+                row_refs_by_entry.push(packed_row_ref);
+            }
+        }
+
         indexes.push(RuntimeIndexSnapshotIndex {
             index_id: index.index_id.0.clone(),
-            entries: state
-                .entries
-                .keys()
-                .filter_map(|key| decode_runtime_index_entry_key(key))
-                .collect::<Vec<_>>(),
-            row_refs: state
-                .entries
-                .iter()
-                .filter_map(|(key, row_ref)| {
-                    let decoded_key = decode_runtime_index_entry_key(key)?;
-                    unpack_row_ref(*row_ref).map(|row_ref| (decoded_key, row_ref))
-                })
-                .collect(),
+            entries,
+            row_refs_by_entry,
+            // Keep legacy field for backward compatibility; new snapshots prefer row_refs_by_entry.
+            row_refs: Vec::new(),
         });
     }
 
