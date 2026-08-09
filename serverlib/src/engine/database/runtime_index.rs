@@ -286,7 +286,7 @@ fn spawn_background_accessor_prewarm_from_checkpoint(
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
-    entries: AHashMap<Vec<Vec<u8>>, Option<NonZeroU64>>,
+    entries: AHashMap<Vec<u8>, Option<NonZeroU64>>,
 }
 
 fn pack_row_ref(row_ref: u64) -> Option<NonZeroU64> {
@@ -299,6 +299,14 @@ fn unpack_row_ref(row_ref: Option<NonZeroU64>) -> Option<u64> {
     row_ref.map(|row_ref| row_ref.get().saturating_sub(1))
 }
 
+fn encode_runtime_index_entry_key(key: &[Vec<u8>]) -> Option<Vec<u8>> {
+    common::helpers::bincode_compat::serialize(&key).ok()
+}
+
+fn decode_runtime_index_entry_key(key: &[u8]) -> Option<Vec<Vec<u8>>> {
+    common::helpers::bincode_compat::deserialize::<Vec<Vec<u8>>>(key).ok()
+}
+
 impl RuntimeIndexState {
 
     pub fn new() -> Self {
@@ -306,7 +314,9 @@ impl RuntimeIndexState {
     }
 
     pub fn contains(&self, pk_val: &[Vec<u8>]) -> bool {
-        self.entries.contains_key(pk_val)
+        encode_runtime_index_entry_key(pk_val)
+            .as_ref()
+            .is_some_and(|encoded| self.entries.contains_key(encoded))
     }
 
     pub fn insert(&mut self, pk_val: Vec<Vec<u8>>) {
@@ -314,6 +324,10 @@ impl RuntimeIndexState {
     }
 
     pub fn insert_with_row_ref(&mut self, pk_val: Vec<Vec<u8>>, row_ref: Option<u64>) {
+        let Some(encoded_key) = encode_runtime_index_entry_key(&pk_val) else {
+            return;
+        };
+
         let stored_row_ref = if self
             .index
             .as_ref()
@@ -325,11 +339,13 @@ impl RuntimeIndexState {
             None
         };
 
-        self.entries.insert(pk_val, stored_row_ref);
+        self.entries.insert(encoded_key, stored_row_ref);
     }
 
     pub fn remove(&mut self, pk_val: &[Vec<u8>]) {
-        self.entries.remove(pk_val);
+        if let Some(encoded_key) = encode_runtime_index_entry_key(pk_val) {
+            self.entries.remove(&encoded_key);
+        }
     }
 
     pub fn cardinality(&self) -> usize {
@@ -341,7 +357,10 @@ impl RuntimeIndexState {
     }
 
     pub fn rebuild(&mut self, entries: AHashSet<Vec<Vec<u8>>>) {
-        self.entries = entries.into_iter().map(|key| (key, None)).collect();
+        self.entries = entries
+            .into_iter()
+            .filter_map(|key| encode_runtime_index_entry_key(&key).map(|encoded| (encoded, None)))
+            .collect();
     }
 
     pub fn rebuild_with_row_refs(
@@ -352,7 +371,8 @@ impl RuntimeIndexState {
         row_refs.retain(|key, _| entries.contains(key));
         self.entries = entries
             .into_iter()
-            .map(|key| {
+            .filter_map(|key| {
+                let encoded = encode_runtime_index_entry_key(&key)?;
                 let row_ref = row_refs.get(&key).copied();
                 let stored_row_ref = if self
                     .index
@@ -363,13 +383,14 @@ impl RuntimeIndexState {
                 } else {
                     None
                 };
-                (key, stored_row_ref)
+                Some((encoded, stored_row_ref))
             })
             .collect();
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
-        unpack_row_ref(self.entries.get(pk_val).copied().flatten())
+        let encoded_key = encode_runtime_index_entry_key(pk_val)?;
+        unpack_row_ref(self.entries.get(&encoded_key).copied().flatten())
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
@@ -1910,11 +1931,18 @@ fn snapshot_indexes_for_table(
 
         indexes.push(RuntimeIndexSnapshotIndex {
             index_id: index.index_id.0.clone(),
-            entries: state.entries.keys().cloned().collect::<Vec<_>>(),
+            entries: state
+                .entries
+                .keys()
+                .filter_map(|key| decode_runtime_index_entry_key(key))
+                .collect::<Vec<_>>(),
             row_refs: state
                 .entries
                 .iter()
-                .filter_map(|(key, row_ref)| unpack_row_ref(*row_ref).map(|row_ref| (key.clone(), row_ref)))
+                .filter_map(|(key, row_ref)| {
+                    let decoded_key = decode_runtime_index_entry_key(key)?;
+                    unpack_row_ref(*row_ref).map(|row_ref| (decoded_key, row_ref))
+                })
                 .collect(),
         });
     }
