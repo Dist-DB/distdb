@@ -4922,12 +4922,14 @@ fn score_equality_probe(source: EqualityProbeSource, filter_count: usize) -> u32
 
 fn score_in_list_probe(source: EqualityProbeSource, value_count: usize) -> u32 {
 
+    // Keep IN-list probes below indexed equality probes so exact keyed lookups
+    // win when both access paths are available.
     let base = match source {
-        EqualityProbeSource::ExistingIndex => 710,
-        EqualityProbeSource::TemporaryIndex => 570,
+        EqualityProbeSource::ExistingIndex => 620,
+        EqualityProbeSource::TemporaryIndex => 500,
     };
 
-    let value_bonus = 120u32.saturating_sub(value_count.min(120) as u32);
+    let value_bonus = 80u32.saturating_sub(value_count.min(80) as u32);
     base + value_bonus
 
 }

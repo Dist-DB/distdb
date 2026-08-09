@@ -471,6 +471,38 @@ fn plan_relation_access_selects_in_list_probe_when_available() {
 }
 
 #[test]
+fn plan_relation_access_prefers_indexed_equality_over_in_list() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    seed_users_table(&mut catalog, &wal);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let mut equality_filters = HashMap::new();
+    equality_filters.insert("email".to_string(), b"sam@example.com".to_vec());
+
+    let plan = plan_relation_access(
+        &table,
+        false,
+        equality_filters,
+        Some((
+            "id".to_string(),
+            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
+        )),
+        Vec::new(),
+        None,
+    );
+
+    assert!(matches!(
+        plan.strategy,
+        RelationAccessStrategy::EqualityProbe {
+            source: EqualityProbeSource::ExistingIndex,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn collect_indexable_range_filter_for_schema_extracts_bounds() {
     let schema = table_schema(vec![
         ("latitude", 1, FieldType::Float(64), FieldIndex::Indexed, false),
