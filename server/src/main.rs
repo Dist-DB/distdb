@@ -771,6 +771,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service_registry_for_listener = Arc::clone(&service_registry);
     let active_connections = Arc::new(AtomicUsize::new(0));
     let active_connections_for_listener = Arc::clone(&active_connections);
+    let connector_tls_handshake_attempts = Arc::new(AtomicUsize::new(0));
+    let connector_tls_handshake_success = Arc::new(AtomicUsize::new(0));
+    let connector_tls_handshake_failures = Arc::new(AtomicUsize::new(0));
+    let connector_tls_handshake_eof_failures = Arc::new(AtomicUsize::new(0));
+    let connector_tls_handshake_attempts_for_listener = Arc::clone(&connector_tls_handshake_attempts);
+    let connector_tls_handshake_success_for_listener = Arc::clone(&connector_tls_handshake_success);
+    let connector_tls_handshake_failures_for_listener = Arc::clone(&connector_tls_handshake_failures);
+    let connector_tls_handshake_eof_failures_for_listener = Arc::clone(&connector_tls_handshake_eof_failures);
     let local_node_for_listener = local_node.clone();
     let node_data_dir_for_listener = node_data_dir.clone();
     let tls_acceptor_for_listener = tls_acceptor.clone();
@@ -812,8 +820,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let node_data_dir = node_data_dir_for_listener.clone();
                     let tls_mode = tls_mode;
                     let ca_root_enabled = ca_root_enabled_for_listener;
+                    let tls_handshake_attempts = Arc::clone(&connector_tls_handshake_attempts_for_listener);
+                    let tls_handshake_success = Arc::clone(&connector_tls_handshake_success_for_listener);
+                    let tls_handshake_failures = Arc::clone(&connector_tls_handshake_failures_for_listener);
+                    let tls_handshake_eof_failures = Arc::clone(&connector_tls_handshake_eof_failures_for_listener);
 
                     tokio::spawn(async move {
+
+                        let handshake_started_at = std::time::Instant::now();
+                        let handshake_attempt = tls_handshake_attempts.fetch_add(1, Ordering::SeqCst) + 1;
 
                         let stream = match negotiate_connector_stream(
                             stream,
@@ -823,13 +838,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .await
                         {
-                            Ok(stream) => stream,
-                            Err(err) => {
-                                log::warn!(
-                                    "connector stream tls negotiation failed for {}: {}",
+                            Ok(stream) => {
+                                let handshake_success = tls_handshake_success.fetch_add(1, Ordering::SeqCst) + 1;
+                                let elapsed_ms = handshake_started_at.elapsed().as_millis();
+                                log::info!(
+                                    "connector tls handshake succeeded for {} (attempt={} elapsed_ms={} counters: attempts={} success={} failure={} eof_failure={})",
                                     peer_addr,
-                                    err
+                                    handshake_attempt,
+                                    elapsed_ms,
+                                    tls_handshake_attempts.load(Ordering::SeqCst),
+                                    handshake_success,
+                                    tls_handshake_failures.load(Ordering::SeqCst),
+                                    tls_handshake_eof_failures.load(Ordering::SeqCst),
                                 );
+                                stream
+                            }
+                            Err(err) => {
+                                let handshake_failures = tls_handshake_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                                let err_text = err.to_string();
+                                let is_eof = err_text.to_ascii_lowercase().contains("tls handshake eof");
+                                if is_eof {
+                                    tls_handshake_eof_failures.fetch_add(1, Ordering::SeqCst);
+                                }
+                                let elapsed_ms = handshake_started_at.elapsed().as_millis();
+                                log::warn!(
+                                    "connector stream tls negotiation failed for {}: {} (attempt={} elapsed_ms={} counters: attempts={} success={} failure={} eof_failure={})",
+                                    peer_addr,
+                                    err,
+                                    handshake_attempt,
+                                    elapsed_ms,
+                                    tls_handshake_attempts.load(Ordering::SeqCst),
+                                    tls_handshake_success.load(Ordering::SeqCst),
+                                    handshake_failures,
+                                    tls_handshake_eof_failures.load(Ordering::SeqCst),
+                                );
+
+                                let attempts_now = tls_handshake_attempts.load(Ordering::SeqCst);
+                                if attempts_now % 25 == 0 {
+                                    log::info!(
+                                        "connector tls handshake counter snapshot attempts={} success={} failure={} eof_failure={}",
+                                        attempts_now,
+                                        tls_handshake_success.load(Ordering::SeqCst),
+                                        tls_handshake_failures.load(Ordering::SeqCst),
+                                        tls_handshake_eof_failures.load(Ordering::SeqCst),
+                                    );
+                                }
                                 let remaining = active_connections.fetch_sub(1, Ordering::SeqCst) - 1;
                                 log::info!(
                                     "connector peer disconnected from {} (active_connections={})",
