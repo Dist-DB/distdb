@@ -1512,6 +1512,12 @@ fn rows_for_field_values(
     equality_filters: &HashMap<String, Vec<u8>>,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
+    if equality_filters.len() == 1
+        && let Some((field_name, lookup_value)) = equality_filters.iter().next()
+    {
+        return rows_for_field_value(entry, field_name, lookup_value);
+    }
+
     let mut seed_row_ids = None::<Vec<u64>>;
 
     for (field_name, lookup_value) in equality_filters {
@@ -2830,6 +2836,36 @@ fn equality_probe_direct_scan_enabled() -> bool {
 
 }
 
+fn should_use_direct_scan_for_equality_probe(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+) -> bool {
+
+    if !equality_probe_direct_scan_enabled() {
+        return false;
+    }
+
+    // If WAL is already loaded for this stream, direct scan stays fast and avoids
+    // extra checkpoint/snapshot restore overhead.
+    if wal.latest_transaction_id_if_loaded(table_stream_id).is_some() {
+        return true;
+    }
+
+    // For cold durable streams with a saved live-row checkpoint, prefer the
+    // accessor-miss restore path to avoid first-query full WAL replay.
+    if wal.stream_mode(table_stream_id) == WalStreamMode::Durable
+        && let Some(data_dir) = wal.data_dir_path()
+        && load_live_row_count_checkpoint(&data_dir, table_stream_id, table_id, schema).is_some()
+    {
+        return false;
+    }
+
+    true
+
+}
+
 fn row_matches_equality_filters(
     row_map: &HashMap<String, Vec<u8>>,
     equality_filters: &HashMap<String, Vec<u8>>,
@@ -3238,7 +3274,7 @@ pub fn load_live_rows_by_equality_filters(
         return rows;
     }
 
-    if equality_probe_direct_scan_enabled() {
+    if should_use_direct_scan_for_equality_probe(wal, table_stream_id, table_id, schema) {
         return load_live_rows_by_equality_filters_direct_wal_scan(
             wal,
             table_stream_id,
