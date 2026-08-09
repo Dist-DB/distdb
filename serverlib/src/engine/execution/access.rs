@@ -4294,6 +4294,27 @@ fn load_live_rows_for_accessor_miss(
         && let Some((latest_tx_id, live_rows)) =
             load_live_row_checkpoint_rows(&data_dir, table_stream_id, table_id, schema)
     {
+        let wal_latest_tx_id = wal
+            .latest_transaction_id(table_stream_id)
+            .map(|tx| tx.0)
+            .unwrap_or(0);
+
+        if wal_latest_tx_id > latest_tx_id {
+            log::warn!(
+                "accessor miss load live-row checkpoint stale table={} stream={} checkpoint_latest_tx_id={} wal_latest_tx_id={} source=wal_scan",
+                table_id,
+                table_stream_id,
+                latest_tx_id,
+                wal_latest_tx_id,
+            );
+        } else if live_rows.is_empty() && wal_latest_tx_id > 0 {
+            log::warn!(
+                "accessor miss load live-row checkpoint mismatch table={} stream={} checkpoint_rows=0 wal_latest_tx_id={} source=wal_scan",
+                table_id,
+                table_stream_id,
+                wal_latest_tx_id,
+            );
+        } else {
         let elapsed_ms = started_at.elapsed().as_millis();
         if elapsed_ms >= 100 {
             log::info!(
@@ -4312,6 +4333,7 @@ fn load_live_rows_for_accessor_miss(
             elapsed_ms,
         );
         return (latest_tx_id, live_rows);
+        }
     }
 
     if warm_fields.is_empty()
