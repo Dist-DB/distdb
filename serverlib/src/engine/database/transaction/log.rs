@@ -10,6 +10,19 @@ pub trait TransactionLog {
     // When from is None, return all records for the WAL stream.
     fn since(&self, wal_id: &str, from: Option<TransactionId>) -> Vec<TransactionRecord>;
 
+    // Stream records after `from` (exclusive) without requiring callers to
+    // materialize a returned Vec unless they actually need ownership.
+    fn for_each_since<F>(&self, wal_id: &str, from: Option<TransactionId>, mut func: F)
+    where
+        F: FnMut(&TransactionRecord),
+    {
+        let records = self.since(wal_id, from);
+
+        for record in &records {
+            func(record);
+        }
+    }
+
     fn with_all_records<T, F>(&self, wal_id: &str, func: F) -> T
     where
         F: FnOnce(&[TransactionRecord]) -> T,
@@ -31,10 +44,15 @@ pub trait TransactionLog {
             return Vec::new();
         }
 
-        self.since(wal_id, from)
-            .into_iter()
-            .filter(|record| kinds.contains(&record.kind))
-            .collect()
+        let mut records = Vec::new();
+
+        self.for_each_since(wal_id, from, |record| {
+            if kinds.contains(&record.kind) {
+                records.push(record.clone());
+            }
+        });
+
+        records
             
     }
 

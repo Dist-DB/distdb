@@ -976,6 +976,38 @@ impl TransactionLog for ConcurrentWalManager {
 
     }
 
+    fn for_each_since<F>(&self, wal_id: &str, from: Option<TransactionId>, mut func: F)
+    where
+        F: FnMut(&TransactionRecord),
+    {
+
+        let stream_key = match obfuscated_stream_key(wal_id) {
+            Ok(k) => k,
+            Err(_) => return,
+        };
+
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
+
+        let entries = match self.stream_entries_handle(&stream_key) {
+            Some(entries) => entries,
+            None => return,
+        };
+
+        let entries = match entries.lock() {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        let start_idx = from
+            .map(|min_id| first_record_index_after_id(entries.as_slice(), min_id))
+            .unwrap_or(0);
+
+        for record in &entries[start_idx..] {
+            func(record);
+        }
+
+    }
+
     fn with_all_records<T, F>(&self, wal_id: &str, func: F) -> T
     where
         F: FnOnce(&[TransactionRecord]) -> T,
