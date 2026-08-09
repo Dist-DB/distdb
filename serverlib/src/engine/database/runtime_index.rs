@@ -1909,6 +1909,39 @@ fn load_bootstrap_live_rows(
     let checkpoint_elapsed_ms = checkpoint_started_at.elapsed().as_millis();
 
     if let Some(checkpoint) = checkpoint_rows {
+
+        if checkpoint.live_rows.is_empty()
+            && let Some((wal_size_bytes, _)) = wal_fingerprint
+            && wal_size_bytes > 0
+        {
+            let wal_probe_started_at = Instant::now();
+            let wal_rows = load_live_rows_in_place(
+                wal,
+                table_stream_id,
+                &table.schema,
+            );
+
+            if !wal_rows.is_empty() {
+                let wal_probe_elapsed_ms = wal_probe_started_at.elapsed().as_millis();
+
+                log::warn!(
+                    "runtime index bootstrap live-row checkpoint mismatch table={} stream={} checkpoint_rows=0 wal_rows={} checkpoint_ms={} wal_probe_ms={} source=wal",
+                    table.table_id,
+                    table_stream_id,
+                    wal_rows.len(),
+                    checkpoint_elapsed_ms,
+                    wal_probe_elapsed_ms,
+                );
+
+                return (
+                    fallback_latest_tx_id,
+                    wal_rows,
+                    "wal",
+                    checkpoint_elapsed_ms.saturating_add(wal_probe_elapsed_ms),
+                );
+            }
+        }
+
         return (
             checkpoint.latest_tx_id,
             checkpoint.live_rows,
