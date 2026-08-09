@@ -711,12 +711,21 @@ impl RuntimeIndexStore {
         self.indexes
             .iter()
             .filter_map(|(scoped_id, state)| {
-                scoped_id
-                    .rsplit_once("::")
-                    .filter(|(_, scoped_index_id)| {
-                        common::normalize_identifier!(scoped_index_id) == normalized_index_id
-                    })
-                    .map(|(scope_id, _)| (scope_id, state))
+                if let Some((scope_id, scoped_index_id)) = scoped_id.rsplit_once("::") {
+                    if common::normalize_identifier!(scoped_index_id) == normalized_index_id {
+                        return Some((scope_id, state));
+                    }
+                }
+
+                let normalized_scoped_id = common::normalize_identifier!(scoped_id);
+                if normalized_scoped_id == normalized_index_id
+                    || normalized_scoped_id.ends_with(&normalized_index_id)
+                    || normalized_scoped_id.contains(&normalized_index_id)
+                {
+                    return Some((scoped_id.as_str(), state));
+                }
+
+                None
             })
             .find(|(_, state)| state.contains(lookup_key))
 
@@ -729,12 +738,16 @@ impl RuntimeIndexStore {
         self.indexes
             .keys()
             .any(|scoped_id| {
-                scoped_id
-                    .rsplit_once("::")
-                    .map(|(_, scoped_index_id)| {
-                        common::normalize_identifier!(scoped_index_id) == normalized_index_id
-                    })
-                    .unwrap_or(false)
+                if let Some((_, scoped_index_id)) = scoped_id.rsplit_once("::") {
+                    if common::normalize_identifier!(scoped_index_id) == normalized_index_id {
+                        return true;
+                    }
+                }
+
+                let normalized_scoped_id = common::normalize_identifier!(scoped_id);
+                normalized_scoped_id == normalized_index_id
+                    || normalized_scoped_id.ends_with(&normalized_index_id)
+                    || normalized_scoped_id.contains(&normalized_index_id)
             })
 
     }
