@@ -197,6 +197,7 @@ fn equality_probe_result_cache_max_entries_per_table() -> usize {
     std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
+    .filter(|value| *value > 0)
         .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE)
 
 }
@@ -527,15 +528,7 @@ fn accessor_cold_direct_scan_min_rows() -> usize {
 
 fn disable_accessor_row_cache() -> bool {
 
-    std::env::var("DISTDB_DISABLE_ACCESSOR_ROW_CACHE")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    false
 
 }
 
