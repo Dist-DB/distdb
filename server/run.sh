@@ -5,9 +5,9 @@ TLS_SERVER_ADDR="${TLS_SERVER_ADDR:-127.0.0.1:5443}"
 TLS_SANS="${TLS_SANS:-localhost}"
 
 # Unified startup profile switch:
-# - minimum (default): smallest memory footprint for bootstrap/runtime index.
-# - throughput: favors higher index warm-up and ingest throughput.
-DISTDB_PLATFORM_PROFILE="${DISTDB_PLATFORM_PROFILE:-minimum}"
+# - minimum: smallest memory footprint for bootstrap/runtime index.
+# - throughput (default): favors predictable warm query posture and ingest throughput.
+DISTDB_PLATFORM_PROFILE="${DISTDB_PLATFORM_PROFILE:-throughput}"
 
 # Backward compatibility for existing automation.
 # DISTDB_ENABLE_LOW_MEMORY_PROFILE=1 -> minimum

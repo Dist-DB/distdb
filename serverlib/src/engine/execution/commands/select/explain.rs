@@ -13,6 +13,44 @@ use crate::engine::execution::{
     relation_qualifier, SelectExecutionResult, join_condition_field_names
 };
 
+fn explain_table_scope_id<'a>(table_id: &'a str, table: Option<&'a DatabaseTable>) -> &'a str {
+    table
+        .and_then(|table| {
+            if table.entity_id.is_empty() {
+                None
+            } else {
+                Some(table.entity_id.as_str())
+            }
+        })
+        .unwrap_or(table_id)
+}
+
+fn format_lookup_key_part(part: &[u8]) -> String {
+    if part.len() == 8 {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(part);
+        let decoded = i64::from_le_bytes(bytes);
+        if decoded >= 0 {
+            return decoded.to_string();
+        }
+    }
+
+    if let Ok(text) = std::str::from_utf8(part)
+        && text.chars().all(|ch| !ch.is_control())
+    {
+        return text.to_string();
+    }
+
+    let mut hex = String::with_capacity(part.len() * 2 + 2);
+    hex.push_str("0x");
+    for byte in part {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{:02x}", byte);
+    }
+
+    hex
+}
+
 pub fn explain_select_plan_result(
     table_id: &str,
     filter_count: usize,
@@ -22,6 +60,8 @@ pub fn explain_select_plan_result(
     read_plan: &SelectReadPlan,
     table: Option<&DatabaseTable>,
 ) -> SelectExecutionResult {
+
+    let table_scope_id = explain_table_scope_id(table_id, table);
     
     let columns = vec![
         FieldDef {
@@ -140,14 +180,14 @@ pub fn explain_select_plan_result(
 
         if let Some((index, key)) = index_lookup {
 
-            let state = runtime_indexes.index_for_table(table_id, &index.index_id.0);
+            let state = runtime_indexes.index_for_table(table_scope_id, &index.index_id.0);
 
             let hit = state.map(|s| s.contains(key)).unwrap_or(false);
             let card = state.map(|s| s.cardinality()).unwrap_or(0);
 
             let key_text = key
                 .iter()
-                .map(|part| String::from_utf8_lossy(part).to_string())
+                .map(|part| format_lookup_key_part(part))
                 .collect::<Vec<_>>()
                 .join(",");
 
