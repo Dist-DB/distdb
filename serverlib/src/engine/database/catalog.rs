@@ -432,6 +432,7 @@ impl DatabaseCatalog {
     ) -> DatabaseResult<()> {
 
         let table_id = common::normalize_identifier!(table_id.into());
+
         self.register_table_with_entity_id(table_id.clone(), schema, entity_id)?;
 
         self.with_table_mut(&table_id, |table| {
@@ -447,6 +448,7 @@ impl DatabaseCatalog {
             table.complete_sync()?;
             Ok(())
         })?;
+
         self.bump_schema_epoch();
 
         Ok(())
@@ -466,7 +468,9 @@ impl DatabaseCatalog {
         });
 
         self.entity_handles().iter().find_map(|(key, handle)| {
+
             handle.read(|entity| {
+
                 if let Some((left, right, name)) = relationship_target
                     && let DatabaseEntity::Relationship(relationship) = entity
                     && relationship.left_table_id == left
@@ -481,7 +485,9 @@ impl DatabaseCatalog {
                 }
 
                 None
+            
             })
+
         })
 
     }
@@ -1330,6 +1336,7 @@ impl DatabaseCatalog {
                 };
 
                 self.with_table_mut(&table_id, |table| {
+
                     if !index
                         .field_names
                         .iter()
@@ -1966,6 +1973,7 @@ impl DatabaseCatalog {
     }
 
     pub fn olap_view(&self, view_id: &str) -> Option<DatabaseOlapView> {
+
         self.with_entity_read(view_id, |entity| match entity {
             DatabaseEntity::OlapView(view) => Some(view.clone()),
             _ => None,
@@ -2151,11 +2159,13 @@ impl DatabaseCatalog {
     }
 
     pub fn view_schema(&self, view_id: &str) -> Option<TableSchema> {
+        
         self.with_entity_read(view_id, |entity| match entity {
             DatabaseEntity::View(view) => Some(view.schema.clone()),
             _ => None,
         })
         .flatten()
+
     }
 
     /// Returns `true` for tables, `false` for views. Used at the query

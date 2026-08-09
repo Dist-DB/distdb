@@ -264,6 +264,11 @@ fn spawn_background_accessor_prewarm_from_checkpoint(
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
+    entries: AHashMap<Vec<Vec<u8>>, Option<u64>>,
+}
+
+struct RuntimeIndexRebuildItem {
+    index_id: String,
     entries: AHashSet<Vec<Vec<u8>>>,
     row_refs: AHashMap<Vec<Vec<u8>>, u64>,
 }
@@ -275,7 +280,7 @@ impl RuntimeIndexState {
     }
 
     pub fn contains(&self, pk_val: &[Vec<u8>]) -> bool {
-        self.entries.contains(pk_val)
+        self.entries.contains_key(pk_val)
     }
 
     pub fn insert(&mut self, pk_val: Vec<Vec<u8>>) {
@@ -283,20 +288,21 @@ impl RuntimeIndexState {
     }
 
     pub fn insert_with_row_ref(&mut self, pk_val: Vec<Vec<u8>>, row_ref: Option<u64>) {
-        if let Some(row_ref) = row_ref
-            && self
-                .index
-                .as_ref()
-                .map(|index| index.is_unique_key())
-                .unwrap_or(true)
+        let stored_row_ref = if self
+            .index
+            .as_ref()
+            .map(|index| index.is_unique_key())
+            .unwrap_or(true)
         {
-            self.row_refs.insert(pk_val.clone(), row_ref);
-        }
-        self.entries.insert(pk_val);
+            row_ref
+        } else {
+            None
+        };
+
+        self.entries.insert(pk_val, stored_row_ref);
     }
 
     pub fn remove(&mut self, pk_val: &[Vec<u8>]) {
-        self.row_refs.remove(pk_val);
         self.entries.remove(pk_val);
     }
 
@@ -309,8 +315,7 @@ impl RuntimeIndexState {
     }
 
     pub fn rebuild(&mut self, entries: AHashSet<Vec<Vec<u8>>>) {
-        self.entries = entries;
-        self.row_refs.clear();
+        self.entries = entries.into_iter().map(|key| (key, None)).collect();
     }
 
     pub fn rebuild_with_row_refs(
@@ -319,20 +324,26 @@ impl RuntimeIndexState {
         mut row_refs: AHashMap<Vec<Vec<u8>>, u64>,
     ) {
         row_refs.retain(|key, _| entries.contains(key));
-        self.entries = entries;
-        self.row_refs = if self
-            .index
-            .as_ref()
-            .is_some_and(|index| !index.is_unique_key())
-        {
-            AHashMap::new()
-        } else {
-            row_refs
-        };
+        self.entries = entries
+            .into_iter()
+            .map(|key| {
+                let row_ref = row_refs.get(&key).copied();
+                let stored_row_ref = if self
+                    .index
+                    .as_ref()
+                    .is_some_and(|index| index.is_unique_key())
+                {
+                    row_ref
+                } else {
+                    None
+                };
+                (key, stored_row_ref)
+            })
+            .collect();
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
-        self.row_refs.get(pk_val).copied()
+        self.entries.get(pk_val).copied().flatten()
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
@@ -562,6 +573,24 @@ impl RuntimeIndexStore {
         self.indexes.get(&scoped)
     }
 
+    pub fn find_scoped_index_state_for_lookup<'a>(
+        &'a self,
+        index_id: &str,
+        lookup_key: &[Vec<u8>],
+    ) -> Option<(&'a str, &'a RuntimeIndexState)> {
+
+        self.indexes
+            .iter()
+            .filter_map(|(scoped_id, state)| {
+                scoped_id
+                    .rsplit_once("::")
+                    .filter(|(_, scoped_index_id)| *scoped_index_id == index_id)
+                    .map(|(scope_id, _)| (scope_id, state))
+            })
+            .find(|(_, state)| state.contains(lookup_key))
+
+    }
+
     #[expect(clippy::should_implement_trait, reason="Index access by string ID, not by reference")]
     pub fn index_mut(&mut self, index_id: &str) -> &mut RuntimeIndexState {
         
@@ -624,8 +653,7 @@ impl RuntimeIndexStore {
         let index_id = index.index_id.0.clone();
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index),
-            entries: AHashSet::new(),
-            row_refs: AHashMap::new(),
+            entries: AHashMap::new(),
         });
 
     }
@@ -639,8 +667,7 @@ impl RuntimeIndexStore {
         let index_id = scoped_index_id(table_scope_id, &index.index_id.0);
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index.clone()),
-            entries: AHashSet::new(),
-            row_refs: AHashMap::new(),
+            entries: AHashMap::new(),
         });
 
     }
@@ -1057,7 +1084,7 @@ impl RuntimeIndexStore {
                     let restored_index_count = restored.len();
                     let restored_entry_count = restored
                         .iter()
-                        .map(|(_, entries, _)| entries.len())
+                        .map(|item| item.entries.len())
                         .sum::<usize>();
 
                     if restored_index_count != tracked_indexes.len() {
@@ -1070,13 +1097,13 @@ impl RuntimeIndexStore {
                         );
                     }
 
-                    for (index_id, entries, row_refs) in restored {
-                        let state = self.index_mut_for_table(&table_stream_id, &index_id);
+                    for item in restored {
+                        let state = self.index_mut_for_table(&table_stream_id, &item.index_id);
                         state.index = tracked_indexes
                             .iter()
-                            .find(|index| index.index_id.0 == index_id)
+                            .find(|index| index.index_id.0 == item.index_id)
                             .cloned();
-                        state.rebuild_with_row_refs(entries, row_refs);
+                        state.rebuild_with_row_refs(item.entries, item.row_refs);
                     }
 
                     log::info!(
@@ -1316,13 +1343,13 @@ impl RuntimeIndexStore {
                 let rebuilt = build_bootstrap_index_entries(&tracked_indexes, &live_rows);
                 let rebuild_elapsed_ms = rebuild_started_at.elapsed().as_millis();
 
-                for (index_id, entries, row_refs) in rebuilt {
-                    let state = self.index_mut_for_table(&table_stream_id, &index_id);
+                for item in rebuilt {
+                    let state = self.index_mut_for_table(&table_stream_id, &item.index_id);
                     state.index = tracked_indexes
                         .iter()
-                        .find(|index| index.index_id.0 == index_id)
+                        .find(|index| index.index_id.0 == item.index_id)
                         .cloned();
-                    state.rebuild_with_row_refs(entries, row_refs);
+                    state.rebuild_with_row_refs(item.entries, item.row_refs);
                 }
 
                 persist_live_row_checkpoint_if_from_wal(
@@ -1758,6 +1785,8 @@ fn persist_runtime_index_snapshot(
 
     let indexes = snapshot_indexes_for_table(store, table_stream_id, tracked_indexes)?;
 
+    let snapshot_path = RuntimeIndexSnapshotService::runtime_index_snapshot_path(data_dir, table_stream_id);
+
     RuntimeIndexSnapshotService::save_runtime_index_snapshot(
         data_dir,
         table,
@@ -1767,6 +1796,19 @@ fn persist_runtime_index_snapshot(
         wal_fingerprint,
         indexes,
     )?;
+
+    if !snapshot_path.exists() {
+        return Err(format!(
+            "snapshot write reported success but file missing at {}",
+            snapshot_path.display()
+        ));
+    }
+
+    log::info!(
+        "runtime index snapshot persisted table={} path={}",
+        table.table_id,
+        snapshot_path.display(),
+    );
 
     RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
         data_dir,
@@ -1801,11 +1843,11 @@ fn snapshot_indexes_for_table(
 
         indexes.push(RuntimeIndexSnapshotIndex {
             index_id: index.index_id.0.clone(),
-            entries: state.entries.iter().cloned().collect(),
+            entries: state.entries.keys().cloned().collect::<Vec<_>>(),
             row_refs: state
-                .row_refs
+                .entries
                 .iter()
-                .map(|(key, row_ref)| (key.clone(), *row_ref))
+                .filter_map(|(key, row_ref)| row_ref.map(|row_ref| (key.clone(), row_ref)))
                 .collect(),
         });
     }
@@ -1817,7 +1859,7 @@ fn snapshot_indexes_for_table(
 fn build_bootstrap_index_entries(
     tracked_indexes: &[DatabaseIndex],
     live_rows: &[(u64, HashMap<String, Vec<u8>>)],
-) -> Vec<(String, AHashSet<Vec<Vec<u8>>>, AHashMap<Vec<Vec<u8>>, u64>)> {
+) -> Vec<RuntimeIndexRebuildItem> {
 
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -1839,7 +1881,11 @@ fn build_bootstrap_index_entries(
                     row_refs.insert(key.clone(), *row_id);
                     entries.insert(key);
                 }
-                (index.index_id.0.clone(), entries, row_refs)
+                RuntimeIndexRebuildItem {
+                    index_id: index.index_id.0.clone(),
+                    entries,
+                    row_refs,
+                }
             })
             .collect();
 
@@ -1852,7 +1898,7 @@ fn build_bootstrap_index_entries(
 
     let chunk_size = tracked_indexes.len().div_ceil(workers);
 
-    let mut chunks = std::thread::scope(|scope| {
+    let rebuilt = std::thread::scope(|scope| {
 
         let mut handles = Vec::new();
 
@@ -1879,7 +1925,11 @@ fn build_bootstrap_index_entries(
                         row_refs.insert(key.clone(), *row_id);
                         entries.insert(key);
                     }
-                    chunk.push((index.index_id.0.clone(), entries, row_refs));
+                    chunk.push(RuntimeIndexRebuildItem {
+                        index_id: index.index_id.0.clone(),
+                        entries,
+                        row_refs,
+                    });
                 
                 }
                 
@@ -1889,34 +1939,28 @@ fn build_bootstrap_index_entries(
 
         }
 
-        let mut out = Vec::with_capacity(handles.len());
+        let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
         
         for handle in handles {
             if let Ok(chunk) = handle.join() {
-                out.push(chunk);
+                let (_, mut items) = chunk;
+                rebuilt.append(&mut items);
             }
         }
         
-        out
+        rebuilt
 
     });
-
-    chunks.sort_by_key(|(start, _)| *start);
-
-    let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
-
-    for (_, mut chunk) in chunks {
-        rebuilt.append(&mut chunk);
-    }
 
     rebuilt
 
 }
 
+#[expect(clippy::type_complexity, reason="returning per-index bootstrap state for rebuild")]
 fn build_snapshot_index_entries(
     tracked_indexes: &[DatabaseIndex],
     snapshot: &RuntimeIndexTableSnapshot,
-) -> Vec<(String, AHashSet<Vec<Vec<u8>>>, AHashMap<Vec<Vec<u8>>, u64>)> {
+) -> Vec<RuntimeIndexRebuildItem> {
 
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -1935,12 +1979,10 @@ fn build_snapshot_index_entries(
                     .indexes
                     .iter()
                     .find(|item| item.index_id == index.index_id.0)
-                    .map(|item| {
-                        (
-                            index.index_id.0.clone(),
-                            item.entries.iter().cloned().collect::<AHashSet<_>>(),
-                            item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
-                        )
+                    .map(|item| RuntimeIndexRebuildItem {
+                        index_id: index.index_id.0.clone(),
+                        entries: item.entries.iter().cloned().collect::<AHashSet<_>>(),
+                        row_refs: item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
                     })
 
             })
@@ -1954,7 +1996,7 @@ fn build_snapshot_index_entries(
 
     let chunk_size = tracked_indexes.len().div_ceil(workers);
 
-    let mut chunks = std::thread::scope(|scope| {
+    let rebuilt = std::thread::scope(|scope| {
         
         let mut handles = Vec::new();
 
@@ -1980,11 +2022,11 @@ fn build_snapshot_index_entries(
                         continue;
                     };
 
-                    chunk.push((
-                        index.index_id.0.clone(),
-                        item.entries.iter().cloned().collect::<AHashSet<_>>(),
-                        item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
-                    ));
+                    chunk.push(RuntimeIndexRebuildItem {
+                        index_id: index.index_id.0.clone(),
+                        entries: item.entries.iter().cloned().collect::<AHashSet<_>>(),
+                        row_refs: item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
+                    });
                 }
 
                 (start, chunk)
@@ -1993,25 +2035,18 @@ fn build_snapshot_index_entries(
 
         }
 
-        let mut out = Vec::with_capacity(handles.len());
+        let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
 
         for handle in handles {
             if let Ok(chunk) = handle.join() {
-                out.push(chunk);
+                let (_, mut items) = chunk;
+                rebuilt.append(&mut items);
             }
         }
 
-        out
+        rebuilt
         
     });
-
-    chunks.sort_by_key(|(start, _)| *start);
-
-    let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
-
-    for (_, mut chunk) in chunks {
-        rebuilt.append(&mut chunk);
-    }
 
     rebuilt
 

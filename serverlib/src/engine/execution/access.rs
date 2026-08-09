@@ -20,7 +20,10 @@ use crate::engine::database::row_payload::{
     decode_row_payload_if_field_equals_with_schema_cache,
     row_payload_schema_cache,
 };
-use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
+use crate::engine::database::schema::migration::{
+    compare_stored_field_values, convert_value_to_field_type, render_stored_field_value,
+    TypeConversionPolicy,
+};
 use crate::engine::sql::{compare_like_value, compare_row_value};
 use crate::{
     TransactionPayloadContext,
@@ -76,12 +79,53 @@ fn cache_live_row_count(
         .insert(table_id.to_string(), (latest_tx_id, count));
 }
 
+pub fn clear_cached_table_state(cache_scope_id: usize, table_id: &str, stream_id: &str) {
+
+    if let Some(cache) = LIVE_ROW_COUNT_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        if let Some(scope_cache) = guard.get_mut(&cache_scope_id) {
+            scope_cache.remove(table_id);
+            if scope_cache.is_empty() {
+                guard.remove(&cache_scope_id);
+            }
+        }
+    }
+
+    if let Some(cache) = EQUALITY_TABLE_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        if let Some(scope_cache) = guard.get_mut(&cache_scope_id) {
+            scope_cache.remove(table_id);
+            if scope_cache.is_empty() {
+                guard.remove(&cache_scope_id);
+            }
+        }
+    }
+
+    if let Some(cache) = EQUALITY_PROBE_RESULT_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        guard.remove(&(cache_scope_id, stream_id.to_string()));
+    }
+
+    if let Some(stats_map) = ACCESSOR_LOAD_SOURCE_STATS.get()
+        && let Ok(mut guard) = stats_map.lock()
+    {
+        guard.remove(stream_id);
+        if table_id != stream_id {
+            guard.remove(table_id);
+        }
+    }
+
+}
+
 const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_ROWS: usize = 250_000;
 const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_POSTINGS: usize = 50_000;
 const ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS: usize = 250_000;
 const ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS: usize = 150_000;
 const ACCESSOR_POSTINGS_PARALLEL_MIN_ROWS: usize = 200_000;
-const ACCESSOR_CACHE_MAX_ROWS_BYTES: usize = 128 * 1024 * 1024;
+const ACCESSOR_CACHE_MAX_ROWS_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 struct EqualityTableCacheEntry {
@@ -133,7 +177,7 @@ static EQUALITY_PROBE_RESULT_CACHE: OnceLock<Mutex<EqualityProbeResultCacheScope
 type EqualityProbeResultCacheTableMap = AHashMap<EqualityProbeCacheKey, EqualityProbeCacheEntry>;
 type EqualityProbeResultCacheScopeMap = AHashMap<(usize, String), EqualityProbeResultCacheTableMap>;
 
-const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE: usize = 16;
+const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE: usize = 0;
 const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_ROWS: usize = 10_000;
 const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -491,7 +535,7 @@ fn disable_accessor_row_cache() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 
 }
 
@@ -744,7 +788,7 @@ fn build_rows_by_id_from_snapshot(
     let chunks = split_vec_into_chunks(rows, chunk_size);
     let total_len = chunks.iter().map(|chunk| chunk.len()).sum();
 
-    let mut partials = std::thread::scope(|scope| {
+    let rows_by_id = std::thread::scope(|scope| {
 
         let mut handles = Vec::with_capacity(chunks.len());
 
@@ -758,22 +802,16 @@ fn build_rows_by_id_from_snapshot(
             }));
         }
 
-        let mut partials = Vec::with_capacity(handles.len());
+        let mut rows_by_id = AHashMap::with_capacity(total_len);
         for handle in handles {
             if let Ok(partial) = handle.join() {
-                partials.push(partial);
+                rows_by_id.extend(partial);
             }
         }
-        
-        partials
+
+        rows_by_id
 
     });
-
-    let mut rows_by_id = AHashMap::with_capacity(total_len);
-    
-    for partial in partials.drain(..) {
-        rows_by_id.extend(partial);
-    }
 
     rows_by_id
 
@@ -813,7 +851,7 @@ fn build_row_ids_by_field_value_from_snapshot(
 
     }
 
-    let mut partials = std::thread::scope(|scope| {
+    let row_ids_by_field_value = std::thread::scope(|scope| {
 
         let mut handles = Vec::with_capacity(postings_by_field.len());
 
@@ -827,21 +865,16 @@ fn build_row_ids_by_field_value_from_snapshot(
             }));
         }
 
-        let mut partials = Vec::with_capacity(handles.len());
+        let mut row_ids_by_field_value = AHashMap::with_capacity(handles.len());
         for handle in handles {
             if let Ok(partial) = handle.join() {
-                partials.push(partial);
+                row_ids_by_field_value.insert(partial.0, partial.1);
             }
         }
-        
-        partials
+
+        row_ids_by_field_value
 
     });
-
-    let mut row_ids_by_field_value = AHashMap::with_capacity(partials.len());
-    for (field_name, posting_map) in partials.drain(..) {
-        row_ids_by_field_value.insert(field_name, posting_map);
-    }
 
     row_ids_by_field_value
 
@@ -1232,7 +1265,7 @@ fn build_warm_equality_cache_parallel(
         chunks.push(chunk);
     }
 
-    let partials = std::thread::scope(|scope| {
+    let (rows_by_id, postings_by_field) = std::thread::scope(|scope| {
 
         let mut handles = Vec::with_capacity(chunks.len());
 
@@ -1264,34 +1297,28 @@ fn build_warm_equality_cache_parallel(
 
         }
 
-        let mut out = Vec::with_capacity(handles.len());
+        let mut rows_by_id = AHashMap::with_capacity(live_row_count);
+        let mut postings_by_field = (0..fields.len())
+            .map(|_| AHashMap::<Vec<u8>, Vec<u64>>::new())
+            .collect::<Vec<_>>();
+
         for handle in handles {
             if let Ok(partial) = handle.join() {
-                out.push(partial);
+                let (local_rows_by_id, local_postings_by_field) = partial;
+                rows_by_id.extend(local_rows_by_id);
+
+                for (field_idx, mut local_postings) in local_postings_by_field.into_iter().enumerate() {
+                    let global_postings = &mut postings_by_field[field_idx];
+                    for (value, mut row_ids) in local_postings.drain() {
+                        global_postings.entry(value).or_default().append(&mut row_ids);
+                    }
+                }
             }
         }
-        
-        out
+
+        (rows_by_id, postings_by_field)
 
     });
-
-    let mut rows_by_id = AHashMap::with_capacity(live_row_count);
-    let mut postings_by_field = (0..fields.len())
-        .map(|_| AHashMap::<Vec<u8>, Vec<u64>>::new())
-        .collect::<Vec<_>>();
-
-    for (local_rows_by_id, local_postings_by_field) in partials {
-
-        rows_by_id.extend(local_rows_by_id);
-
-        for (field_idx, mut local_postings) in local_postings_by_field.into_iter().enumerate() {
-            let global_postings = &mut postings_by_field[field_idx];
-            for (value, mut row_ids) in local_postings.drain() {
-                global_postings.entry(value).or_default().append(&mut row_ids);
-            }
-        }
-
-    }
 
     let row_ids_by_field_value = fields
         .iter()
@@ -5182,12 +5209,30 @@ fn load_live_row_by_runtime_index_row_ref(
         let row_map = decode_row_payload(schema, payload).ok()?;
 
         let row_value = row_map.get(field_name)?;
-        if row_value.as_slice() != lookup_value {
+        if compare_stored_field_values(row_value.as_slice(), lookup_value)
+            != std::cmp::Ordering::Equal
+        {
             return None;
         }
 
         Some((record.id.0, row_map))
     })?
+
+}
+
+fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
+
+    let mut variants = Vec::with_capacity(2);
+    variants.push(lookup_key.to_vec());
+
+    if lookup_key.len() == 1 {
+        let rendered = render_stored_field_value(&lookup_key[0]);
+        if rendered != lookup_key[0] {
+            variants.push(vec![rendered]);
+        }
+    }
+
+    variants
 
 }
 
@@ -5215,6 +5260,21 @@ where
             lookup_key,
         } => {
 
+            let lookup_key_variants = runtime_lookup_key_variants(lookup_key);
+
+            let runtime_index_state_with_scope = runtime_indexes
+                .index_for_table(table_stream_id, index_id)
+                .map(|state| (table_stream_id.to_string(), state))
+                .or_else(|| {
+                    lookup_key_variants
+                        .iter()
+                        .find_map(|key_variant| {
+                            runtime_indexes
+                                .find_scoped_index_state_for_lookup(index_id, key_variant)
+                                .map(|(scope_id, state)| (scope_id.to_string(), state))
+                        })
+                });
+
             let runtime_lookup_index_is_unique = table
                 .indexes
                 .values()
@@ -5240,38 +5300,59 @@ where
                 None
             };
 
-            if let Some(state) = runtime_indexes.index_for_table(table_stream_id, index_id) {
+            if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
 
                 if state.cardinality() == 0 {
                     log::debug!(
-                        "relation runtime index lookup table={} index_id={} state_cardinality=0 -> empty result",
+                        "relation runtime index lookup table={} index_id={} scope={} state_cardinality=0 -> empty result",
                         table.table_id,
                         index_id,
+                        runtime_index_scope_id,
                     );
                     return Vec::new();
                 }
 
-                if !state.contains(lookup_key) {
+                let matched_lookup_key = lookup_key_variants
+                    .iter()
+                    .find(|key_variant| state.contains(key_variant));
+
+                if matched_lookup_key.is_none() {
                     log::debug!(
-                        "relation runtime index lookup table={} index_id={} key_present=false -> empty result",
+                        "relation runtime index lookup table={} index_id={} scope={} key_present=false -> fallback_scan",
                         table.table_id,
                         index_id,
+                        runtime_index_scope_id,
                     );
-                    return Vec::new();
+
+                    if let Some(single_field_name) = single_field_name {
+                        return load_live_rows_by_equality(
+                            wal,
+                            &runtime_index_scope_id,
+                            &table.table_id,
+                            schema,
+                            single_field_name,
+                            &lookup_key[0],
+                        );
+                    }
+
+                    return load_live_rows(wal, &runtime_index_scope_id, &table.table_id, schema);
                 }
+
+                let matched_lookup_key = matched_lookup_key.expect("checked is_some");
 
                 log::debug!(
-                    "relation runtime index lookup table={} index_id={} key_present=true",
+                    "relation runtime index lookup table={} index_id={} scope={} key_present=true",
                     table.table_id,
                     index_id,
+                    runtime_index_scope_id,
                 );
 
                 if runtime_lookup_index_is_unique
                     && let Some(single_field_name) = single_field_name
-                    && let Some(row_ref) = state.row_ref(lookup_key)
+                    && let Some(row_ref) = state.row_ref(matched_lookup_key)
                     && let Some(row) = load_live_row_by_runtime_index_row_ref(
                         wal,
-                        table_stream_id,
+                        &runtime_index_scope_id,
                         schema,
                         single_field_name,
                         &lookup_key[0],
@@ -5279,20 +5360,35 @@ where
                     )
                 {
                     log::debug!(
-                        "relation runtime index lookup table={} index_id={} row_ref_direct=true",
+                        "relation runtime index lookup table={} index_id={} scope={} row_ref_direct=true",
                         table.table_id,
                         index_id,
+                        runtime_index_scope_id,
                     );
                     return vec![row];
                 }
 
                 if runtime_lookup_index_is_unique {
                     log::debug!(
-                        "relation runtime index lookup table={} index_id={} row_ref_direct=false reason=fallback_scan",
+                        "relation runtime index lookup table={} index_id={} scope={} row_ref_direct=false reason=fallback_scan",
                         table.table_id,
                         index_id,
+                        runtime_index_scope_id,
                     );
                 }
+
+                if let Some(single_field_name) = single_field_name {
+                    return load_live_rows_by_equality(
+                        wal,
+                        &runtime_index_scope_id,
+                        &table.table_id,
+                        schema,
+                        single_field_name,
+                        &lookup_key[0],
+                    );
+                }
+
+                return load_live_rows(wal, &runtime_index_scope_id, &table.table_id, schema);
 
             } else {
                 log::debug!(
@@ -5315,19 +5411,6 @@ where
                 return load_live_rows(wal, table_stream_id, &table.table_id, schema);
 
             }
-
-            if let Some(single_field_name) = single_field_name {
-                return load_live_rows_by_equality(
-                    wal,
-                    table_stream_id,
-                    &table.table_id,
-                    schema,
-                    single_field_name,
-                    &lookup_key[0],
-                );
-            }
-
-            load_live_rows(wal, table_stream_id, &table.table_id, schema)
 
         },
 
@@ -5356,14 +5439,30 @@ where
                     .values()
                     .find(|index| index.index_id.0 == index_id)
                     .is_some_and(|index| index.is_unique_key())
-                && let Some(state) = runtime_indexes.index_for_table(table_stream_id, &index_id)
             {
                 let key = vec![lookup_value.clone()];
+                let key_variants = runtime_lookup_key_variants(&key);
 
-                if let Some(row_ref) = state.row_ref(&key)
+                let runtime_index_state_with_scope = runtime_indexes
+                    .index_for_table(table_stream_id, &index_id)
+                    .map(|state| (table_stream_id.to_string(), state))
+                    .or_else(|| {
+                        key_variants
+                            .iter()
+                            .find_map(|key_variant| {
+                                runtime_indexes
+                                    .find_scoped_index_state_for_lookup(&index_id, key_variant)
+                                    .map(|(scope_id, state)| (scope_id.to_string(), state))
+                            })
+                    });
+
+                if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
+                if let Some(row_ref) = key_variants
+                    .iter()
+                    .find_map(|key_variant| state.row_ref(key_variant))
                     && let Some((row_id, row_map)) = load_live_row_by_runtime_index_row_ref(
                         wal,
-                        table_stream_id,
+                        &runtime_index_scope_id,
                         schema,
                         field_name,
                         lookup_value,
@@ -5377,18 +5476,21 @@ where
                     })
                 {
                     log::debug!(
-                        "relation equality probe table={} field={} row_ref_direct=true",
+                        "relation equality probe table={} field={} scope={} row_ref_direct=true",
                         table.table_id,
                         field_name,
+                        runtime_index_scope_id,
                     );
                     return vec![(row_id, row_map)];
                 }
 
                 log::debug!(
-                    "relation equality probe table={} field={} row_ref_direct=false reason=fallback_scan",
+                    "relation equality probe table={} field={} scope={} row_ref_direct=false reason=fallback_scan",
                     table.table_id,
                     field_name,
+                    runtime_index_scope_id,
                 );
+                }
             }
 
             if equality_filters.len() > 1 {

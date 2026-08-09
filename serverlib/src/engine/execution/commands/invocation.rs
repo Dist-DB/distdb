@@ -2,6 +2,7 @@ use crate::{
     ConcurrentWalManager, DatabaseCatalog, DatabaseError, DatabaseStoredProcedure,
     DatabaseTrigger, RuntimeIndexStore, TriggerEventKind, TriggerTiming,
 };
+use crate::engine::execution::access::clear_cached_table_state;
 use crate::engine::sql::{
     evaluate_expression_sql_to_bytes, parse_create_procedure_action_statements,
     parse_if_else_end_plan_from_create_procedure_statement,
@@ -297,7 +298,9 @@ pub fn cleanup_temporary_tables(
 
         }
 
-        let stream_id = stream_id.unwrap_or(table_id);
+        let stream_id = stream_id.unwrap_or_else(|| table_id.clone());
+
+        clear_cached_table_state(wal.cache_scope_id(), &table_id, &stream_id);
 
         if wal.stream_mode(&stream_id) == crate::WalStreamMode::Ephemeral {
             wal.clear_stream_records(&stream_id)

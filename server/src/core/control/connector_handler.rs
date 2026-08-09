@@ -30,7 +30,7 @@ use peerlib::{
     PeerNode,
     AffinityJoinResponse, DataSnapshotResponse, SchemaCatalogResponse, ServiceMessage,
     TableLockState, TransactionsSinceResponse,
-    ServerP2pEvent, ServerP2pRuntime,
+    ServerP2pRuntime,
 };
 use serverlib::core::cluster::NodeDescriptor;
 use serverlib::{
@@ -59,6 +59,7 @@ const SERVER_SHOW_CATALOG_WORKERS_SQL: &str = "__distdb_show_catalog_workers__";
 const MAX_SEEN_NODE_ANNOUNCES: usize = 8192;
 const MAX_SESSION_ROUTE_ENTRIES: usize = 65536;
 const MAX_SERVICE_REGISTRY_ENTRIES: usize = 8192;
+const MAX_CATALOG_WORKERS: usize = 2048;
 const CONNECTOR_IDLE_READ_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_IDLE_READ_TIMEOUT_SECS";
 const CONNECTOR_IDLE_READ_TIMEOUT_SECS_DEFAULT: u64 = 120;
 static BOOTSTRAP_STATUS_STARTED_AT: OnceLock<Instant> = OnceLock::new();
@@ -161,14 +162,21 @@ async fn rollback_active_session_transaction(
             locked: false,
         };
 
-        let mut runtime = p2p_runtime.lock().await;
-        
-        for peer in runtime.network().discover_peers() {
-            for peer_addr in peer.addrs {
-                let _ = runtime
-                    .network_mut()
-                    .send_message(&peer_addr, ServiceMessage::TableLockState(payload.clone()));
-            }
+        let peer_addrs = {
+            let runtime = p2p_runtime.lock().await;
+            runtime
+                .network()
+                .discover_peers()
+                .into_iter()
+                .flat_map(|peer| peer.addrs)
+                .collect::<Vec<_>>()
+        };
+
+        for peer_addr in peer_addrs {
+            let _ = send_service_message_to_addr(
+                &peer_addr,
+                &ServiceMessage::TableLockState(payload.clone()),
+            );
         }
     
     }
@@ -529,6 +537,27 @@ impl CatalogDispatcher {
     async fn worker_for_catalog(&self, catalog_id: &str) -> CatalogWorkerHandle {
 
         let mut workers = self.workers.lock().await;
+
+        if workers.len() >= MAX_CATALOG_WORKERS {
+            let routes = self.session_routes.lock().await;
+            let routed_catalogs = routes.values().cloned().collect::<HashSet<_>>();
+
+            workers.retain(|existing_catalog_id, handle| {
+                let is_routed = routed_catalogs.contains(existing_catalog_id);
+                let is_idle = handle.queue_depth.load(Ordering::SeqCst) == 0
+                    && handle.active.load(Ordering::SeqCst) == 0;
+                is_routed || !is_idle
+            });
+
+            if workers.len() >= MAX_CATALOG_WORKERS {
+                log::warn!(
+                    "catalog worker registry remains at capacity after idle eviction capacity={} current={}",
+                    MAX_CATALOG_WORKERS,
+                    workers.len()
+                );
+            }
+        }
+
         if let Some(worker) = workers.get(catalog_id) {
             return worker.clone();
         }
@@ -2172,15 +2201,26 @@ pub async fn handle_connector_stream(
 
             let message_for_fanout = message.clone();
             let mut runtime = p2p_runtime.lock().await;
-            
-            if let Err(err) = runtime.handle_event(ServerP2pEvent::MessageReceived {
-                from_peer_id: peer_addr.clone(),
-                message,
-            }) {
-                log::debug!("server p2p message handling failed from {}: {}", peer_addr, err);
-            }
 
             if let ServiceMessage::ServiceAnnounce(announcement) = &message_for_fanout {
+
+                let targets = node_announce_fanout_targets(
+                    &node_descriptor_to_peer_node(&local_node),
+                    &runtime.network().discover_peers(),
+                );
+
+                for addr in targets {
+                    if let Err(err) = send_service_message_to_addr(
+                        &addr,
+                        &ServiceMessage::ServiceAnnounce(announcement.clone()),
+                    ) {
+                        log::debug!(
+                            "server service announce send failed to {}: {}",
+                            addr,
+                            err
+                        );
+                    }
+                }
 
                 {
                     let mut services = service_registry.lock().await;

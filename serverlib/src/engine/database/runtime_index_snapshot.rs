@@ -24,6 +24,7 @@ const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
 const LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrcnt";
 const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";
 const LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS: usize = 150_000;
+const LIVE_ROW_CHECKPOINT_MAX_BYTES_DEFAULT: u64 = 256 * 1024 * 1024;
 const ACCESSOR_SNAPSHOT_PERSIST_ROWS_DEFAULT: bool = false;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -113,6 +114,16 @@ impl RuntimeIndexSnapshotService {
 
     }
 
+    fn live_row_checkpoint_max_bytes() -> u64 {
+
+        std::env::var("DISTDB_LIVE_ROW_CHECKPOINT_MAX_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(LIVE_ROW_CHECKPOINT_MAX_BYTES_DEFAULT)
+
+    }
+
     pub(crate) fn wal_stream_fingerprint(data_dir: &Path, table_stream_id: &str) -> Option<(u64, u64)> {
 
         let path = Self::wal_stream_path(data_dir, table_stream_id);
@@ -138,6 +149,22 @@ impl RuntimeIndexSnapshotService {
     ) -> Option<(u64, Vec<(u64, HashMap<String, Vec<u8>>)>)> {
 
         let checkpoint_path = Self::live_row_checkpoint_path(data_dir, table_stream_id);
+        let metadata = fs::metadata(&checkpoint_path).ok()?;
+
+        if metadata.len() > Self::live_row_checkpoint_max_bytes() {
+            let _ = fs::remove_file(&checkpoint_path);
+
+            log::debug!(
+                "live-row checkpoint restore skipped table={} stream={} reason=oversized_checkpoint file_bytes={} max_bytes={}",
+                table_id,
+                table_stream_id,
+                metadata.len(),
+                Self::live_row_checkpoint_max_bytes(),
+            );
+
+            return None;
+        }
+
         let bytes = read_bytes(&checkpoint_path).ok()?;
 
         if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
@@ -193,28 +220,83 @@ impl RuntimeIndexSnapshotService {
         let bytes = read_bytes(&snapshot_path).ok()?;
 
         if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
+            log::debug!(
+                "runtime index snapshot restore miss table={} stream={} reason=invalid_header_or_empty",
+                table.table_id,
+                table_stream_id,
+            );
             return None;
         }
 
         let (snapshot, legacy_plain_encoding): (RuntimeIndexTableSnapshot, bool) =
-            decode_snapshot_payload(&bytes[HEADER_SIZE..])?;
+            match decode_snapshot_payload(&bytes[HEADER_SIZE..]) {
+                Some(decoded) => decoded,
+                None => {
+                    let _ = fs::remove_file(&snapshot_path);
 
-        let schema_fingerprint = table_schema_fingerprint(table)?;
+                    log::warn!(
+                        "runtime index snapshot file removed after decode failure table={} stream={} path={}",
+                        table.table_id,
+                        table_stream_id,
+                        snapshot_path.display(),
+                    );
+
+                    log::debug!(
+                        "runtime index snapshot restore miss table={} stream={} reason=decode_failed",
+                        table.table_id,
+                        table_stream_id,
+                    );
+                    return None;
+                }
+            };
+
+        let schema_fingerprint = match table_schema_fingerprint(table) {
+            Some(fingerprint) => fingerprint,
+            None => {
+                log::debug!(
+                    "runtime index snapshot restore miss table={} stream={} reason=schema_fingerprint_unavailable",
+                    table.table_id,
+                    table_stream_id,
+                );
+                return None;
+            }
+        };
 
         if snapshot.table_id != table.table_id
             || snapshot.schema_fingerprint != schema_fingerprint
         {
+            log::debug!(
+                "runtime index snapshot restore miss table={} stream={} reason=table_or_schema_mismatch snapshot_table={} snapshot_schema={} current_schema={}",
+                table.table_id,
+                table_stream_id,
+                snapshot.table_id,
+                snapshot.schema_fingerprint,
+                schema_fingerprint,
+            );
             return None;
         }
 
-        #[expect(clippy::question_mark, reason="we want to return None if the wal fingerprint is unavailable")]
         let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
+            log::debug!(
+                "runtime index snapshot restore miss table={} stream={} reason=wal_fingerprint_unavailable",
+                table.table_id,
+                table_stream_id,
+            );
             return None;
         };
 
         if snapshot.wal_size_bytes != wal_size_bytes
             || snapshot.wal_modified_epoch_ms != wal_modified_epoch_ms
         {
+            log::debug!(
+                "runtime index snapshot restore miss table={} stream={} reason=wal_fingerprint_mismatch snapshot=({}, {}) current=({}, {})",
+                table.table_id,
+                table_stream_id,
+                snapshot.wal_size_bytes,
+                snapshot.wal_modified_epoch_ms,
+                wal_size_bytes,
+                wal_modified_epoch_ms,
+            );
             return None;
         }
 
@@ -228,6 +310,19 @@ impl RuntimeIndexSnapshotService {
             .iter()
             .any(|index| !snapshot_index_ids.contains(index.index_id.0.as_str()))
         {
+            let missing = tracked_indexes
+                .iter()
+                .filter(|index| !snapshot_index_ids.contains(index.index_id.0.as_str()))
+                .map(|index| index.index_id.0.clone())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            log::debug!(
+                "runtime index snapshot restore miss table={} stream={} reason=tracked_index_missing missing_indexes={}",
+                table.table_id,
+                table_stream_id,
+                missing,
+            );
             return None;
         }
 
@@ -420,6 +515,18 @@ impl RuntimeIndexSnapshotService {
         live_rows: &[(u64, HashMap<String, Vec<u8>>) ],
     ) -> Result<(), String> {
 
+        if live_rows.len() > Self::live_row_checkpoint_compress_max_rows() {
+            log::debug!(
+                "live-row checkpoint save skipped table={} stream={} live_rows={} max_rows={}",
+                table.table_id,
+                table_stream_id,
+                live_rows.len(),
+                Self::live_row_checkpoint_compress_max_rows(),
+            );
+
+            return Ok(());
+        }
+
         let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
             .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
 
@@ -577,7 +684,7 @@ impl RuntimeIndexSnapshotService {
 
     }
 
-    fn runtime_index_snapshot_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
+    pub(crate) fn runtime_index_snapshot_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
         let table_key = stable_id(&[table_stream_id]);
         let stem = format!("{}_{}", RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX, table_key);
 

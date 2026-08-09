@@ -8,6 +8,7 @@ use crate::{
     collect_indexable_range_filters_for_schema,
     relation_access_plan_diagnostics,
 };
+use crate::engine::database::schema::migration::render_stored_field_value;
 
 use crate::engine::execution::{
     relation_qualifier, SelectExecutionResult, join_condition_field_names
@@ -91,7 +92,14 @@ fn explain_row_ref_hydration_hint(
                 return "fallback_non_unique_index".to_string();
             }
 
-            let Some(state) = runtime_indexes.index_for_table(table_scope_id, index_id) else {
+            let Some(state) = runtime_indexes
+                .index_for_table(table_scope_id, index_id)
+                .or_else(|| {
+                    runtime_indexes
+                        .find_scoped_index_state_for_lookup(index_id, lookup_key)
+                        .map(|(_, state)| state)
+                })
+            else {
                 return "fallback_missing_runtime_state".to_string();
             };
 
@@ -136,11 +144,18 @@ fn explain_row_ref_hydration_hint(
                 return "fallback_non_unique_index".to_string();
             }
 
-            let Some(state) = runtime_indexes.index_for_table(table_scope_id, &index_id) else {
+            let key = vec![lookup_value.clone()];
+
+            let Some(state) = runtime_indexes
+                .index_for_table(table_scope_id, &index_id)
+                .or_else(|| {
+                    runtime_indexes
+                        .find_scoped_index_state_for_lookup(&index_id, &key)
+                        .map(|(_, state)| state)
+                })
+            else {
                 return "fallback_missing_runtime_state".to_string();
             };
-
-            let key = vec![lookup_value.clone()];
 
             if state.row_ref(&key).is_some() {
                 "eligible_direct_row_ref".to_string()
@@ -151,6 +166,22 @@ fn explain_row_ref_hydration_hint(
 
         _ => "n/a".to_string(),
     }
+}
+
+fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
+
+    let mut variants = Vec::with_capacity(2);
+    variants.push(lookup_key.to_vec());
+
+    if lookup_key.len() == 1 {
+        let rendered = render_stored_field_value(&lookup_key[0]);
+        if rendered != lookup_key[0] {
+            variants.push(vec![rendered]);
+        }
+    }
+
+    variants
+
 }
 
 pub fn explain_select_plan_result(
@@ -291,9 +322,23 @@ pub fn explain_select_plan_result(
 
         if let Some((index, key)) = index_lookup {
 
-            let state = runtime_indexes.index_for_table(table_scope_id, &index.index_id.0);
+            let key_variants = runtime_lookup_key_variants(key);
 
-            let hit = state.map(|s| s.contains(key)).unwrap_or(false);
+            let state = runtime_indexes
+                .index_for_table(table_scope_id, &index.index_id.0)
+                .or_else(|| {
+                    key_variants
+                        .iter()
+                        .find_map(|key_variant| {
+                            runtime_indexes
+                                .find_scoped_index_state_for_lookup(&index.index_id.0, key_variant)
+                                .map(|(_, state)| state)
+                        })
+                });
+
+            let hit = state
+                .map(|s| key_variants.iter().any(|key_variant| s.contains(key_variant)))
+                .unwrap_or(false);
             let card = state.map(|s| s.cardinality()).unwrap_or(0);
 
             let key_text = key

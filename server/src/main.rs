@@ -73,7 +73,7 @@ use peerlib::ServerP2pRuntime;
 use tlsserver::client::request_certificate_from_tls_server;
 use tlsserver::protocol::TlsCertificateRequest;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -83,6 +83,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rustls::TlsAcceptor;
+
+const MAX_CONNECTOR_IN_FLIGHT_CONNECTIONS: usize = 4096;
+const MAX_WSS_IN_FLIGHT_CONNECTIONS: usize = 4096;
 
 fn parse_tls_subject_alt_names_from_args(args: &[String]) -> Vec<String> {
 
@@ -242,8 +245,6 @@ async fn handle_wss_connection(
         let local_node = local_node_for_handler.clone();
 
         async move {
-            let mut session = session.lock().await;
-
             if let Some(response) = maybe_server_peer_discovery_response(
                 &request,
                 &p2p_runtime,
@@ -297,6 +298,8 @@ async fn handle_wss_connection(
             {
                 return Ok(response);
             }
+
+            let mut session = session.lock().await;
 
             if !session.authenticated {
                 let auth_outcome = match &request.command {
@@ -769,6 +772,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let service_registry_for_listener = Arc::clone(&service_registry);
+    let connector_connection_slots = Arc::new(Semaphore::new(MAX_CONNECTOR_IN_FLIGHT_CONNECTIONS));
+    let connector_connection_slots_for_listener = Arc::clone(&connector_connection_slots);
     let active_connections = Arc::new(AtomicUsize::new(0));
     let active_connections_for_listener = Arc::clone(&active_connections);
     let connector_tls_handshake_attempts = Arc::new(AtomicUsize::new(0));
@@ -797,6 +802,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match listener.accept().await {
 
                 Ok((stream, peer_addr)) => {
+
+                    let permit = match connector_connection_slots_for_listener
+                        .clone()
+                        .acquire_owned()
+                        .await
+                    {
+                        Ok(permit) => permit,
+                        Err(err) => {
+                            log::warn!(
+                                "connector connection slot acquire failed for {}: {}",
+                                peer_addr,
+                                err
+                            );
+                            continue;
+                        }
+                    };
                     
                     let connection_id =
                         active_connections_for_listener.fetch_add(1, Ordering::SeqCst) + 1;
@@ -826,6 +847,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let tls_handshake_eof_failures = Arc::clone(&connector_tls_handshake_eof_failures_for_listener);
 
                     tokio::spawn(async move {
+
+                        let _connection_permit = permit;
 
                         let handshake_started_at = std::time::Instant::now();
                         let handshake_attempt = tls_handshake_attempts.fetch_add(1, Ordering::SeqCst) + 1;
@@ -949,6 +972,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let node_data_dir_for_wss_listener = node_data_dir.clone();
         let p2p_runtime_for_wss_listener = Arc::clone(&p2p_runtime);
         let service_registry_for_wss_listener = Arc::clone(&service_registry);
+        let wss_connection_slots = Arc::new(Semaphore::new(MAX_WSS_IN_FLIGHT_CONNECTIONS));
+        let wss_connection_slots_for_listener = Arc::clone(&wss_connection_slots);
         let active_connections_for_wss_listener = Arc::clone(&active_connections);
         let local_node_for_wss_listener = local_node.clone();
         let tls_acceptor_for_wss_listener = tls_acceptor.clone();
@@ -957,6 +982,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 match wss_listener.accept().await {
                     Ok((stream, peer_addr)) => {
+
+                        let permit = match wss_connection_slots_for_listener
+                            .clone()
+                            .acquire_owned()
+                            .await
+                        {
+                            Ok(permit) => permit,
+                            Err(err) => {
+                                log::warn!(
+                                    "wss connection slot acquire failed for {}: {}",
+                                    peer_addr,
+                                    err
+                                );
+                                continue;
+                            }
+                        };
+
                         let connection_id =
                             active_connections_for_wss_listener.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -971,6 +1013,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let tls_acceptor = tls_acceptor_for_wss_listener.clone();
 
                         tokio::spawn(async move {
+                            let _connection_permit = permit;
                             let Some(tls_acceptor) = tls_acceptor else {
                                 log::warn!(
                                     "wss connection rejected for {}: tls acceptor missing",
@@ -1045,6 +1088,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bootstrap_ready.store(true, Ordering::SeqCst);
     log::info!("connector bootstrap gate opened; server is ready to accept requests");
 
+    let mut affinity_replication_task = None;
+
     if let Some(config) = &affinity_config {
         
         execute_affinity_join_sequence(
@@ -1057,14 +1102,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
         // Spawn replication task to execute sync phases
-        let _replication_task = spawn_affinity_replication_task(
+        affinity_replication_task = Some(spawn_affinity_replication_task(
             Arc::clone(&affinity_processor),
             Arc::clone(&affinity_storage),
             Arc::clone(&app),
             Arc::clone(&p2p_runtime),
             config.clone(),
             local_peer_node.clone(),
-        );
+        ));
 
     }
 
@@ -1074,6 +1119,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     p2p_heartbeat_task.abort();
     p2p_service_announce_task.abort();
+    if let Some(replication_task) = affinity_replication_task {
+        replication_task.abort();
+    }
 
     app.write().await.shutdown()?;
     drop(p2p_runtime);

@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
+const MAX_PENDING_P2P_MESSAGES_PER_QUEUE: usize = 8192;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerP2pEvent {
 
@@ -46,6 +48,24 @@ macro_rules! drain_pending_queue {
             self.$field.drain(..).collect()
         }
     };
+}
+
+fn push_pending_bounded<T>(
+    queue: &mut VecDeque<(String, T)>,
+    from_peer_id: String,
+    payload: T,
+    queue_name: &str,
+) {
+    if queue.len() >= MAX_PENDING_P2P_MESSAGES_PER_QUEUE {
+        let _ = queue.pop_front();
+        log::debug!(
+            "server p2p pending queue overflow queue={} limit={} dropped_oldest=true",
+            queue_name,
+            MAX_PENDING_P2P_MESSAGES_PER_QUEUE
+        );
+    }
+
+    queue.push_back((from_peer_id, payload));
 }
 
 #[derive(Debug)]
@@ -145,6 +165,17 @@ impl<T: Transport> ServerP2pRuntime<T> {
         pending_transactions_since_responses,
         super::protocol::TransactionsSinceResponse
     );
+
+    pub fn clear_pending_messages(&mut self) {
+        self.pending_affinity_join_requests.clear();
+        self.pending_affinity_join_responses.clear();
+        self.pending_schema_catalog_requests.clear();
+        self.pending_schema_catalog_responses.clear();
+        self.pending_data_snapshot_requests.clear();
+        self.pending_data_snapshot_responses.clear();
+        self.pending_transactions_since_requests.clear();
+        self.pending_transactions_since_responses.clear();
+    }
     
     pub fn run_loop(&mut self, events: &Receiver<ServerP2pEvent>) -> Result<()> {
 
@@ -239,8 +270,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             from_peer_id,
                             req.affinity_id
                         );
-                        self.pending_affinity_join_requests
-                            .push_back((from_peer_id.clone(), req));
+                        push_pending_bounded(
+                            &mut self.pending_affinity_join_requests,
+                            from_peer_id.clone(),
+                            req,
+                            "pending_affinity_join_requests",
+                        );
                     },
                     
                     ServiceMessage::AffinityJoinResponse(resp) => {
@@ -251,8 +286,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             resp.request_id,
                             resp.ok
                         );
-                        self.pending_affinity_join_responses
-                            .push_back((from_peer_id.clone(), resp));
+                        push_pending_bounded(
+                            &mut self.pending_affinity_join_responses,
+                            from_peer_id.clone(),
+                            resp,
+                            "pending_affinity_join_responses",
+                        );
                     },
                     
                     ServiceMessage::SchemaCatalogRequest(req) => {
@@ -262,8 +301,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             from_peer_id,
                             req.database_id
                         );
-                        self.pending_schema_catalog_requests
-                            .push_back((from_peer_id.clone(), req));
+                        push_pending_bounded(
+                            &mut self.pending_schema_catalog_requests,
+                            from_peer_id.clone(),
+                            req,
+                            "pending_schema_catalog_requests",
+                        );
                     },
 
                     ServiceMessage::SchemaCatalogResponse(resp) => {
@@ -273,8 +316,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             from_peer_id,
                             resp.request_id
                         );
-                        self.pending_schema_catalog_responses
-                            .push_back((from_peer_id.clone(), resp));
+                        push_pending_bounded(
+                            &mut self.pending_schema_catalog_responses,
+                            from_peer_id.clone(),
+                            resp,
+                            "pending_schema_catalog_responses",
+                        );
                     },
 
                     ServiceMessage::DataSnapshotRequest(req) => {
@@ -284,8 +331,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             from_peer_id,
                             req.database_id
                         );
-                        self.pending_data_snapshot_requests
-                            .push_back((from_peer_id.clone(), req));
+                        push_pending_bounded(
+                            &mut self.pending_data_snapshot_requests,
+                            from_peer_id.clone(),
+                            req,
+                            "pending_data_snapshot_requests",
+                        );
                     },
 
                     ServiceMessage::DataSnapshotResponse(resp) => {
@@ -295,8 +346,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             from_peer_id,
                             resp.request_id
                         );
-                        self.pending_data_snapshot_responses
-                            .push_back((from_peer_id.clone(), resp));
+                        push_pending_bounded(
+                            &mut self.pending_data_snapshot_responses,
+                            from_peer_id.clone(),
+                            resp,
+                            "pending_data_snapshot_responses",
+                        );
                     },
 
                     ServiceMessage::TransactionsSinceRequest(req) => {
@@ -307,8 +362,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             req.database_id,
                             req.from_transaction_id
                         );
-                        self.pending_transactions_since_requests
-                            .push_back((from_peer_id.clone(), req));
+                        push_pending_bounded(
+                            &mut self.pending_transactions_since_requests,
+                            from_peer_id.clone(),
+                            req,
+                            "pending_transactions_since_requests",
+                        );
                     },
 
                     ServiceMessage::TransactionsSinceResponse(resp) => {
@@ -319,8 +378,12 @@ impl<T: Transport> ServerP2pRuntime<T> {
                             resp.request_id,
                             resp.transactions.len()
                         );
-                        self.pending_transactions_since_responses
-                            .push_back((from_peer_id.clone(), resp));
+                        push_pending_bounded(
+                            &mut self.pending_transactions_since_responses,
+                            from_peer_id.clone(),
+                            resp,
+                            "pending_transactions_since_responses",
+                        );
                     },
 
                     _ => {

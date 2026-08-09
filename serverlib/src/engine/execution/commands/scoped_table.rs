@@ -1,6 +1,7 @@
 use crate::{
     ConcurrentWalManager, DatabaseCatalog, TableSchema, WalStreamMode,
 };
+use crate::engine::execution::access::clear_cached_table_state;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedEphemeralTableHandle {
@@ -208,6 +209,7 @@ pub fn release_scoped_ephemeral_table(
     }
 
     if wal.stream_mode(&handle.stream_id) == WalStreamMode::Ephemeral {
+        clear_cached_table_state(wal.cache_scope_id(), &handle.table_id, &handle.stream_id);
         wal.clear_stream_records(&handle.stream_id)
             .map_err(|err| format!("scoped table release failed: {err}"))?;
     }
