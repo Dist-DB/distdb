@@ -96,6 +96,9 @@ fn explain_row_ref_hydration_hint(
                         .map(|(_, state)| state)
                 })
             else {
+                if runtime_indexes.has_scoped_index_state(index_id) {
+                    return "fallback_key_not_present".to_string();
+                }
                 return "fallback_missing_runtime_state".to_string();
             };
 
@@ -155,6 +158,9 @@ fn explain_row_ref_hydration_hint(
                         })
                 })
             else {
+                if runtime_indexes.has_scoped_index_state(&index_id) {
+                    return "fallback_key_not_present".to_string();
+                }
                 return "fallback_missing_runtime_state".to_string();
             };
 

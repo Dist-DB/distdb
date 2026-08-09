@@ -718,6 +718,19 @@ impl RuntimeIndexStore {
 
     }
 
+    pub fn has_scoped_index_state(&self, index_id: &str) -> bool {
+
+        self.indexes
+            .keys()
+            .any(|scoped_id| {
+                scoped_id
+                    .rsplit_once("::")
+                    .map(|(_, scoped_index_id)| scoped_index_id == index_id)
+                    .unwrap_or(false)
+            })
+
+    }
+
     #[expect(clippy::should_implement_trait, reason="Index access by string ID, not by reference")]
     pub fn index_mut(&mut self, index_id: &str) -> &mut RuntimeIndexState {
         
