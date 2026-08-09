@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::borrow::Cow;
 use std::fs;
+use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
@@ -320,7 +321,7 @@ impl ConcurrentWalManager {
             return;
         }
 
-        let existing = load_records_from_file(&wal_path);
+        let existing = load_records_from_path(&wal_path);
         let entries_handle = if let Ok(mut store) = self.storage.lock() {
             store
                 .entry(stream_key.to_string())
@@ -903,6 +904,7 @@ impl TransactionLog for ConcurrentWalManager {
         entries
             .iter()
             .filter(|entry| {
+                
                 let kind_matched = match kinds {
                     [kind] => entry.kind == *kind,
                     [first, second] => entry.kind == *first || entry.kind == *second,
@@ -911,6 +913,7 @@ impl TransactionLog for ConcurrentWalManager {
 
                 from.map(|min_id| entry.id.0 > min_id.0).unwrap_or(true)
                     && kind_matched
+
             })
             .cloned()
             .collect()
@@ -1209,31 +1212,64 @@ fn decode_records_sequential_from_bytes_with_context(
 
     let mut records = Vec::new();
     let mut pos = HEADER_SIZE;
+    let max_frame_size = wal_max_frame_size_bytes();
 
     while pos + 8 <= bytes.len() {
 
-        let len = u64::from_le_bytes(
+        let len_u64 = u64::from_le_bytes(
             bytes[pos..pos + 8]
                 .try_into()
                 .expect("slice is exactly 8 bytes"),
-        ) as usize;
+        );
 
         pos += 8;
 
-        if pos + len > bytes.len() {
+        if len_u64 > usize::MAX as u64 {
+            log::warn!(
+                "invalid WAL frame length {} at byte offset {}, stopping replay",
+                len_u64,
+                pos,
+            );
+            break;
+        }
+
+        let len = len_u64 as usize;
+
+        if len > max_frame_size {
+            log::warn!(
+                "WAL frame length {} exceeds max {} at byte offset {}, stopping replay",
+                len,
+                max_frame_size,
+                pos,
+            );
+            break;
+        }
+
+        let Some(end) = pos.checked_add(len) else {
+            log::warn!(
+                "WAL frame length overflow at byte offset {}, stopping replay",
+                pos,
+            );
+            break;
+        };
+
+        if end > bytes.len() {
             log::warn!("truncated WAL frame at byte offset {}, stopping replay", pos);
             break;
         }
 
         match decode_record_from_frame(bytes, pos, len, context) {
+
             Ok(record) => records.push(record),
+
             Err(e) => {
                 log::error!("failed to deserialize WAL frame at byte {}: {}", pos, e);
                 break;
             }
+            
         }
 
-        pos += len;
+        pos = end;
 
     }
 
@@ -1241,27 +1277,169 @@ fn decode_records_sequential_from_bytes_with_context(
 
 }
 
-fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
+fn decode_records_sequential_from_reader_with_context<R: Read>(
+    reader: &mut R,
+    context: &TransactionPayloadContext,
+) -> Vec<TransactionRecord> {
 
-    let started_at = Instant::now();
-    let read_started_at = Instant::now();
+    let mut records = Vec::new();
+    let mut frame_offset = HEADER_SIZE as u64;
+    let mut len_buf = [0u8; 8];
+    let mut frame = Vec::new();
+    let max_frame_size = wal_max_frame_size_bytes();
 
-    let bytes = match read_bytes(path) {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
+    loop {
 
-    let read_elapsed_ms = read_started_at.elapsed().as_millis();
+        match reader.read_exact(&mut len_buf) {
+
+            Ok(()) => {},
+
+            Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+
+            Err(err) => {
+                log::warn!(
+                    "failed to read WAL frame length at byte offset {}: {}",
+                    frame_offset,
+                    err,
+                );
+                break;
+            }
+
+        }
+
+        frame_offset = frame_offset.saturating_add(8);
+
+        let len_u64 = u64::from_le_bytes(len_buf);
+
+        if len_u64 > usize::MAX as u64 {
+            log::warn!(
+                "invalid WAL frame length {} at byte offset {}, stopping replay",
+                len_u64,
+                frame_offset,
+            );
+            break;
+        }
+
+        let len = len_u64 as usize;
+
+        if len > max_frame_size {
+            log::warn!(
+                "WAL frame length {} exceeds max {} at byte offset {}, stopping replay",
+                len,
+                max_frame_size,
+                frame_offset,
+            );
+            break;
+        }
+
+        frame.resize(len, 0);
+
+        if let Err(err) = reader.read_exact(&mut frame[..]) {
+            if err.kind() == ErrorKind::UnexpectedEof {
+                log::warn!(
+                    "truncated WAL frame at byte offset {}, stopping replay",
+                    frame_offset,
+                );
+            } else {
+                log::warn!(
+                    "failed to read WAL frame at byte offset {}: {}",
+                    frame_offset,
+                    err,
+                );
+            }
+            break;
+        }
+
+        match decode_record_from_storage_with_context(&frame, context) {
+
+            Ok(record) => records.push(record),
+
+            Err(err) => {
+                log::error!(
+                    "failed to deserialize WAL frame at byte {}: {}",
+                    frame_offset,
+                    err,
+                );
+                break;
+            }
+
+        }
+
+        frame_offset = frame_offset.saturating_add(len_u64);
+
+    }
+
+    records
+
+}
+
+fn wal_max_frame_size_bytes() -> usize {
+
+    std::env::var("DISTDB_WAL_MAX_FRAME_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(64 * 1024 * 1024)
+
+}
+
+fn load_records_from_stream(bytes: Vec<u8>) -> Vec<TransactionRecord> {
 
     if let Err(e) = verify_header(FileKind::Data, &bytes) {
-        log::error!("invalid WAL header in '{}': {}", path.display(), e);
+        log::error!("invalid WAL header from byte stream: {}", e);
         return Vec::new();
     }
 
-    let decode_started_at = Instant::now();
     let context = default_transaction_payload_context();
-    let records = decode_records_sequential_from_bytes_with_context(&bytes, context);
 
+    let decode_started_at = Instant::now();
+    let records = decode_records_sequential_from_bytes_with_context(&bytes, context);    
+    let decode_elapsed_ms = decode_started_at.elapsed().as_millis();
+
+    if decode_elapsed_ms >= 1_000 {
+        log::info!(
+            "wal stream load timing records={} bytes={} decode_ms={}",
+            records.len(),
+            bytes.len(),
+            decode_elapsed_ms,
+        );
+    }
+
+    records
+
+}
+
+fn load_records_from_path(path: &Path) -> Vec<TransactionRecord> {
+
+    let started_at = Instant::now();
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Vec::new(),
+    };
+
+    let byte_len = file.metadata().ok().map(|meta| meta.len()).unwrap_or(0);
+
+    let mut reader = BufReader::new(file);
+    let mut header = [0u8; HEADER_SIZE];
+
+    if let Err(err) = reader.read_exact(&mut header) {
+        log::warn!(
+            "failed to read WAL header from '{}': {}",
+            path.display(),
+            err,
+        );
+        return Vec::new();
+    }
+
+    if let Err(err) = verify_header(FileKind::Data, &header) {
+        log::error!("invalid WAL header in '{}': {}", path.display(), err);
+        return Vec::new();
+    }
+
+    let context = default_transaction_payload_context();
+    let decode_started_at = Instant::now();
+    let records = decode_records_sequential_from_reader_with_context(&mut reader, context);
     let decode_elapsed_ms = decode_started_at.elapsed().as_millis();
     let total_elapsed_ms = started_at.elapsed().as_millis();
 
@@ -1270,13 +1448,13 @@ fn load_records_from_file(path: &Path) -> Vec<TransactionRecord> {
             "wal file load timing path={} records={} bytes={} read_ms={} decode_ms={} total_ms={}",
             path.display(),
             records.len(),
-            bytes.len(),
-            read_elapsed_ms,
+            byte_len,
+            total_elapsed_ms.saturating_sub(decode_elapsed_ms),
             decode_elapsed_ms,
             total_elapsed_ms,
         );
     }
-    
+
     records
 
 }
@@ -1308,6 +1486,7 @@ fn open_wal_append_file(path: &Path) -> Result<fs::File, &'static str> {
         .append(true)
         .open(path)
         .map_err(|_| "failed to open WAL append file")
+
 }
 
 fn append_wal_bytes(
@@ -1334,6 +1513,7 @@ fn append_wal_bytes(
     *append_file = Some(open_wal_append_file(path)?);
 
     if let Some(file) = append_file.as_mut() {
+
         file.write_all(bytes)
             .map_err(|_| "failed to persist WAL bytes to disk")?;
 
@@ -1341,6 +1521,7 @@ fn append_wal_bytes(
             file.sync_data()
                 .map_err(|_| "failed to sync WAL bytes to disk")?;
         }
+
     }
 
     Ok(())
@@ -1368,6 +1549,7 @@ fn rewrite_wal_file_with_context(
     write_bytes(path, &bytes).map_err(|_| "failed to rewrite compacted WAL file")?;
 
     if wal_sync_on_append() {
+
         let file = fs::OpenOptions::new()
             .read(true)
             .open(path)
@@ -1375,6 +1557,7 @@ fn rewrite_wal_file_with_context(
 
         file.sync_all()
             .map_err(|_| "failed to sync rewritten WAL file")?;
+
     }
 
     Ok(())
@@ -1424,6 +1607,7 @@ fn compact_entries_to_latest_schema_and_metadata(
         if latest_schema.is_some() && latest_metadata.is_some() {
             break;
         }
+
     }
 
     let mut retained_ids = std::collections::HashSet::new();
@@ -1519,7 +1703,7 @@ fn spawn_worker(
 
             append_file = open_wal_append_file(path).ok();
 
-            let existing = load_records_from_file(path);
+            let existing = load_records_from_path(path);
             let mut count = 0usize;
 
             let entries = if let Ok(mut state) = storage.lock() {

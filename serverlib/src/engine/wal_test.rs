@@ -94,7 +94,7 @@ fn wal_hydration_benchmark_style_avoids_reloading_disk_state() {
 
     let baseline_start = Instant::now();
     let baseline = black_box((0..100).fold(0u64, |acc, _| {
-        let records = load_records_from_file(&wal_file);
+        let records = load_records_from_path(&wal_file);
         acc + records.len() as u64
     }));
     let baseline_elapsed = baseline_start.elapsed();
