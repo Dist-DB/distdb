@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use openssl::rand::rand_bytes;
 use openssl::sha::sha256;
 use openssl::symm::{Cipher, Crypter, Mode};
@@ -515,7 +516,70 @@ enum CompatibleRowPayload {
     LegacyOrdinal(Vec<Vec<u8>>),
 }
 
+const SCHEMA_ORDINAL_CACHE_MAX_ENTRIES: usize = 1024;
+
+#[derive(Debug, Clone)]
+struct SchemaOrdinalCacheEntry {
+    ordered_field_names: Vec<String>,
+    field_name_index: HashMap<String, usize>,
+}
+
+static SCHEMA_ORDINAL_CACHE: OnceLock<Mutex<HashMap<usize, SchemaOrdinalCacheEntry>>> =
+    OnceLock::new();
+
+fn schema_cache_key(schema: &TableSchema) -> usize {
+    schema as *const TableSchema as usize
+}
+
+fn schema_ordinal_cache_entry(schema: &TableSchema) -> SchemaOrdinalCacheEntry {
+
+    let cache = SCHEMA_ORDINAL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(mut guard) = cache.lock() {
+
+        let key = schema_cache_key(schema);
+
+        if let Some(entry) = guard.get(&key) {
+            return entry.clone();
+        }
+
+        let ordered_field_names = field_names_by_ordinal(schema);
+        let field_name_index = ordered_field_names
+            .iter()
+            .enumerate()
+            .map(|(index, field_name)| (field_name.clone(), index))
+            .collect::<HashMap<_, _>>();
+
+        let entry = SchemaOrdinalCacheEntry {
+            ordered_field_names,
+            field_name_index,
+        };
+
+        if guard.len() >= SCHEMA_ORDINAL_CACHE_MAX_ENTRIES {
+            guard.clear();
+        }
+
+        guard.insert(key, entry.clone());
+        return entry;
+
+    }
+
+    let ordered_field_names = field_names_by_ordinal(schema);
+    let field_name_index = ordered_field_names
+        .iter()
+        .enumerate()
+        .map(|(index, field_name)| (field_name.clone(), index))
+        .collect::<HashMap<_, _>>();
+
+    SchemaOrdinalCacheEntry {
+        ordered_field_names,
+        field_name_index,
+    }
+
+}
+
 fn decode_compatible_row_payload_shape(payload: &[u8]) -> Result<CompatibleRowPayload, String> {
+
     if let Ok(ordinal_row) = bincode::deserialize::<OrdinalRowPayload>(payload) {
         return Ok(CompatibleRowPayload::Ordinal(ordinal_row));
     }
@@ -535,6 +599,7 @@ fn decode_compatible_row_payload_shape(payload: &[u8]) -> Result<CompatibleRowPa
     }
 
     Err("row payload decode failed".to_string())
+    
 }
 
 fn decode_compatible_row_payload(
@@ -542,7 +607,8 @@ fn decode_compatible_row_payload(
     payload: &[u8],
 ) -> Result<HashMap<String, Vec<u8>>, String> {
 
-    let ordered_field_names = field_names_by_ordinal(schema);
+    let schema_cache = schema_ordinal_cache_entry(schema);
+    let ordered_field_names = schema_cache.ordered_field_names;
 
     match decode_compatible_row_payload_shape(payload)? {
 
@@ -624,8 +690,8 @@ pub fn decode_row_field_value(
     field_name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
 
-    let field_name_indexes = field_name_index_by_ordinal(schema);
-    let position = field_name_indexes.get(field_name).copied();
+    let schema_cache = schema_ordinal_cache_entry(schema);
+    let position = schema_cache.field_name_index.get(field_name).copied();
 
     match decode_compatible_row_payload_shape(payload)? {
         CompatibleRowPayload::Ordinal(ordinal_row) => {

@@ -19,7 +19,7 @@ use crate::engine::database::schema::migration::{convert_value_to_field_type, Ty
 use crate::engine::sql::{compare_like_value, compare_row_value};
 use crate::{
     TransactionPayloadContext,
-    decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
+    decode_row_field_value, decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
     SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
     TransactionRecord,
     WalStreamMode,
@@ -120,6 +120,161 @@ struct AccessorLoadSourceStats {
 
 static ACCESSOR_LOAD_SOURCE_STATS: OnceLock<Mutex<AHashMap<String, AccessorLoadSourceStats>>> =
     OnceLock::new();
+static EQUALITY_PROBE_RESULT_CACHE: OnceLock<Mutex<EqualityProbeResultCacheScopeMap>> =
+    OnceLock::new();
+
+type EqualityProbeResultCacheTableMap = AHashMap<EqualityProbeCacheKey, EqualityProbeCacheEntry>;
+type EqualityProbeResultCacheScopeMap = AHashMap<(usize, String), EqualityProbeResultCacheTableMap>;
+
+const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE: usize = 16;
+const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_ROWS: usize = 10_000;
+const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EqualityProbeCacheKey {
+    filters: Vec<(String, Vec<u8>)>,
+}
+
+#[derive(Debug, Clone)]
+struct EqualityProbeCacheEntry {
+    latest_tx_id: u64,
+    rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
+}
+
+fn equality_probe_result_cache_max_entries_per_table() -> usize {
+
+    std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE)
+
+}
+
+fn equality_probe_result_cache_max_entry_rows() -> usize {
+
+    std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ROWS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_ROWS)
+
+}
+
+fn equality_probe_result_cache_max_entry_bytes() -> usize {
+
+    std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES)
+
+}
+
+fn equality_probe_cache_key(equality_filters: &HashMap<String, Vec<u8>>) -> EqualityProbeCacheKey {
+
+    let mut filters = equality_filters
+        .iter()
+        .map(|(field_name, value)| (field_name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+
+    filters.sort_by(|(left_field, left_value), (right_field, right_value)| {
+        left_field
+            .cmp(right_field)
+            .then_with(|| left_value.cmp(right_value))
+    });
+
+    EqualityProbeCacheKey { filters }
+
+}
+
+fn estimate_live_rows_bytes(rows: &[(u64, HashMap<String, Vec<u8>>)]) -> usize {
+
+    let mut bytes = rows
+        .len()
+        .saturating_mul(std::mem::size_of::<(u64, HashMap<String, Vec<u8>>)>());
+
+    for (_, row_map) in rows {
+        bytes = bytes.saturating_add(estimate_row_map_bytes(row_map));
+    }
+
+    bytes
+
+}
+
+fn cached_equality_probe_rows(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
+
+    let latest_tx_id = wal.latest_transaction_id_if_loaded(table_stream_id)?.0;
+    let cache_scope_id = wal.cache_scope_id();
+    let table_key = (cache_scope_id, table_stream_id.to_string());
+    let filter_key = equality_probe_cache_key(equality_filters);
+
+    let cache = EQUALITY_PROBE_RESULT_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+    let mut guard = cache.lock().ok()?;
+    let table_cache = guard.get_mut(&table_key)?;
+    let entry = table_cache.get(&filter_key)?;
+
+    if entry.latest_tx_id != latest_tx_id {
+        table_cache.remove(&filter_key);
+        return None;
+    }
+
+    Some(entry.rows.clone())
+
+}
+
+fn maybe_cache_equality_probe_rows(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    equality_filters: &HashMap<String, Vec<u8>>,
+    rows: &[(u64, HashMap<String, Vec<u8>>)],
+) {
+
+    let max_entries = equality_probe_result_cache_max_entries_per_table();
+    let max_rows = equality_probe_result_cache_max_entry_rows();
+    let max_bytes = equality_probe_result_cache_max_entry_bytes();
+
+    if max_entries == 0 || rows.len() > max_rows {
+        return;
+    }
+
+    let approx_bytes = estimate_live_rows_bytes(rows);
+    if max_bytes > 0 && approx_bytes > max_bytes {
+        return;
+    }
+
+    let Some(latest_tx_id) = wal.latest_transaction_id_if_loaded(table_stream_id).map(|tx| tx.0) else {
+        return;
+    };
+
+    let cache_scope_id = wal.cache_scope_id();
+    let table_key = (cache_scope_id, table_stream_id.to_string());
+    let filter_key = equality_probe_cache_key(equality_filters);
+
+    let cache = EQUALITY_PROBE_RESULT_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+
+    let table_cache = guard.entry(table_key).or_default();
+    table_cache.retain(|_, entry| entry.latest_tx_id == latest_tx_id);
+
+    if table_cache.len() >= max_entries
+        && let Some(evict_key) = table_cache.keys().next().cloned()
+    {
+        table_cache.remove(&evict_key);
+    }
+
+    table_cache.insert(
+        filter_key,
+        EqualityProbeCacheEntry {
+            latest_tx_id,
+            rows: rows.to_vec(),
+        },
+    );
+
+}
 
 fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: usize, elapsed_ms: u128) {
 
@@ -2703,6 +2858,14 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
             let mut row_order = Vec::with_capacity(equality_filters.len().saturating_mul(32));
             let mut committed_groups = AHashSet::with_capacity(records.len() / 8 + 1);
             let mut aborted_groups = AHashSet::with_capacity(records.len() / 8 + 1);
+            let single_filter = if equality_filters.len() == 1 {
+                equality_filters
+                    .iter()
+                    .next()
+                    .map(|(field_name, value)| (field_name.as_str(), value.as_slice()))
+            } else {
+                None
+            };
 
             let available_workers = std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -2731,13 +2894,25 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
 
                 for chunk in records.chunks(LIVE_ROW_APPLY_PARALLEL_CHUNK_SIZE) {
 
-                    let decoded_chunk = decode_live_row_chunk(
-                        chunk,
-                        schema,
-                        &committed_groups,
-                        &aborted_groups,
-                        apply_workers,
-                    );
+                    let decoded_chunk = if let Some((field_name, lookup_value)) = single_filter {
+                        decode_matching_live_row_chunk(
+                            chunk,
+                            schema,
+                            &committed_groups,
+                            &aborted_groups,
+                            apply_workers,
+                            field_name,
+                            lookup_value,
+                        )
+                    } else {
+                        decode_live_row_chunk(
+                            chunk,
+                            schema,
+                            &committed_groups,
+                            &aborted_groups,
+                            apply_workers,
+                        )
+                    };
 
                     let mut decoded_iter = decoded_chunk.into_iter().peekable();
 
@@ -2748,7 +2923,7 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                                 if let Some((decoded_offset, _)) = decoded_iter.peek()
                                     && *decoded_offset == offset
                                     && let Some((_, row_map)) = decoded_iter.next()
-                                    && row_matches_equality_filters(&row_map, equality_filters)
+                                    && (single_filter.is_some() || row_matches_equality_filters(&row_map, equality_filters))
                                 {
                                     row_order.push(record.id.0);
                                     live_rows.insert(record.id.0, row_map);
@@ -2783,6 +2958,16 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                             let Some(payload) = record.payload_logical() else {
                                 continue;
                             };
+
+                            if let Some((field_name, lookup_value)) = single_filter {
+                                let Ok(field_value) = decode_row_field_value(schema, payload, field_name) else {
+                                    continue;
+                                };
+
+                                if field_value.as_deref() != Some(lookup_value) {
+                                    continue;
+                                }
+                            }
 
                             let Ok(row_map) = decode_row_payload(schema, payload) else {
                                 continue;
@@ -2827,7 +3012,130 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
 
     record_accessor_load_source(table_stream_id, "wal_scan_filtered", rows.len(), elapsed_ms);
 
+    maybe_cache_equality_probe_rows(
+        wal,
+        table_stream_id,
+        equality_filters,
+        &rows,
+    );
+
     rows
+
+}
+
+fn decode_matching_live_row_chunk(
+    chunk: &[TransactionRecord],
+    schema: &TableSchema,
+    committed_groups: &AHashSet<u64>,
+    aborted_groups: &AHashSet<u64>,
+    workers: usize,
+    field_name: &str,
+    lookup_value: &[u8],
+) -> Vec<(usize, HashMap<String, Vec<u8>>)> {
+
+    if workers <= 1 || chunk.len() < 2 {
+
+        let mut decoded = Vec::new();
+
+        for (idx, record) in chunk.iter().enumerate() {
+            if !record_visible_for_live_row_apply(record, committed_groups, aborted_groups) {
+                continue;
+            }
+
+            if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
+                continue;
+            }
+
+            let Some(payload) = record.payload_logical() else {
+                continue;
+            };
+
+            let Ok(field_value) = decode_row_field_value(schema, payload, field_name) else {
+                continue;
+            };
+
+            if field_value.as_deref() != Some(lookup_value) {
+                continue;
+            }
+
+            if let Ok(row_map) = decode_row_payload(schema, payload) {
+                decoded.push((idx, row_map));
+            }
+        }
+
+        return decoded;
+    }
+
+    let chunk_size = chunk.len().div_ceil(workers);
+
+    let partials = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+
+        for worker_idx in 0..workers {
+
+            let start = worker_idx * chunk_size;
+            if start >= chunk.len() {
+                break;
+            }
+
+            let end = std::cmp::min(start + chunk_size, chunk.len());
+            let sub_chunk = &chunk[start..end];
+
+            handles.push(scope.spawn(move || {
+
+                let mut local = Vec::new();
+
+                for (offset, record) in sub_chunk.iter().enumerate() {
+
+                    if !record_visible_for_live_row_apply(record, committed_groups, aborted_groups) {
+                        continue;
+                    }
+
+                    if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
+                        continue;
+                    }
+
+                    let Some(payload) = record.payload_logical() else {
+                        continue;
+                    };
+
+                    let Ok(field_value) = decode_row_field_value(schema, payload, field_name) else {
+                        continue;
+                    };
+
+                    if field_value.as_deref() != Some(lookup_value) {
+                        continue;
+                    }
+
+                    if let Ok(row_map) = decode_row_payload(schema, payload) {
+                        local.push((start + offset, row_map));
+                    }
+                }
+
+                local
+
+            }));
+        }
+
+        let mut all = Vec::with_capacity(handles.len());
+        for handle in handles {
+            if let Ok(local) = handle.join() {
+                all.push(local);
+            }
+        }
+
+        all
+
+    });
+
+    let total_decoded = partials.iter().map(|local| local.len()).sum();
+    let mut decoded = Vec::with_capacity(total_decoded);
+
+    for mut local in partials {
+        decoded.append(&mut local);
+    }
+
+    decoded
 
 }
 
@@ -2899,6 +3207,10 @@ pub fn load_live_rows_by_equality_filters(
         rows_for_field_values(entry, equality_filters)
     }) {
         return result;
+    }
+
+    if let Some(rows) = cached_equality_probe_rows(wal, table_stream_id, equality_filters) {
+        return rows;
     }
 
     if equality_probe_direct_scan_enabled() {
