@@ -3,6 +3,7 @@ use common::epoch_ms;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
+use std::num::NonZeroU64;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -285,13 +286,17 @@ fn spawn_background_accessor_prewarm_from_checkpoint(
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
-    entries: AHashMap<Vec<Vec<u8>>, Option<u64>>,
+    entries: AHashMap<Vec<Vec<u8>>, Option<NonZeroU64>>,
 }
 
-struct RuntimeIndexRebuildItem {
-    index_id: String,
-    entries: AHashSet<Vec<Vec<u8>>>,
-    row_refs: AHashMap<Vec<Vec<u8>>, u64>,
+fn pack_row_ref(row_ref: u64) -> Option<NonZeroU64> {
+    row_ref
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+}
+
+fn unpack_row_ref(row_ref: Option<NonZeroU64>) -> Option<u64> {
+    row_ref.map(|row_ref| row_ref.get().saturating_sub(1))
 }
 
 impl RuntimeIndexState {
@@ -315,7 +320,7 @@ impl RuntimeIndexState {
             .map(|index| index.is_unique_key())
             .unwrap_or(true)
         {
-            row_ref
+            row_ref.and_then(pack_row_ref)
         } else {
             None
         };
@@ -354,7 +359,7 @@ impl RuntimeIndexState {
                     .as_ref()
                     .is_some_and(|index| index.is_unique_key())
                 {
-                    row_ref
+                    row_ref.and_then(pack_row_ref)
                 } else {
                     None
                 };
@@ -364,7 +369,7 @@ impl RuntimeIndexState {
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
-        self.entries.get(pk_val).copied().flatten()
+        unpack_row_ref(self.entries.get(pk_val).copied().flatten())
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
@@ -1136,7 +1141,7 @@ impl RuntimeIndexStore {
                             let row_ref = row_refs_lookup
                                 .as_ref()
                                 .and_then(|lookup| lookup.get(key).copied());
-                            state.entries.insert(key.clone(), row_ref);
+                            state.insert_with_row_ref(key.clone(), row_ref);
                         }
                     }
 
@@ -1909,7 +1914,7 @@ fn snapshot_indexes_for_table(
             row_refs: state
                 .entries
                 .iter()
-                .filter_map(|(key, row_ref)| row_ref.map(|row_ref| (key.clone(), row_ref)))
+                .filter_map(|(key, row_ref)| unpack_row_ref(*row_ref).map(|row_ref| (key.clone(), row_ref)))
                 .collect(),
         });
     }
