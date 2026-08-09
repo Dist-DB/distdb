@@ -88,10 +88,6 @@ fn explain_row_ref_hydration_hint(
                 return "fallback_missing_index_metadata".to_string();
             };
 
-            if !index.is_unique_key() {
-                return "fallback_non_unique_index".to_string();
-            }
-
             let Some(state) = runtime_indexes
                 .index_for_table(table_scope_id, index_id)
                 .or_else(|| {
@@ -105,6 +101,10 @@ fn explain_row_ref_hydration_hint(
 
             if !state.contains(lookup_key) {
                 return "fallback_key_not_present".to_string();
+            }
+
+            if !index.is_unique_key() {
+                return "non_unique_key_present".to_string();
             }
 
             if state.row_ref(lookup_key).is_some() {
@@ -140,24 +140,39 @@ fn explain_row_ref_hydration_hint(
                 return "fallback_missing_index_metadata".to_string();
             };
 
-            if !index.is_unique_key() {
-                return "fallback_non_unique_index".to_string();
-            }
-
             let key = vec![lookup_value.clone()];
+            let key_variants = runtime_lookup_key_variants(&key);
 
             let Some(state) = runtime_indexes
                 .index_for_table(table_scope_id, &index_id)
                 .or_else(|| {
-                    runtime_indexes
-                        .find_scoped_index_state_for_lookup(&index_id, &key)
-                        .map(|(_, state)| state)
+                    key_variants
+                        .iter()
+                        .find_map(|key_variant| {
+                            runtime_indexes
+                                .find_scoped_index_state_for_lookup(&index_id, key_variant)
+                                .map(|(_, state)| state)
+                        })
                 })
             else {
                 return "fallback_missing_runtime_state".to_string();
             };
 
-            if state.row_ref(&key).is_some() {
+            let matched_key = key_variants
+                .iter()
+                .find(|key_variant| state.contains(key_variant));
+
+            if matched_key.is_none() {
+                return "fallback_key_not_present".to_string();
+            }
+
+            if !index.is_unique_key() {
+                return "non_unique_key_present".to_string();
+            }
+
+            if let Some(matched_key) = matched_key
+                && state.row_ref(matched_key).is_some()
+            {
                 "eligible_direct_row_ref".to_string()
             } else {
                 "fallback_missing_row_ref".to_string()
