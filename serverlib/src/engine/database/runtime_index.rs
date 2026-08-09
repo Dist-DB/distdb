@@ -1101,12 +1101,44 @@ impl RuntimeIndexStore {
                     bootstrapped_indexes += tracked_indexes.len();
                     bootstrapped_rows += snapshot.live_row_count;
 
-                    let restored = build_snapshot_index_entries(&tracked_indexes, snapshot);
-                    let restored_index_count = restored.len();
-                    let restored_entry_count = restored
-                        .iter()
-                        .map(|item| item.entries.len())
-                        .sum::<usize>();
+                    let mut restored_index_count = 0usize;
+                    let mut restored_entry_count = 0usize;
+
+                    for index in &tracked_indexes {
+                        let Some(snapshot_index) = snapshot
+                            .indexes
+                            .iter()
+                            .find(|item| item.index_id == index.index_id.0) else {
+                            continue;
+                        };
+
+                        restored_index_count = restored_index_count.saturating_add(1);
+                        restored_entry_count = restored_entry_count.saturating_add(snapshot_index.entries.len());
+
+                        let state = self.index_mut_for_table(&table_stream_id, &index.index_id.0);
+                        state.index = Some(index.clone());
+                        state.entries.clear();
+                        state.reserve_entries(snapshot_index.entries.len());
+
+                        let row_refs_lookup = if index.is_unique_key() {
+                            Some(
+                                snapshot_index
+                                    .row_refs
+                                    .iter()
+                                    .map(|(key, row_ref)| (key, *row_ref))
+                                    .collect::<AHashMap<_, _>>()
+                            )
+                        } else {
+                            None
+                        };
+
+                        for key in &snapshot_index.entries {
+                            let row_ref = row_refs_lookup
+                                .as_ref()
+                                .and_then(|lookup| lookup.get(key).copied());
+                            state.entries.insert(key.clone(), row_ref);
+                        }
+                    }
 
                     if restored_index_count != tracked_indexes.len() {
                         log::warn!(
@@ -1116,15 +1148,6 @@ impl RuntimeIndexStore {
                             tracked_indexes.len(),
                             restored_index_count,
                         );
-                    }
-
-                    for item in restored {
-                        let state = self.index_mut_for_table(&table_stream_id, &item.index_id);
-                        state.index = tracked_indexes
-                            .iter()
-                            .find(|index| index.index_id.0 == item.index_id)
-                            .cloned();
-                        state.rebuild_with_row_refs(item.entries, item.row_refs);
                     }
 
                     log::info!(
@@ -1921,102 +1944,6 @@ fn rebuild_bootstrap_indexes_from_live_rows(
         }
 
     }
-
-}
-
-#[expect(clippy::type_complexity, reason="returning per-index bootstrap state for rebuild")]
-fn build_snapshot_index_entries(
-    tracked_indexes: &[DatabaseIndex],
-    snapshot: &RuntimeIndexTableSnapshot,
-) -> Vec<RuntimeIndexRebuildItem> {
-
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-
-    let should_parallel = available > 1
-        && tracked_indexes.len() > 1
-        && snapshot.live_row_count >= runtime_index_parallel_build_min_rows();
-
-    if !should_parallel {
-        return tracked_indexes
-            .iter()
-            .filter_map(|index| {
-
-                snapshot
-                    .indexes
-                    .iter()
-                    .find(|item| item.index_id == index.index_id.0)
-                    .map(|item| RuntimeIndexRebuildItem {
-                        index_id: index.index_id.0.clone(),
-                        entries: item.entries.iter().cloned().collect::<AHashSet<_>>(),
-                        row_refs: item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
-                    })
-
-            })
-            .collect();
-    }
-
-    let workers = std::cmp::min(
-        std::cmp::min(available, runtime_index_parallel_build_max_workers()),
-        tracked_indexes.len(),
-    );
-
-    let chunk_size = tracked_indexes.len().div_ceil(workers);
-
-    let rebuilt = std::thread::scope(|scope| {
-        
-        let mut handles = Vec::new();
-
-        for worker_idx in 0..workers {
-
-            let start = worker_idx * chunk_size;
-            if start >= tracked_indexes.len() {
-                break;
-            }
-
-            let end = std::cmp::min(start + chunk_size, tracked_indexes.len());
-            let indexes = &tracked_indexes[start..end];
-
-            handles.push(scope.spawn(move || {
-
-                let mut chunk = Vec::with_capacity(indexes.len());
-
-                for index in indexes {
-                    let Some(item) = snapshot
-                        .indexes
-                        .iter()
-                        .find(|item| item.index_id == index.index_id.0) else {
-                        continue;
-                    };
-
-                    chunk.push(RuntimeIndexRebuildItem {
-                        index_id: index.index_id.0.clone(),
-                        entries: item.entries.iter().cloned().collect::<AHashSet<_>>(),
-                        row_refs: item.row_refs.iter().cloned().collect::<AHashMap<_, _>>(),
-                    });
-                }
-
-                (start, chunk)
-                
-            }));
-
-        }
-
-        let mut rebuilt = Vec::with_capacity(tracked_indexes.len());
-
-        for handle in handles {
-            if let Ok(chunk) = handle.join() {
-                let (_, mut items) = chunk;
-                rebuilt.append(&mut items);
-            }
-        }
-
-        rebuilt
-        
-    });
-
-    rebuilt
 
 }
 
