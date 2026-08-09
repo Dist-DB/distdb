@@ -217,20 +217,6 @@ fn runtime_index_bootstrap_index_build_chunk_rows() -> usize {
 
 }
 
-fn runtime_index_bootstrap_skip_materialization() -> bool {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_SKIP_MATERIALIZATION")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
-}
-
 fn should_preload_accessors_for_bootstrap(live_row_count: usize) -> bool {
     live_row_count <= runtime_index_bootstrap_accessor_preload_max_live_rows()
 }
@@ -974,15 +960,13 @@ impl RuntimeIndexStore {
 
         let bootstrap_started_at = Instant::now();
         let preload_accessors_on_bootstrap = runtime_index_preload_accessors_on_bootstrap();
-        let skip_materialization = runtime_index_bootstrap_skip_materialization();
 
         log::info!(
-            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} preload_accessor_max_live_rows={} warm_equality_cache_on_bootstrap={} skip_materialization={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
+            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} preload_accessor_max_live_rows={} warm_equality_cache_on_bootstrap={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
             preload_accessors_on_bootstrap,
             runtime_index_bootstrap_accessor_preload_max_live_rows(),
             preload_accessors_on_bootstrap,
-            skip_materialization,
             
             if self.non_primary_field_allowlist.is_empty() {
                 "<none>".to_string()
@@ -1074,22 +1058,6 @@ impl RuntimeIndexStore {
 
                 for index in &tracked_indexes {
                     self.register_index_for_table(&table_stream_id, index);
-                }
-
-                if skip_materialization {
-                    bootstrapped_tables += 1;
-                    bootstrapped_indexes += tracked_indexes.len();
-                    log::info!(
-                        "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=skip_materialization elapsed_ms={}",
-                        database_id,
-                        table_id,
-                        tracked_indexes.len(),
-                        0,
-                        table_started_at.elapsed().as_millis(),
-                    );
-
-                    mark_runtime_index_bootstrap_table_complete();
-                    continue;
                 }
 
                 let wal_fingerprint = snapshot_data_dir

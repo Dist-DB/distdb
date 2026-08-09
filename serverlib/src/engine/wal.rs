@@ -1409,13 +1409,6 @@ fn decode_records_sequential_from_reader_with_context<R: Read>(
     context: &TransactionPayloadContext,
 ) -> Vec<TransactionRecord> {
 
-    if wal_replay_force_empty() {
-        log::warn!(
-            "WAL replay forced empty by env DISTDB_WAL_REPLAY_FORCE_EMPTY; returning no decoded records"
-        );
-        return Vec::new();
-    }
-
     let mut records = Vec::new();
     let mut frame_offset = HEADER_SIZE as u64;
     let mut len_buf = [0u8; 8];
@@ -1504,20 +1497,6 @@ fn decode_records_sequential_from_reader_with_context<R: Read>(
     }
 
     records
-
-}
-
-fn wal_replay_force_empty() -> bool {
-
-    std::env::var("DISTDB_WAL_REPLAY_FORCE_EMPTY")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
 
 }
 

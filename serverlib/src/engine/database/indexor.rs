@@ -126,7 +126,6 @@ pub struct IndexorRangeBound {
 struct IndexorStorage {
     kind: DatabaseIndexKind,
     key_directory: BTreeMap<Vec<u8>, u32>,
-    equality_lookup: HashMap<Vec<u8>, u32>,
     buckets: HashMap<u32, HashSet<u64>>,
     next_bucket_id: u32,
 }
@@ -135,7 +134,7 @@ impl IndexorStorage {
 
     fn bucket_for_key_mut(&mut self, key: &[u8]) -> u32 {
 
-        if let Some(bucket_id) = self.equality_lookup.get(key) {
+        if let Some(bucket_id) = self.key_directory.get(key) {
             return *bucket_id;
         }
 
@@ -143,8 +142,7 @@ impl IndexorStorage {
         self.next_bucket_id = self.next_bucket_id.saturating_add(1);
 
         let owned_key = key.to_vec();
-        
-        self.equality_lookup.insert(owned_key.clone(), bucket_id);
+
         self.key_directory.insert(owned_key, bucket_id);
         self.buckets.entry(bucket_id).or_default();
 
@@ -153,7 +151,7 @@ impl IndexorStorage {
     }
 
     fn bucket_for_key(&self, key: &[u8]) -> Option<u32> {
-        self.equality_lookup.get(key).copied()
+        self.key_directory.get(key).copied()
     }
 
 }
@@ -425,7 +423,7 @@ impl DatabaseIndexor {
 
             for entry in &storage_snapshot.entries {
 
-                if storage.equality_lookup.contains_key(entry.key.as_slice()) {
+                if storage.key_directory.contains_key(entry.key.as_slice()) {
                     return Err(IndexorSnapshotError::DuplicateKey {
                         index_name,
                         key: entry.key.clone(),
@@ -443,10 +441,6 @@ impl DatabaseIndexor {
                 let bucket_id = storage.next_bucket_id;
                 
                 storage.next_bucket_id = storage.next_bucket_id.saturating_add(1);
-
-                storage
-                    .equality_lookup
-                    .insert(entry.key.clone(), bucket_id);
                 
                 storage.key_directory.insert(entry.key.clone(), bucket_id);
 
