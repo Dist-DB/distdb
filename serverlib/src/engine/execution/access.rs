@@ -2129,6 +2129,16 @@ pub fn load_live_rows_by_in_list(
         return result;
     }
 
+    if should_use_direct_scan_for_equality_probe(wal, table_stream_id, table_id, schema) {
+        return load_live_rows_by_in_list_direct_wal_scan(
+            wal,
+            table_stream_id,
+            schema,
+            field_name,
+            lookup_values,
+        );
+    }
+
     let (latest_tx_id, live_rows) = load_live_rows_for_accessor_miss(
         wal,
         table_stream_id,
@@ -2181,6 +2191,126 @@ pub fn load_live_rows_by_in_list(
     );
 
     result
+
+}
+
+fn load_live_rows_by_in_list_direct_wal_scan(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    lookup_values: &[Vec<u8>],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if lookup_values.is_empty() {
+        return Vec::new();
+    }
+
+    let started_at = Instant::now();
+    let schema_cache = row_payload_schema_cache(schema);
+    let lookup_set = lookup_values
+        .iter()
+        .cloned()
+        .collect::<AHashSet<_>>();
+    let single_lookup = if lookup_values.len() == 1 {
+        lookup_values.first().map(Vec::as_slice)
+    } else {
+        None
+    };
+
+    let rows = wal
+        .with_records(table_stream_id, |records| {
+            let mut live_rows = AHashMap::with_capacity(lookup_values.len().saturating_mul(32));
+            let mut row_order = Vec::with_capacity(lookup_values.len().saturating_mul(32));
+            let mut committed_groups = AHashSet::with_capacity(records.len() / 8 + 1);
+            let mut aborted_groups = AHashSet::with_capacity(records.len() / 8 + 1);
+
+            for record in records {
+                match record.kind {
+                    TransactionKind::WriteCommit => {
+                        if let Some(group_id) = record.groupid {
+                            committed_groups.insert(group_id.0);
+                        }
+                    },
+                    TransactionKind::WriteAbort => {
+                        if let Some(group_id) = record.groupid {
+                            aborted_groups.insert(group_id.0);
+                        }
+                    },
+                    _ => {}
+                }
+            }
+
+            for record in records {
+                if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                    continue;
+                }
+
+                match record.kind {
+                    TransactionKind::Insert | TransactionKind::Update => {
+                        let Some(payload) = record.payload_logical() else {
+                            continue;
+                        };
+
+                        let maybe_row_map = if let Some(lookup_value) = single_lookup {
+                            decode_row_payload_if_field_equals_with_schema_cache(
+                                &schema_cache,
+                                payload,
+                                field_name,
+                                lookup_value,
+                            )
+                            .ok()
+                            .flatten()
+                        } else {
+                            decode_row_payload(schema, payload)
+                                .ok()
+                                .filter(|row_map| {
+                                    row_map
+                                        .get(field_name)
+                                        .map(|row_value| lookup_set.contains(row_value))
+                                        .unwrap_or(false)
+                                })
+                        };
+
+                        if let Some(row_map) = maybe_row_map {
+                            row_order.push(record.id.0);
+                            live_rows.insert(record.id.0, row_map);
+                        }
+                    },
+
+                    TransactionKind::Delete => {
+                        if let Some(refid) = record.refid {
+                            live_rows.remove(&refid.0);
+                        }
+                    },
+
+                    _ => {}
+                }
+            }
+
+            row_order
+                .into_iter()
+                .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+
+    if elapsed_ms >= 100 {
+        log::info!(
+            "in-list probe direct scan stream={} field={} lookups={} live_rows={} elapsed_ms={}",
+            table_stream_id,
+            field_name,
+            lookup_values.len(),
+            rows.len(),
+            elapsed_ms,
+        );
+    }
+
+    record_accessor_load_source(table_stream_id, "wal_scan_filtered", rows.len(), elapsed_ms);
+
+    rows
 
 }
 
