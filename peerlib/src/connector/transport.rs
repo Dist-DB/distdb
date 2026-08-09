@@ -24,11 +24,13 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
 const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 300;
-const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 1;
-const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 20;
+const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 3;
+const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 60;
+const CONNECTOR_CONNECT_RETRY_ATTEMPTS_DEFAULT: u64 = 3;
 const CONNECTOR_STREAM_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
 const CONNECTOR_CONNECT_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
+const CONNECTOR_CONNECT_RETRY_ATTEMPTS_ENV: &str = "DISTDB_CONNECTOR_CONNECT_RETRY_ATTEMPTS";
 const PLATFORM_TLS_FINGERPRINT_ENV: &str = "DISTDB_PLATFORM_TLS_FINGERPRINT";
 const CONNECTOR_TLS_FINGERPRINT_ENV: &str = "DISTDB_CONNECTOR_TLS_FINGERPRINT";
 const CONNECTOR_TLS_FINGERPRINT_FILE: &str = "ca-fingerprint.sha256";
@@ -104,7 +106,7 @@ fn connector_connect_timeout_secs() -> u64 {
     std::env::var(CONNECTOR_CONNECT_TIMEOUT_SECS_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|value| value.clamp(1, 30))
+    .map(|value| value.clamp(1, 60))
         .unwrap_or(CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT)
 }
 
@@ -120,8 +122,29 @@ fn connector_handshake_timeout_secs() -> u64 {
     std::env::var(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-    .map(|value| value.clamp(1, 120))
+        .map(|value| value.clamp(5, 300))
         .unwrap_or(CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT)
+}
+
+fn connector_connect_retry_attempts() -> u64 {
+    std::env::var(CONNECTOR_CONNECT_RETRY_ATTEMPTS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(1, 10))
+        .unwrap_or(CONNECTOR_CONNECT_RETRY_ATTEMPTS_DEFAULT)
+}
+
+fn is_transient_connect_error(err: &ConnectorError) -> bool {
+    match err {
+        ConnectorError::Transport(message) => {
+            let normalized = message.to_ascii_lowercase();
+            normalized.contains("timed out")
+                || normalized.contains("resource temporarily unavailable")
+                || normalized.contains("would block")
+                || normalized.contains("os error 35")
+        }
+        _ => false,
+    }
 }
 
 fn normalize_tls_fingerprint(raw: &str) -> Option<String> {
@@ -1096,7 +1119,7 @@ fn ensure_live_connection(
         }
     }
 
-    for socket_addr in candidate_addrs {
+    'next_addr: for socket_addr in candidate_addrs {
 
         // With legacy CA bootstrap removed, only an explicitly configured CA file
         // or the local development CA fallback can seed connector trust.
@@ -1130,17 +1153,41 @@ fn ensure_live_connection(
             cached_ca_pem.is_some()
         );
 
-        let mut stream = match connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref) {
-            Ok(stream) => stream,
-            Err(err) => {
-                log::debug!(
-                    "connector failed address candidate peer={} addr={} err={}",
-                    peer.peer_id,
-                    socket_addr,
-                    err
-                );
-                last_err = Some(err);
-                continue;
+        let mut stream = {
+            let mut attempt = 1;
+            let max_attempts = connector_connect_retry_attempts();
+            loop {
+                match connect_connector_stream(&socket_addr, &transport.config.tls, ca_pem_ref) {
+                    Ok(stream) => break stream,
+                    Err(err) => {
+                        let transient = is_transient_connect_error(&err);
+                        if transient && attempt < max_attempts {
+                            let backoff_ms = 200u64.saturating_mul(attempt);
+                            log::warn!(
+                                "connector transient connect failure peer={} addr={} attempt={}/{} err={} backoff_ms={}",
+                                peer.peer_id,
+                                socket_addr,
+                                attempt,
+                                max_attempts,
+                                err,
+                                backoff_ms
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                            attempt += 1;
+                            continue;
+                        }
+
+                        log::debug!(
+                            "connector failed address candidate peer={} addr={} attempts={} err={}",
+                            peer.peer_id,
+                            socket_addr,
+                            attempt,
+                            err
+                        );
+                        last_err = Some(err);
+                        continue 'next_addr;
+                    }
+                }
             }
         };
 
