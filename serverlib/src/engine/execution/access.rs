@@ -15,11 +15,16 @@ use crate::engine::database::runtime_index::{
     load_live_row_checkpoint_rows,
 };
 use crate::engine::database::runtime_index_snapshot::RuntimeIndexSnapshotService;
+use crate::engine::database::row_payload::{
+    RowPayloadSchemaCache,
+    decode_row_payload_if_field_equals_with_schema_cache,
+    row_payload_schema_cache,
+};
 use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::engine::sql::{compare_like_value, compare_row_value};
 use crate::{
     TransactionPayloadContext,
-    decode_row_field_value, decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
+    decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
     SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
     TransactionRecord,
     WalStreamMode,
@@ -2851,6 +2856,7 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
     }
 
     let started_at = Instant::now();
+    let schema_cache = row_payload_schema_cache(schema);
 
     let rows = wal
         .with_records(table_stream_id, |records| {
@@ -2897,7 +2903,7 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                     let decoded_chunk = if let Some((field_name, lookup_value)) = single_filter {
                         decode_matching_live_row_chunk(
                             chunk,
-                            schema,
+                            &schema_cache,
                             &committed_groups,
                             &aborted_groups,
                             apply_workers,
@@ -2960,13 +2966,25 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                             };
 
                             if let Some((field_name, lookup_value)) = single_filter {
-                                let Ok(field_value) = decode_row_field_value(schema, payload, field_name) else {
+                                let Ok(maybe_row_map) = decode_row_payload_if_field_equals_with_schema_cache(
+                                    &schema_cache,
+                                    payload,
+                                    field_name,
+                                    lookup_value,
+                                ) else {
                                     continue;
                                 };
 
-                                if field_value.as_deref() != Some(lookup_value) {
+                                let Some(row_map) = maybe_row_map else {
                                     continue;
+                                };
+
+                                if row_matches_equality_filters(&row_map, equality_filters) {
+                                    row_order.push(record.id.0);
+                                    live_rows.insert(record.id.0, row_map);
                                 }
+
+                                continue;
                             }
 
                             let Ok(row_map) = decode_row_payload(schema, payload) else {
@@ -3025,7 +3043,7 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
 
 fn decode_matching_live_row_chunk(
     chunk: &[TransactionRecord],
-    schema: &TableSchema,
+    schema_cache: &RowPayloadSchemaCache,
     committed_groups: &AHashSet<u64>,
     aborted_groups: &AHashSet<u64>,
     workers: usize,
@@ -3050,17 +3068,20 @@ fn decode_matching_live_row_chunk(
                 continue;
             };
 
-            let Ok(field_value) = decode_row_field_value(schema, payload, field_name) else {
+            let Ok(maybe_row_map) = decode_row_payload_if_field_equals_with_schema_cache(
+                schema_cache,
+                payload,
+                field_name,
+                lookup_value,
+            ) else {
                 continue;
             };
 
-            if field_value.as_deref() != Some(lookup_value) {
+            let Some(row_map) = maybe_row_map else {
                 continue;
-            }
+            };
 
-            if let Ok(row_map) = decode_row_payload(schema, payload) {
-                decoded.push((idx, row_map));
-            }
+            decoded.push((idx, row_map));
         }
 
         return decoded;
@@ -3080,6 +3101,7 @@ fn decode_matching_live_row_chunk(
 
             let end = std::cmp::min(start + chunk_size, chunk.len());
             let sub_chunk = &chunk[start..end];
+            let schema_cache = schema_cache.clone();
 
             handles.push(scope.spawn(move || {
 
@@ -3099,17 +3121,20 @@ fn decode_matching_live_row_chunk(
                         continue;
                     };
 
-                    let Ok(field_value) = decode_row_field_value(schema, payload, field_name) else {
+                    let Ok(maybe_row_map) = decode_row_payload_if_field_equals_with_schema_cache(
+                        &schema_cache,
+                        payload,
+                        field_name,
+                        lookup_value,
+                    ) else {
                         continue;
                     };
 
-                    if field_value.as_deref() != Some(lookup_value) {
+                    let Some(row_map) = maybe_row_map else {
                         continue;
-                    }
+                    };
 
-                    if let Ok(row_map) = decode_row_payload(schema, payload) {
-                        local.push((start + offset, row_map));
-                    }
+                    local.push((start + offset, row_map));
                 }
 
                 local
