@@ -1145,6 +1145,54 @@ fn load_live_rows_via_primary_key_limit_uses_runtime_row_refs() {
 }
 
 #[test]
+fn materialize_runtime_lookup_fallback_honors_row_limit_with_pk_cap() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let table_stream_id = if table.entity_id.is_empty() {
+        table.table_id.clone()
+    } else {
+        table.entity_id.clone()
+    };
+
+    let id_index = table
+        .indexes
+        .values()
+        .find(|index| {
+            index.field_names.len() == 1 && index.field_names[0] == "id"
+        })
+        .cloned()
+        .expect("id index should exist");
+
+    let state = runtime_indexes.index_mut_for_table(&table_stream_id, &id_index.index_id.0);
+    state.index = Some(id_index.clone());
+    state.insert_with_row_ref(vec![b"1".to_vec()], Some(1));
+    state.insert_with_row_ref(vec![b"2".to_vec()], Some(2));
+
+    // Lookup key shape intentionally does not match index key shape so the
+    // runtime lookup path falls back to capped hydration.
+    let rows = materialize_relation_rows_with_limit(
+        &wal,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::RuntimeIndexLookup {
+                index_id: id_index.index_id.0,
+                lookup_key: vec![b"missing-a".to_vec(), b"missing-b".to_vec()],
+            },
+        },
+        Some(1),
+    );
+
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
 fn equality_probe_result_cache_ttl_treats_negative_one_as_permanent() {
     let entry = EqualityProbeCacheEntry {
         latest_tx_id: 1,

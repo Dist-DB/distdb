@@ -5757,6 +5757,37 @@ fn load_live_rows_via_primary_key_limit(
 
 }
 
+fn load_live_rows_with_optional_pk_cap(
+    wal: &ConcurrentWalManager,
+    table: &DatabaseTable,
+    table_stream_id: &str,
+    schema: &TableSchema,
+    runtime_indexes: &RuntimeIndexStore,
+    row_limit: Option<usize>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    match row_limit {
+        Some(max_rows) => load_live_rows_via_primary_key_limit(
+            wal,
+            table,
+            table_stream_id,
+            schema,
+            runtime_indexes,
+            max_rows,
+        )
+        .unwrap_or_else(|| {
+            load_live_rows_in_place_limited(
+                wal,
+                table_stream_id,
+                schema,
+                max_rows,
+            )
+        }),
+        None => load_live_rows(wal, table_stream_id, &table.table_id, schema),
+    }
+
+}
+
 fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
 
     let mut variants = Vec::with_capacity(2);
@@ -5890,7 +5921,14 @@ where
                         );
                     }
 
-                    return load_live_rows(wal, &runtime_index_scope_id, &table.table_id, schema);
+                    return load_live_rows_with_optional_pk_cap(
+                        wal,
+                        table,
+                        &runtime_index_scope_id,
+                        schema,
+                        runtime_indexes,
+                        row_limit,
+                    );
                 }
 
                 let matched_lookup_key = matched_lookup_key.expect("checked is_some");
@@ -5944,7 +5982,14 @@ where
                     );
                 }
 
-                load_live_rows(wal, &runtime_index_scope_id, &table.table_id, schema)
+                load_live_rows_with_optional_pk_cap(
+                    wal,
+                    table,
+                    &runtime_index_scope_id,
+                    schema,
+                    runtime_indexes,
+                    row_limit,
+                )
 
             } else {
 
@@ -5966,15 +6011,14 @@ where
                     );
                 }
 
-                match row_limit {
-                    Some(max_rows) => load_live_rows_in_place_limited(
-                        wal,
-                        table_stream_id,
-                        schema,
-                        max_rows,
-                    ),
-                    None => load_live_rows(wal, table_stream_id, &table.table_id, schema),
-                }
+                load_live_rows_with_optional_pk_cap(
+                    wal,
+                    table,
+                    table_stream_id,
+                    schema,
+                    runtime_indexes,
+                    row_limit,
+                )
 
             }
 
@@ -6325,25 +6369,14 @@ where
         },
 
         RelationAccessStrategy::FullScan => {
-            match row_limit {
-                Some(max_rows) => load_live_rows_via_primary_key_limit(
-                    wal,
-                    table,
-                    table_stream_id,
-                    schema,
-                    runtime_indexes,
-                    max_rows,
-                )
-                .unwrap_or_else(|| {
-                    load_live_rows_in_place_limited(
-                        wal,
-                        table_stream_id,
-                        schema,
-                        max_rows,
-                    )
-                }),
-                None => load_live_rows(wal, table_stream_id, &table.table_id, schema),
-            }
+            load_live_rows_with_optional_pk_cap(
+                wal,
+                table,
+                table_stream_id,
+                schema,
+                runtime_indexes,
+                row_limit,
+            )
         },
 
     }

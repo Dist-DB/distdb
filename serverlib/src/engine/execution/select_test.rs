@@ -3218,6 +3218,94 @@ fn execute_relation_select_plan_caps_unbounded_simple_selects() {
 }
 
 #[test]
+fn execute_relation_select_plan_caps_unbounded_runtime_lookup_fallback() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("email", 2, FieldType::Text, FieldIndex::None, false),
+    ]);
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table should register");
+
+    let table = catalog.table("users").expect("users table should exist");
+    let id_index = table
+        .indexes
+        .values()
+        .find(|index| {
+            index.field_names.len() == 1 && index.field_names[0] == "id"
+        })
+        .cloned()
+        .expect("id index should exist");
+
+    let actor = UserId("test-user".to_string());
+    for tx_id in 1..=1_100_u64 {
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), tx_id.to_string().into_bytes());
+        row.insert(
+            "email".to_string(),
+            format!("user-{tx_id}@example.com").into_bytes(),
+        );
+
+        wal.append(
+            "users",
+            TransactionRecord::with_payload(
+                TransactionId(tx_id),
+                None,
+                None,
+                tx_id,
+                actor.clone(),
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &row).expect("row should encode"),
+            ),
+        )
+        .expect("row should append");
+    }
+
+    let table_scope_id = if table.entity_id.is_empty() {
+        table.table_id.clone()
+    } else {
+        table.entity_id.clone()
+    };
+
+    let state = runtime_indexes.index_mut_for_table(&table_scope_id, &id_index.index_id.0);
+    state.index = Some(id_index.clone());
+    state.insert_with_row_ref(vec![b"1".to_vec()], Some(1));
+
+    let read_plan = parse_select_read_plan_from_statement("select u.email from users u")
+        .expect("unbounded relation select should parse");
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog.table_schema("users").expect("users schema should exist");
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::RuntimeIndexLookup {
+            index_id: id_index.index_id.0,
+            lookup_key: vec![b"missing-a".to_vec(), b"missing-b".to_vec()],
+        },
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |row_map, nested_condition| {
+            row_matches_select_condition_result(row_map, nested_condition, &catalog, &wal, &runtime_indexes)
+        },
+    )
+    .expect("unbounded runtime lookup fallback should succeed");
+
+    assert_eq!(result.rows.len(), 1_000);
+}
+
+#[test]
 fn execute_relation_select_plan_supports_exists_predicates() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
