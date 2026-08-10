@@ -240,6 +240,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
                 removals: vec!["legacy".to_string()],
                 additions: vec![("status".to_string(), b"active".to_vec())],
                 type_changes: Vec::new(),
+                target_schema: None,
                 conversion_policy: TypeConversionPolicy::Safe,
             },
         )
@@ -325,6 +326,7 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
                     field_name: "age".to_string(),
                     target_type: FieldType::UInt(32),
                 }],
+                target_schema: None,
                 conversion_policy: TypeConversionPolicy::Safe,
             },
         )
@@ -395,6 +397,7 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
                     field_name: "age".to_string(),
                     target_type: FieldType::UInt(32),
                 }],
+                target_schema: None,
                 conversion_policy: TypeConversionPolicy::Force,
             },
         )

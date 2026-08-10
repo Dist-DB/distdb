@@ -31,10 +31,12 @@ enum StoredNumericValue {
 pub fn apply_schema_rules_to_payload(
     payload: &[u8],
     rules: &SchemaMutationRuleSet,
-    schema: &TableSchema,
+    source_schema: &TableSchema,
 ) -> Result<Vec<u8>, DatabaseError> {
 
-    let mut row: HashMap<String, Vec<u8>> = match decode_row_payload(schema, payload) {
+    let target_schema = rules.target_schema.as_ref().unwrap_or(source_schema);
+
+    let mut row: HashMap<String, Vec<u8>> = match decode_row_payload(source_schema, payload) {
         Ok(row) => row,
         Err(_) => return Ok(payload.to_vec()),
     };
@@ -71,7 +73,7 @@ pub fn apply_schema_rules_to_payload(
             .or_insert_with(|| default_value.clone());
     }
 
-    encode_row_payload(schema, &row).map_err(|_| DatabaseError::CatalogSerialize)
+    encode_row_payload(target_schema, &row).map_err(|_| DatabaseError::CatalogSerialize)
 
 }
 

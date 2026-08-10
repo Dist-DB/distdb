@@ -1,6 +1,7 @@
 use crate::engine::database::catalog::DatabaseCatalog;
 use crate::engine::database::core::DatabaseResult;
 use crate::engine::database::table::schema::FieldType;
+use crate::engine::database::table::schema::TableSchema;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaMigrationProgress {
@@ -15,6 +16,7 @@ pub struct SchemaMutationRuleSet {
     pub removals: Vec<String>,
     pub additions: Vec<(String, Vec<u8>)>,
     pub type_changes: Vec<FieldTypeChangeRule>,
+    pub target_schema: Option<TableSchema>,
     pub conversion_policy: TypeConversionPolicy,
 }
 

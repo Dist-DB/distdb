@@ -135,8 +135,14 @@ pub(super) fn execute_alter_table_impl(
     let entity_wal_id = table_id.clone();
     let created_at = common::epoch_nanos!();
 
-    // Type changes require row rewrite while the schema lock is still active.
-    if !type_changes.is_empty() {
+    // Any row-shape change (drop/rename/add/type) requires rewriting payload bytes
+    // while the source schema is still available under the active schema lock.
+    let requires_row_rewrite = !renames.is_empty()
+        || !removals.is_empty()
+        || !additions.is_empty()
+        || !type_changes.is_empty();
+
+    if requires_row_rewrite {
 
         let mutation_rule_set = serverlib::SchemaMutationRuleSet {
             renames,
@@ -146,6 +152,7 @@ pub(super) fn execute_alter_table_impl(
                 .map(|(name, _)| (name, vec![]))
                 .collect(),
             type_changes,
+            target_schema: Some(tx.pending_schema().clone()),
             conversion_policy: serverlib::TypeConversionPolicy::Safe,
         };
 
