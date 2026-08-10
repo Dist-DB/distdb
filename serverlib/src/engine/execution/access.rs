@@ -3206,6 +3206,20 @@ fn equality_probe_direct_scan_enabled() -> bool {
 
 }
 
+fn equality_probe_cold_durable_direct_scan_enabled() -> bool {
+
+    std::env::var("DISTDB_EQUALITY_PROBE_COLD_DURABLE_DIRECT_SCAN")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+
+}
+
 fn should_use_direct_scan_for_equality_probe(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
@@ -3227,6 +3241,10 @@ fn should_use_direct_scan_for_equality_probe(
     // hydration (and full decode) before we attempt snapshot/checkpoint-backed
     // paths.
     if wal.stream_mode(table_stream_id) == WalStreamMode::Durable {
+        if !equality_probe_cold_durable_direct_scan_enabled() {
+            return false;
+        }
+
         let Some(data_dir) = wal.data_dir_path() else {
             return false;
         };
@@ -3286,6 +3304,9 @@ fn apply_visible_equality_record(
     live_rows: &mut AHashMap<u64, HashMap<String, Vec<u8>>>,
     row_order: &mut Vec<u64>,
     applied_group_row_ids: &mut AHashMap<u64, Vec<u64>>,
+    decoded_candidate_rows: &mut usize,
+    decoded_matching_rows: &mut usize,
+    decode_elapsed_ns: &mut u128,
 ) {
 
     match record.kind {
@@ -3293,6 +3314,9 @@ fn apply_visible_equality_record(
             let Some(payload) = record.payload_logical() else {
                 return;
             };
+
+            *decoded_candidate_rows = decoded_candidate_rows.saturating_add(1);
+            let decode_started_at = Instant::now();
 
             let maybe_row_map = if let Some((field_name, lookup_value)) = single_filter {
                 decode_row_payload_if_field_equals_with_schema_cache(
@@ -3307,11 +3331,14 @@ fn apply_visible_equality_record(
                 decode_row_payload(schema, payload).ok()
             };
 
+            *decode_elapsed_ns = decode_elapsed_ns.saturating_add(decode_started_at.elapsed().as_nanos());
+
             let Some(row_map) = maybe_row_map else {
                 return;
             };
 
             if row_matches_equality_filters(&row_map, equality_filters) {
+                *decoded_matching_rows = decoded_matching_rows.saturating_add(1);
                 row_order.push(record.id.0);
                 live_rows.insert(record.id.0, row_map);
                 if let Some(group_id) = group_id {
@@ -3341,6 +3368,8 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
     equality_filters: &HashMap<String, Vec<u8>>,
 ) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
 
+    let started_at = Instant::now();
+
     let mut live_rows = AHashMap::with_capacity(equality_filters.len().saturating_mul(32));
     let mut row_order = Vec::with_capacity(equality_filters.len().saturating_mul(32));
     let schema_cache = row_payload_schema_cache(schema);
@@ -3357,12 +3386,26 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
     let mut aborted_groups = AHashSet::new();
     let mut pending_group_records = AHashMap::<u64, Vec<TransactionRecord>>::new();
     let mut applied_group_row_ids = AHashMap::<u64, Vec<u64>>::new();
+    let mut scanned_records = 0usize;
+    let mut grouped_records = 0usize;
+    let mut commit_records = 0usize;
+    let mut abort_records = 0usize;
+    let mut max_pending_groups = 0usize;
+    let mut max_pending_records = 0usize;
+    let mut decoded_candidate_rows = 0usize;
+    let mut decoded_matching_rows = 0usize;
+    let mut decode_elapsed_ns = 0u128;
 
     match wal.scan_durable_records_if_unloaded(table_stream_id, |record| {
+        scanned_records = scanned_records.saturating_add(1);
         let group_id = record.groupid.map(|group_id| group_id.0);
+        if group_id.is_some() {
+            grouped_records = grouped_records.saturating_add(1);
+        }
 
         match record.kind {
             TransactionKind::WriteCommit => {
+                commit_records = commit_records.saturating_add(1);
                 let Some(group_id) = group_id else {
                     return;
                 };
@@ -3385,12 +3428,16 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
                             &mut live_rows,
                             &mut row_order,
                             &mut applied_group_row_ids,
+                            &mut decoded_candidate_rows,
+                            &mut decoded_matching_rows,
+                            &mut decode_elapsed_ns,
                         );
                     }
                 }
             }
 
             TransactionKind::WriteAbort => {
+                abort_records = abort_records.saturating_add(1);
                 let Some(group_id) = group_id else {
                     return;
                 };
@@ -3422,6 +3469,9 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
                             &mut live_rows,
                             &mut row_order,
                             &mut applied_group_row_ids,
+                            &mut decoded_candidate_rows,
+                            &mut decoded_matching_rows,
+                            &mut decode_elapsed_ns,
                         );
                         return;
                     }
@@ -3430,6 +3480,13 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
                         .entry(group_id)
                         .or_default()
                         .push(record);
+
+                    max_pending_groups = std::cmp::max(max_pending_groups, pending_group_records.len());
+                    let pending_records = pending_group_records
+                        .values()
+                        .map(|group_records| group_records.len())
+                        .sum::<usize>();
+                    max_pending_records = std::cmp::max(max_pending_records, pending_records);
                     return;
                 }
 
@@ -3443,6 +3500,9 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
                     &mut live_rows,
                     &mut row_order,
                     &mut applied_group_row_ids,
+                    &mut decoded_candidate_rows,
+                    &mut decoded_matching_rows,
+                    &mut decode_elapsed_ns,
                 );
             }
         }
@@ -3463,6 +3523,25 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
         .into_iter()
         .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
         .collect::<Vec<_>>();
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+    if elapsed_ms >= 100 {
+        log::info!(
+            "cold equality WAL scan timing stream={} filters={} records={} grouped_records={} commits={} aborts={} pending_groups_max={} pending_records_max={} decoded_candidates={} decoded_matches={} decode_ms={} total_ms={}",
+            table_stream_id,
+            equality_filters.len(),
+            scanned_records,
+            grouped_records,
+            commit_records,
+            abort_records,
+            max_pending_groups,
+            max_pending_records,
+            decoded_candidate_rows,
+            decoded_matching_rows,
+            decode_elapsed_ns / 1_000_000,
+            elapsed_ms,
+        );
+    }
 
     Some(rows)
 

@@ -432,7 +432,7 @@ fn durable_cold_unique_row_ref_probe_uses_checkpoint_without_wal_hydration() {
 }
 
 #[test]
-fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydration() {
+fn durable_large_without_live_row_checkpoint_prefers_accessor_miss_hydration_by_default() {
 
     let data_dir = unique_temp_dir("access-large-no-live-row-checkpoint");
     fs::create_dir_all(&data_dir).expect("temp data dir should be created");
@@ -482,8 +482,8 @@ fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydra
     assert_eq!(rows[0].0, 1);
 
     assert!(
-        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
-        "large cold equality path should use filtered scan and avoid WAL hydration",
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_some(),
+        "large cold equality path should hydrate WAL by default when strict cold direct scan is disabled",
     );
 
     let _ = fs::remove_dir_all(&data_dir);
@@ -491,7 +491,7 @@ fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydra
 }
 
 #[test]
-fn durable_cold_without_checkpoints_prefers_filtered_scan_without_hydration() {
+fn durable_cold_without_checkpoints_prefers_accessor_miss_hydration_by_default() {
 
     let data_dir = unique_temp_dir("access-cold-no-checkpoints");
     fs::create_dir_all(&data_dir).expect("temp data dir should be created");
@@ -520,8 +520,8 @@ fn durable_cold_without_checkpoints_prefers_filtered_scan_without_hydration() {
     assert_eq!(rows[0].0, 1);
 
     assert!(
-        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
-        "cold durable equality probe without checkpoints should avoid full WAL hydration",
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_some(),
+        "cold durable equality probe without checkpoints should hydrate WAL by default when strict cold direct scan is disabled",
     );
 
     let _ = fs::remove_dir_all(&data_dir);

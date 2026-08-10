@@ -36,6 +36,7 @@ use crate::TransactionKind;
 
 static NEXT_WAL_CACHE_SCOPE_ID: AtomicUsize = AtomicUsize::new(1);
 static DEFAULT_TRANSACTION_PAYLOAD_CONTEXT: OnceLock<TransactionPayloadContext> = OnceLock::new();
+const WAL_BUFFERED_READ_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
 
 fn next_wal_cache_scope_id() -> usize {
     NEXT_WAL_CACHE_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
@@ -318,7 +319,7 @@ impl ConcurrentWalManager {
         }
 
         let file = fs::File::open(&wal_path).map_err(|_| "failed to open WAL file")?;
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::with_capacity(WAL_BUFFERED_READ_CAPACITY_BYTES, file);
 
         let mut header = [0u8; HEADER_SIZE];
         reader
@@ -1572,7 +1573,7 @@ fn load_records_from_path(path: &Path) -> Vec<TransactionRecord> {
 
     let byte_len = file.metadata().ok().map(|meta| meta.len()).unwrap_or(0);
 
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(WAL_BUFFERED_READ_CAPACITY_BYTES, file);
     let mut header = [0u8; HEADER_SIZE];
 
     if let Err(err) = reader.read_exact(&mut header) {
