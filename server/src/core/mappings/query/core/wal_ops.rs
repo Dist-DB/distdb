@@ -888,9 +888,15 @@ pub(super) fn payload_context_for_table(
     table_id: &str,
 ) -> serverlib::TransactionPayloadContext {
 
+    let normalized_table_id = common::normalize_identifier!(table_id);
+
+    let entity_id = catalog
+        .entity_identity_id(&normalized_table_id)
+        .unwrap_or_else(|| normalized_table_id.clone());
+
     let mut context = serverlib::TransactionPayloadContext::new()
         .with_database_id(catalog.database_id.0.clone())
-        .with_table_id(table_id.to_string());
+        .with_table_id(entity_id);
 
     if let Some(key_ref) = catalog.at_rest_encryption_key_ref() {
         context = context.with_at_rest_encryption(
@@ -905,6 +911,7 @@ pub(super) fn payload_context_for_table(
 
 #[cfg(test)]
 mod tests {
+
     use super::summarize_sql_for_error_log;
 
     #[test]
@@ -922,4 +929,5 @@ mod tests {
         assert!(summary.ends_with("..."));
         assert_eq!(summary.chars().count(), 243);
     }
+    
 }

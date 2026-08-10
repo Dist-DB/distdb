@@ -1,8 +1,9 @@
 use super::*;
 use common::helpers::write_bytes;
-use crate::engine::database::catalog::DatabaseCatalog;
-use crate::engine::database::transaction::{TransactionId, TransactionKind, TransactionRecord};
 use crate::core::identity::UserId;
+use crate::engine::database::catalog::DatabaseCatalog;
+use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::transaction::{TransactionId, TransactionKind, TransactionRecord};
 
 #[test]
 fn stream_key_for_table_normalizes_identifier() {
@@ -30,12 +31,21 @@ fn payload_context_for_table_includes_catalog_encryption_metadata() {
     catalog
         .configure_at_rest_encryption_key_ref("enc:node-main:db-main")
         .expect("encryption ref should configure");
+    catalog
+        .register_table("users", TableSchema::new(Vec::new()))
+        .expect("table should register");
 
     let context = payload_context_for_table(&catalog, "users").expect("context should build");
+    let entity_id = catalog
+        .entity_identity_id("users")
+        .expect("entity identity should resolve");
 
     assert_eq!(context.database_id(), Some(catalog.database_id.0.as_str()));
-    assert_eq!(context.table_id(), Some("users"));
-    assert!(context.stream_id().is_some());
+    assert_eq!(context.table_id(), Some(entity_id.as_str()));
+    assert_eq!(
+        context.stream_id(),
+        catalog.entity_wal_stream_id("users").as_deref()
+    );
     assert_eq!(
         context.at_rest_encryption_key_ref(),
         Some("enc:node-main:db-main")

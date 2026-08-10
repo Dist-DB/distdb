@@ -51,11 +51,21 @@ pub fn payload_context_for_table(
         return Err(DatabaseError::TableNotFound);
     }
 
-    let stream_key = stream_key_for_table(&normalized_table_id)?;
+    let entity_id = catalog
+        .entity_identity_id(&normalized_table_id)
+        .unwrap_or_else(|| normalized_table_id.clone());
+    
+    let stream_id = catalog
+        .entity_wal_stream_id(&normalized_table_id)
+        .unwrap_or_else(|| {
+            stream_key_for_table(&normalized_table_id)
+                .unwrap_or_else(|_| normalized_table_id.clone())
+        });
+
     let mut context = TransactionPayloadContext::new()
         .with_database_id(catalog.database_id.0.clone())
-        .with_table_id(normalized_table_id)
-        .with_stream_id(stream_key);
+        .with_table_id(entity_id)
+        .with_stream_id(stream_id);
 
     if let Some(key_ref) = catalog.at_rest_encryption_key_ref() {
         context = context.with_at_rest_encryption(
