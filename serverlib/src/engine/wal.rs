@@ -1184,15 +1184,8 @@ fn decode_record_from_storage_internal(
     context: &TransactionPayloadContext,
 ) -> Result<TransactionRecord, &'static str> {
 
-    let mut record = match bincode::serde::decode_from_slice::<TransactionRecord, _>(
-        encoded,
-        bincode::config::legacy(),
-    ) {
-        Ok((record, consumed)) if consumed == encoded.len() => record,
-        Ok(_) => return Err("failed to deserialize WAL record"),
-        Err(_) => common::helpers::bincode_compat::deserialize::<TransactionRecord>(encoded)
-            .map_err(|_| "failed to deserialize WAL record")?,
-    };    
+    let mut record = common::helpers::bincode_compat::deserialize::<TransactionRecord>(encoded)
+        .map_err(|_| "failed to deserialize WAL record")?;
 
     if let Some(payload) = into_owned_payload(
         resolve_wal_storage_payload(record.payload_raw(), context)
