@@ -132,7 +132,12 @@ pub(super) fn execute_alter_table_impl(
     }
 
     let wal_id = catalog.database_id.0.clone();
-    let entity_wal_id = table_id.clone();
+    let Some(entity_wal_id) = catalog.entity_wal_stream_id(&table_id) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            "alter table WAL stream lookup failed".to_string(),
+        );
+    };
     let created_at = common::epoch_nanos!();
 
     // Any row-shape change (drop/rename/add/type) requires rewriting payload bytes

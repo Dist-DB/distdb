@@ -8974,6 +8974,80 @@ fn alter_table_query_updates_schema() {
 }
 
 #[test]
+fn alter_table_query_writes_schema_change_to_entity_stream() {
+    let unique_suffix = common::epoch_nanos!();
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-server-alter-table-wal-stream-{}-{}",
+        std::process::id(),
+        unique_suffix
+    ));
+
+    let config = ServerRuntimeConfig::default_local_with_data_dir(temp_root);
+    let mut app = ServerApp::new(config).expect("server app should initialize");
+
+    let catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    app.catalogs.insert("main".to_string(), catalog);
+
+    let create_request = ConnectorRequest::new(
+        "req-create-table-alter-stream-1",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "create table users (id bigint not null primary key, email varchar(255))"
+                    .to_string(),
+            },
+        },
+    );
+
+    let create_response = app.handle_connector_request(&create_request);
+    assert_eq!(create_response.status, ResponseStatus::Applied);
+
+    let users_stream_id = table_stream_id(&app, "main", "users");
+    let before = app.wal.since(&users_stream_id, None);
+    let before_schema_change_count = before
+        .iter()
+        .filter(|record| record.kind == TransactionKind::SchemaChange)
+        .count();
+
+    let alter_request = ConnectorRequest::new(
+        "req-alter-table-stream-1",
+        ConnectorCommand::Query {
+            query: connector::DataQuery {
+                database_id: "main".to_string(),
+                sql: "alter table users rename column email to login_email".to_string(),
+            },
+        },
+    );
+
+    let alter_response = app.handle_connector_request(&alter_request);
+    assert_eq!(alter_response.status, ResponseStatus::Applied);
+
+    let after = app.wal.since(&users_stream_id, None);
+    let after_schema_change_count = after
+        .iter()
+        .filter(|record| record.kind == TransactionKind::SchemaChange)
+        .count();
+
+    assert!(
+        after_schema_change_count > before_schema_change_count,
+        "alter table should append schema change to entity stream '{}'",
+        users_stream_id,
+    );
+
+    if users_stream_id != "users" {
+        let plain_stream_records = app.wal.since("users", None);
+        assert!(
+            plain_stream_records
+                .iter()
+                .all(|record| record.kind != TransactionKind::SchemaChange),
+            "plain table-id stream should not receive schema change records when canonical stream differs"
+        );
+    }
+}
+
+#[test]
 fn schema_command_alter_table_update_field_uses_modify_column_path() {
 
     let unique_suffix = common::epoch_nanos!();
