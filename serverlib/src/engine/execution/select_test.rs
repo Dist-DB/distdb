@@ -968,6 +968,129 @@ fn equality_probe_falls_back_to_legacy_table_stream_when_scoped_stream_has_only_
 }
 
 #[test]
+fn equality_probe_retries_legacy_stream_when_scoped_probe_returns_empty() {
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-equality-legacy-retry-empty-{}-{}",
+        std::process::id(),
+        common::epoch_nanos!(),
+    ));
+    std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
+
+    let wal = ConcurrentWalManager::with_data_dir(temp_root.clone());
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let places_schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("places", places_schema.clone())
+        .expect("places table should register");
+
+    let relation = catalog.table("places").expect("places table should exist");
+    let schema = catalog
+        .table_schema("places")
+        .expect("places schema should exist");
+
+    let display_name_index_id = relation
+        .indexes
+        .values()
+        .find(|index| {
+            index.field_names.len() == 1 &&
+            index.field_names[0] == "display_name"
+        })
+        .map(|index| index.index_id.0.clone())
+        .expect("display_name index should exist");
+
+    let mut relation_with_scoped_stream = relation;
+    relation_with_scoped_stream.entity_id = "main:scoped:places".to_string();
+
+    let actor = UserId("test-user".to_string());
+
+    // Legacy stream has the matching Cologne row.
+    let mut cologne_row = std::collections::HashMap::new();
+    cologne_row.insert("uid".to_string(), b"1".to_vec());
+    cologne_row.insert("display_name".to_string(), b"Cologne".to_vec());
+
+    wal.append(
+        "places",
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor.clone(),
+            TransactionKind::Insert,
+            encode_row_payload(&places_schema, &cologne_row).expect("row should encode"),
+        ),
+    )
+    .expect("row should append to legacy stream");
+
+    // Scoped stream has data writes, but no Cologne match.
+    let mut other_row = std::collections::HashMap::new();
+    other_row.insert("uid".to_string(), b"2".to_vec());
+    other_row.insert("display_name".to_string(), b"Berlin".to_vec());
+
+    wal.append(
+        relation_with_scoped_stream.entity_id.as_str(),
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&places_schema, &other_row).expect("row should encode"),
+        ),
+    )
+    .expect("row should append to scoped stream");
+
+    runtime_indexes
+        .index_mut_for_table(
+            relation_with_scoped_stream.entity_id.as_str(),
+            &display_name_index_id,
+        )
+        .insert(vec![b"Cologne".to_vec()]);
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::EqualityProbe {
+            field_name: "display_name".to_string(),
+            lookup_value: b"Cologne".to_vec(),
+            source: crate::EqualityProbeSource::ExistingIndex,
+            equality_filters: std::collections::HashMap::from([(
+                "display_name".to_string(),
+                b"Cologne".to_vec(),
+            )]),
+        },
+    };
+
+    let rows = crate::materialize_relation_rows_with_limit(
+        &wal,
+        &relation_with_scoped_stream,
+        &schema,
+        &runtime_indexes,
+        &access_plan,
+        None,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .1
+            .get("display_name")
+            .map(|value| render_stored_field_value(value)),
+        Some(b"Cologne".to_vec())
+    );
+
+    let _ = std::fs::remove_dir_all(temp_root);
+
+}
+
+#[test]
 fn execute_joined_select_plan_supports_inbuilt_function_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();

@@ -6103,7 +6103,7 @@ where
                 }
             }
 
-            if equality_filters.len() > 1 {
+            let primary_rows = if equality_filters.len() > 1 {
                 load_live_rows_by_equality_filters_with_limit(
                     wal,
                     equality_probe_stream_scope.as_ref(),
@@ -6122,7 +6122,46 @@ where
                     lookup_value,
                     row_limit,
                 )
+            };
+
+            if primary_rows.is_empty() && equality_probe_stream_scope.as_ref() != table.table_id {
+
+                log::debug!(
+                    "relation equality probe table={} field={} scoped_stream={} returned_no_rows -> retry_legacy_stream={}",
+                    table.table_id,
+                    field_name,
+                    equality_probe_stream_scope.as_ref(),
+                    table.table_id,
+                );
+
+                let legacy_rows = if equality_filters.len() > 1 {
+                    load_live_rows_by_equality_filters_with_limit(
+                        wal,
+                        &table.table_id,
+                        &table.table_id,
+                        schema,
+                        equality_filters,
+                        row_limit,
+                    )
+                } else {
+                    load_live_rows_by_equality_with_limit(
+                        wal,
+                        &table.table_id,
+                        &table.table_id,
+                        schema,
+                        field_name,
+                        lookup_value,
+                        row_limit,
+                    )
+                };
+
+                if !legacy_rows.is_empty() {
+                    return legacy_rows;
+                }
+
             }
+
+            primary_rows
 
         },
 
