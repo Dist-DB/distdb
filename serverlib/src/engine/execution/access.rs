@@ -3227,20 +3227,25 @@ fn should_use_direct_scan_for_equality_probe(
     // hydration (and full decode) before we attempt snapshot/checkpoint-backed
     // paths.
     if wal.stream_mode(table_stream_id) == WalStreamMode::Durable {
-        if let Some(data_dir) = wal.data_dir_path()
-            && let Some((_, live_row_count)) =
-                load_live_row_count_checkpoint(&data_dir, table_stream_id, table_id, schema)
-            && live_row_count > accessor_snapshot_max_live_rows()
-            && load_live_row_checkpoint_rows(&data_dir, table_stream_id, table_id, schema)
-                .is_none()
-        {
-            // If the table is too large for accessor snapshot restore and there
-            // is no usable live-row checkpoint payload, prefer a filtered direct
-            // scan over full live-row hydration.
-            return true;
+        let Some(data_dir) = wal.data_dir_path() else {
+            return false;
+        };
+
+        if load_live_row_checkpoint_rows(&data_dir, table_stream_id, table_id, schema).is_some() {
+            return false;
         }
 
-        return false;
+        if let Some((_, live_row_count)) =
+            load_live_row_count_checkpoint(&data_dir, table_stream_id, table_id, schema)
+        {
+            // Without a usable live-row checkpoint payload, large tables should
+            // use filtered direct scans rather than full live-row hydration.
+            return live_row_count > accessor_snapshot_max_live_rows();
+        }
+
+        // No usable checkpoint payloads are available for this durable cold
+        // stream, so direct filtered scan is safer than full hydration.
+        return true;
     }
 
     // For cold durable streams, only prefer accessor/checkpoint restore when
@@ -3271,50 +3276,70 @@ fn row_matches_equality_filters(
 
 }
 
+fn apply_visible_equality_record(
+    record: &TransactionRecord,
+    group_id: Option<u64>,
+    schema: &TableSchema,
+    schema_cache: &RowPayloadSchemaCache,
+    equality_filters: &HashMap<String, Vec<u8>>,
+    single_filter: Option<(&str, &[u8])>,
+    live_rows: &mut AHashMap<u64, HashMap<String, Vec<u8>>>,
+    row_order: &mut Vec<u64>,
+    applied_group_row_ids: &mut AHashMap<u64, Vec<u64>>,
+) {
+
+    match record.kind {
+        TransactionKind::Insert | TransactionKind::Update => {
+            let Some(payload) = record.payload_logical() else {
+                return;
+            };
+
+            let maybe_row_map = if let Some((field_name, lookup_value)) = single_filter {
+                decode_row_payload_if_field_equals_with_schema_cache(
+                    schema_cache,
+                    payload,
+                    field_name,
+                    lookup_value,
+                )
+                .ok()
+                .flatten()
+            } else {
+                decode_row_payload(schema, payload).ok()
+            };
+
+            let Some(row_map) = maybe_row_map else {
+                return;
+            };
+
+            if row_matches_equality_filters(&row_map, equality_filters) {
+                row_order.push(record.id.0);
+                live_rows.insert(record.id.0, row_map);
+                if let Some(group_id) = group_id {
+                    applied_group_row_ids
+                        .entry(group_id)
+                        .or_default()
+                        .push(record.id.0);
+                }
+            }
+        }
+
+        TransactionKind::Delete => {
+            if let Some(refid) = record.refid {
+                live_rows.remove(&refid.0);
+            }
+        }
+
+        _ => {}
+    }
+
+}
+
 fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
     schema: &TableSchema,
     equality_filters: &HashMap<String, Vec<u8>>,
 ) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
-
-    let mut committed_groups = AHashSet::new();
-    let mut aborted_groups = AHashSet::new();
-
-    match wal.scan_durable_records_if_unloaded(table_stream_id, |record| {
-        match record.kind {
-            
-            TransactionKind::WriteCommit => {
-                if let Some(group_id) = record.groupid {
-                    committed_groups.insert(group_id.0);
-                }
-            },
-            
-            TransactionKind::WriteAbort => {
-                if let Some(group_id) = record.groupid {
-                    aborted_groups.insert(group_id.0);
-                }
-            },
-            
-            _ => {}
-
-        }
-    }) {
-        
-        Ok(true) => {},
-
-        Ok(false) => return None,
-
-        Err(err) => {
-            log::warn!(
-                "cold equality WAL scan pre-pass failed stream={}: {}",
-                table_stream_id,
-                err,
-            );
-            return None;
-        }
-
-    }
 
     let mut live_rows = AHashMap::with_capacity(equality_filters.len().saturating_mul(32));
     let mut row_order = Vec::with_capacity(equality_filters.len().saturating_mul(32));
@@ -3328,70 +3353,105 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
         None
     };
 
-    match wal.scan_durable_records_if_unloaded(table_stream_id, |record| {
+    let mut committed_groups = AHashSet::new();
+    let mut aborted_groups = AHashSet::new();
+    let mut pending_group_records = AHashMap::<u64, Vec<TransactionRecord>>::new();
+    let mut applied_group_row_ids = AHashMap::<u64, Vec<u64>>::new();
 
-        if !record_visible_for_live_row_apply(&record, &committed_groups, &aborted_groups) {
-            return;
-        }
+    match wal.scan_durable_records_if_unloaded(table_stream_id, |record| {
+        let group_id = record.groupid.map(|group_id| group_id.0);
 
         match record.kind {
-
-            TransactionKind::Insert | 
-            TransactionKind::Update => {
-
-                let Some(payload) = record.payload_logical() else {
+            TransactionKind::WriteCommit => {
+                let Some(group_id) = group_id else {
                     return;
                 };
 
-                if let Some((field_name, lookup_value)) = single_filter {
-                    let Ok(maybe_row_map) = decode_row_payload_if_field_equals_with_schema_cache(
-                        &schema_cache,
-                        payload,
-                        field_name,
-                        lookup_value,
-                    ) else {
-                        return;
-                    };
+                committed_groups.insert(group_id);
+                if aborted_groups.contains(&group_id) {
+                    pending_group_records.remove(&group_id);
+                    return;
+                }
 
-                    let Some(row_map) = maybe_row_map else {
-                        return;
-                    };
+                if let Some(staged) = pending_group_records.remove(&group_id) {
+                    for staged_record in staged {
+                        apply_visible_equality_record(
+                            &staged_record,
+                            Some(group_id),
+                            schema,
+                            &schema_cache,
+                            equality_filters,
+                            single_filter,
+                            &mut live_rows,
+                            &mut row_order,
+                            &mut applied_group_row_ids,
+                        );
+                    }
+                }
+            }
 
-                    if row_matches_equality_filters(&row_map, equality_filters) {
-                        row_order.push(record.id.0);
-                        live_rows.insert(record.id.0, row_map);
+            TransactionKind::WriteAbort => {
+                let Some(group_id) = group_id else {
+                    return;
+                };
+
+                aborted_groups.insert(group_id);
+                pending_group_records.remove(&group_id);
+
+                if let Some(applied_ids) = applied_group_row_ids.remove(&group_id) {
+                    for row_id in applied_ids {
+                        live_rows.remove(&row_id);
+                    }
+                }
+            }
+
+            _ => {
+                if let Some(group_id) = group_id {
+                    if aborted_groups.contains(&group_id) {
+                        return;
                     }
 
+                    if committed_groups.contains(&group_id) {
+                        apply_visible_equality_record(
+                            &record,
+                            Some(group_id),
+                            schema,
+                            &schema_cache,
+                            equality_filters,
+                            single_filter,
+                            &mut live_rows,
+                            &mut row_order,
+                            &mut applied_group_row_ids,
+                        );
+                        return;
+                    }
+
+                    pending_group_records
+                        .entry(group_id)
+                        .or_default()
+                        .push(record);
                     return;
                 }
 
-                let Ok(row_map) = decode_row_payload(schema, payload) else {
-                    return;
-                };
-
-                if row_matches_equality_filters(&row_map, equality_filters) {
-                    row_order.push(record.id.0);
-                    live_rows.insert(record.id.0, row_map);
-                }
-
-            },
-
-            TransactionKind::Delete => {
-                if let Some(refid) = record.refid {
-                    live_rows.remove(&refid.0);
-                }
-            },
-
-            _ => {}
-
+                apply_visible_equality_record(
+                    &record,
+                    None,
+                    schema,
+                    &schema_cache,
+                    equality_filters,
+                    single_filter,
+                    &mut live_rows,
+                    &mut row_order,
+                    &mut applied_group_row_ids,
+                );
+            }
         }
-
     }) {
         Ok(true) => {}
         Ok(false) => return None,
         Err(err) => {
             log::warn!(
-                "cold equality WAL scan apply-pass failed stream={}: {}",
+                "cold equality WAL scan single-pass failed stream={}: {}",
                 table_stream_id,
                 err,
             );

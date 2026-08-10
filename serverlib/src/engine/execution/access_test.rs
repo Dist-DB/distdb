@@ -491,6 +491,44 @@ fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydra
 }
 
 #[test]
+fn durable_cold_without_checkpoints_prefers_filtered_scan_without_hydration() {
+
+    let data_dir = unique_temp_dir("access-cold-no-checkpoints");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+    let rows = load_live_rows_by_equality_filters_with_limit(
+        &wal_cold,
+        &table.table_id,
+        &table.table_id,
+        &schema,
+        &filters,
+        None,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
+        "cold durable equality probe without checkpoints should avoid full WAL hydration",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn build_relation_probe_index_groups_duplicate_keys() {
 
     let rows = vec![
