@@ -522,12 +522,16 @@ const SCHEMA_ORDINAL_CACHE_MAX_ENTRIES: usize = 1024;
 struct SchemaOrdinalCacheEntry {
     ordered_field_names: Vec<String>,
     field_name_index: HashMap<String, usize>,
+    field_seqno_index: HashMap<String, usize>,
+    max_seqno: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct RowPayloadSchemaCache {
     ordered_field_names: Vec<String>,
     field_name_index: HashMap<String, usize>,
+    field_seqno_index: HashMap<String, usize>,
+    max_seqno: usize,
 }
 
 static SCHEMA_ORDINAL_CACHE: OnceLock<Mutex<HashMap<usize, SchemaOrdinalCacheEntry>>> =
@@ -555,10 +559,29 @@ fn schema_ordinal_cache_entry(schema: &TableSchema) -> SchemaOrdinalCacheEntry {
             .enumerate()
             .map(|(index, field_name)| (field_name.clone(), index))
             .collect::<HashMap<_, _>>();
+        let field_seqno_index = schema
+            .fields
+            .iter()
+            .filter_map(|field| {
+                if field.seqno == 0 {
+                    None
+                } else {
+                    Some((field.field_name.clone(), (field.seqno as usize).saturating_sub(1)))
+                }
+            })
+            .collect::<HashMap<_, _>>();
+        let max_seqno = schema
+            .fields
+            .iter()
+            .map(|field| field.seqno as usize)
+            .max()
+            .unwrap_or(0);
 
         let entry = SchemaOrdinalCacheEntry {
             ordered_field_names,
             field_name_index,
+            field_seqno_index,
+            max_seqno,
         };
 
         if guard.len() >= SCHEMA_ORDINAL_CACHE_MAX_ENTRIES {
@@ -576,10 +599,58 @@ fn schema_ordinal_cache_entry(schema: &TableSchema) -> SchemaOrdinalCacheEntry {
         .enumerate()
         .map(|(index, field_name)| (field_name.clone(), index))
         .collect::<HashMap<_, _>>();
+    let field_seqno_index = schema
+        .fields
+        .iter()
+        .filter_map(|field| {
+            if field.seqno == 0 {
+                None
+            } else {
+                Some((field.field_name.clone(), (field.seqno as usize).saturating_sub(1)))
+            }
+        })
+        .collect::<HashMap<_, _>>();
+    let max_seqno = schema
+        .fields
+        .iter()
+        .map(|field| field.seqno as usize)
+        .max()
+        .unwrap_or(0);
 
     SchemaOrdinalCacheEntry {
         ordered_field_names,
         field_name_index,
+        field_seqno_index,
+        max_seqno,
+    }
+
+}
+
+fn use_seqno_slot_decoding(
+    payload_len: usize,
+    ordered_field_count: usize,
+    max_seqno: usize,
+) -> bool {
+
+    payload_len > ordered_field_count &&
+    max_seqno > ordered_field_count &&
+    max_seqno >= payload_len
+
+}
+
+fn row_index_for_field(
+    field_name: &str,
+    payload_len: usize,
+    ordered_field_count: usize,
+    max_seqno: usize,
+    compact_index: &HashMap<String, usize>,
+    seqno_index: &HashMap<String, usize>,
+) -> Option<usize> {
+
+    if use_seqno_slot_decoding(payload_len, ordered_field_count, max_seqno) {
+        seqno_index.get(field_name).copied()
+    } else {
+        compact_index.get(field_name).copied()
     }
 
 }
@@ -614,15 +685,20 @@ fn decode_compatible_row_payload(
 ) -> Result<HashMap<String, Vec<u8>>, String> {
 
     let schema_cache = schema_ordinal_cache_entry(schema);
-    decode_compatible_row_payload_with_ordered_field_names(
-        &schema_cache.ordered_field_names,
+    decode_compatible_row_payload_with_schema_cache(
+        &RowPayloadSchemaCache {
+            ordered_field_names: schema_cache.ordered_field_names,
+            field_name_index: schema_cache.field_name_index,
+            field_seqno_index: schema_cache.field_seqno_index,
+            max_seqno: schema_cache.max_seqno,
+        },
         payload,
     )
 
 }
 
-fn decode_compatible_row_payload_with_ordered_field_names(
-    ordered_field_names: &[String],
+fn decode_compatible_row_payload_with_schema_cache(
+    schema_cache: &RowPayloadSchemaCache,
     payload: &[u8],
 ) -> Result<HashMap<String, Vec<u8>>, String> {
 
@@ -631,9 +707,20 @@ fn decode_compatible_row_payload_with_ordered_field_names(
         CompatibleRowPayload::LegacyMap(legacy_row) => Ok(legacy_row),
 
         CompatibleRowPayload::Ordinal(ordinal_row) => {
-            let mut row_map = HashMap::with_capacity(ordered_field_names.len());
+            let mut row_map = HashMap::with_capacity(schema_cache.ordered_field_names.len());
 
-            for (idx, field_name) in ordered_field_names.iter().enumerate() {
+            for field_name in &schema_cache.ordered_field_names {
+                let Some(idx) = row_index_for_field(
+                    field_name,
+                    ordinal_row.len(),
+                    schema_cache.ordered_field_names.len(),
+                    schema_cache.max_seqno,
+                    &schema_cache.field_name_index,
+                    &schema_cache.field_seqno_index,
+                ) else {
+                    continue;
+                };
+
                 let maybe_value = ordinal_row.get(idx).cloned().flatten();
                 if let Some(value) = maybe_value {
                     row_map.insert(field_name.clone(), value);
@@ -644,9 +731,20 @@ fn decode_compatible_row_payload_with_ordered_field_names(
         },
 
         CompatibleRowPayload::LegacyOrdinal(legacy_ordinal_row) => {
-            let mut row_map = HashMap::with_capacity(ordered_field_names.len());
+            let mut row_map = HashMap::with_capacity(schema_cache.ordered_field_names.len());
 
-            for (idx, field_name) in ordered_field_names.iter().enumerate() {
+            for field_name in &schema_cache.ordered_field_names {
+                let Some(idx) = row_index_for_field(
+                    field_name,
+                    legacy_ordinal_row.len(),
+                    schema_cache.ordered_field_names.len(),
+                    schema_cache.max_seqno,
+                    &schema_cache.field_name_index,
+                    &schema_cache.field_seqno_index,
+                ) else {
+                    continue;
+                };
+
                 if let Some(value) = legacy_ordinal_row.get(idx) {
                     row_map.insert(field_name.clone(), value.clone());
                 }
@@ -665,6 +763,8 @@ pub fn row_payload_schema_cache(schema: &TableSchema) -> RowPayloadSchemaCache {
     RowPayloadSchemaCache {
         ordered_field_names: entry.ordered_field_names,
         field_name_index: entry.field_name_index,
+        field_seqno_index: entry.field_seqno_index,
+        max_seqno: entry.max_seqno,
     }
 
 }
@@ -714,7 +814,7 @@ pub fn decode_row_payload_with_schema_cache(
     schema_cache: &RowPayloadSchemaCache,
     payload: &[u8],
 ) -> Result<HashMap<String, Vec<u8>>, String> {
-    decode_compatible_row_payload_with_ordered_field_names(&schema_cache.ordered_field_names, payload)
+    decode_compatible_row_payload_with_schema_cache(schema_cache, payload)
 }
 
 pub fn decode_row_field_value(
@@ -727,6 +827,8 @@ pub fn decode_row_field_value(
     let row_payload_schema_cache = RowPayloadSchemaCache {
         ordered_field_names: schema_cache.ordered_field_names,
         field_name_index: schema_cache.field_name_index,
+        field_seqno_index: schema_cache.field_seqno_index,
+        max_seqno: schema_cache.max_seqno,
     };
 
     decode_row_field_value_with_schema_cache(&row_payload_schema_cache, payload, field_name)
@@ -739,14 +841,28 @@ pub fn decode_row_field_value_with_schema_cache(
     field_name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
 
-    let position = schema_cache.field_name_index.get(field_name).copied();
-
     match decode_compatible_row_payload_shape(payload)? {
         CompatibleRowPayload::Ordinal(ordinal_row) => {
+            let position = row_index_for_field(
+                field_name,
+                ordinal_row.len(),
+                schema_cache.ordered_field_names.len(),
+                schema_cache.max_seqno,
+                &schema_cache.field_name_index,
+                &schema_cache.field_seqno_index,
+            );
             Ok(position.and_then(|idx| ordinal_row.get(idx).cloned().flatten()))
         }
         CompatibleRowPayload::LegacyMap(legacy_row) => Ok(legacy_row.get(field_name).cloned()),
         CompatibleRowPayload::LegacyOrdinal(legacy_ordinal_row) => {
+            let position = row_index_for_field(
+                field_name,
+                legacy_ordinal_row.len(),
+                schema_cache.ordered_field_names.len(),
+                schema_cache.max_seqno,
+                &schema_cache.field_name_index,
+                &schema_cache.field_seqno_index,
+            );
             Ok(position.and_then(|idx| legacy_ordinal_row.get(idx).cloned()))
         }
     }
@@ -760,11 +876,17 @@ pub fn decode_row_payload_if_field_equals_with_schema_cache(
     lookup_value: &[u8],
 ) -> Result<Option<HashMap<String, Vec<u8>>>, String> {
 
-    let position = schema_cache.field_name_index.get(field_name).copied();
-
     match decode_compatible_row_payload_shape(payload)? {
 
         CompatibleRowPayload::Ordinal(ordinal_row) => {
+            let position = row_index_for_field(
+                field_name,
+                ordinal_row.len(),
+                schema_cache.ordered_field_names.len(),
+                schema_cache.max_seqno,
+                &schema_cache.field_name_index,
+                &schema_cache.field_seqno_index,
+            );
             let matches_lookup = position
                 .and_then(|idx| ordinal_row.get(idx).and_then(|value| value.as_ref()))
                 .map(|value| value.as_slice() == lookup_value)
@@ -776,7 +898,18 @@ pub fn decode_row_payload_if_field_equals_with_schema_cache(
 
             let mut row_map = HashMap::with_capacity(schema_cache.ordered_field_names.len());
 
-            for (idx, field_name) in schema_cache.ordered_field_names.iter().enumerate() {
+            for field_name in &schema_cache.ordered_field_names {
+                let Some(idx) = row_index_for_field(
+                    field_name,
+                    ordinal_row.len(),
+                    schema_cache.ordered_field_names.len(),
+                    schema_cache.max_seqno,
+                    &schema_cache.field_name_index,
+                    &schema_cache.field_seqno_index,
+                ) else {
+                    continue;
+                };
+
                 let maybe_value = ordinal_row.get(idx).cloned().flatten();
                 if let Some(value) = maybe_value {
                     row_map.insert(field_name.clone(), value);
@@ -800,6 +933,14 @@ pub fn decode_row_payload_if_field_equals_with_schema_cache(
         }
 
         CompatibleRowPayload::LegacyOrdinal(legacy_ordinal_row) => {
+            let position = row_index_for_field(
+                field_name,
+                legacy_ordinal_row.len(),
+                schema_cache.ordered_field_names.len(),
+                schema_cache.max_seqno,
+                &schema_cache.field_name_index,
+                &schema_cache.field_seqno_index,
+            );
             let matches_lookup = position
                 .and_then(|idx| legacy_ordinal_row.get(idx))
                 .map(|value| value.as_slice() == lookup_value)
@@ -811,7 +952,18 @@ pub fn decode_row_payload_if_field_equals_with_schema_cache(
 
             let mut row_map = HashMap::with_capacity(schema_cache.ordered_field_names.len());
 
-            for (idx, field_name) in schema_cache.ordered_field_names.iter().enumerate() {
+            for field_name in &schema_cache.ordered_field_names {
+                let Some(idx) = row_index_for_field(
+                    field_name,
+                    legacy_ordinal_row.len(),
+                    schema_cache.ordered_field_names.len(),
+                    schema_cache.max_seqno,
+                    &schema_cache.field_name_index,
+                    &schema_cache.field_seqno_index,
+                ) else {
+                    continue;
+                };
+
                 if let Some(value) = legacy_ordinal_row.get(idx) {
                     row_map.insert(field_name.clone(), value.clone());
                 }

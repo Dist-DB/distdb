@@ -72,6 +72,88 @@ fn decode_round_trips_ordinal_with_nulls() {
 }
 
 #[test]
+fn decode_legacy_ordinal_with_dropped_slot_uses_seqno_positions() {
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::UInt(64),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 3,
+            field_name: "display_name".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    let legacy_with_gap: Vec<Vec<u8>> = vec![
+        b"42".to_vec(),
+        b"legacy_dropped_value".to_vec(),
+        b"Cologne".to_vec(),
+    ];
+    let encoded = common::helpers::bincode_compat::serialize(&legacy_with_gap)
+        .expect("legacy ordinal payload should encode");
+
+    let row = decode_row_payload(&schema, &encoded).expect("row should decode");
+
+    assert_eq!(row.get("id"), Some(&b"42".to_vec()));
+    assert_eq!(row.get("display_name"), Some(&b"Cologne".to_vec()));
+}
+
+#[test]
+fn equality_decode_legacy_ordinal_with_dropped_slot_matches_target_field() {
+    let schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "id".to_string(),
+            field_type: FieldType::UInt(64),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 3,
+            field_name: "display_name".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::None,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    let schema_cache = row_payload_schema_cache(&schema);
+    let legacy_with_gap: Vec<Vec<u8>> = vec![
+        b"42".to_vec(),
+        b"legacy_dropped_value".to_vec(),
+        b"Cologne".to_vec(),
+    ];
+    let encoded = common::helpers::bincode_compat::serialize(&legacy_with_gap)
+        .expect("legacy ordinal payload should encode");
+
+    let matched = decode_row_payload_if_field_equals_with_schema_cache(
+        &schema_cache,
+        &encoded,
+        "display_name",
+        b"Cologne",
+    )
+    .expect("equality decode should succeed");
+
+    let row = matched.expect("row should match lookup value");
+    assert_eq!(row.get("display_name"), Some(&b"Cologne".to_vec()));
+    assert_eq!(row.get("id"), Some(&b"42".to_vec()));
+}
+
+#[test]
 fn decode_accepts_legacy_name_map() {
     let schema = test_schema();
     let mut legacy = HashMap::new();
