@@ -1042,7 +1042,7 @@ impl ServerApp {
         let catalog_clone_ms = catalog_clone_started_at.elapsed().as_millis() as u64;
 
         let runtime_clone_started_at = Instant::now();
-        let mut runtime_indexes = RuntimeIndexStore::new();
+        let mut runtime_indexes = self.runtime_indexes.clone();
         let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
 
         if catalog_clone_ms > 50 || runtime_clone_ms > 50 {
@@ -1052,7 +1052,7 @@ impl ServerApp {
                 catalog_clone_ms,
                 runtime_clone_ms,
                 0,
-                "ephemeral",
+                "cloned",
             );
         }
         
