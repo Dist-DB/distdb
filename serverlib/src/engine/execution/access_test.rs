@@ -334,6 +334,163 @@ fn durable_scoped_equality_fallback_to_legacy_stream_avoids_wal_hydration() {
 }
 
 #[test]
+fn durable_cold_unique_row_ref_probe_uses_checkpoint_without_wal_hydration() {
+
+    let data_dir = unique_temp_dir("access-unique-row-ref");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(&table.table_id)
+        .map(|tx| tx.0)
+        .expect("latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        &table.table_id,
+    )
+    .expect("wal fingerprint should exist");
+
+    let live_rows = load_live_rows(&wal_writer, &table.table_id, &table.table_id, &schema);
+    let stored_id_value = live_rows
+        .iter()
+        .find(|(row_id, _)| *row_id == 1)
+        .and_then(|(_, row_map)| row_map.get("id").cloned())
+        .expect("stored id value should exist");
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &live_rows,
+    )
+    .expect("live-row checkpoint should save");
+
+    RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        accessor_snapshot_max_live_rows() + 10_000,
+    )
+    .expect("live-row count checkpoint should save");
+
+    let id_index = table
+        .indexes
+        .values()
+        .find(|index| {
+            index.field_names.len() == 1 && index.field_names[0] == "id"
+        })
+        .cloned()
+        .expect("id index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &id_index.index_id.0);
+    state.index = Some(id_index.clone());
+    state.insert_with_row_ref(vec![stored_id_value.clone()], Some(1));
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "id".to_string(),
+                lookup_value: stored_id_value.clone(),
+                source: EqualityProbeSource::ExistingIndex,
+                equality_filters: HashMap::from([(
+                    "id".to_string(),
+                    stored_id_value,
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
+        "unique row-ref equality probe should avoid cold WAL hydration",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
+fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydration() {
+
+    let data_dir = unique_temp_dir("access-large-no-live-row-checkpoint");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(&table.table_id)
+        .map(|tx| tx.0)
+        .expect("latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        &table.table_id,
+    )
+    .expect("wal fingerprint should exist");
+
+    RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        accessor_snapshot_max_live_rows() + 10_000,
+    )
+    .expect("live-row count checkpoint should save");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+    let rows = load_live_rows_by_equality_filters_with_limit(
+        &wal_cold,
+        &table.table_id,
+        &table.table_id,
+        &schema,
+        &filters,
+        None,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
+        "large cold equality path should use filtered scan and avoid WAL hydration",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn build_relation_probe_index_groups_duplicate_keys() {
 
     let rows = vec![

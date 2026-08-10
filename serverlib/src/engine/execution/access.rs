@@ -3227,6 +3227,19 @@ fn should_use_direct_scan_for_equality_probe(
     // hydration (and full decode) before we attempt snapshot/checkpoint-backed
     // paths.
     if wal.stream_mode(table_stream_id) == WalStreamMode::Durable {
+        if let Some(data_dir) = wal.data_dir_path()
+            && let Some((_, live_row_count)) =
+                load_live_row_count_checkpoint(&data_dir, table_stream_id, table_id, schema)
+            && live_row_count > accessor_snapshot_max_live_rows()
+            && load_live_row_checkpoint_rows(&data_dir, table_stream_id, table_id, schema)
+                .is_none()
+        {
+            // If the table is too large for accessor snapshot restore and there
+            // is no usable live-row checkpoint payload, prefer a filtered direct
+            // scan over full live-row hydration.
+            return true;
+        }
+
         return false;
     }
 
@@ -5734,6 +5747,19 @@ fn load_live_row_by_runtime_index_row_ref(
 
 }
 
+fn should_attempt_row_ref_direct_lookup(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+) -> bool {
+
+    if wal.stream_mode(table_stream_id) != WalStreamMode::Durable {
+        return true;
+    }
+
+    wal.latest_transaction_id_if_loaded(table_stream_id).is_some()
+
+}
+
 fn load_live_rows_by_runtime_index_row_refs(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
@@ -5976,6 +6002,7 @@ where
                 );
 
                 if runtime_lookup_index_is_unique
+                    && should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id)
                     && let Some(single_field_name) = single_field_name
                     && let Some(row_ref) = state.row_ref(matched_lookup_key)
                     && let Some(row) = load_live_row_by_runtime_index_row_ref(
@@ -6156,6 +6183,7 @@ where
                 if let Some(row_ref) = key_variants
                     .iter()
                     .find_map(|key_variant| state.row_ref(key_variant))
+                    && should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id)
                     && let Some((row_id, row_map)) = load_live_row_by_runtime_index_row_ref(
                         wal,
                         &runtime_index_scope_id,
