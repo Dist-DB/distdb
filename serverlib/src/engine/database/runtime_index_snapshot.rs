@@ -20,12 +20,15 @@ use crate::{
 };
 
 const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtix";
+const RUNTIME_INDEX_SNAPSHOT_CHUNK_FILE_STEM_PREFIX: &str = "rtixc";
 const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
 const LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrcnt";
 const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";
 const LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS: usize = 150_000;
 const LIVE_ROW_CHECKPOINT_MAX_BYTES_DEFAULT: u64 = 256 * 1024 * 1024;
 const ACCESSOR_SNAPSHOT_PERSIST_ROWS_DEFAULT: bool = false;
+const RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES_DEFAULT: usize = 2 * 1024 * 1024 * 1024;
+const RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK_DEFAULT: usize = 200_000;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RuntimeIndexTableSnapshot {
@@ -48,6 +51,40 @@ pub(crate) struct RuntimeIndexSnapshotIndex {
     pub(crate) row_refs_by_entry: Vec<u64>,
     #[serde(default)]
     pub(crate) row_refs: Vec<(Vec<Vec<u8>>, u64)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimeIndexSnapshotChunkRef {
+    index_id: String,
+    chunk_seq: usize,
+    file_name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimeIndexTableSnapshotChunkedManifest {
+    table_id: String,
+    latest_tx_id: u64,
+    schema_fingerprint: String,
+    live_row_count: usize,
+    wal_size_bytes: u64,
+    wal_modified_epoch_ms: u64,
+    chunk_refs: Vec<RuntimeIndexSnapshotChunkRef>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimeIndexSnapshotChunkPayload {
+    index_id: String,
+    entries: Vec<Vec<Vec<u8>>>,
+    #[serde(default)]
+    row_refs_by_entry: Vec<u64>,
+    #[serde(default)]
+    row_refs: Vec<(Vec<Vec<u8>>, u64)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum RuntimeIndexSnapshotEnvelope {
+    Inline(RuntimeIndexTableSnapshot),
+    Chunked(RuntimeIndexTableSnapshotChunkedManifest),
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +160,26 @@ impl RuntimeIndexSnapshotService {
             .and_then(|value| value.trim().parse::<u64>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(LIVE_ROW_CHECKPOINT_MAX_BYTES_DEFAULT)
+
+    }
+
+    fn runtime_index_snapshot_max_decode_bytes() -> usize {
+
+        std::env::var("DISTDB_RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES_DEFAULT)
+
+    }
+
+    fn runtime_index_snapshot_max_entries_per_chunk() -> usize {
+
+        std::env::var("DISTDB_RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK_DEFAULT)
 
     }
 
@@ -230,28 +287,74 @@ impl RuntimeIndexSnapshotService {
             return None;
         }
 
-        let (snapshot, legacy_plain_encoding): (RuntimeIndexTableSnapshot, bool) =
-            match decode_snapshot_payload_with_reason(&bytes[HEADER_SIZE..]) {
-                Ok(decoded) => decoded,
-                Err(reason) => {
-                    let _ = fs::remove_file(&snapshot_path);
+        let max_decode_bytes = Some(Self::runtime_index_snapshot_max_decode_bytes());
+        let envelope_decode = decode_snapshot_payload_with_reason::<RuntimeIndexSnapshotEnvelope>(
+            &bytes[HEADER_SIZE..],
+            max_decode_bytes,
+        );
 
-                    log::warn!(
-                        "runtime index snapshot file removed after decode failure table={} stream={} path={} reason={}",
-                        table.table_id,
-                        table_stream_id,
-                        snapshot_path.display(),
-                        reason,
-                    );
+        let (snapshot, legacy_plain_encoding): (RuntimeIndexTableSnapshot, bool) = match envelope_decode {
+            Ok((RuntimeIndexSnapshotEnvelope::Inline(snapshot), legacy_plain_encoding)) => {
+                (snapshot, legacy_plain_encoding)
+            }
+            Ok((RuntimeIndexSnapshotEnvelope::Chunked(manifest), legacy_plain_encoding)) => {
+                match Self::load_runtime_index_snapshot_chunks(
+                    data_dir,
+                    table_stream_id,
+                    &manifest,
+                    max_decode_bytes,
+                ) {
+                    Ok(snapshot) => (snapshot, legacy_plain_encoding),
+                    Err(reason) => {
+                        let _ = fs::remove_file(&snapshot_path);
+                        Self::remove_runtime_index_snapshot_chunk_files(data_dir, table_stream_id);
 
-                    log::debug!(
-                        "runtime index snapshot restore miss table={} stream={} reason=decode_failed",
-                        table.table_id,
-                        table_stream_id,
-                    );
-                    return None;
+                        log::warn!(
+                            "runtime index snapshot file removed after decode failure table={} stream={} path={} reason={}",
+                            table.table_id,
+                            table_stream_id,
+                            snapshot_path.display(),
+                            reason,
+                        );
+
+                        log::debug!(
+                            "runtime index snapshot restore miss table={} stream={} reason=decode_failed",
+                            table.table_id,
+                            table_stream_id,
+                        );
+                        return None;
+                    }
                 }
-            };
+            }
+            Err(envelope_reason) => {
+                match decode_snapshot_payload_with_reason::<RuntimeIndexTableSnapshot>(
+                    &bytes[HEADER_SIZE..],
+                    max_decode_bytes,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(snapshot_reason) => {
+                        let _ = fs::remove_file(&snapshot_path);
+                        Self::remove_runtime_index_snapshot_chunk_files(data_dir, table_stream_id);
+
+                        log::warn!(
+                            "runtime index snapshot file removed after decode failure table={} stream={} path={} reason=envelope_decode_error={} snapshot_decode_error={}",
+                            table.table_id,
+                            table_stream_id,
+                            snapshot_path.display(),
+                            envelope_reason,
+                            snapshot_reason,
+                        );
+
+                        log::debug!(
+                            "runtime index snapshot restore miss table={} stream={} reason=decode_failed",
+                            table.table_id,
+                            table_stream_id,
+                        );
+                        return None;
+                    }
+                }
+            }
+        };
 
         let schema_fingerprint = match table_schema_fingerprint(table) {
             Some(fingerprint) => fingerprint,
@@ -350,6 +453,76 @@ impl RuntimeIndexSnapshotService {
             legacy_plain_encoding,
         })
 
+    }
+
+    fn load_runtime_index_snapshot_chunks(
+        data_dir: &Path,
+        _table_stream_id: &str,
+        manifest: &RuntimeIndexTableSnapshotChunkedManifest,
+        max_decode_bytes: Option<usize>,
+    ) -> Result<RuntimeIndexTableSnapshot, String> {
+        let mut indexes_by_id: HashMap<String, RuntimeIndexSnapshotIndex> = HashMap::new();
+
+        for chunk_ref in &manifest.chunk_refs {
+            let chunk_path = Self::runtime_index_snapshot_chunk_path(data_dir, &chunk_ref.file_name);
+            let chunk_bytes = read_bytes(&chunk_path)
+                .map_err(|err| format!("chunk_read_failed file={} error={}", chunk_path.display(), err))?;
+
+            if verify_header(FileKind::Entity, &chunk_bytes).is_err() || chunk_bytes.len() <= HEADER_SIZE {
+                return Err(format!(
+                    "chunk_decode_failed file={} reason=invalid_header_or_empty",
+                    chunk_path.display()
+                ));
+            }
+
+            let (chunk, _legacy_plain_encoding): (RuntimeIndexSnapshotChunkPayload, bool) =
+                decode_snapshot_payload_with_reason(&chunk_bytes[HEADER_SIZE..], max_decode_bytes)
+                    .map_err(|reason| {
+                        format!(
+                            "chunk_decode_failed file={} reason={}",
+                            chunk_path.display(),
+                            reason,
+                        )
+                    })?;
+
+            if chunk.index_id != chunk_ref.index_id {
+                return Err(format!(
+                    "chunk_decode_failed file={} reason=index_id_mismatch expected={} actual={}",
+                    chunk_path.display(),
+                    chunk_ref.index_id,
+                    chunk.index_id,
+                ));
+            }
+
+            let state = indexes_by_id
+                .entry(chunk.index_id.clone())
+                .or_insert_with(|| RuntimeIndexSnapshotIndex {
+                    index_id: chunk.index_id.clone(),
+                    entries: Vec::new(),
+                    row_refs_by_entry: Vec::new(),
+                    row_refs: Vec::new(),
+                });
+
+            state.entries.extend(chunk.entries);
+            state.row_refs_by_entry.extend(chunk.row_refs_by_entry);
+            state.row_refs.extend(chunk.row_refs);
+        }
+
+        let mut indexes = indexes_by_id
+            .into_values()
+            .collect::<Vec<_>>();
+
+        indexes.sort_by(|left, right| left.index_id.cmp(&right.index_id));
+
+        Ok(RuntimeIndexTableSnapshot {
+            table_id: manifest.table_id.clone(),
+            latest_tx_id: manifest.latest_tx_id,
+            schema_fingerprint: manifest.schema_fingerprint.clone(),
+            live_row_count: manifest.live_row_count,
+            wal_size_bytes: manifest.wal_size_bytes,
+            wal_modified_epoch_ms: manifest.wal_modified_epoch_ms,
+            indexes,
+        })
     }
 
     pub(crate) fn load_live_row_checkpoint(
@@ -505,19 +678,115 @@ impl RuntimeIndexSnapshotService {
             live_row_count,
             wal_size_bytes,
             wal_modified_epoch_ms,
-            indexes,
+            indexes: Vec::new(),
         };
 
+        let max_entries_per_chunk = Self::runtime_index_snapshot_max_entries_per_chunk();
+        let mut chunk_refs = Vec::new();
+        let mut chunk_files_written = Vec::new();
+
+        Self::remove_runtime_index_snapshot_chunk_files(data_dir, table_stream_id);
+
+        for index in indexes {
+            let row_refs_lookup = index
+                .row_refs
+                .iter()
+                .map(|(key, row_ref)| (key.clone(), *row_ref))
+                .collect::<HashMap<_, _>>();
+
+            for (chunk_seq, entry_chunk) in index.entries.chunks(max_entries_per_chunk).enumerate() {
+                let entries = entry_chunk.to_vec();
+
+                let row_refs_by_entry = if index.row_refs_by_entry.len() == index.entries.len() {
+                    let start = chunk_seq.saturating_mul(max_entries_per_chunk);
+                    let end = start.saturating_add(entries.len());
+                    index.row_refs_by_entry[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                let row_refs = if row_refs_lookup.is_empty() {
+                    Vec::new()
+                } else {
+                    entries
+                        .iter()
+                        .filter_map(|entry| {
+                            row_refs_lookup
+                                .get(entry)
+                                .copied()
+                                .map(|row_ref| (entry.clone(), row_ref))
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                let chunk_payload = RuntimeIndexSnapshotChunkPayload {
+                    index_id: index.index_id.clone(),
+                    entries,
+                    row_refs_by_entry,
+                    row_refs,
+                };
+
+                let file_name = Self::runtime_index_snapshot_chunk_file_name(
+                    table_stream_id,
+                    &index.index_id,
+                    chunk_seq,
+                );
+
+                let chunk_path = Self::runtime_index_snapshot_chunk_path(data_dir, &file_name);
+                let mut chunk_content = make_header(FileKind::Entity).to_vec();
+                let chunk_encoded = encode_snapshot_payload(&chunk_payload)?;
+                chunk_content.extend_from_slice(&chunk_encoded);
+
+                if let Err(err) = write_bytes_atomic(&chunk_path, &chunk_content) {
+                    for written in &chunk_files_written {
+                        let _ = fs::remove_file(written);
+                    }
+                    return Err(format!("snapshot chunk write failed: {err}"));
+                }
+
+                chunk_files_written.push(chunk_path);
+                chunk_refs.push(RuntimeIndexSnapshotChunkRef {
+                    index_id: index.index_id.clone(),
+                    chunk_seq,
+                    file_name,
+                });
+            }
+        }
+
+        chunk_refs.sort_by(|left, right| {
+            left.index_id
+                .cmp(&right.index_id)
+                .then(left.chunk_seq.cmp(&right.chunk_seq))
+        });
+
+        let envelope = RuntimeIndexSnapshotEnvelope::Chunked(
+            RuntimeIndexTableSnapshotChunkedManifest {
+                table_id: snapshot.table_id,
+                latest_tx_id: snapshot.latest_tx_id,
+                schema_fingerprint: snapshot.schema_fingerprint,
+                live_row_count: snapshot.live_row_count,
+                wal_size_bytes: snapshot.wal_size_bytes,
+                wal_modified_epoch_ms: snapshot.wal_modified_epoch_ms,
+                chunk_refs,
+            },
+        );
+
         let mut content = make_header(FileKind::Entity).to_vec();
-        let payload = encode_snapshot_payload(&snapshot)?;
+        let payload = encode_snapshot_payload(&envelope)?;
         content.extend_from_slice(&payload);
 
         let snapshot_path = Self::runtime_index_snapshot_path(data_dir, table_stream_id);
         write_bytes_atomic(&snapshot_path, &content)
-            .map_err(|err| format!("snapshot write failed: {err}"))?;
+            .map_err(|err| {
+                for written in &chunk_files_written {
+                    let _ = fs::remove_file(written);
+                }
+                format!("snapshot write failed: {err}")
+            })?;
 
         if Self::wal_stream_fingerprint(data_dir, table_stream_id) != Some(expected_wal_fingerprint) {
             let _ = fs::remove_file(&snapshot_path);
+            Self::remove_runtime_index_snapshot_chunk_files(data_dir, table_stream_id);
             return Err("wal fingerprint changed after snapshot write".to_string());
         }
 
@@ -712,6 +981,47 @@ impl RuntimeIndexSnapshotService {
             .join(FileKind::Entity.file_name(stem))
     }
 
+    fn runtime_index_snapshot_chunk_file_name(
+        table_stream_id: &str,
+        index_id: &str,
+        chunk_seq: usize,
+    ) -> String {
+        let table_key = stable_id(&[table_stream_id]);
+        let index_key = stable_id(&[index_id]);
+        format!(
+            "{}_{}_{}_{}",
+            RUNTIME_INDEX_SNAPSHOT_CHUNK_FILE_STEM_PREFIX,
+            table_key,
+            index_key,
+            chunk_seq,
+        )
+    }
+
+    fn runtime_index_snapshot_chunk_path(data_dir: &Path, file_name: &str) -> PathBuf {
+        data_dir
+            .join("runtime-index")
+            .join(FileKind::Entity.file_name(file_name.to_string()))
+    }
+
+    fn remove_runtime_index_snapshot_chunk_files(data_dir: &Path, table_stream_id: &str) {
+        let table_key = stable_id(&[table_stream_id]);
+        let marker = format!("{}_{}", RUNTIME_INDEX_SNAPSHOT_CHUNK_FILE_STEM_PREFIX, table_key);
+        let runtime_index_dir = data_dir.join("runtime-index");
+
+        let Ok(entries) = fs::read_dir(runtime_index_dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+
+            if file_name.contains(marker.as_str()) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
     fn accessor_cache_snapshot_path(data_dir: &Path, table_stream_id: &str) -> PathBuf {
         let table_key = stable_id(&[table_stream_id]);
         let stem = format!("{}_{}", ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX, table_key);
@@ -780,12 +1090,21 @@ fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, St
 
 fn decode_snapshot_payload_with_reason<T: serde::de::DeserializeOwned>(
     payload: &[u8],
+    max_decode_bytes: Option<usize>,
 ) -> Result<(T, bool), String> {
     let decoder = ZlibDecoder::new(payload);
     let mut reader = BufReader::new(decoder);
 
-    let compressed_decode = common::helpers::bincode_compat::deserialize_from::<_, T>(&mut reader)
-        .map(|decoded| (decoded, false));
+    let compressed_decode = if let Some(max_decode_bytes) = max_decode_bytes {
+        common::helpers::bincode_compat::deserialize_from_with_max_bytes::<_, T>(
+            &mut reader,
+            max_decode_bytes,
+        )
+        .map(|decoded| (decoded, false))
+    } else {
+        common::helpers::bincode_compat::deserialize_from::<_, T>(&mut reader)
+            .map(|decoded| (decoded, false))
+    };
 
     if let Ok(decoded) = compressed_decode {
         return Ok(decoded);
@@ -796,8 +1115,16 @@ fn decode_snapshot_payload_with_reason<T: serde::de::DeserializeOwned>(
         .map(|err| err.to_string())
         .unwrap_or_else(|| "unknown compressed decode error".to_string());
 
-    let plain_decode = common::helpers::bincode_compat::deserialize::<T>(payload)
-        .map(|decoded| (decoded, true));
+    let plain_decode = if let Some(max_decode_bytes) = max_decode_bytes {
+        common::helpers::bincode_compat::deserialize_with_max_bytes::<T>(
+            payload,
+            max_decode_bytes,
+        )
+        .map(|decoded| (decoded, true))
+    } else {
+        common::helpers::bincode_compat::deserialize::<T>(payload)
+            .map(|decoded| (decoded, true))
+    };
 
     if let Ok(decoded) = plain_decode {
         return Ok(decoded);
@@ -816,7 +1143,7 @@ fn decode_snapshot_payload_with_reason<T: serde::de::DeserializeOwned>(
 }
 
 fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<(T, bool)> {
-    decode_snapshot_payload_with_reason(payload).ok()
+    decode_snapshot_payload_with_reason(payload, None).ok()
 }
 
 fn snapshot_memory_shape(snapshot: &RuntimeIndexTableSnapshot) -> (usize, usize, usize, usize, usize) {
