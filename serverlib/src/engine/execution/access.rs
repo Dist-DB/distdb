@@ -3206,6 +3206,20 @@ fn equality_probe_direct_scan_enabled() -> bool {
 
 }
 
+fn equality_probe_runtime_state_debug_enabled() -> bool {
+
+    std::env::var("DISTDB_DEBUG_EQUALITY_PROBE_RUNTIME_STATE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+
+}
+
 fn equality_probe_cold_durable_direct_scan_enabled() -> bool {
 
     std::env::var("DISTDB_EQUALITY_PROBE_COLD_DURABLE_DIRECT_SCAN")
@@ -3216,7 +3230,7 @@ fn equality_probe_cold_durable_direct_scan_enabled() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 
 }
 
@@ -3241,10 +3255,6 @@ fn should_use_direct_scan_for_equality_probe(
     // hydration (and full decode) before we attempt snapshot/checkpoint-backed
     // paths.
     if wal.stream_mode(table_stream_id) == WalStreamMode::Durable {
-        if !equality_probe_cold_durable_direct_scan_enabled() {
-            return false;
-        }
-
         let Some(data_dir) = wal.data_dir_path() else {
             return false;
         };
@@ -6234,21 +6244,66 @@ where
 
             let mut equality_probe_stream_scope: Cow<'_, str> = Cow::Borrowed(table_stream_id);
 
-            if matches!(source, EqualityProbeSource::ExistingIndex)
-                && let Some(index_id) = single_field_index_id(table, field_name)
-            {
-                let key = vec![lookup_value.clone()];
-                let key_variants = runtime_lookup_key_variants(&key);
+            if matches!(source, EqualityProbeSource::ExistingIndex) {
+                if let Some(index_id) = single_field_index_id(table, field_name) {
+                    let key = vec![lookup_value.clone()];
+                    let key_variants = runtime_lookup_key_variants(&key);
+                    let scoped_state = runtime_indexes
+                        .index_for_table(table_stream_id, &index_id)
+                        .map(|state| (table_stream_id.to_string(), state))
+                        .or_else(|| {
+                            key_variants
+                                .iter()
+                                .find_map(|key_variant| {
+                                    runtime_indexes
+                                        .find_scoped_index_state_for_lookup(&index_id, key_variant)
+                                        .map(|(scope_id, state)| (scope_id.to_string(), state))
+                                })
+                        });
 
-                if runtime_indexes.index_for_table(table_stream_id, &index_id).is_none()
-                    && let Some((runtime_index_scope_id, _)) = key_variants
-                        .iter()
-                        .find_map(|key_variant| {
-                            runtime_indexes
-                                .find_scoped_index_state_for_lookup(&index_id, key_variant)
-                        })
-                {
-                    equality_probe_stream_scope = Cow::Owned(runtime_index_scope_id.to_string());
+                    if equality_probe_runtime_state_debug_enabled() {
+                        if let Some((scope_id, state)) = scoped_state.as_ref() {
+                            let key_present = key_variants
+                                .iter()
+                                .any(|key_variant| state.contains(key_variant));
+
+                            log::info!(
+                                "equality probe runtime state table={} field={} index_id={} scope={} state_present=true cardinality={} key_present={}",
+                                table.table_id,
+                                field_name,
+                                index_id,
+                                scope_id,
+                                state.cardinality(),
+                                key_present,
+                            );
+                        } else {
+                            log::info!(
+                                "equality probe runtime state table={} field={} index_id={} scope={} state_present=false has_scoped_index_state={}",
+                                table.table_id,
+                                field_name,
+                                index_id,
+                                table_stream_id,
+                                runtime_indexes.has_scoped_index_state(&index_id),
+                            );
+                        }
+                    }
+
+                    if runtime_indexes.index_for_table(table_stream_id, &index_id).is_none()
+                        && let Some((runtime_index_scope_id, _)) = key_variants
+                            .iter()
+                            .find_map(|key_variant| {
+                                runtime_indexes
+                                    .find_scoped_index_state_for_lookup(&index_id, key_variant)
+                            })
+                    {
+                        equality_probe_stream_scope = Cow::Owned(runtime_index_scope_id.to_string());
+                    }
+                } else if equality_probe_runtime_state_debug_enabled() {
+                    log::info!(
+                        "equality probe runtime state table={} field={} source=existing_index result=index_metadata_missing",
+                        table.table_id,
+                        field_name,
+                    );
                 }
             }
 
