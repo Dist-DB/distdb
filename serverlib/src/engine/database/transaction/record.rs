@@ -281,7 +281,7 @@ pub struct TransactionRecord {
     #[serde(default)]
     payload: Option<Vec<u8>>,
     #[serde(skip, default)]
-    payload_shadow: Option<TransactionPayloadShadow>,
+    payload_shadow: Option<Box<TransactionPayloadShadow>>,
 }
 
 impl PartialEq for TransactionRecord {
@@ -416,11 +416,11 @@ impl TransactionRecord {
         }
 
         let resolved = resolver.resolve_payload(self.payload_raw(), context)?;
-        self.payload_shadow = Some(TransactionPayloadShadow {
+        self.payload_shadow = Some(Box::new(TransactionPayloadShadow {
             resolved_payload: resolved,
             resolved_context: Some(context.clone()),
             is_resolved: true,
-        });
+        }));
 
         Ok(self.payload_shadow
             .as_ref()
@@ -440,11 +440,11 @@ impl TransactionRecord {
             && let Some(context) = context
             && context.at_rest_encryption_enabled()
         {
-            self.payload_shadow = Some(TransactionPayloadShadow {
+            self.payload_shadow = Some(Box::new(TransactionPayloadShadow {
                 resolved_payload: None,
                 resolved_context: Some(context.clone()),
                 is_resolved: false,
-            });
+            }));
         } else {
             self.payload_shadow = None;
         }
@@ -456,7 +456,7 @@ impl TransactionRecord {
         // If we already have a resolved logical payload, mutate that canonical view.
         if let Some(shadow) = self.payload_shadow.take()
             && shadow.is_resolved
-            && let Some(resolved_payload) = shadow.resolved_payload
+            && let Some(resolved_payload) = (*shadow).resolved_payload
         {
             self.payload = Some(resolved_payload);
         }
