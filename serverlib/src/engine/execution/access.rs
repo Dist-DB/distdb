@@ -6009,26 +6009,20 @@ where
 
             if equality_probe_stream_scope.as_ref() != table.table_id {
 
-                let scoped_latest_tx_id = wal
-                    .latest_transaction_id(equality_probe_stream_scope.as_ref())
-                    .map(|tx| tx.0)
-                    .unwrap_or(0);
+                let scoped_has_data_writes =
+                    wal.has_write_after(equality_probe_stream_scope.as_ref(), 0);
 
-                if scoped_latest_tx_id == 0 {
+                if !scoped_has_data_writes {
 
-                    let legacy_latest_tx_id = wal
-                        .latest_transaction_id(&table.table_id)
-                        .map(|tx| tx.0)
-                        .unwrap_or(0);
+                    let legacy_has_data_writes = wal.has_write_after(&table.table_id, 0);
 
-                    if legacy_latest_tx_id > 0 {
+                    if legacy_has_data_writes {
                         log::debug!(
-                            "relation equality probe table={} field={} scoped_stream={} scoped_latest_tx_id=0 legacy_stream={} legacy_latest_tx_id={} -> fallback_legacy_stream",
+                            "relation equality probe table={} field={} scoped_stream={} scoped_has_data_writes=false legacy_stream={} legacy_has_data_writes=true -> fallback_legacy_stream",
                             table.table_id,
                             field_name,
                             equality_probe_stream_scope.as_ref(),
                             table.table_id,
-                            legacy_latest_tx_id,
                         );
                         equality_probe_stream_scope = Cow::Borrowed(table.table_id.as_str());
                     }
