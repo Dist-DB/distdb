@@ -258,6 +258,11 @@
         for row in rows {
             if row.get(2).is_some_and(|kind| kind == "table" || kind == "index") {
                 assert_eq!(
+                    row.get(4).map(String::as_str),
+                    Some("ready"),
+                    "table/index status should be ready after bootstrap readiness"
+                );
+                assert_eq!(
                     row.get(5).map(String::as_str),
                     Some("loaded"),
                     "table/index load_state should be loaded after bootstrap readiness"

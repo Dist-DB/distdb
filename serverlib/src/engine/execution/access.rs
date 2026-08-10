@@ -5987,6 +5987,26 @@ where
             equality_filters,
         } => {
 
+            let mut equality_probe_stream_scope: Cow<'_, str> = Cow::Borrowed(table_stream_id);
+
+            if matches!(source, EqualityProbeSource::ExistingIndex)
+                && let Some(index_id) = single_field_index_id(table, field_name)
+            {
+                let key = vec![lookup_value.clone()];
+                let key_variants = runtime_lookup_key_variants(&key);
+
+                if runtime_indexes.index_for_table(table_stream_id, &index_id).is_none()
+                    && let Some((runtime_index_scope_id, _)) = key_variants
+                        .iter()
+                        .find_map(|key_variant| {
+                            runtime_indexes
+                                .find_scoped_index_state_for_lookup(&index_id, key_variant)
+                        })
+                {
+                    equality_probe_stream_scope = Cow::Owned(runtime_index_scope_id.to_string());
+                }
+            }
+
             log::debug!(
                 "relation access table={} field={} strategy={}",
                 table.table_id,
@@ -6062,7 +6082,7 @@ where
             if equality_filters.len() > 1 {
                 load_live_rows_by_equality_filters_with_limit(
                     wal,
-                    table_stream_id,
+                    equality_probe_stream_scope.as_ref(),
                     &table.table_id,
                     schema,
                     equality_filters,
@@ -6071,7 +6091,7 @@ where
             } else {
                 load_live_rows_by_equality_with_limit(
                     wal,
-                    table_stream_id,
+                    equality_probe_stream_scope.as_ref(),
                     &table.table_id,
                     schema,
                     field_name,

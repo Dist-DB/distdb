@@ -301,6 +301,30 @@ fn append_catalog_entity_rows(
     bootstrap_ready: bool,
 ) {
 
+    fn normalize_status_for_display(
+        status: &str,
+        bootstrap_ready: bool,
+        preserve_inflight_state: bool,
+    ) -> String {
+
+        if !bootstrap_ready {
+            if status == "load" {
+                return "indexing".to_string();
+            }
+            return status.to_string();
+        }
+
+        if preserve_inflight_state {
+            return status.to_string();
+        }
+
+        match status {
+            "load" | "lock" | "sync" | "indexing" => "ready".to_string(),
+            _ => status.to_string(),
+        }
+
+    }
+
     fn load_state_for_status(status: &str, bootstrap_ready: bool) -> Vec<u8> {
         if bootstrap_ready {
             // Once bootstrap is complete, entity status may still carry transient
@@ -318,10 +342,11 @@ fn append_catalog_entity_rows(
         }
     }
 
-    let mut catalog_status = catalog.status().to_string().to_ascii_lowercase();
-    if !bootstrap_ready && catalog_status == "load" {
-        catalog_status = "indexing".to_string();
-    }
+    let catalog_status = normalize_status_for_display(
+        &catalog.status().to_string().to_ascii_lowercase(),
+        bootstrap_ready,
+        false,
+    );
 
     rows.push(vec![
         resolved_database_id.as_bytes().to_vec(),
@@ -337,21 +362,25 @@ fn append_catalog_entity_rows(
 
     entities.sort_by(|(left_id, _), (right_id, _)| left_id.cmp(right_id));
 
-    for (_entity_id, entity) in entities {
+    let active_schema_change_table_id = catalog
+        .active_schema_change()
+        .map(|change| common::normalize_identifier!(change.table_id));
 
-        let mut entity_status = entity.status().to_string().to_ascii_lowercase();
-        
-        if !bootstrap_ready && entity_status == "load" {
-            entity_status = "indexing".to_string();
-        }
-        
-        if bootstrap_ready && entity_status == "load" {
-            entity_status = "ready".to_string();
-        }
+    for (_entity_id, entity) in entities {
 
         match entity {
 
             DatabaseEntity::Table(table) => {
+
+                let preserve_inflight_state = active_schema_change_table_id
+                    .as_ref()
+                    .is_some_and(|table_id| table_id == &table.table_id);
+
+                let entity_status = normalize_status_for_display(
+                    &table.status().to_string().to_ascii_lowercase(),
+                    bootstrap_ready,
+                    preserve_inflight_state,
+                );
 
                 rows.push(vec![
                     resolved_database_id.as_bytes().to_vec(),
@@ -373,7 +402,13 @@ fn append_catalog_entity_rows(
 
                 for index_id in indexes {
 
-                    let index_status = if entity_status == "ready" {
+                    let index_status = if bootstrap_ready {
+                        if preserve_inflight_state && entity_status != "ready" {
+                            "indexing"
+                        } else {
+                            "ready"
+                        }
+                    } else if entity_status == "ready" {
                         "ready"
                     } else if entity_status == "indexing" {
                         "indexing"
@@ -396,6 +431,12 @@ fn append_catalog_entity_rows(
             },
 
             _ => {
+                let entity_status = normalize_status_for_display(
+                    &entity.status().to_string().to_ascii_lowercase(),
+                    bootstrap_ready,
+                    false,
+                );
+
                 rows.push(vec![
                     resolved_database_id.as_bytes().to_vec(),
                     catalog.database_name().as_bytes().to_vec(),

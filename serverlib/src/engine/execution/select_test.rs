@@ -9,7 +9,7 @@ use crate::{
     encode_row_payload, parse_select_read_plan_from_statement, ConcurrentWalManager,
     DatabaseCatalog, FieldDef, FieldIndex, FieldType, RuntimeIndexStore, SelectComparisonOp,
     SelectCondition, SelectLockMode, SelectPredicate, SelectProjectionItem, SelectRelation, TableSchema,
-    TransactionId, TransactionKind, TransactionRecord, UserId,
+    TransactionId, TransactionKind, TransactionRecord, UserId, render_stored_field_value,
 };
 
 fn evaluate_inbuilt_for_test(function: &sqlparser::ast::Function) -> Result<Option<Vec<u8>>, String> {
@@ -645,6 +645,105 @@ fn materialize_relation_rows_with_limit_bounds_equality_probe_results() {
     );
 
     assert_eq!(rows.len(), 3);
+
+}
+
+#[test]
+fn equality_probe_uses_runtime_index_scope_when_relation_stream_has_no_rows() {
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-equality-scope-fallback-{}-{}",
+        std::process::id(),
+        common::epoch_nanos!(),
+    ));
+    std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
+
+    let wal = ConcurrentWalManager::with_data_dir(temp_root.clone());
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let places_schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("places", places_schema.clone())
+        .expect("places table should register");
+
+    let actor = UserId("test-user".to_string());
+    let mut row_map = std::collections::HashMap::new();
+    row_map.insert("uid".to_string(), b"1".to_vec());
+    row_map.insert("display_name".to_string(), b"Cologne".to_vec());
+
+    wal.append(
+        "places",
+        TransactionRecord::with_payload(
+            TransactionId(1),
+            None,
+            None,
+            1,
+            actor,
+            TransactionKind::Insert,
+            encode_row_payload(&places_schema, &row_map).expect("row should encode"),
+        ),
+    )
+    .expect("row should append to legacy stream");
+
+    let relation = catalog.table("places").expect("places table should exist");
+    let schema = catalog
+        .table_schema("places")
+        .expect("places schema should exist");
+
+    let display_name_index_id = relation
+        .indexes
+        .values()
+        .find(|index| {
+            index.field_names.len() == 1 &&
+            index.field_names[0] == "display_name"
+        })
+        .map(|index| index.index_id.0.clone())
+        .expect("display_name index should exist");
+
+    runtime_indexes
+        .index_mut_for_table("places", &display_name_index_id)
+        .insert(vec![b"Cologne".to_vec()]);
+
+    let mut relation_with_scoped_stream = relation;
+    relation_with_scoped_stream.entity_id = "main:scoped:places".to_string();
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::EqualityProbe {
+            field_name: "display_name".to_string(),
+            lookup_value: b"Cologne".to_vec(),
+            source: crate::EqualityProbeSource::ExistingIndex,
+            equality_filters: std::collections::HashMap::from([(
+                "display_name".to_string(),
+                b"Cologne".to_vec(),
+            )]),
+        },
+    };
+
+    let rows = crate::materialize_relation_rows_with_limit(
+        &wal,
+        &relation_with_scoped_stream,
+        &schema,
+        &runtime_indexes,
+        &access_plan,
+        None,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .1
+            .get("display_name")
+            .map(|value| render_stored_field_value(value)),
+        Some(b"Cologne".to_vec())
+    );
+
+    let _ = std::fs::remove_dir_all(temp_root);
 
 }
 
