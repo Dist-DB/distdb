@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::path::PathBuf;
+use std::fs;
 use std::time::{Duration, Instant};
 
 
 use super::*;
+use crate::engine::database::runtime_index_snapshot::RuntimeIndexSnapshotService;
 use crate::engine::database::transaction::TransactionLog;
 use crate::{
     DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin,
@@ -29,6 +32,22 @@ fn table_schema(fields: Vec<(&str, u32, FieldType, FieldIndex, bool)>) -> TableS
             )
             .collect(),
     )
+
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+
+    std::env::temp_dir().join(format!(
+        "distdb-{}-{}-{}",
+        prefix,
+        std::process::id(),
+        now_nanos,
+    ))
 
 }
 
@@ -143,6 +162,94 @@ fn collect_indexable_equality_filters_rejects_or() {
         &condition,
         &mut filters
     ));
+
+}
+
+#[test]
+fn durable_cold_equality_probe_prefers_checkpoint_without_wal_hydration() {
+
+    let data_dir = unique_temp_dir("access-equality-cold");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let stream_id = "ent:places";
+    let table_id = "places";
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    let mut row = HashMap::new();
+    row.insert("id".to_string(), b"1".to_vec());
+    row.insert("display_name".to_string(), b"Cologne".to_vec());
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    wal_writer
+        .append(
+            stream_id,
+            TransactionRecord::with_payload(
+                TransactionId(1),
+                None,
+                None,
+                1,
+                UserId("seed-user".to_string()),
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &row).expect("row should encode"),
+            ),
+        )
+        .expect("seed record should append");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(stream_id)
+        .map(|tx| tx.0)
+        .expect("latest tx id should exist");
+
+    let table = crate::DatabaseTable::new(table_id.to_string(), schema.clone(), HashMap::new());
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(&data_dir, stream_id)
+        .expect("wal fingerprint should exist");
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        stream_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &[(1, row.clone())],
+    )
+    .expect("live-row checkpoint should save");
+
+    RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
+        &data_dir,
+        &table,
+        stream_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        accessor_snapshot_max_live_rows() + 10_000,
+    )
+    .expect("live-row count checkpoint should save");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    assert!(wal_cold.latest_transaction_id_if_loaded(stream_id).is_none());
+
+    let filters = HashMap::from([("display_name".to_string(), b"Cologne".to_vec())]);
+    let rows = load_live_rows_by_equality_filters_with_limit(
+        &wal_cold,
+        stream_id,
+        table_id,
+        &schema,
+        &filters,
+        None,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.get("display_name"), Some(&b"Cologne".to_vec()));
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(stream_id).is_none(),
+        "cold equality probe should not hydrate WAL when checkpoint-backed paths are available",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
 
 }
 

@@ -3201,11 +3201,17 @@ fn should_use_direct_scan_for_equality_probe(
         return true;
     }
 
+    // On cold durable streams, avoid direct scans because they force WAL
+    // hydration (and full decode) before we attempt snapshot/checkpoint-backed
+    // paths.
+    if wal.stream_mode(table_stream_id) == WalStreamMode::Durable {
+        return false;
+    }
+
     // For cold durable streams, only prefer accessor/checkpoint restore when
     // the checkpointed table size is small enough that a snapshot-style load is
     // expected to be cheaper than a filtered direct WAL scan.
-    if wal.stream_mode(table_stream_id) == WalStreamMode::Durable
-        && let Some(data_dir) = wal.data_dir_path()
+    if let Some(data_dir) = wal.data_dir_path()
         && let Some((_, live_row_count)) =
             load_live_row_count_checkpoint(&data_dir, table_stream_id, table_id, schema)
     {
@@ -4752,24 +4758,23 @@ fn load_live_rows_for_accessor_miss(
             load_live_row_checkpoint_rows(&data_dir, table_stream_id, table_id, schema)
     {
         let wal_latest_tx_id = wal
-            .latest_transaction_id(table_stream_id)
-            .map(|tx| tx.0)
-            .unwrap_or(0);
+            .latest_transaction_id_if_loaded(table_stream_id)
+            .map(|tx| tx.0);
 
-        if wal_latest_tx_id > latest_tx_id {
+        if wal_latest_tx_id.is_some_and(|wal_latest_tx_id| wal_latest_tx_id > latest_tx_id) {
             log::warn!(
                 "accessor miss load live-row checkpoint stale table={} stream={} checkpoint_latest_tx_id={} wal_latest_tx_id={} source=wal_scan",
                 table_id,
                 table_stream_id,
                 latest_tx_id,
-                wal_latest_tx_id,
+                wal_latest_tx_id.unwrap_or(0),
             );
-        } else if live_rows.is_empty() && wal_latest_tx_id > 0 {
+        } else if live_rows.is_empty() && wal_latest_tx_id.unwrap_or(0) > 0 {
             log::warn!(
                 "accessor miss load live-row checkpoint mismatch table={} stream={} checkpoint_rows=0 wal_latest_tx_id={} source=wal_scan",
                 table_id,
                 table_stream_id,
-                wal_latest_tx_id,
+                wal_latest_tx_id.unwrap_or(0),
             );
         } else {
         let elapsed_ms = started_at.elapsed().as_millis();
