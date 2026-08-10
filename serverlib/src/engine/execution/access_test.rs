@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 
 use super::*;
@@ -1106,4 +1107,65 @@ fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_state_missin
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, 1);
     
+}
+
+#[test]
+fn load_live_rows_via_primary_key_limit_uses_runtime_row_refs() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal);
+    let table = catalog.table("users").expect("users table should exist");
+    let table_stream_id = if wal.latest_transaction_id_if_loaded(&table.entity_id).is_some() {
+        table.entity_id.clone()
+    } else {
+        table.table_id.clone()
+    };
+
+    let pk_index = crate::primary_key_index(&table).expect("primary key should exist").clone();
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table_stream_id, &pk_index.index_id.0);
+    state.index = Some(pk_index);
+    state.insert_with_row_ref(vec![b"1".to_vec()], Some(1));
+    state.insert_with_row_ref(vec![b"2".to_vec()], Some(2));
+
+    let rows = load_live_rows_via_primary_key_limit(
+        &wal,
+        &table,
+        &table_stream_id,
+        &schema,
+        &runtime_indexes,
+        1,
+    )
+    .expect("primary key limited load should use runtime row refs");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+}
+
+#[test]
+fn equality_probe_result_cache_ttl_treats_negative_one_as_permanent() {
+    let entry = EqualityProbeCacheEntry {
+        latest_tx_id: 1,
+        cached_at: Instant::now() - Duration::from_secs(3600),
+        rows: Vec::new(),
+    };
+
+    assert_eq!(equality_probe_result_cache_ttl_ms_from_config(-1), None);
+    assert!(!equality_probe_cache_entry_is_expired(&entry, None));
+}
+
+#[test]
+fn equality_probe_result_cache_ttl_expires_entries_after_deadline() {
+    let entry = EqualityProbeCacheEntry {
+        latest_tx_id: 1,
+        cached_at: Instant::now() - Duration::from_millis(10),
+        rows: Vec::new(),
+    };
+
+    assert!(equality_probe_cache_entry_is_expired(
+        &entry,
+        equality_probe_result_cache_ttl_ms_from_config(1),
+    ));
 }

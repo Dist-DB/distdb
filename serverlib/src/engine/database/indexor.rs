@@ -231,8 +231,8 @@ impl DatabaseIndexor {
         let bucket_id = storage.bucket_for_key_mut(key);
         let bucket = storage.buckets.entry(bucket_id).or_default();
 
-        if index_kind_is_unique(storage.kind)
-            && let Some(existing_row_id) = bucket.iter().copied().next() {
+        if index_kind_is_unique(storage.kind) &&
+            let Some(existing_row_id) = bucket.iter().copied().next() {
 
             if existing_row_id != row_id {
                 return Err(IndexorInsertError::UniqueViolation {
@@ -244,6 +244,7 @@ impl DatabaseIndexor {
             }
 
             return Ok(());
+            
         }
 
         bucket.insert(row_id);
@@ -459,7 +460,7 @@ impl DatabaseIndexor {
     }
 
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>, IndexorSnapshotError> {
-        common::helpers::bincode_compat::serialize(&self.snapshot()).map_err(|_| IndexorSnapshotError::SerializeFailed)
+        common::helpers::bincode_compat::serialize(self.snapshot()).map_err(|_| IndexorSnapshotError::SerializeFailed)
     }
 
     pub fn from_snapshot_bytes(payload: &[u8]) -> Result<Self, IndexorSnapshotError> {

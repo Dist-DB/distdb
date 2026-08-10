@@ -16,16 +16,16 @@ pub use access::{
     collect_indexable_equality_filters_for_schema,
     collect_indexable_in_list_filter_for_schema,
     collect_indexable_like_filter_for_schema,
-    collect_indexable_range_filters_for_schema,
     collect_indexable_range_filter_for_schema,
+    collect_indexable_range_filters_for_schema,
     collect_indexable_prefix_like_filter_for_schema, count_condition_predicates,
     field_has_single_column_index, load_live_row_count,
     load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows,
     snapshot_equality_cache, restore_equality_cache_from_snapshot, EqualityTableCacheSnapshot,
     apply_equality_cache_row_mutation, apply_equality_cache_row_mutation_batch,
-    materialize_relation_rows, plan_relation_access, relation_access_plan_diagnostics,
-    EqualityProbeSource, RelationAccessCandidateDiagnostic, RelationAccessPlan,
-    RelationAccessPlanDiagnostics, RelationAccessStrategy,
+    materialize_relation_rows, materialize_relation_rows_with_limit, plan_relation_access,
+    relation_access_plan_diagnostics, EqualityProbeSource, RelationAccessCandidateDiagnostic,
+    RelationAccessPlan, RelationAccessPlanDiagnostics, RelationAccessStrategy,
 };
 
 pub use join::build_joined_row_tuples;
@@ -57,6 +57,11 @@ pub use commands::{
     RoutineLocalEntity, RoutineLocalEntityScope,
     SelectReadPlanCursorSource,
     SqlCursorFrame, SqlCursorSource, VecSqlCursorSource,
+};
+
+pub(crate) use commands::{
+    execute_joined_select_plan_with_row_bound,
+    execute_relation_select_plan_with_row_bound,
 };
 pub use select::{
     execute_sql_function_with_lookup,

@@ -80,7 +80,7 @@ fn plain_payload_resolver_returns_raw_bytes_and_caches_once() {
     assert_eq!(record.resolve_payload_with(&resolver).unwrap(), Some(&[9, 8, 7][..]));
     assert_eq!(calls.get(), 1);
 
-    record.set_payload(Some(vec![1, 2, 3]));
+    record.set_payload(Some(vec![1, 2, 3]), None);
     assert!(record.resolved_payload().is_none());
     assert_eq!(record.resolve_payload_with(&resolver).unwrap(), Some(&[1, 2, 3][..]));
     assert_eq!(calls.get(), 2);
@@ -354,4 +354,175 @@ fn resolve_payload_with_context_recomputes_when_context_changes() {
             .unwrap(),
         Some(&b"payload:orders"[..])
     );
+}
+
+#[test]
+fn set_payload_with_encrypted_context_defers_resolution() {
+    struct CountingResolver<'a> {
+        calls: &'a Cell<usize>,
+    }
+
+    impl TransactionPayloadResolver for CountingResolver<'_> {
+        fn resolve_payload(
+            &self,
+            raw_payload: Option<&[u8]>,
+            _context: &TransactionPayloadContext,
+        ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(raw_payload.map(|payload| payload.to_vec()))
+        }
+    }
+
+    let calls = Cell::new(0usize);
+    let resolver = CountingResolver { calls: &calls };
+    let mut record = TransactionRecord::with_payload(
+        TransactionId(18),
+        None,
+        None,
+        18,
+        UserId("system".to_string()),
+        TransactionKind::Insert,
+        b"payload".to_vec(),
+    );
+    let context = TransactionPayloadContext::new()
+        .with_table_id("users")
+        .with_at_rest_encryption("kek-main", 1);
+
+    record.set_payload(Some(b"resolved".to_vec()), Some(&context));
+
+    assert_eq!(record.resolved_payload(), None);
+    assert_eq!(
+        record
+            .resolve_payload_with_context(&resolver, &context)
+            .unwrap(),
+        Some(&b"resolved"[..])
+    );
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn set_payload_with_non_encrypted_context_does_not_keep_shadow() {
+    struct CountingResolver<'a> {
+        calls: &'a Cell<usize>,
+    }
+
+    impl TransactionPayloadResolver for CountingResolver<'_> {
+        fn resolve_payload(
+            &self,
+            raw_payload: Option<&[u8]>,
+            _context: &TransactionPayloadContext,
+        ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(raw_payload.map(|payload| payload.to_vec()))
+        }
+    }
+
+    let calls = Cell::new(0usize);
+    let resolver = CountingResolver { calls: &calls };
+    let mut record = TransactionRecord::with_payload(
+        TransactionId(19),
+        None,
+        None,
+        19,
+        UserId("system".to_string()),
+        TransactionKind::Insert,
+        b"payload".to_vec(),
+    );
+    let context = TransactionPayloadContext::new().with_table_id("users");
+
+    record.set_payload(Some(b"resolved".to_vec()), Some(&context));
+
+    assert_eq!(record.resolved_payload(), None);
+    assert_eq!(
+        record
+            .resolve_payload_with_context(&resolver, &context)
+            .unwrap(),
+        Some(&b"resolved"[..])
+    );
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn payload_mut_clears_shadow_without_losing_raw_payload() {
+    let resolver = PlainTransactionPayloadResolver;
+    let mut record = TransactionRecord::with_payload(
+        TransactionId(20),
+        None,
+        None,
+        20,
+        UserId("system".to_string()),
+        TransactionKind::Insert,
+        b"payload".to_vec(),
+    );
+    let context = TransactionPayloadContext::new()
+        .with_table_id("users")
+        .with_at_rest_encryption("kek-main", 1);
+
+    record
+        .resolve_payload_with_context(&resolver, &context)
+        .expect("resolve should succeed");
+    assert_eq!(record.resolved_payload(), Some(&b"payload"[..]));
+
+    let _ = record.payload_mut();
+
+    assert_eq!(record.resolved_payload(), None);
+    assert_eq!(record.payload_raw(), Some(&b"payload"[..]));
+    assert_eq!(record.payload_logical(), Some(&b"payload"[..]));
+
+    record
+        .resolve_payload_with_context(&resolver, &context)
+        .expect("resolve after invalidation should succeed");
+    assert_eq!(record.resolved_payload(), Some(&b"payload"[..]));
+}
+
+#[test]
+fn payload_mut_prefers_resolved_shadow_payload_for_mutation() {
+    struct ContextAwareResolver;
+
+    impl TransactionPayloadResolver for ContextAwareResolver {
+        fn resolve_payload(
+            &self,
+            raw_payload: Option<&[u8]>,
+            context: &TransactionPayloadContext,
+        ) -> Result<Option<Vec<u8>>, PayloadTransformError> {
+            let Some(payload) = raw_payload else {
+                return Ok(None);
+            };
+
+            let mut transformed = b"plain:".to_vec();
+            transformed.extend_from_slice(context.table_id().unwrap_or("none").as_bytes());
+            transformed.extend_from_slice(b":");
+            transformed.extend_from_slice(payload);
+            Ok(Some(transformed))
+        }
+    }
+
+    let resolver = ContextAwareResolver;
+    let mut record = TransactionRecord::with_payload(
+        TransactionId(21),
+        None,
+        None,
+        21,
+        UserId("system".to_string()),
+        TransactionKind::Insert,
+        b"ciphertext".to_vec(),
+    );
+    let context = TransactionPayloadContext::new()
+        .with_table_id("users")
+        .with_at_rest_encryption("kek-main", 1);
+
+    record
+        .resolve_payload_with_context(&resolver, &context)
+        .expect("context-aware resolve should succeed");
+
+    assert_eq!(record.payload_raw(), Some(&b"ciphertext"[..]));
+    assert_eq!(record.resolved_payload(), Some(&b"plain:users:ciphertext"[..]));
+
+    let payload = record.payload_mut().expect("payload should exist");
+
+    assert_eq!(payload.as_slice(), b"plain:users:ciphertext");
+    payload.extend_from_slice(b":mutated");
+
+    assert_eq!(record.payload_raw(), Some(&b"plain:users:ciphertext:mutated"[..]));
+    assert_eq!(record.resolved_payload(), None);
 }

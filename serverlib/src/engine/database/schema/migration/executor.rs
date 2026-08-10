@@ -136,7 +136,10 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
                     let payload = record
                         .payload_logical()
                         .ok_or(DatabaseError::CatalogWrite)?;
-                    record.set_payload(Some(apply_schema_rules_to_payload(payload, rule_set, &schema)?));
+                    record.set_payload(
+                        Some(apply_schema_rules_to_payload(payload, rule_set, &schema)?),
+                        None,
+                    );
                 }
             rewritten.push(record);
         }

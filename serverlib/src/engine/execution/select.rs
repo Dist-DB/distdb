@@ -160,6 +160,7 @@ fn collect_subquery_exists_with_outer(
             .and_then(|handle| handle.table_snapshot()) else {
             return Ok(false);
         };
+
         let schema = &table.schema;
 
         let scoped_table_owned = catalog.entity_wal_stream_id(&subquery.table_id).map(|stream_id| {
@@ -167,6 +168,7 @@ fn collect_subquery_exists_with_outer(
             table_with_stream.entity_id = stream_id;
             table_with_stream
         });
+        
         let scoped_table = scoped_table_owned.as_ref().unwrap_or(&table);
 
         let mut index_filter_map = HashMap::new();
@@ -211,7 +213,7 @@ fn collect_subquery_exists_with_outer(
             .unwrap_or(&subquery.table_id)
             .to_string();
 
-        let result = execute_relation_select_plan(
+        let result = super::execute_relation_select_plan_with_row_bound(
             wal,
             scoped_table,
             schema,
@@ -238,13 +240,14 @@ fn collect_subquery_exists_with_outer(
                 )
 
             },
+            Some(1),
         );
 
         return result.map(|result| !result.rows.is_empty());
 
     }
 
-    execute_joined_select_plan(
+    super::execute_joined_select_plan_with_row_bound(
         catalog,
         wal,
         runtime_indexes,
@@ -276,6 +279,7 @@ fn collect_subquery_exists_with_outer(
             )
 
         },
+        Some(1),
 
     )
     .map(|result| !result.rows.is_empty())
@@ -497,7 +501,7 @@ fn collect_subquery_scalar_value_with_outer(
             like_filter,
         );
 
-        return execute_relation_select_plan(
+        return super::execute_relation_select_plan_with_row_bound(
             wal,
             &table,
             schema,
@@ -517,12 +521,13 @@ fn collect_subquery_scalar_value_with_outer(
                     runtime_indexes,
                 )
             },
+            Some(2),
         )
         .and_then(single_scalar_value);
 
     }
 
-    execute_joined_select_plan(
+    super::execute_joined_select_plan_with_row_bound(
         catalog,
         wal,
         runtime_indexes,
@@ -554,6 +559,7 @@ fn collect_subquery_scalar_value_with_outer(
             )
             
         },
+        Some(2),
     )
     .and_then(single_scalar_value)
 

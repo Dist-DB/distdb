@@ -15,7 +15,8 @@ use crate::engine::sql::{
 };
 
 use crate::engine::execution::{
-    build_joined_row_tuples, materialize_relation_rows, relation_qualifier, JoinedRowTuple,
+    build_joined_row_tuples, materialize_relation_rows, materialize_relation_rows_with_limit,
+    relation_qualifier, JoinedRowTuple,
 };
 
 use crate::engine::execution::SelectExecutionResult;
@@ -38,6 +39,89 @@ fn select_stage_diagnostics_enabled() -> bool {
         .unwrap_or(false)
 }
 
+struct ResultRowCollector {
+    limit: Option<usize>,
+    rows: Vec<Vec<Vec<u8>>>,
+}
+
+impl ResultRowCollector {
+
+    fn new(limit: Option<usize>) -> Self {
+
+        let capacity = limit.unwrap_or(0);
+
+        Self {
+            limit,
+            rows: Vec::with_capacity(capacity),
+        }
+
+    }
+
+    fn push(&mut self, row: Vec<Vec<u8>>) -> bool {
+
+        self.rows.push(row);
+
+        self.limit
+            .map(|limit| self.rows.len() < limit)
+            .unwrap_or(true)
+
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn into_rows(self) -> Vec<Vec<Vec<u8>>> {
+        self.rows
+    }
+
+}
+
+fn select_requires_full_result_materialization(read_plan: &SelectReadPlan) -> bool {
+
+    read_plan.distinct
+        || !read_plan.order_by.is_empty()
+        || !read_plan.group_by.is_empty()
+        || read_plan.having_condition.is_some()
+        || !read_plan.named_windows.is_empty()
+        || read_plan.has_window_clause
+        || read_plan.limit_by.is_some()
+        || read_plan.top_percent.is_some()
+        || read_plan.top_percent_with_ties.is_some()
+        || read_plan.top_with_ties_limit.is_some()
+        || read_plan.fetch_percent.is_some()
+        || read_plan.fetch_percent_with_ties.is_some()
+        || read_plan.fetch_with_ties_limit.is_some()
+        || read_plan.qualify_condition.is_some()
+
+}
+
+fn select_explicit_result_row_bound(read_plan: &SelectReadPlan) -> Option<usize> {
+
+    read_plan
+        .limit
+        .map(|limit| limit.saturating_add(read_plan.offset.unwrap_or(0)))
+
+}
+
+fn effective_result_row_bound(
+    read_plan: &SelectReadPlan,
+    forced_row_bound: Option<usize>,
+) -> Option<usize> {
+
+    if select_requires_full_result_materialization(read_plan) {
+        return None;
+    }
+
+    match (select_explicit_result_row_bound(read_plan), forced_row_bound) {
+        (Some(explicit), Some(forced)) => Some(explicit.min(forced)),
+        (Some(explicit), None) => Some(explicit),
+        (None, Some(forced)) => Some(forced),
+        (None, None) => None,
+    }
+
+}
+
 pub fn execute_joined_select_plan<E, RM, RJ>(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -46,6 +130,35 @@ pub fn execute_joined_select_plan<E, RM, RJ>(
     evaluate_function: &mut E,
     row_matches_relation: &mut RM,
     row_matches_joined: &mut RJ,
+) -> Result<SelectExecutionResult, String>
+where
+    E: SqlFunctionEvaluationStrategy,
+    RM: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
+    RJ: FnMut(&JoinedRowTuple, Option<&SelectCondition>) -> Result<bool, String>,
+{
+
+    execute_joined_select_plan_with_row_bound(
+        catalog,
+        wal,
+        runtime_indexes,
+        read_plan,
+        evaluate_function,
+        row_matches_relation,
+        row_matches_joined,
+        None,
+    )
+
+}
+
+pub(crate) fn execute_joined_select_plan_with_row_bound<E, RM, RJ>(
+    catalog: &DatabaseCatalog,
+    wal: &ConcurrentWalManager,
+    runtime_indexes: &RuntimeIndexStore,
+    read_plan: &SelectReadPlan,
+    evaluate_function: &mut E,
+    row_matches_relation: &mut RM,
+    row_matches_joined: &mut RJ,
+    forced_row_bound: Option<usize>,
 ) -> Result<SelectExecutionResult, String>
 where
     E: SqlFunctionEvaluationStrategy,
@@ -212,8 +325,8 @@ where
     )?;
 
     let joined_candidates = row_tuples.len();
-
-    let mut rows = Vec::new();
+    let result_row_bound = effective_result_row_bound(read_plan, forced_row_bound);
+    let mut row_collector = ResultRowCollector::new(result_row_bound);
     
     for row_tuple in row_tuples {
 
@@ -282,14 +395,21 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        rows.push(projected_row);
+        if !row_collector.push(projected_row) {
+            break;
+        }
 
     }
 
-    let projected_rows = rows.len();
+    let projected_rows = row_collector.len();
     let post_processing_started = Instant::now();
 
-    let rows = apply_select_post_processing(rows, &columns, read_plan, &projection_items)?;
+    let rows = apply_select_post_processing(
+        row_collector.into_rows(),
+        &columns,
+        read_plan,
+        &projection_items,
+    )?;
     let post_processed_rows = rows.len();
     let post_processing_elapsed_ms = post_processing_started.elapsed().as_millis();
     let (columns, rows) = strip_hidden_output_columns(columns, rows);
@@ -316,7 +436,6 @@ where
 
 }
 
-#[expect(clippy::too_many_arguments, reason="this function is a join select executor and needs to pass many arguments to the executor closure")]
 pub fn execute_relation_select_plan<E, R, T, S>(
     wal: &ConcurrentWalManager,
     table: T,
@@ -326,6 +445,39 @@ pub fn execute_relation_select_plan<E, R, T, S>(
     access_plan: &RelationAccessPlan,
     evaluate_function: &mut E,
     row_matches: &mut R,
+) -> Result<SelectExecutionResult, String>
+where
+    E: SqlFunctionEvaluationStrategy,
+    R: FnMut(&HashMap<String, Vec<u8>>, Option<&SelectCondition>) -> Result<bool, String>,
+    T: Borrow<DatabaseTable>,
+    S: Borrow<TableSchema>,
+{
+
+    execute_relation_select_plan_with_row_bound(
+        wal,
+        table,
+        schema,
+        runtime_indexes,
+        read_plan,
+        access_plan,
+        evaluate_function,
+        row_matches,
+        None,
+    )
+
+}
+
+#[expect(clippy::too_many_arguments, reason="this function is a relation select executor and needs to pass many arguments to the executor closure")]
+pub(crate) fn execute_relation_select_plan_with_row_bound<E, R, T, S>(
+    wal: &ConcurrentWalManager,
+    table: T,
+    schema: S,
+    runtime_indexes: &RuntimeIndexStore,
+    read_plan: &SelectReadPlan,
+    access_plan: &RelationAccessPlan,
+    evaluate_function: &mut E,
+    row_matches: &mut R,
+    forced_row_bound: Option<usize>,
 ) -> Result<SelectExecutionResult, String>
 where
     E: SqlFunctionEvaluationStrategy,
@@ -397,6 +549,9 @@ where
     let projection_items = expand_relation_projection_items(schema, &read_plan.projection_items);
     let visible_projection_len = projection_items.len();
     let projection_items = ensure_order_by_projection_items(projection_items, read_plan);
+
+    let row_limit = simple_unordered_relation_row_limit(read_plan);
+    let result_row_bound = effective_result_row_bound(read_plan, forced_row_bound);
 
     let mut columns = Vec::with_capacity(projection_items.len());
 
@@ -496,9 +651,16 @@ where
 
     }
 
-    let mut rows = Vec::new();
+    let mut row_collector = ResultRowCollector::new(result_row_bound);
 
-    for (_, row_map) in materialize_relation_rows(wal, table, schema, runtime_indexes, access_plan) {
+    for (_, row_map) in materialize_relation_rows_with_limit(
+        wal,
+        table,
+        schema,
+        runtime_indexes,
+        access_plan,
+        row_limit,
+    ) {
 
         if !row_matches(&row_map, read_plan.where_condition.as_ref())? {
             continue;
@@ -565,14 +727,21 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        rows.push(projected_row);
+        if !row_collector.push(projected_row) {
+            break;
+        }
 
     }
 
-    let projected_rows = rows.len();
+    let projected_rows = row_collector.len();
     let post_processing_started = Instant::now();
 
-    let rows = apply_select_post_processing(rows, &columns, read_plan, &projection_items)?;
+    let rows = apply_select_post_processing(
+        row_collector.into_rows(),
+        &columns,
+        read_plan,
+        &projection_items,
+    )?;
     let post_processed_rows = rows.len();
     let post_processing_elapsed_ms = post_processing_started.elapsed().as_millis();
     let (columns, rows) = strip_hidden_output_columns(columns, rows);
@@ -594,6 +763,38 @@ where
         columns,
         rows,
     })
+
+}
+
+fn simple_unordered_relation_row_limit(read_plan: &SelectReadPlan) -> Option<usize> {
+
+    const DEFAULT_UNBOUNDED_RELATION_ROW_LIMIT: usize = 1_000;
+
+    if read_plan.offset.unwrap_or(0) != 0 {
+        return None;
+    }
+
+    if !read_plan.joins.is_empty()
+        || read_plan.distinct
+        || !read_plan.order_by.is_empty()
+        || !read_plan.group_by.is_empty()
+        || read_plan.having_condition.is_some()
+        || !read_plan.named_windows.is_empty()
+        || read_plan.has_window_clause
+        || read_plan.limit_by.is_some()
+        || read_plan.top_percent.is_some()
+        || read_plan.top_percent_with_ties.is_some()
+        || read_plan.top_with_ties_limit.is_some()
+        || read_plan.fetch_percent.is_some()
+        || read_plan.fetch_percent_with_ties.is_some()
+        || read_plan.fetch_with_ties_limit.is_some()
+        || read_plan.qualify_condition.is_some()
+        || read_plan.where_condition.is_some()
+    {
+        return None;
+    }
+
+    read_plan.limit.or(Some(DEFAULT_UNBOUNDED_RELATION_ROW_LIMIT))
 
 }
 

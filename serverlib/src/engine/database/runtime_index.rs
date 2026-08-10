@@ -341,15 +341,18 @@ fn log_runtime_index_bootstrap_table_memory_profile(
         .iter()
         .map(|(_, entry_count, _, _)| *entry_count)
         .sum::<usize>();
+    
     let total_row_refs = index_profiles
         .iter()
         .map(|(_, _, row_ref_count, _)| *row_ref_count)
         .sum::<usize>();
+
     let total_key_bytes = index_profiles
         .iter()
         .map(|(_, _, _, key_bytes)| *key_bytes)
         .sum::<usize>();
 
+    #[expect(clippy::unnecessary_sort_by, reason="Sorting by key_bytes descending for logging purposes")]
     index_profiles.sort_by(|left, right| right.3.cmp(&left.3));
 
     let top_indexes = index_profiles
@@ -380,7 +383,7 @@ fn log_runtime_index_bootstrap_table_memory_profile(
 }
 
 fn encode_runtime_index_entry_key(key: &[Vec<u8>]) -> Option<Vec<u8>> {
-    common::helpers::bincode_compat::serialize(&key).ok()
+    common::helpers::bincode_compat::serialize(key).ok()
 }
 
 fn decode_runtime_index_entry_key(key: &[u8]) -> Option<Vec<Vec<u8>>> {
@@ -471,6 +474,24 @@ impl RuntimeIndexState {
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
         let encoded_key = encode_runtime_index_entry_key(pk_val)?;
         unpack_row_ref(self.entries.get(&encoded_key).copied().flatten())
+    }
+
+    pub fn first_row_refs(&self, limit: usize) -> Vec<u64> {
+
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let mut row_refs = self
+            .entries
+            .values()
+            .filter_map(|row_ref| unpack_row_ref(*row_ref))
+            .collect::<Vec<_>>();
+
+        row_refs.sort_unstable();
+        row_refs.truncate(limit);
+        row_refs
+
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
@@ -711,11 +732,11 @@ impl RuntimeIndexStore {
         self.indexes
             .iter()
             .filter_map(|(scoped_id, state)| {
-                if let Some((scope_id, scoped_index_id)) = scoped_id.rsplit_once("::") {
-                    if common::normalize_identifier!(scoped_index_id) == normalized_index_id {
+                
+                if let Some((scope_id, scoped_index_id)) = scoped_id.rsplit_once("::")
+                    && common::normalize_identifier!(scoped_index_id) == normalized_index_id {
                         return Some((scope_id, state));
                     }
-                }
 
                 let normalized_scoped_id = common::normalize_identifier!(scoped_id);
                 if normalized_scoped_id == normalized_index_id
@@ -738,16 +759,18 @@ impl RuntimeIndexStore {
         self.indexes
             .keys()
             .any(|scoped_id| {
-                if let Some((_, scoped_index_id)) = scoped_id.rsplit_once("::") {
-                    if common::normalize_identifier!(scoped_index_id) == normalized_index_id {
+
+                if let Some((_, scoped_index_id)) = scoped_id.rsplit_once("::")
+                    && common::normalize_identifier!(scoped_index_id) == normalized_index_id {
                         return true;
                     }
-                }
 
                 let normalized_scoped_id = common::normalize_identifier!(scoped_id);
-                normalized_scoped_id == normalized_index_id
-                    || normalized_scoped_id.ends_with(&normalized_index_id)
-                    || normalized_scoped_id.contains(&normalized_index_id)
+                
+                normalized_scoped_id == normalized_index_id ||
+                normalized_scoped_id.ends_with(&normalized_index_id) ||
+                normalized_scoped_id.contains(&normalized_index_id)
+                
             })
 
     }

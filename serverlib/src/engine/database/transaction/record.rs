@@ -281,7 +281,7 @@ pub struct TransactionRecord {
     #[serde(default)]
     payload: Option<Vec<u8>>,
     #[serde(skip, default)]
-    payload_shadow: TransactionPayloadShadow,
+    payload_shadow: Option<TransactionPayloadShadow>,
 }
 
 impl PartialEq for TransactionRecord {
@@ -322,7 +322,7 @@ impl TransactionRecord {
             actor,
             kind,
             payload,
-            payload_shadow: TransactionPayloadShadow::default(),
+            payload_shadow: None,
         }
 
     }
@@ -379,11 +379,10 @@ impl TransactionRecord {
     }
 
     pub fn resolved_payload(&self) -> Option<&[u8]> {
-        if self.payload_shadow.is_resolved {
-            self.payload_shadow.resolved_payload.as_deref()
-        } else {
-            None
-        }
+        self.payload_shadow
+            .as_ref()
+            .and_then(|shadow| shadow.is_resolved.then_some(shadow))
+            .and_then(|shadow| shadow.resolved_payload.as_deref())
     }
 
     pub fn resolve_payload_with<R: TransactionPayloadResolver>(
@@ -402,34 +401,74 @@ impl TransactionRecord {
         context: &TransactionPayloadContext,
     ) -> Result<Option<&[u8]>, PayloadTransformError> {
         
-        if self.payload_shadow.is_resolved
-            && self.payload_shadow.resolved_context.as_ref() == Some(context)
-        {
-            return Ok(self.payload_shadow.resolved_payload.as_deref());
+        let cache_hit = self
+            .payload_shadow
+            .as_ref()
+            .is_some_and(|shadow| {
+                shadow.is_resolved && shadow.resolved_context.as_ref() == Some(context)
+            });
+
+        if cache_hit {
+            return Ok(self
+                .payload_shadow
+                .as_ref()
+                .and_then(|shadow| shadow.resolved_payload.as_deref()));
         }
 
         let resolved = resolver.resolve_payload(self.payload_raw(), context)?;
-        self.payload_shadow.resolved_payload = resolved;
-        self.payload_shadow.resolved_context = Some(context.clone());
-        self.payload_shadow.is_resolved = true;
+        self.payload_shadow = Some(TransactionPayloadShadow {
+            resolved_payload: resolved,
+            resolved_context: Some(context.clone()),
+            is_resolved: true,
+        });
 
-        Ok(self.payload_shadow.resolved_payload.as_deref())
+        Ok(self.payload_shadow
+            .as_ref()
+            .and_then(|shadow| shadow.resolved_payload.as_deref()))
 
     }
 
-    pub fn set_payload(&mut self, payload: Option<Vec<u8>>) {
+    pub fn set_payload(
+        &mut self,
+        payload: Option<Vec<u8>>,
+        context: Option<&TransactionPayloadContext>,
+    ) {
+        
         self.payload = payload;
-        self.payload_shadow = TransactionPayloadShadow::default();
+
+        if self.payload.is_some()
+            && let Some(context) = context
+            && context.at_rest_encryption_enabled()
+        {
+            self.payload_shadow = Some(TransactionPayloadShadow {
+                resolved_payload: None,
+                resolved_context: Some(context.clone()),
+                is_resolved: false,
+            });
+        } else {
+            self.payload_shadow = None;
+        }
+
     }
 
     pub fn payload_mut(&mut self) -> Option<&mut Vec<u8>> {
-        self.payload_shadow = TransactionPayloadShadow::default();
+        
+        // If we already have a resolved logical payload, mutate that canonical view.
+        if let Some(shadow) = self.payload_shadow.take()
+            && shadow.is_resolved
+            && let Some(resolved_payload) = shadow.resolved_payload
+        {
+            self.payload = Some(resolved_payload);
+        }
+
+        self.payload_shadow = None;
         self.payload.as_mut()
+
     }
 
     pub fn clear_payload(&mut self) {
         self.payload = None;
-        self.payload_shadow = TransactionPayloadShadow::default();
+        self.payload_shadow = None;
     }
 
     pub fn has_payload(&self) -> bool {

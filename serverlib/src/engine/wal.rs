@@ -928,7 +928,7 @@ impl ConcurrentWalManager {
                 .map_err(map_payload_transform_error)?;
 
             if let Some(Cow::Owned(payload)) = resolved_payload {
-                record.set_payload(Some(payload));
+                record.set_payload(Some(payload), Some(context));
             }
 
         }
@@ -1198,7 +1198,7 @@ fn decode_record_from_storage_internal(
         resolve_wal_storage_payload(record.payload_raw(), context)
             .map_err(map_payload_transform_error)?,
     ) {
-        record.set_payload(Some(payload));
+        record.set_payload(Some(payload), Some(context));
     }
 
     Ok(record)

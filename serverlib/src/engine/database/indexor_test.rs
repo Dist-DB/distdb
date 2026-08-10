@@ -478,7 +478,7 @@ fn indexor_can_insert_rows_directly_from_database_index_definition() {
         .insert_indexed_row(&composite_index, &row_b, 11)
         .expect("second insert should succeed");
 
-    let lookup_key = common::helpers::bincode_compat::serialize(&vec![
+    let lookup_key = common::helpers::bincode_compat::serialize(vec![
         b"sam@example.com".to_vec(),
         b"acme".to_vec(),
     ])

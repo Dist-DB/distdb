@@ -14,6 +14,11 @@ pub use select::join::{
 	execute_relation_select_plan,
 };
 
+pub(crate) use select::join::{
+	execute_joined_select_plan_with_row_bound,
+	execute_relation_select_plan_with_row_bound,
+};
+
 pub use select::explain::{
 	advise_select_execution, explain_joined_select_plan_result,
 	explain_select_plan_result, SelectExecutionAdvice,
