@@ -558,6 +558,16 @@ impl RuntimeIndexSnapshotService {
             return None;
         }
 
+        if let Some(reason) = suspicious_sparse_snapshot_reason(&snapshot, tracked_indexes) {
+            log::warn!(
+                "runtime index snapshot restore miss table={} stream={} reason=suspicious_sparse_snapshot details={}",
+                table.table_id,
+                table_stream_id,
+                reason,
+            );
+            return None;
+        }
+
         let (index_count, entry_count, key_bytes, row_refs_legacy_count, row_refs_compact_count) =
             snapshot_memory_shape(&snapshot);
 
@@ -1199,6 +1209,54 @@ impl RuntimeIndexSnapshotService {
         let stream_key = stable_id(&[table_stream_id]);
         data_dir.join(FileKind::Data.file_name(stream_key))
     }
+}
+
+fn suspicious_sparse_snapshot_reason(
+    snapshot: &RuntimeIndexTableSnapshot,
+    tracked_indexes: &[DatabaseIndex],
+) -> Option<String> {
+
+    const MIN_LIVE_ROWS_FOR_SPARSE_VALIDATION: usize = 100_000;
+    const MAX_NON_PRIMARY_ENTRY_COUNT_FOR_SUSPECT: usize = 1;
+    const MIN_SUSPECT_NON_PRIMARY_INDEXES: usize = 3;
+
+    if snapshot.live_row_count < MIN_LIVE_ROWS_FOR_SPARSE_VALIDATION {
+        return None;
+    }
+
+    let snapshot_cardinality_by_index = snapshot
+        .indexes
+        .iter()
+        .map(|index| (index.index_id.as_str(), index.entries.len()))
+        .collect::<HashMap<_, _>>();
+
+    let mut sparse_non_primary = Vec::new();
+
+    for index in tracked_indexes {
+        if index.is_primary_key() {
+            continue;
+        }
+
+        let Some(entry_count) = snapshot_cardinality_by_index.get(index.index_id.0.as_str()) else {
+            continue;
+        };
+
+        if *entry_count <= MAX_NON_PRIMARY_ENTRY_COUNT_FOR_SUSPECT {
+            sparse_non_primary.push(index.index_id.0.clone());
+        }
+    }
+
+    if sparse_non_primary.len() < MIN_SUSPECT_NON_PRIMARY_INDEXES {
+        return None;
+    }
+
+    Some(format!(
+        "live_rows={} sparse_non_primary_indexes={} sparse_indexes={}",
+        snapshot.live_row_count,
+        sparse_non_primary.len(),
+        sparse_non_primary.join(","),
+    ))
+
 }
 
 fn table_schema_fingerprint(table: &DatabaseTable) -> Option<String> {
