@@ -1041,18 +1041,39 @@ impl ServerApp {
         let mut catalogs = self.catalogs.clone();
         let catalog_clone_ms = catalog_clone_started_at.elapsed().as_millis() as u64;
 
+        let scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
+        let scope_table_count = scope_table_ids.len();
+        let scope_preview = if scope_table_ids.is_empty() {
+            "<none>".to_string()
+        } else {
+            let mut names = scope_table_ids.iter().cloned().collect::<Vec<_>>();
+            names.sort();
+            names.truncate(3);
+            names.join(",")
+        };
+
         let runtime_clone_started_at = Instant::now();
-        let mut runtime_indexes = self.runtime_indexes.clone();
+        let mut runtime_indexes = if scope_table_ids.is_empty() {
+            self.runtime_indexes.clone()
+        } else {
+            self.runtime_indexes
+                .clone_for_tables(&catalogs, &scope_table_ids)
+        };
         let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
 
         if catalog_clone_ms > 50 || runtime_clone_ms > 50 {
             log::info!(
-                "read-only clone timing request_id={} catalog_clone_ms={} runtime_index_clone_ms={} scope_tables={} runtime_mode={}",
+                "read-only clone timing request_id={} catalog_clone_ms={} runtime_index_clone_ms={} scope_tables={} scope_preview={} runtime_mode={}",
                 request.request_id,
                 catalog_clone_ms,
                 runtime_clone_ms,
-                0,
-                "cloned",
+                scope_table_count,
+                scope_preview,
+                if scope_table_ids.is_empty() {
+                    "cloned_full"
+                } else {
+                    "cloned_scoped"
+                },
             );
         }
         
