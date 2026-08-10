@@ -231,16 +231,17 @@ impl RuntimeIndexSnapshotService {
         }
 
         let (snapshot, legacy_plain_encoding): (RuntimeIndexTableSnapshot, bool) =
-            match decode_snapshot_payload(&bytes[HEADER_SIZE..]) {
-                Some(decoded) => decoded,
-                None => {
+            match decode_snapshot_payload_with_reason(&bytes[HEADER_SIZE..]) {
+                Ok(decoded) => decoded,
+                Err(reason) => {
                     let _ = fs::remove_file(&snapshot_path);
 
                     log::warn!(
-                        "runtime index snapshot file removed after decode failure table={} stream={} path={}",
+                        "runtime index snapshot file removed after decode failure table={} stream={} path={} reason={}",
                         table.table_id,
                         table_stream_id,
                         snapshot_path.display(),
+                        reason,
                     );
 
                     log::debug!(
@@ -777,17 +778,45 @@ fn encode_snapshot_payload<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, St
         .map_err(|_| "snapshot compression finish failed".to_string())
 }
 
-fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<(T, bool)> {
+fn decode_snapshot_payload_with_reason<T: serde::de::DeserializeOwned>(
+    payload: &[u8],
+) -> Result<(T, bool), String> {
     let decoder = ZlibDecoder::new(payload);
     let mut reader = BufReader::new(decoder);
 
-    if let Ok(decoded) = common::helpers::bincode_compat::deserialize_from::<_, T>(&mut reader) {
-        return Some((decoded, false));
+    let compressed_decode = common::helpers::bincode_compat::deserialize_from::<_, T>(&mut reader)
+        .map(|decoded| (decoded, false));
+
+    if let Ok(decoded) = compressed_decode {
+        return Ok(decoded);
     }
 
-    common::helpers::bincode_compat::deserialize::<T>(payload)
-        .ok()
-        .map(|decoded| (decoded, true))
+    let compressed_error = compressed_decode
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "unknown compressed decode error".to_string());
+
+    let plain_decode = common::helpers::bincode_compat::deserialize::<T>(payload)
+        .map(|decoded| (decoded, true));
+
+    if let Ok(decoded) = plain_decode {
+        return Ok(decoded);
+    }
+
+    let plain_error = plain_decode
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "unknown plain decode error".to_string());
+
+    Err(format!(
+        "compressed_decode_error={} plain_decode_error={}",
+        compressed_error,
+        plain_error,
+    ))
+}
+
+fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<(T, bool)> {
+    decode_snapshot_payload_with_reason(payload).ok()
 }
 
 fn snapshot_memory_shape(snapshot: &RuntimeIndexTableSnapshot) -> (usize, usize, usize, usize, usize) {
