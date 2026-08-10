@@ -6,6 +6,130 @@ use std::time::UNIX_EPOCH;
 
 use common::helpers::format::{make_header, verify_header, FileKind, HEADER_SIZE};
 use common::helpers::hash::stable_id;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_temp_data_dir() -> PathBuf {
+        let unique = format!(
+            "rtix-snapshot-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0),
+        );
+
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(dir.join("runtime-index")).expect("create runtime-index test dir");
+        dir
+    }
+
+    #[test]
+    fn chunked_loader_restores_declared_empty_indexes() {
+        let data_dir = make_temp_data_dir();
+
+        let manifest = RuntimeIndexTableSnapshotChunkedManifest {
+            table_id: "users".to_string(),
+            latest_tx_id: 10,
+            schema_fingerprint: "schema-v1".to_string(),
+            live_row_count: 0,
+            wal_size_bytes: 1,
+            wal_modified_epoch_ms: 1,
+            empty_index_ids: vec!["ind:users:display_name".to_string()],
+            chunk_refs: Vec::new(),
+        };
+
+        let snapshot = RuntimeIndexSnapshotService::load_runtime_index_snapshot_chunks(
+            &data_dir,
+            "users",
+            &manifest,
+            None,
+        )
+        .expect("load chunked snapshot");
+
+        assert_eq!(snapshot.indexes.len(), 1);
+        assert_eq!(snapshot.indexes[0].index_id, "ind:users:display_name");
+        assert!(snapshot.indexes[0].entries.is_empty());
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn chunked_loader_merges_empty_and_chunked_indexes() {
+        let data_dir = make_temp_data_dir();
+
+        let index_id = "ind:users:email".to_string();
+        let table_stream_id = "users";
+        let file_name = RuntimeIndexSnapshotService::runtime_index_snapshot_chunk_file_name(
+            table_stream_id,
+            &index_id,
+            0,
+        );
+
+        let chunk_path = RuntimeIndexSnapshotService::runtime_index_snapshot_chunk_path(
+            &data_dir,
+            &file_name,
+        );
+
+        let payload = RuntimeIndexSnapshotChunkPayload {
+            index_id: index_id.clone(),
+            entries: vec![vec![b"alice@example.com".to_vec()]],
+            row_refs_by_entry: vec![42],
+            row_refs: Vec::new(),
+        };
+
+        let mut encoded_chunk = make_header(FileKind::Entity).to_vec();
+        let encoded_payload = encode_snapshot_payload(&payload).expect("encode chunk payload");
+        encoded_chunk.extend_from_slice(&encoded_payload);
+        write_bytes_atomic(&chunk_path, &encoded_chunk).expect("write chunk payload");
+
+        let manifest = RuntimeIndexTableSnapshotChunkedManifest {
+            table_id: "users".to_string(),
+            latest_tx_id: 11,
+            schema_fingerprint: "schema-v1".to_string(),
+            live_row_count: 1,
+            wal_size_bytes: 2,
+            wal_modified_epoch_ms: 2,
+            empty_index_ids: vec!["ind:users:display_name".to_string()],
+            chunk_refs: vec![RuntimeIndexSnapshotChunkRef {
+                index_id: index_id.clone(),
+                chunk_seq: 0,
+                file_name,
+            }],
+        };
+
+        let snapshot = RuntimeIndexSnapshotService::load_runtime_index_snapshot_chunks(
+            &data_dir,
+            table_stream_id,
+            &manifest,
+            None,
+        )
+        .expect("load chunked snapshot");
+
+        assert_eq!(snapshot.indexes.len(), 2);
+
+        let email_index = snapshot
+            .indexes
+            .iter()
+            .find(|index| index.index_id == index_id)
+            .expect("email index present");
+
+        assert_eq!(email_index.entries.len(), 1);
+        assert_eq!(email_index.row_refs_by_entry, vec![42]);
+
+        let empty_index = snapshot
+            .indexes
+            .iter()
+            .find(|index| index.index_id == "ind:users:display_name")
+            .expect("empty index present");
+
+        assert!(empty_index.entries.is_empty());
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
+}
 use common::helpers::io::{read_bytes, write_bytes_atomic};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -68,6 +192,8 @@ struct RuntimeIndexTableSnapshotChunkedManifest {
     live_row_count: usize,
     wal_size_bytes: u64,
     wal_modified_epoch_ms: u64,
+    #[serde(default)]
+    empty_index_ids: Vec<String>,
     chunk_refs: Vec<RuntimeIndexSnapshotChunkRef>,
 }
 
@@ -463,6 +589,17 @@ impl RuntimeIndexSnapshotService {
     ) -> Result<RuntimeIndexTableSnapshot, String> {
         let mut indexes_by_id: HashMap<String, RuntimeIndexSnapshotIndex> = HashMap::new();
 
+        for index_id in &manifest.empty_index_ids {
+            indexes_by_id
+                .entry(index_id.clone())
+                .or_insert_with(|| RuntimeIndexSnapshotIndex {
+                    index_id: index_id.clone(),
+                    entries: Vec::new(),
+                    row_refs_by_entry: Vec::new(),
+                    row_refs: Vec::new(),
+                });
+        }
+
         for chunk_ref in &manifest.chunk_refs {
             let chunk_path = Self::runtime_index_snapshot_chunk_path(data_dir, &chunk_ref.file_name);
             let chunk_bytes = read_bytes(&chunk_path)
@@ -681,13 +818,19 @@ impl RuntimeIndexSnapshotService {
             indexes: Vec::new(),
         };
 
-        let max_entries_per_chunk = Self::runtime_index_snapshot_max_entries_per_chunk();
+        let max_entries_per_chunk = Self::runtime_index_snapshot_max_entries_per_chunk().max(1);
         let mut chunk_refs = Vec::new();
         let mut chunk_files_written = Vec::new();
+        let mut empty_index_ids = Vec::new();
 
         Self::remove_runtime_index_snapshot_chunk_files(data_dir, table_stream_id);
 
         for index in indexes {
+            if index.entries.is_empty() {
+                empty_index_ids.push(index.index_id.clone());
+                continue;
+            }
+
             let row_refs_lookup = index
                 .row_refs
                 .iter()
@@ -758,6 +901,8 @@ impl RuntimeIndexSnapshotService {
                 .cmp(&right.index_id)
                 .then(left.chunk_seq.cmp(&right.chunk_seq))
         });
+        empty_index_ids.sort();
+        empty_index_ids.dedup();
 
         let envelope = RuntimeIndexSnapshotEnvelope::Chunked(
             RuntimeIndexTableSnapshotChunkedManifest {
@@ -767,6 +912,7 @@ impl RuntimeIndexSnapshotService {
                 live_row_count: snapshot.live_row_count,
                 wal_size_bytes: snapshot.wal_size_bytes,
                 wal_modified_epoch_ms: snapshot.wal_modified_epoch_ms,
+                empty_index_ids,
                 chunk_refs,
             },
         );
