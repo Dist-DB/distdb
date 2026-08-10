@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 pub fn spawn_affinity_replication_task(
     affinity_processor: Arc<Mutex<Option<AffinityProcessor>>>,
@@ -32,6 +32,7 @@ pub fn spawn_affinity_replication_task(
     tokio::spawn(async move {
 
         let mut ticker = interval(Duration::from_millis(500));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut executor = ReplicationPhaseExecutor::new();
         let mut last_affinity_refresh_at = std::time::Instant::now() - Duration::from_secs(30);
         let mut wal_cursors: HashMap<String, HashMap<String, TransactionId>> = HashMap::new();

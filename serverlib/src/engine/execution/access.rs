@@ -17,6 +17,8 @@ use crate::engine::database::runtime_index::{
 use crate::engine::database::runtime_index_snapshot::RuntimeIndexSnapshotService;
 use crate::engine::database::row_payload::{
     RowPayloadSchemaCache,
+    decode_row_field_value_with_schema_cache,
+    decode_row_payload_with_schema_cache,
     decode_row_payload_if_field_equals_with_schema_cache,
     row_payload_schema_cache,
 };
@@ -3761,15 +3763,38 @@ pub fn load_live_rows_by_equality(
     lookup_value: &[u8],
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
+    load_live_rows_by_equality_with_limit(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        field_name,
+        lookup_value,
+        None,
+    )
+
+}
+
+pub fn load_live_rows_by_equality_with_limit(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    field_name: &str,
+    lookup_value: &[u8],
+    row_limit: Option<usize>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
     let mut equality_filters = HashMap::with_capacity(1);
     equality_filters.insert(field_name.to_string(), lookup_value.to_vec());
 
-    load_live_rows_by_equality_filters(
+    load_live_rows_by_equality_filters_with_limit(
         wal,
         table_stream_id,
         table_id,
         schema,
         &equality_filters,
+        row_limit,
     )
 
 }
@@ -3780,6 +3805,39 @@ pub fn load_live_rows_by_equality_filters(
     table_id: &str,
     schema: &TableSchema,
     equality_filters: &HashMap<String, Vec<u8>>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    load_live_rows_by_equality_filters_with_limit(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        equality_filters,
+        None,
+    )
+
+}
+
+fn apply_row_limit_if_any(
+    mut rows: Vec<(u64, HashMap<String, Vec<u8>>)>,
+    row_limit: Option<usize>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if let Some(limit) = row_limit {
+        rows.truncate(limit);
+    }
+
+    rows
+
+}
+
+pub fn load_live_rows_by_equality_filters_with_limit(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+    row_limit: Option<usize>,
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
 
     if equality_filters.is_empty() {
@@ -3795,20 +3853,29 @@ pub fn load_live_rows_by_equality_filters(
         rows_for_field_values(entry, equality_filters)
 
     }) {
-        return result;
+        return apply_row_limit_if_any(result, row_limit);
     }
 
     if let Some(rows) = cached_equality_probe_rows(wal, table_stream_id, equality_filters) {
-        return rows;
+        return apply_row_limit_if_any(rows, row_limit);
     }
 
     if should_use_direct_scan_for_equality_probe(wal, table_stream_id, table_id, schema) {
-        return load_live_rows_by_equality_filters_direct_wal_scan(
+        let rows = load_live_rows_by_equality_filters_direct_wal_scan(
             wal,
             table_stream_id,
             schema,
             equality_filters,
         );
+
+        maybe_cache_equality_probe_rows(
+            wal,
+            table_stream_id,
+            equality_filters,
+            &rows,
+        );
+
+        return apply_row_limit_if_any(rows, row_limit);
     }
 
     let warm_fields = equality_filters
@@ -3846,7 +3913,14 @@ pub fn load_live_rows_by_equality_filters(
             live_row_count,
         );
 
-        return result;
+        maybe_cache_equality_probe_rows(
+            wal,
+            table_stream_id,
+            equality_filters,
+            &result,
+        );
+
+        return apply_row_limit_if_any(result, row_limit);
     }
 
     let entry = build_cold_accessor_cache_entry(
@@ -3870,7 +3944,178 @@ pub fn load_live_rows_by_equality_filters(
         live_row_count,
     );
 
-    result
+    maybe_cache_equality_probe_rows(
+        wal,
+        table_stream_id,
+        equality_filters,
+        &result,
+    );
+
+    apply_row_limit_if_any(result, row_limit)
+
+}
+
+fn count_rows_for_field_values(
+    entry: &EqualityTableCacheEntry,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> usize {
+
+    if equality_filters.len() == 1
+        && let Some((field_name, lookup_value)) = equality_filters.iter().next()
+    {
+        return entry
+            .row_ids_by_field_value
+            .get(field_name)
+            .and_then(|row_ids_by_value| row_ids_by_value.get(lookup_value.as_slice()))
+            .map(|row_ids| row_ids.len())
+            .unwrap_or(0);
+    }
+
+    rows_for_field_values(entry, equality_filters).len()
+
+}
+
+fn count_live_rows_by_equality_filters_direct_wal_scan(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> usize {
+
+    if equality_filters.is_empty() {
+        return 0;
+    }
+
+    let schema_cache = row_payload_schema_cache(schema);
+    let mut committed_groups = AHashSet::new();
+    let mut aborted_groups = AHashSet::new();
+
+    if let Some(rows) = load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
+        wal,
+        table_stream_id,
+        schema,
+        equality_filters,
+    ) {
+        return rows.len();
+    }
+
+    wal.with_records(table_stream_id, |records| {
+        let mut matching_live_row_ids = AHashSet::with_capacity(equality_filters.len().saturating_mul(32));
+
+        let single_filter = if equality_filters.len() == 1 {
+            equality_filters
+                .iter()
+                .next()
+                .map(|(field_name, value)| (field_name.as_str(), value.as_slice()))
+        } else {
+            None
+        };
+
+        for record in records {
+            match record.kind {
+                TransactionKind::WriteCommit => {
+                    if let Some(group_id) = record.groupid {
+                        committed_groups.insert(group_id.0);
+                    }
+                }
+                TransactionKind::WriteAbort => {
+                    if let Some(group_id) = record.groupid {
+                        aborted_groups.insert(group_id.0);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for record in records {
+            if !record_visible_for_live_row_apply(record, &committed_groups, &aborted_groups) {
+                continue;
+            }
+
+            match record.kind {
+                TransactionKind::Insert | TransactionKind::Update => {
+                    let Some(payload) = record.payload_logical() else {
+                        continue;
+                    };
+
+                    let matches = if let Some((field_name, lookup_value)) = single_filter {
+                        decode_row_field_value_with_schema_cache(&schema_cache, payload, field_name)
+                            .ok()
+                            .flatten()
+                            .map(|value| value.as_slice() == lookup_value)
+                            .unwrap_or(false)
+                    } else {
+                        decode_row_payload_with_schema_cache(&schema_cache, payload)
+                            .ok()
+                            .map(|row_map| row_matches_equality_filters(&row_map, equality_filters))
+                            .unwrap_or(false)
+                    };
+
+                    if matches {
+                        matching_live_row_ids.insert(record.id.0);
+                    }
+                }
+
+                TransactionKind::Delete => {
+                    if let Some(refid) = record.refid {
+                        matching_live_row_ids.remove(&refid.0);
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        matching_live_row_ids.len()
+    })
+    .unwrap_or(0)
+
+}
+
+pub fn count_live_rows_by_equality_filters(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> usize {
+
+    if equality_filters.is_empty() {
+        return 0;
+    }
+
+    if let Some(count) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
+        for field_name in equality_filters.keys() {
+            ensure_field_postings(entry, field_name);
+        }
+
+        count_rows_for_field_values(entry, equality_filters)
+    }) {
+        return count;
+    }
+
+    if let Some(rows) = cached_equality_probe_rows(wal, table_stream_id, equality_filters) {
+        return rows.len();
+    }
+
+    if should_use_direct_scan_for_equality_probe(wal, table_stream_id, table_id, schema) {
+        return count_live_rows_by_equality_filters_direct_wal_scan(
+            wal,
+            table_stream_id,
+            schema,
+            equality_filters,
+        );
+    }
+
+    load_live_rows_by_equality_filters_with_limit(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        equality_filters,
+        None,
+    )
+    .len()
 
 }
 
@@ -5634,13 +5879,14 @@ where
                     );
 
                     if let Some(single_field_name) = single_field_name {
-                        return load_live_rows_by_equality(
+                        return load_live_rows_by_equality_with_limit(
                             wal,
                             &runtime_index_scope_id,
                             &table.table_id,
                             schema,
                             single_field_name,
                             &lookup_key[0],
+                            row_limit,
                         );
                     }
 
@@ -5687,13 +5933,14 @@ where
                 }
 
                 if let Some(single_field_name) = single_field_name {
-                    return load_live_rows_by_equality(
+                    return load_live_rows_by_equality_with_limit(
                         wal,
                         &runtime_index_scope_id,
                         &table.table_id,
                         schema,
                         single_field_name,
                         &lookup_key[0],
+                        row_limit,
                     );
                 }
 
@@ -5708,13 +5955,14 @@ where
                 );
 
                 if let Some(single_field_name) = single_field_name {
-                    return load_live_rows_by_equality(
+                    return load_live_rows_by_equality_with_limit(
                         wal,
                         table_stream_id,
                         &table.table_id,
                         schema,
                         single_field_name,
                         &lookup_key[0],
+                        row_limit,
                     );
                 }
 
@@ -5812,21 +6060,23 @@ where
             }
 
             if equality_filters.len() > 1 {
-                load_live_rows_by_equality_filters(
+                load_live_rows_by_equality_filters_with_limit(
                     wal,
                     table_stream_id,
                     &table.table_id,
                     schema,
                     equality_filters,
+                    row_limit,
                 )
             } else {
-                load_live_rows_by_equality(
+                load_live_rows_by_equality_with_limit(
                     wal,
                     table_stream_id,
                     &table.table_id,
                     schema,
                     field_name,
                     lookup_value,
+                    row_limit,
                 )
             }
 

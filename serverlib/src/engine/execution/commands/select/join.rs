@@ -15,7 +15,9 @@ use crate::engine::sql::{
 };
 
 use crate::engine::execution::{
-    build_joined_row_tuples, materialize_relation_rows, materialize_relation_rows_with_limit,
+    build_joined_row_tuples, collect_indexable_equality_filters_for_schema,
+    count_condition_predicates, count_live_rows_by_equality_filters,
+    materialize_relation_rows, materialize_relation_rows_with_limit,
     relation_qualifier, JoinedRowTuple,
 };
 
@@ -515,6 +517,16 @@ where
 
             crate::load_live_row_count(wal, table_stream_id)
 
+        } else if let Some(filtered_count) = count_star_indexed_equality_fast_path(
+            wal,
+            table,
+            schema,
+            read_plan,
+            access_plan,
+        ) {
+
+            filtered_count
+
         } else {
 
             let mut matched_rows = 0usize;
@@ -552,6 +564,12 @@ where
 
     let row_limit = simple_unordered_relation_row_limit(read_plan);
     let result_row_bound = effective_result_row_bound(read_plan, forced_row_bound);
+    let materialization_row_limit = match (row_limit, result_row_bound) {
+        (Some(base), Some(bound)) => Some(base.min(bound)),
+        (Some(base), None) => Some(base),
+        (None, Some(bound)) => Some(bound),
+        (None, None) => None,
+    };
 
     let mut columns = Vec::with_capacity(projection_items.len());
 
@@ -659,7 +677,7 @@ where
         schema,
         runtime_indexes,
         access_plan,
-        row_limit,
+        materialization_row_limit,
     ) {
 
         if !row_matches(&row_map, read_plan.where_condition.as_ref())? {
@@ -1078,6 +1096,85 @@ fn count_star_is_strict_full_table(read_plan: &SelectReadPlan) -> bool {
     read_plan.limit.is_none() &&
     read_plan.offset.is_none()
     
+}
+
+fn count_star_indexed_equality_fast_path(
+    wal: &ConcurrentWalManager,
+    table: &crate::DatabaseTable,
+    schema: &TableSchema,
+    read_plan: &SelectReadPlan,
+    access_plan: &RelationAccessPlan,
+) -> Option<usize> {
+
+    if !read_plan.joins.is_empty()
+        || !read_plan.group_by.is_empty()
+        || read_plan.having_condition.is_some()
+        || read_plan.distinct
+        || !read_plan.order_by.is_empty()
+        || read_plan.limit_by.is_some()
+        || read_plan.limit.is_some()
+        || read_plan.offset.is_some()
+    {
+        return None;
+    }
+
+    let crate::RelationAccessStrategy::EqualityProbe {
+        equality_filters,
+        ..
+    } = &access_plan.strategy else {
+        return None;
+    };
+
+    if equality_filters.is_empty() {
+        return None;
+    }
+
+    if let Some(condition) = read_plan.where_condition.as_ref() {
+        let mut normalized_filters = HashMap::new();
+
+        if !collect_indexable_equality_filters_for_schema(schema, condition, &mut normalized_filters) {
+            return None;
+        }
+
+        if count_condition_predicates(condition) != normalized_filters.len() {
+            return None;
+        }
+
+        if normalized_filters.len() != equality_filters.len() {
+            return None;
+        }
+
+        for (field_name, value) in &normalized_filters {
+            if equality_filters.get(field_name) != Some(value) {
+                return None;
+            }
+        }
+    }
+
+    let scoped_stream_id = if table.entity_id.is_empty() {
+        table.table_id.as_str()
+    } else {
+        table.entity_id.as_str()
+    };
+
+    let table_stream_id = if scoped_stream_id != table.table_id
+        && wal.data_dir_path().is_none()
+        && wal.latest_transaction_id_if_loaded(scoped_stream_id).is_none()
+        && wal.latest_transaction_id_if_loaded(&table.table_id).is_some()
+    {
+        table.table_id.as_str()
+    } else {
+        scoped_stream_id
+    };
+
+    Some(count_live_rows_by_equality_filters(
+        wal,
+        table_stream_id,
+        &table.table_id,
+        schema,
+        equality_filters,
+    ))
+
 }
 
 fn count_star_primary_key_cardinality(

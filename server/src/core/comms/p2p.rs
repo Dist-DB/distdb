@@ -13,7 +13,7 @@ use serverlib::core::cluster::NodeDescriptor;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 #[derive(Debug, Default)]
 pub struct TcpServerTransport {
@@ -124,6 +124,8 @@ pub fn spawn_p2p_heartbeat_task(
     tokio::spawn(async move {
 
         let mut ticker = interval(Duration::from_secs(30));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let local_peer = node_descriptor_to_peer_node(&local_node);
 
         loop {
 
@@ -132,7 +134,7 @@ pub fn spawn_p2p_heartbeat_task(
             let mut runtime = runtime.lock().await;
             if let Err(err) = runtime
                 .network_mut()
-                .broadcast_announce(node_descriptor_to_peer_node(&local_node))
+                .broadcast_announce(local_peer.clone())
             {
                 log::warn!("server p2p heartbeat announce failed: {}", err);
                 continue;
@@ -156,6 +158,7 @@ pub fn spawn_service_announce_task(
     tokio::spawn(async move {
 
         let mut ticker = interval(Duration::from_secs(30));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
 

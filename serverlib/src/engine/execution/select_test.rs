@@ -495,6 +495,160 @@ fn execute_relation_select_plan_count_star_falls_back_when_pk_cardinality_is_zer
 }
 
 #[test]
+fn execute_relation_select_plan_count_star_equality_probe_uses_fast_path() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select count(*) from users where id=1",
+    )
+    .expect("count equality select should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+
+    let mut equality_filters = std::collections::HashMap::new();
+    let where_condition = read_plan
+        .where_condition
+        .as_ref()
+        .expect("where condition should exist");
+
+    assert!(crate::collect_indexable_equality_filters_for_schema(
+        &schema,
+        where_condition,
+        &mut equality_filters,
+    ));
+
+    let lookup_value = equality_filters
+        .get("id")
+        .cloned()
+        .expect("id equality filter should exist");
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::EqualityProbe {
+            field_name: "id".to_string(),
+            lookup_value,
+            source: crate::EqualityProbeSource::ExistingIndex,
+            equality_filters,
+        },
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |_row_map, _nested_condition| {
+            panic!("equality count fast path should avoid row materialization")
+        },
+    )
+    .expect("count equality select should execute");
+
+    assert_eq!(result.rows, vec![vec![b"1".to_vec()]]);
+
+}
+
+#[test]
+fn materialize_relation_rows_with_limit_bounds_equality_probe_results() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let users_schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("region", 2, FieldType::UInt(64), FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("users", users_schema.clone())
+        .expect("users table should register");
+
+    let actor = UserId("test-user".to_string());
+
+    for i in 1..=10u64 {
+        let mut row_map = std::collections::HashMap::new();
+        row_map.insert("id".to_string(), i.to_string().into_bytes());
+        row_map.insert("region".to_string(), b"5412".to_vec());
+
+        wal.append(
+            "users",
+            TransactionRecord::with_payload(
+                TransactionId(i),
+                None,
+                None,
+                i,
+                actor.clone(),
+                TransactionKind::Insert,
+                encode_row_payload(&users_schema, &row_map).expect("row should encode"),
+            ),
+        )
+        .expect("row should append");
+    }
+
+    let relation = catalog.table("users").expect("users table should exist");
+    let schema = catalog
+        .table_schema("users")
+        .expect("users schema should exist");
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select * from users where region=5412",
+    )
+    .expect("relation select should parse");
+
+    let mut equality_filters = std::collections::HashMap::new();
+    let where_condition = read_plan
+        .where_condition
+        .as_ref()
+        .expect("where condition should exist");
+
+    assert!(crate::collect_indexable_equality_filters_for_schema(
+        &schema,
+        where_condition,
+        &mut equality_filters,
+    ));
+
+    let lookup_value = equality_filters
+        .get("region")
+        .cloned()
+        .expect("region equality filter should exist");
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::EqualityProbe {
+            field_name: "region".to_string(),
+            lookup_value,
+            source: crate::EqualityProbeSource::ExistingIndex,
+            equality_filters,
+        },
+    };
+
+    let rows = crate::materialize_relation_rows_with_limit(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &access_plan,
+        Some(3),
+    );
+
+    assert_eq!(rows.len(), 3);
+
+}
+
+#[test]
 fn execute_joined_select_plan_supports_inbuilt_function_projection() {
     let wal = ConcurrentWalManager::in_memory();
     let runtime_indexes = RuntimeIndexStore::new();
