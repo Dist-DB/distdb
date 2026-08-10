@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::identity::UserId;
 use crate::engine::database::core::ObjectStatus;
+use crate::engine::database::row_payload::{decode_row_payload, encode_row_payload};
 use crate::engine::database::table::schema::TableSchema;
 use crate::engine::database::transaction::{TransactionId, TransactionKind, TransactionRecord};
 use common::helpers::format::FileKind;
@@ -130,7 +131,7 @@ fn disk_executor_rewrites_flushes_and_cuts_over() {
 
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
 
-    let stream_key = stream_key_for_table("users").expect("stream key should resolve");
+    let stream_key = wal_stream_key_for_table(&catalog, "users").expect("stream key should resolve");
     let wal_path = temp_root.join(FileKind::Data.file_name(&stream_key));
 
     let actor = UserId::from_username("migrator");
@@ -210,7 +211,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
 
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
 
-    let stream_key = stream_key_for_table("users").expect("stream key should resolve");
+    let stream_key = wal_stream_key_for_table(&catalog, "users").expect("stream key should resolve");
     let wal_path = temp_root.join(FileKind::Data.file_name(&stream_key));
 
     let actor = UserId::from_username("migrator");
@@ -294,7 +295,7 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
     ));
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
 
-    let stream_key = stream_key_for_table("users").expect("stream key should resolve");
+    let stream_key = wal_stream_key_for_table(&catalog, "users").expect("stream key should resolve");
     let wal_path = temp_root.join(FileKind::Data.file_name(&stream_key));
 
     let actor = UserId::from_username("migrator");
@@ -365,7 +366,7 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
     ));
     std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
 
-    let stream_key = stream_key_for_table("users").expect("stream key should resolve");
+    let stream_key = wal_stream_key_for_table(&catalog, "users").expect("stream key should resolve");
     let wal_path = temp_root.join(FileKind::Data.file_name(&stream_key));
 
     let actor = UserId::from_username("migrator");
@@ -420,6 +421,153 @@ fn disk_executor_force_type_change_coerces_invalid_value() {
             .map(|value| render_stored_field_value(value)),
         Some(b"0".to_vec())
     );
+
+    let _ = std::fs::remove_dir_all(temp_root);
+}
+
+#[test]
+fn disk_executor_drop_column_rewrites_ordinal_payload_without_value_shift() {
+    use crate::engine::database::table::schema::{FieldDef, FieldIndex, FieldType};
+
+    let source_schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "uid".to_string(),
+            field_type: FieldType::UInt(64),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 2,
+            field_name: "form".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::Indexed,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 3,
+            field_name: "class".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::Indexed,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("MainDb").expect("catalog should be created");
+    catalog
+        .create_table("users", source_schema.clone())
+        .expect("table should be created");
+    catalog
+        .transition_status(ObjectStatus::Sync)
+        .expect("load->sync");
+    catalog
+        .transition_status(ObjectStatus::Ready)
+        .expect("sync->ready");
+
+    let _tx = catalog
+        .begin_schema_change("users")
+        .expect("schema change should begin");
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "distdb-schema-drop-ordinal-{}-{}",
+        std::process::id(),
+        common::epoch_nanos!()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("temp dir should be created");
+
+    let stream_key =
+        wal_stream_key_for_table(&catalog, "users").expect("stream key should resolve");
+    let wal_path = temp_root.join(FileKind::Data.file_name(&stream_key));
+
+    let actor = UserId::from_username("migrator");
+    let mut row = HashMap::new();
+    row.insert("uid".to_string(), b"1".to_vec());
+    row.insert("form".to_string(), b"N".to_vec());
+    row.insert("class".to_string(), b"PRK".to_vec());
+
+    let payload = encode_row_payload(&source_schema, &row).expect("source payload should encode");
+    let seed_records = vec![TransactionRecord::with_payload(
+        TransactionId(1),
+        None,
+        None,
+        1,
+        actor,
+        TransactionKind::Insert,
+        payload,
+    )];
+
+    let wal_file = frame_records_as_wal_file(&seed_records).expect("wal file should frame");
+    write_bytes(&wal_path, &wal_file).expect("seed wal should write");
+
+    let target_schema = TableSchema::new(vec![
+        FieldDef {
+            seqno: 1,
+            field_name: "uid".to_string(),
+            field_type: FieldType::UInt(64),
+            nullable: false,
+            indexed: FieldIndex::PrimaryKey,
+            default_value: None,
+            metadata: None,
+        },
+        FieldDef {
+            seqno: 3,
+            field_name: "class".to_string(),
+            field_type: FieldType::Text,
+            nullable: false,
+            indexed: FieldIndex::Indexed,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    let executor = DiskToMemorySchemaMigrationExecutor::new(temp_root.clone());
+    executor
+        .set_rules_for_table(
+            "users",
+            SchemaMutationRuleSet {
+                renames: Vec::new(),
+                removals: vec!["form".to_string()],
+                additions: Vec::new(),
+                type_changes: Vec::new(),
+                target_schema: Some(target_schema.clone()),
+                conversion_policy: TypeConversionPolicy::Safe,
+            },
+        )
+        .expect("rules should be set");
+
+    run_schema_migration(&mut catalog, "users", &executor).expect("migration should succeed");
+
+    let rewritten = load_records_from_path(&wal_path).expect("rewritten wal should load");
+    assert_eq!(rewritten.len(), 1);
+
+    let decoded = decode_row_payload(
+        &target_schema,
+        rewritten[0]
+            .payload()
+            .expect("payload should be present"),
+    )
+    .expect("rewritten row should decode against target schema");
+
+    assert_eq!(
+        decoded
+            .get("uid")
+            .map(|value| render_stored_field_value(value)),
+        Some(b"1".to_vec())
+    );
+    assert_eq!(
+        decoded
+            .get("class")
+            .map(|value| render_stored_field_value(value)),
+        Some(b"PRK".to_vec())
+    );
+    assert!(!decoded.contains_key("form"));
 
     let _ = std::fs::remove_dir_all(temp_root);
 }

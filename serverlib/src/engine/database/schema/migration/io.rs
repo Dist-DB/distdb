@@ -25,6 +25,26 @@ pub fn stream_key_for_table(table_id: &str) -> DatabaseResult<String> {
 
 }
 
+pub fn wal_stream_key_for_table(
+    catalog: &DatabaseCatalog,
+    table_id: &str,
+) -> DatabaseResult<String> {
+
+    let normalized_table_id = common::normalize_identifier!(table_id);
+
+    if normalized_table_id.is_empty() {
+        return Err(DatabaseError::TableNotFound);
+    }
+
+    Ok(catalog
+        .entity_wal_stream_id(&normalized_table_id)
+        .unwrap_or_else(|| {
+            stream_key_for_table(&normalized_table_id)
+                .unwrap_or_else(|_| normalized_table_id.clone())
+        }))
+
+}
+
 pub fn map_io_error_to_catalog_error(err: std::io::Error) -> DatabaseError {
 
     if err.kind() == ErrorKind::NotFound {
@@ -55,12 +75,7 @@ pub fn payload_context_for_table(
         .entity_identity_id(&normalized_table_id)
         .unwrap_or_else(|| normalized_table_id.clone());
     
-    let stream_id = catalog
-        .entity_wal_stream_id(&normalized_table_id)
-        .unwrap_or_else(|| {
-            stream_key_for_table(&normalized_table_id)
-                .unwrap_or_else(|_| normalized_table_id.clone())
-        });
+    let stream_id = wal_stream_key_for_table(catalog, &normalized_table_id)?;
 
     let mut context = TransactionPayloadContext::new()
         .with_database_id(catalog.database_id.0.clone())

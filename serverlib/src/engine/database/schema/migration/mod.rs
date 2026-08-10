@@ -8,7 +8,10 @@ pub use conversion::{
     convert_value_to_field_type, display_stored_field_value, render_stored_field_value,
 };
 pub use executor::{DiskToMemorySchemaMigrationExecutor, NoopSchemaMigrationExecutor};
-pub use io::{frame_records_as_wal_file, load_records_from_path, stream_key_for_table};
+pub use io::{
+    frame_records_as_wal_file, load_records_from_path, stream_key_for_table,
+    wal_stream_key_for_table,
+};
 pub use types::{FieldTypeChangeRule, SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet, TypeConversionPolicy};
 
 use crate::engine::database::catalog::DatabaseCatalog;

@@ -301,8 +301,17 @@ fn append_catalog_entity_rows(
     bootstrap_ready: bool,
 ) {
 
-    fn load_state_for_status(status: &str) -> Vec<u8> {
-        if status == "ready" {
+    fn load_state_for_status(status: &str, bootstrap_ready: bool) -> Vec<u8> {
+        if bootstrap_ready {
+            // Once bootstrap is complete, entity status may still carry transient
+            // lock/load markers from earlier phases, but load state should reflect
+            // readiness rather than bootstrap progress.
+            if status == "indexing" {
+                return b"loading".to_vec();
+            }
+
+            b"loaded".to_vec()
+        } else if status == "ready" {
             b"loaded".to_vec()
         } else {
             b"loading".to_vec()
@@ -320,7 +329,7 @@ fn append_catalog_entity_rows(
         b"database".to_vec(),
         resolved_database_id.as_bytes().to_vec(),
         catalog_status.clone().into_bytes(),
-        load_state_for_status(&catalog_status),
+        load_state_for_status(&catalog_status, bootstrap_ready),
         b"n/a".to_vec(),
     ]);
 
@@ -350,7 +359,7 @@ fn append_catalog_entity_rows(
                     b"table".to_vec(),
                     table.table_id.clone().into_bytes(),
                     entity_status.clone().into_bytes(),
-                    load_state_for_status(&entity_status),
+                    load_state_for_status(&entity_status, bootstrap_ready),
                     table.indexes.len().to_string().into_bytes(),
                 ]);
 
@@ -378,7 +387,7 @@ fn append_catalog_entity_rows(
                         b"index".to_vec(),
                         index_id.into_bytes(),
                         index_status.as_bytes().to_vec(),
-                        load_state_for_status(index_status),
+                        load_state_for_status(index_status, bootstrap_ready),
                         b"n/a".to_vec(),
                     ]);
 
@@ -393,7 +402,7 @@ fn append_catalog_entity_rows(
                     entity.kind().to_string().into_bytes(),
                     entity.name().as_bytes().to_vec(),
                     entity_status.clone().into_bytes(),
-                    load_state_for_status(&entity_status),
+                    load_state_for_status(&entity_status, bootstrap_ready),
                     b"n/a".to_vec(),
                 ]);
             }

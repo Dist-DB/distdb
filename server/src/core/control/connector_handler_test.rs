@@ -21,6 +21,22 @@
         }
     }
 
+    fn query_rows(response: ConnectorResponse) -> Vec<Vec<String>> {
+        let ConnectorResult::Query(result) = response.result else {
+            panic!("expected query result")
+        };
+
+        result
+            .rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|cell| String::from_utf8_lossy(&cell).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    }
+
     fn ensure_applied(response: &ConnectorResponse, context: &str) {
         assert!(
             matches!(response.status, ResponseStatus::Applied),
@@ -198,6 +214,56 @@
 
         assert_eq!(unique, vec!["alice".to_string(), "bob".to_string()]);
         assert!(values.len() >= 2, "expected at least two merged rows");
+
+    }
+
+    #[tokio::test]
+    async fn show_entities_reports_loaded_state_when_bootstrap_ready() {
+
+        let data_dir = unique_test_data_dir("distdb-show-entities-loaded");
+        let config = ServerRuntimeConfig::default_local_with_data_dir(data_dir);
+        let mut app = ServerApp::new(config).expect("server app should initialize");
+        let session_id = "session-show-entities";
+        app.init_session(session_id.to_string(), 1, "root".to_string());
+
+        let database_id = seed_catalog(
+            &mut app,
+            session_id,
+            "locations",
+            "create table users (id bigint not null primary key, name text)",
+            vec!["insert into users (id, name) values (1, 'alice')".to_string()],
+        );
+
+        let app = Arc::new(RwLock::new(app));
+
+        let response = maybe_show_entities_response(
+            &request(
+                "show-entities",
+                ConnectorCommand::Query {
+                    query: connector::DataQuery {
+                        database_id,
+                        sql: "show entities".to_string(),
+                    },
+                },
+            ),
+            &app,
+            &std::env::temp_dir(),
+            true,
+        )
+        .await
+        .expect("show entities response should be available");
+
+        let rows = query_rows(response);
+
+        for row in rows {
+            if row.get(2).is_some_and(|kind| kind == "table" || kind == "index") {
+                assert_eq!(
+                    row.get(5).map(String::as_str),
+                    Some("loaded"),
+                    "table/index load_state should be loaded after bootstrap readiness"
+                );
+            }
+        }
 
     }
 

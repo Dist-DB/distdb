@@ -11,7 +11,7 @@ use super::conversion::apply_schema_rules_to_payload;
 
 use super::io::{
     frame_records_as_wal_file_with_context, load_records_from_path_with_context,
-    map_io_error_to_catalog_error, payload_context_for_table, stream_key_for_table,
+    map_io_error_to_catalog_error, payload_context_for_table, wal_stream_key_for_table,
 };
 
 use super::types::{SchemaMigrationExecutor, SchemaMigrationProgress, SchemaMutationRuleSet};
@@ -98,7 +98,7 @@ impl SchemaMigrationExecutor for DiskToMemorySchemaMigrationExecutor {
         table_id: &str,
     ) -> DatabaseResult<SchemaMigrationProgress> {
 
-        let stream_key = stream_key_for_table(table_id)?;
+        let stream_key = wal_stream_key_for_table(_catalog, table_id)?;
         let final_path = self.data_dir.join(common::helpers::format::FileKind::Data.file_name(&stream_key));
         
         let temp_path = self
