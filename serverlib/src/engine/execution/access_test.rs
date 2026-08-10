@@ -254,6 +254,86 @@ fn durable_cold_equality_probe_prefers_checkpoint_without_wal_hydration() {
 }
 
 #[test]
+fn durable_scoped_equality_fallback_to_legacy_stream_avoids_wal_hydration() {
+
+    let data_dir = unique_temp_dir("access-scoped-fallback");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(&table.table_id)
+        .map(|tx| tx.0)
+        .expect("latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        &table.table_id,
+    )
+    .expect("wal fingerprint should exist");
+
+    let live_rows = load_live_rows(&wal_writer, &table.table_id, &table.table_id, &schema);
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &live_rows,
+    )
+    .expect("live-row checkpoint should save");
+
+    RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        accessor_snapshot_max_live_rows() + 10_000,
+    )
+    .expect("live-row count checkpoint should save");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.entity_id).is_none());
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &table,
+        &schema,
+        &RuntimeIndexStore::new(),
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::TemporaryIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
+        "legacy stream should remain cold during scoped fallback when checkpoints are available",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn build_relation_probe_index_groups_duplicate_keys() {
 
     let rows = vec![
@@ -286,6 +366,46 @@ fn field_has_single_column_index_detects_indexed_columns() {
     assert!(field_has_single_column_index(&table, "email"));
     assert!(!field_has_single_column_index(&table, "nickname"));
     assert_eq!(schema.fields.len(), 3);
+}
+
+#[test]
+fn field_has_single_column_index_ignores_stale_index_for_removed_column() {
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+    ]);
+
+    let mut indexes = HashMap::new();
+    let stale = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["email".to_string()],
+    );
+    indexes.insert(stale.index_id.0.clone(), stale);
+
+    let table = crate::DatabaseTable::new("users".to_string(), schema, indexes);
+
+    assert!(!field_has_single_column_index(&table, "email"));
+}
+
+#[test]
+fn choose_index_lookup_ignores_stale_index_for_removed_column() {
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+    ]);
+
+    let mut indexes = HashMap::new();
+    let stale = DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["email".to_string()],
+    );
+    indexes.insert(stale.index_id.0.clone(), stale);
+
+    let table = crate::DatabaseTable::new("users".to_string(), schema, indexes);
+
+    let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+
+    assert!(choose_index_lookup(&table, &filters).is_none());
 }
 
 #[test]

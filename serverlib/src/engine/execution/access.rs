@@ -2800,6 +2800,20 @@ fn simple_like_prefix(pattern: &[u8]) -> Option<Vec<u8>> {
 
     Some(prefix.to_vec())
 }
+
+fn index_fields_exist_in_schema(index: &DatabaseIndex, schema: &TableSchema) -> bool {
+
+    if !index.field_names.is_empty() {
+        return index
+            .field_names
+            .iter()
+            .all(|field_name| schema.field(field_name).is_some());
+    }
+
+    !index.field_name.is_empty() && schema.field(&index.field_name).is_some()
+
+}
+
 pub fn field_has_single_column_index<T>(table: T, field_name: &str) -> bool
 where
     T: Borrow<DatabaseTable>,
@@ -2807,7 +2821,15 @@ where
 
     let table = table.borrow();
 
+    if table.schema.field(field_name).is_none() {
+        return false;
+    }
+
     table.indexes.values().any(|index| {
+        if !index_fields_exist_in_schema(index, &table.schema) {
+            return false;
+        }
+
         if !index.field_names.is_empty() {
             index.field_names.len() == 1 && index.field_names[0] == field_name
         } else {
@@ -5529,10 +5551,18 @@ fn access_path_name(strategy: &RelationAccessStrategy) -> &'static str {
 
 fn single_field_index_id(table: &DatabaseTable, field_name: &str) -> Option<String> {
 
+    if table.schema.field(field_name).is_none() {
+        return None;
+    }
+
     table
         .indexes
         .values()
         .filter(|index| {
+            if !index_fields_exist_in_schema(index, &table.schema) {
+                return false;
+            }
+
             (!index.field_names.is_empty()
                 && index.field_names.len() == 1
                 && index.field_names[0] == field_name)
@@ -6058,24 +6088,31 @@ where
 
             if equality_probe_stream_scope.as_ref() != table.table_id {
 
-                let scoped_has_data_writes =
-                    wal.has_write_after(equality_probe_stream_scope.as_ref(), 0);
+                let (scoped_has_data_writes, legacy_has_data_writes) =
+                    if wal.data_dir_path().is_some() {
+                        (
+                            wal.latest_transaction_id_if_loaded(
+                                equality_probe_stream_scope.as_ref(),
+                            )
+                            .is_some(),
+                            wal.latest_transaction_id_if_loaded(&table.table_id).is_some(),
+                        )
+                    } else {
+                        (
+                            wal.has_write_after(equality_probe_stream_scope.as_ref(), 0),
+                            wal.has_write_after(&table.table_id, 0),
+                        )
+                    };
 
-                if !scoped_has_data_writes {
-
-                    let legacy_has_data_writes = wal.has_write_after(&table.table_id, 0);
-
-                    if legacy_has_data_writes {
-                        log::debug!(
-                            "relation equality probe table={} field={} scoped_stream={} scoped_has_data_writes=false legacy_stream={} legacy_has_data_writes=true -> fallback_legacy_stream",
-                            table.table_id,
-                            field_name,
-                            equality_probe_stream_scope.as_ref(),
-                            table.table_id,
-                        );
-                        equality_probe_stream_scope = Cow::Borrowed(table.table_id.as_str());
-                    }
-
+                if !scoped_has_data_writes && legacy_has_data_writes {
+                    log::debug!(
+                        "relation equality probe table={} field={} scoped_stream={} scoped_has_data_writes=false legacy_stream={} legacy_has_data_writes=true -> fallback_legacy_stream",
+                        table.table_id,
+                        field_name,
+                        equality_probe_stream_scope.as_ref(),
+                        table.table_id,
+                    );
+                    equality_probe_stream_scope = Cow::Borrowed(table.table_id.as_str());
                 }
 
             }
@@ -6465,6 +6502,10 @@ pub fn choose_index_lookup<'a>(
     let mut selected: Option<(&DatabaseIndex, u8, usize)> = None;
 
     for index in derived_indexes_for_table(table) {
+
+        if !index_fields_exist_in_schema(index, &table.schema) {
+            continue;
+        }
 
         let Some(score) = index_lookup_match_score(index, filters) else {
             continue;
