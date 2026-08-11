@@ -292,7 +292,7 @@ fn cached_equality_probe_rows(
     equality_filters: &HashMap<String, Vec<u8>>,
 ) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
 
-    let latest_tx_id = wal.latest_transaction_id_if_loaded(table_stream_id)?.0;
+    let latest_tx_id = wal.latest_transaction_id_if_loaded(table_stream_id).map(|tx| tx.0);
     let cache_scope_id = wal.cache_scope_id();
     let table_key = (cache_scope_id, table_stream_id.to_string());
     let filter_key = equality_probe_cache_key(equality_filters);
@@ -303,7 +303,9 @@ fn cached_equality_probe_rows(
     let entry = table_cache.get(&filter_key)?;
     let ttl = equality_probe_result_cache_ttl();
 
-    if entry.latest_tx_id != latest_tx_id {
+    if let Some(latest_tx_id) = latest_tx_id
+        && entry.latest_tx_id != latest_tx_id
+    {
         table_cache.remove(&filter_key);
         return None;
     }
@@ -324,6 +326,24 @@ fn maybe_cache_equality_probe_rows(
     rows: &[(u64, HashMap<String, Vec<u8>>)],
 ) {
 
+    maybe_cache_equality_probe_rows_with_latest_tx_id(
+        wal,
+        table_stream_id,
+        equality_filters,
+        rows,
+        wal.latest_transaction_id_if_loaded(table_stream_id).map(|tx| tx.0),
+    );
+
+}
+
+fn maybe_cache_equality_probe_rows_with_latest_tx_id(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    equality_filters: &HashMap<String, Vec<u8>>,
+    rows: &[(u64, HashMap<String, Vec<u8>>)],
+    latest_tx_id: Option<u64>,
+) {
+
     let max_entries = equality_probe_result_cache_max_entries_per_table();
     let max_rows = equality_probe_result_cache_max_entry_rows();
     let max_bytes = equality_probe_result_cache_max_entry_bytes();
@@ -342,7 +362,7 @@ fn maybe_cache_equality_probe_rows(
         return;
     }
 
-    let Some(latest_tx_id) = wal.latest_transaction_id_if_loaded(table_stream_id).map(|tx| tx.0) else {
+    let Some(latest_tx_id) = latest_tx_id else {
         return;
     };
 
@@ -4102,18 +4122,13 @@ pub fn load_live_rows_by_equality_filters_with_limit(
             equality_filters,
         );
 
-        if !direct_scan_result.rows.is_empty() {
-            let mut entry = build_rows_only_cache_entry(
-                direct_scan_result.latest_tx_id,
-                direct_scan_result.rows.clone(),
-            );
-
-            for field_name in equality_filters.keys() {
-                ensure_field_postings(&mut entry, field_name);
-            }
-
-            insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
-        }
+        maybe_cache_equality_probe_rows_with_latest_tx_id(
+            wal,
+            table_stream_id,
+            equality_filters,
+            &direct_scan_result.rows,
+            Some(direct_scan_result.latest_tx_id),
+        );
 
         return apply_row_limit_if_any(direct_scan_result.rows, row_limit);
     }

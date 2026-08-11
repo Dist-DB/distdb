@@ -75,6 +75,20 @@ impl ServerApp {
 
     }
 
+    fn read_only_runtime_index_metadata_only_clone_enabled() -> bool {
+
+        std::env::var("DISTDB_READONLY_RUNTIME_INDEX_METADATA_ONLY_CLONE")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+
+    }
+
     fn read_only_runtime_index_scope_table_ids(parsed_requests: &[SqlRequest]) -> HashSet<String> {
 
         let mut table_ids = HashSet::new();
@@ -1154,6 +1168,7 @@ impl ServerApp {
 
         let scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
         let include_selected_non_unique = Self::read_only_scope_include_selected_non_unique_indexes();
+        let metadata_only_clone = Self::read_only_runtime_index_metadata_only_clone_enabled();
         let selected_fields_by_table = if include_selected_non_unique {
             Self::read_only_runtime_index_scope_selected_fields(&parsed_requests)
         } else {
@@ -1176,6 +1191,9 @@ impl ServerApp {
         let runtime_clone_started_at = Instant::now();
         let mut runtime_indexes = if scope_table_ids.is_empty() {
             self.runtime_indexes.clone()
+        } else if metadata_only_clone {
+            self.runtime_indexes
+                .clone_for_tables_index_metadata_only(&catalogs, &scope_table_ids)
         } else {
             self.runtime_indexes
                 .clone_for_tables_unique_and_selected_single_field_indexes(
@@ -1196,6 +1214,8 @@ impl ServerApp {
                 scope_preview,
                 if scope_table_ids.is_empty() {
                     "cloned_full"
+                } else if metadata_only_clone {
+                    "cloned_scoped_metadata_only"
                 } else {
                     if selected_field_count == 0 {
                         "cloned_scoped_unique"

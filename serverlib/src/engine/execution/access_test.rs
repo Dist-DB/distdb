@@ -469,6 +469,7 @@ fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydra
     assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
 
     let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+
     let rows = load_live_rows_by_equality_filters_with_limit(
         &wal_cold,
         &table.table_id,
@@ -545,6 +546,9 @@ fn durable_cold_repeated_equality_probe_reuses_scoped_cache_without_second_scan(
     assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
 
     let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+    let initial_wal_scan_loads = accessor_load_source_stats_for_test(&table.table_id)
+        .map(|stats| stats.2)
+        .unwrap_or(0);
 
     let rows_first = load_live_rows_by_equality_filters_with_limit(
         &wal_cold,
@@ -577,7 +581,99 @@ fn durable_cold_repeated_equality_probe_reuses_scoped_cache_without_second_scan(
 
     let stats = accessor_load_source_stats_for_test(&table.table_id)
         .expect("accessor load source stats should be recorded for stream");
-    assert_eq!(stats.2, 1, "only one WAL filtered scan should occur for repeated identical probe");
+    assert_eq!(
+        stats.2.saturating_sub(initial_wal_scan_loads),
+        1,
+        "only one additional WAL filtered scan should occur for repeated identical probe",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
+fn durable_cold_equality_cache_does_not_poison_other_values() {
+
+    let data_dir = unique_temp_dir("access-cold-equality-poison");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("name", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("places", schema.clone())
+        .expect("places table should register");
+
+    let actor = UserId("test-user".to_string());
+
+    for (tx_id, id, name) in [
+        (1u64, b"1".as_slice(), b"alpha".as_slice()),
+        (2u64, b"2".as_slice(), b"beta".as_slice()),
+    ] {
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), id.to_vec());
+        row.insert("name".to_string(), name.to_vec());
+
+        wal_writer
+            .append(
+                "places",
+                TransactionRecord::with_payload(
+                    TransactionId(tx_id),
+                    None,
+                    None,
+                    tx_id,
+                    actor.clone(),
+                    TransactionKind::Insert,
+                    encode_row_payload(&schema, &row).expect("row should encode"),
+                ),
+            )
+            .expect("row should append");
+    }
+
+    let table = catalog.table("places").expect("places table should exist");
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+
+    let initial_wal_scan_loads = accessor_load_source_stats_for_test(&table.table_id)
+        .map(|stats| stats.2)
+        .unwrap_or(0);
+
+    let rows_alpha = load_live_rows_by_equality_filters_with_limit(
+        &wal_cold,
+        &table.table_id,
+        &table.table_id,
+        &schema,
+        &HashMap::from([("name".to_string(), b"alpha".to_vec())]),
+        None,
+    );
+
+    assert_eq!(rows_alpha.len(), 1);
+    assert_eq!(rows_alpha[0].1.get("name"), Some(&b"alpha".to_vec()));
+
+    let rows_beta = load_live_rows_by_equality_filters_with_limit(
+        &wal_cold,
+        &table.table_id,
+        &table.table_id,
+        &schema,
+        &HashMap::from([("name".to_string(), b"beta".to_vec())]),
+        None,
+    );
+
+    assert_eq!(rows_beta.len(), 1);
+    assert_eq!(rows_beta[0].1.get("name"), Some(&b"beta".to_vec()));
+
+    let stats = accessor_load_source_stats_for_test(&table.table_id)
+        .expect("accessor load source stats should be recorded for stream");
+    assert_eq!(
+        stats.2.saturating_sub(initial_wal_scan_loads),
+        2,
+        "different equality values should not reuse a partial row cache",
+    );
 
     let _ = fs::remove_dir_all(&data_dir);
 
