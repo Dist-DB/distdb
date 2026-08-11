@@ -381,6 +381,7 @@ pub(super) fn append_row_payload_record_with_live_row_ids_and_prepared_row_map(
             kind,
             latest_tx_id,
             row_map,
+            refid.map(|tx| tx.0),
         );
         
         serverlib::apply_equality_cache_row_mutation(

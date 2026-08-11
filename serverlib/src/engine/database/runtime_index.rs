@@ -1,8 +1,10 @@
 use ahash::{AHashMap, AHashSet};
 use common::epoch_ms;
 use std::borrow::Borrow;
+use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
+use std::ops::Bound;
 use std::num::NonZeroU64;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -287,6 +289,14 @@ fn spawn_background_accessor_prewarm_from_checkpoint(
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
     entries: AHashMap<Vec<u8>, Option<NonZeroU64>>,
+    non_unique_row_refs: AHashMap<Vec<u8>, Vec<NonZeroU64>>,
+    ordered_entry_keys: BTreeSet<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeIndexRangeBound {
+    pub key: Vec<Vec<u8>>,
+    pub inclusive: bool,
 }
 
 fn pack_row_ref(row_ref: u64) -> Option<NonZeroU64> {
@@ -411,23 +421,65 @@ impl RuntimeIndexState {
             return;
         };
 
-        let stored_row_ref = if self
+        let is_unique_key = self
             .index
             .as_ref()
             .map(|index| index.is_unique_key())
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+
+        let stored_row_ref = if is_unique_key {
             row_ref.and_then(pack_row_ref)
         } else {
             None
         };
 
-        self.entries.insert(encoded_key, stored_row_ref);
+        self.entries.insert(encoded_key.clone(), stored_row_ref);
+        self.ordered_entry_keys.insert(encoded_key.clone());
+
+        if !is_unique_key
+            && let Some(row_ref) = row_ref.and_then(pack_row_ref)
+        {
+            self.non_unique_row_refs
+                .entry(encoded_key)
+                .or_default()
+                .push(row_ref);
+        }
     }
 
     pub fn remove(&mut self, pk_val: &[Vec<u8>]) {
+        self.remove_with_row_ref(pk_val, None);
+    }
+
+    pub fn remove_with_row_ref(&mut self, pk_val: &[Vec<u8>], row_ref: Option<u64>) {
         if let Some(encoded_key) = encode_runtime_index_entry_key(pk_val) {
-            self.entries.remove(&encoded_key);
+            let is_unique_key = self
+                .index
+                .as_ref()
+                .map(|index| index.is_unique_key())
+                .unwrap_or(true);
+
+            if is_unique_key {
+                self.entries.remove(&encoded_key);
+                self.ordered_entry_keys.remove(&encoded_key);
+                return;
+            }
+
+            let should_remove_key = if let Some(non_unique_row_refs) = self.non_unique_row_refs.get_mut(&encoded_key) {
+                if let Some(row_ref) = row_ref.and_then(pack_row_ref) {
+                    non_unique_row_refs.retain(|existing| *existing != row_ref);
+                    non_unique_row_refs.is_empty()
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
+
+            if should_remove_key {
+                self.non_unique_row_refs.remove(&encoded_key);
+                self.entries.remove(&encoded_key);
+                self.ordered_entry_keys.remove(&encoded_key);
+            }
         }
     }
 
@@ -440,9 +492,15 @@ impl RuntimeIndexState {
     }
 
     pub fn rebuild(&mut self, entries: AHashSet<Vec<Vec<u8>>>) {
+        self.non_unique_row_refs.clear();
+        self.ordered_entry_keys.clear();
         self.entries = entries
             .into_iter()
-            .filter_map(|key| encode_runtime_index_entry_key(&key).map(|encoded| (encoded, None)))
+            .filter_map(|key| {
+                let encoded = encode_runtime_index_entry_key(&key)?;
+                self.ordered_entry_keys.insert(encoded.clone());
+                Some((encoded, None))
+            })
             .collect();
     }
 
@@ -451,11 +509,14 @@ impl RuntimeIndexState {
         entries: AHashSet<Vec<Vec<u8>>>,
         mut row_refs: AHashMap<Vec<Vec<u8>>, u64>,
     ) {
+        self.non_unique_row_refs.clear();
+        self.ordered_entry_keys.clear();
         row_refs.retain(|key, _| entries.contains(key));
         self.entries = entries
             .into_iter()
             .filter_map(|key| {
                 let encoded = encode_runtime_index_entry_key(&key)?;
+                self.ordered_entry_keys.insert(encoded.clone());
                 let row_ref = row_refs.get(&key).copied();
                 let stored_row_ref = if self
                     .index
@@ -476,6 +537,118 @@ impl RuntimeIndexState {
         unpack_row_ref(self.entries.get(&encoded_key).copied().flatten())
     }
 
+    pub fn row_refs_for_key(&self, pk_val: &[Vec<u8>], limit: Option<usize>) -> Vec<u64> {
+
+        let Some(encoded_key) = encode_runtime_index_entry_key(pk_val) else {
+            return Vec::new();
+        };
+
+        if let Some(row_ref) = unpack_row_ref(self.entries.get(&encoded_key).copied().flatten()) {
+            return vec![row_ref];
+        }
+
+        let Some(non_unique_row_refs) = self.non_unique_row_refs.get(&encoded_key) else {
+            return Vec::new();
+        };
+
+        let mut row_refs = non_unique_row_refs
+            .iter()
+            .filter_map(|row_ref| unpack_row_ref(Some(*row_ref)))
+            .collect::<Vec<_>>();
+
+        row_refs.sort_unstable();
+        row_refs.dedup();
+
+        if let Some(limit) = limit {
+            row_refs.truncate(limit);
+        }
+
+        row_refs
+
+    }
+
+    pub fn row_refs_for_key_range(
+        &self,
+        lower: Option<&RuntimeIndexRangeBound>,
+        upper: Option<&RuntimeIndexRangeBound>,
+        limit: Option<usize>,
+    ) -> Vec<u64> {
+
+        let lower = match lower {
+            Some(bound) => {
+                let Some(encoded) = encode_runtime_index_entry_key(&bound.key) else {
+                    return Vec::new();
+                };
+
+                if bound.inclusive {
+                    Bound::Included(encoded)
+                } else {
+                    Bound::Excluded(encoded)
+                }
+            }
+            None => Bound::Unbounded,
+        };
+
+        let upper = match upper {
+            Some(bound) => {
+                let Some(encoded) = encode_runtime_index_entry_key(&bound.key) else {
+                    return Vec::new();
+                };
+
+                if bound.inclusive {
+                    Bound::Included(encoded)
+                } else {
+                    Bound::Excluded(encoded)
+                }
+            }
+            None => Bound::Unbounded,
+        };
+
+        if let (Bound::Included(lower_key) | Bound::Excluded(lower_key), Bound::Included(upper_key) | Bound::Excluded(upper_key)) = (&lower, &upper) {
+            if lower_key > upper_key {
+                return Vec::new();
+            }
+
+            if lower_key == upper_key
+                && (!matches!(lower, Bound::Included(_)) || !matches!(upper, Bound::Included(_)))
+            {
+                return Vec::new();
+            }
+        }
+
+        let mut row_refs = Vec::new();
+
+        for encoded_key in self.ordered_entry_keys.range((lower, upper)) {
+            if let Some(row_ref) = self
+                .entries
+                .get(encoded_key)
+                .copied()
+                .flatten()
+                .and_then(|row_ref| unpack_row_ref(Some(row_ref)))
+            {
+                row_refs.push(row_ref);
+            }
+
+            if let Some(non_unique_row_refs) = self.non_unique_row_refs.get(encoded_key) {
+                row_refs.extend(
+                    non_unique_row_refs
+                        .iter()
+                        .filter_map(|row_ref| unpack_row_ref(Some(*row_ref))),
+                );
+            }
+        }
+
+        row_refs.sort_unstable();
+        row_refs.dedup();
+
+        if let Some(limit) = limit {
+            row_refs.truncate(limit);
+        }
+
+        row_refs
+
+    }
+
     pub fn first_row_refs(&self, limit: usize) -> Vec<u64> {
 
         if limit == 0 {
@@ -488,7 +661,15 @@ impl RuntimeIndexState {
             .filter_map(|row_ref| unpack_row_ref(*row_ref))
             .collect::<Vec<_>>();
 
+        row_refs.extend(
+            self.non_unique_row_refs
+                .values()
+                .flatten()
+                .filter_map(|row_ref| unpack_row_ref(Some(*row_ref))),
+        );
+
         row_refs.sort_unstable();
+        row_refs.dedup();
         row_refs.truncate(limit);
         row_refs
 
@@ -838,6 +1019,8 @@ impl RuntimeIndexStore {
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index),
             entries: AHashMap::new(),
+            non_unique_row_refs: AHashMap::new(),
+            ordered_entry_keys: BTreeSet::new(),
         });
 
     }
@@ -852,6 +1035,8 @@ impl RuntimeIndexStore {
         self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
             index: Some(index.clone()),
             entries: AHashMap::new(),
+            non_unique_row_refs: AHashMap::new(),
+            ordered_entry_keys: BTreeSet::new(),
         });
 
     }
@@ -942,6 +1127,7 @@ impl RuntimeIndexStore {
         table_scope_id: &str,
         indexes: I,
         row_map: &HashMap<String, Vec<u8>>,
+        row_ref: Option<u64>,
     )
     where
         I: IntoIterator<Item = &'a DatabaseIndex>,
@@ -954,7 +1140,7 @@ impl RuntimeIndexStore {
 
             let key = index_value_tuple(index, row_map);
             self.index_mut_for_table(table_scope_id, &index.index_id.0)
-                .remove(&key);
+                .remove_with_row_ref(&key, row_ref);
 
         }
     }
@@ -1091,6 +1277,7 @@ impl RuntimeIndexStore {
         kind: TransactionKind,
         latest_tx_id: u64,
         row_map: &HashMap<String, Vec<u8>>,
+        row_ref: Option<u64>,
     )
     where
         I: IntoIterator<Item = &'a DatabaseIndex>,
@@ -1100,7 +1287,7 @@ impl RuntimeIndexStore {
             
             TransactionKind::Ignore => {},
 
-            TransactionKind::Delete => self.remove_table_row_for_table(table_scope_id, indexes, row_map),
+            TransactionKind::Delete => self.remove_table_row_for_table(table_scope_id, indexes, row_map, row_ref),
 
             TransactionKind::Insert |
             TransactionKind::Update => {
@@ -1282,6 +1469,7 @@ impl RuntimeIndexStore {
                         let state = self.index_mut_for_table(&table_stream_id, &index.index_id.0);
                         state.index = Some(index.clone());
                         state.entries.clear();
+                        state.non_unique_row_refs.clear();
                         state.reserve_entries(snapshot_index.entries.len());
 
                         if index.is_unique_key()
@@ -1300,23 +1488,36 @@ impl RuntimeIndexStore {
                                 state.insert_with_row_ref(key.clone(), row_ref);
                             }
                         } else {
-                            let row_refs_lookup = if index.is_unique_key() {
-                                Some(
-                                    snapshot_index
-                                        .row_refs
-                                        .iter()
-                                        .map(|(key, row_ref)| (key, *row_ref))
-                                        .collect::<AHashMap<_, _>>()
-                                )
-                            } else {
-                                None
-                            };
+                            if index.is_unique_key() {
+                                let row_refs_lookup = snapshot_index
+                                    .row_refs
+                                    .iter()
+                                    .map(|(key, row_ref)| (key, *row_ref))
+                                    .collect::<AHashMap<_, _>>();
 
-                            for key in &snapshot_index.entries {
-                                let row_ref = row_refs_lookup
-                                    .as_ref()
-                                    .and_then(|lookup| lookup.get(key).copied());
-                                state.insert_with_row_ref(key.clone(), row_ref);
+                                for key in &snapshot_index.entries {
+                                    let row_ref = row_refs_lookup.get(key).copied();
+                                    state.insert_with_row_ref(key.clone(), row_ref);
+                                }
+                            } else {
+                                let mut row_refs_lookup = AHashMap::<Vec<Vec<u8>>, Vec<u64>>::new();
+
+                                for (key, row_ref) in &snapshot_index.row_refs {
+                                    row_refs_lookup
+                                        .entry(key.clone())
+                                        .or_default()
+                                        .push(*row_ref);
+                                }
+
+                                for key in &snapshot_index.entries {
+                                    if let Some(row_refs) = row_refs_lookup.get(key) {
+                                        for row_ref in row_refs {
+                                            state.insert_with_row_ref(key.clone(), Some(*row_ref));
+                                        }
+                                    } else {
+                                        state.insert_with_row_ref(key.clone(), None);
+                                    }
+                                }
                             }
                         }
                     }
@@ -2006,6 +2207,8 @@ impl RuntimeIndexStore {
                             RuntimeIndexState {
                                 index: Some(index.clone()),
                                 entries: AHashMap::new(),
+                                non_unique_row_refs: AHashMap::new(),
+                                ordered_entry_keys: BTreeSet::new(),
                             },
                         );
                     }
@@ -2380,6 +2583,7 @@ fn snapshot_indexes_for_table(
 
         let mut entries = Vec::with_capacity(state.entries.len());
         let mut row_refs_by_entry = Vec::with_capacity(state.entries.len());
+        let mut row_refs = Vec::new();
 
         for (key, row_ref) in &state.entries {
             if let Some(decoded_key) = decode_runtime_index_entry_key(key) {
@@ -2388,6 +2592,14 @@ fn snapshot_indexes_for_table(
                     .and_then(|row_ref| row_ref.checked_add(1))
                     .unwrap_or(0);
                 row_refs_by_entry.push(packed_row_ref);
+
+                if !index.is_unique_key()
+                    && let Some(decoded_key) = decode_runtime_index_entry_key(key)
+                {
+                    for row_ref in state.row_refs_for_key(&decoded_key, None) {
+                        row_refs.push((decoded_key.clone(), row_ref));
+                    }
+                }
             }
         }
 
@@ -2395,8 +2607,9 @@ fn snapshot_indexes_for_table(
             index_id: index.index_id.0.clone(),
             entries,
             row_refs_by_entry,
-            // Keep legacy field for backward compatibility; new snapshots prefer row_refs_by_entry.
-            row_refs: Vec::new(),
+            // Keep legacy field for backward compatibility. For non-unique
+            // indexes, this stores full postings row refs keyed by index value.
+            row_refs,
         });
     }
 

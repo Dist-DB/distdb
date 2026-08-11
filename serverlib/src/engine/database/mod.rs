@@ -12,7 +12,6 @@ pub mod index_id;
 pub mod replica_state;
 pub mod entity;
 pub mod databaseindex;
-pub mod indexor;
 pub mod index_lifecycle_payload;
 pub mod row_payload;
 pub mod runtime_index;

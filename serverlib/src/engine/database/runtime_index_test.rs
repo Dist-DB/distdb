@@ -312,3 +312,69 @@ fn runtime_index_store_keeps_row_refs_for_unique_indexes_only() {
         .expect("non-unique state");
     assert_eq!(non_unique_state.row_ref(&city_key), None);
 }
+
+#[test]
+fn runtime_index_state_range_scan_returns_non_unique_row_refs_with_bounds() {
+    let mut state = RuntimeIndexState::new();
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Indexed,
+        vec!["city".to_string()],
+    ));
+
+    state.insert_with_row_ref(vec![b"athens".to_vec()], Some(13));
+    state.insert_with_row_ref(vec![b"athens".to_vec()], Some(7));
+    state.insert_with_row_ref(vec![b"berlin".to_vec()], Some(21));
+    state.insert_with_row_ref(vec![b"cancun".to_vec()], Some(8));
+
+    let lower = RuntimeIndexRangeBound {
+        key: vec![b"athens".to_vec()],
+        inclusive: true,
+    };
+
+    let upper = RuntimeIndexRangeBound {
+        key: vec![b"cancun".to_vec()],
+        inclusive: false,
+    };
+
+    assert_eq!(
+        state.row_refs_for_key_range(Some(&lower), Some(&upper), None),
+        vec![7, 13, 21],
+    );
+
+    state.remove_with_row_ref(&[b"berlin".to_vec()], Some(21));
+
+    assert_eq!(
+        state.row_refs_for_key_range(Some(&lower), Some(&upper), None),
+        vec![7, 13],
+    );
+}
+
+#[test]
+fn runtime_index_state_range_scan_returns_unique_row_refs_with_limit() {
+    let mut state = RuntimeIndexState::new();
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Unique,
+        vec!["email".to_string()],
+    ));
+
+    state.insert_with_row_ref(vec![b"a@x.io".to_vec()], Some(301));
+    state.insert_with_row_ref(vec![b"b@x.io".to_vec()], Some(302));
+    state.insert_with_row_ref(vec![b"c@x.io".to_vec()], Some(303));
+
+    let lower = RuntimeIndexRangeBound {
+        key: vec![b"a@x.io".to_vec()],
+        inclusive: true,
+    };
+
+    let upper = RuntimeIndexRangeBound {
+        key: vec![b"c@x.io".to_vec()],
+        inclusive: true,
+    };
+
+    assert_eq!(
+        state.row_refs_for_key_range(Some(&lower), Some(&upper), Some(2)),
+        vec![301, 302],
+    );
+}

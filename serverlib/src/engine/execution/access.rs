@@ -246,6 +246,20 @@ fn equality_probe_result_cache_ttl() -> Option<Duration> {
 
 }
 
+fn equality_probe_result_cache_debug_enabled() -> bool {
+
+    std::env::var("DISTDB_DEBUG_EQUALITY_PROBE_RESULT_CACHE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+
+}
+
 fn equality_probe_cache_entry_is_expired(
     entry: &EqualityProbeCacheEntry,
     ttl: Option<Duration>,
@@ -292,30 +306,88 @@ fn cached_equality_probe_rows(
     equality_filters: &HashMap<String, Vec<u8>>,
 ) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
 
+    let debug_enabled = equality_probe_result_cache_debug_enabled();
     let latest_tx_id = wal.latest_transaction_id_if_loaded(table_stream_id).map(|tx| tx.0);
     let cache_scope_id = wal.cache_scope_id();
     let table_key = (cache_scope_id, table_stream_id.to_string());
     let filter_key = equality_probe_cache_key(equality_filters);
 
     let cache = EQUALITY_PROBE_RESULT_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
-    let mut guard = cache.lock().ok()?;
-    let table_cache = guard.get_mut(&table_key)?;
-    let entry = table_cache.get(&filter_key)?;
+    let Ok(mut guard) = cache.lock() else {
+        if debug_enabled {
+            log::info!(
+                "equality probe result cache miss stream={} reason=lock_failed",
+                table_stream_id,
+            );
+        }
+        return None;
+    };
+
+    let Some(table_cache) = guard.get_mut(&table_key) else {
+        if debug_enabled {
+            log::info!(
+                "equality probe result cache miss stream={} reason=stream_cache_missing",
+                table_stream_id,
+            );
+        }
+        return None;
+    };
+
+    let Some(entry) = table_cache.get(&filter_key) else {
+        if debug_enabled {
+            log::info!(
+                "equality probe result cache miss stream={} reason=filter_cache_missing filters={}",
+                table_stream_id,
+                equality_filters.len(),
+            );
+        }
+        return None;
+    };
+
+    let entry_latest_tx_id = entry.latest_tx_id;
+    let entry_rows = entry.rows.clone();
+
     let ttl = equality_probe_result_cache_ttl();
 
     if let Some(latest_tx_id) = latest_tx_id
-        && entry.latest_tx_id != latest_tx_id
+        && entry_latest_tx_id != latest_tx_id
     {
         table_cache.remove(&filter_key);
+        if debug_enabled {
+            log::info!(
+                "equality probe result cache miss stream={} reason=latest_tx_mismatch entry_latest_tx_id={} loaded_latest_tx_id={}",
+                table_stream_id,
+                entry_latest_tx_id,
+                latest_tx_id,
+            );
+        }
         return None;
     }
 
     if equality_probe_cache_entry_is_expired(entry, ttl) {
         table_cache.remove(&filter_key);
+        if debug_enabled {
+            log::info!(
+                "equality probe result cache miss stream={} reason=ttl_expired entry_latest_tx_id={}",
+                table_stream_id,
+                entry_latest_tx_id,
+            );
+        }
         return None;
     }
 
-    Some(entry.rows.clone())
+    if debug_enabled {
+        log::info!(
+            "equality probe result cache hit stream={} filters={} rows={} entry_latest_tx_id={} loaded_latest_tx_id={}",
+            table_stream_id,
+            equality_filters.len(),
+            entry_rows.len(),
+            entry_latest_tx_id,
+            latest_tx_id.unwrap_or(0),
+        );
+    }
+
+    Some(entry_rows)
 
 }
 
@@ -6215,6 +6287,49 @@ where
                     runtime_index_scope_id,
                 );
 
+                if should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id) {
+                    let candidate_row_refs = state.row_refs_for_key(matched_lookup_key, row_limit);
+
+                    if !candidate_row_refs.is_empty() {
+                        let mut candidate_rows = load_live_rows_by_runtime_index_row_refs(
+                            wal,
+                            &runtime_index_scope_id,
+                            schema,
+                            &candidate_row_refs,
+                        );
+
+                        if let Some(single_field_name) = single_field_name {
+                            candidate_rows.retain(|(_, row_map)| {
+                                row_map
+                                    .get(single_field_name)
+                                    .map(|row_value| {
+                                        compare_stored_field_values(
+                                            row_value.as_slice(),
+                                            &lookup_key[0],
+                                        ) == std::cmp::Ordering::Equal
+                                    })
+                                    .unwrap_or(false)
+                            });
+                        }
+
+                        if let Some(limit) = row_limit {
+                            candidate_rows.truncate(limit);
+                        }
+
+                        if !candidate_rows.is_empty() {
+                            log::debug!(
+                                "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=true candidate_refs={} resolved_rows={}",
+                                table.table_id,
+                                index_id,
+                                runtime_index_scope_id,
+                                candidate_row_refs.len(),
+                                candidate_rows.len(),
+                            );
+                            return candidate_rows;
+                        }
+                    }
+                }
+
                 if runtime_lookup_index_is_unique
                     && should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id)
                     && let Some(single_field_name) = single_field_name
@@ -6416,11 +6531,6 @@ where
             if matches!(source, EqualityProbeSource::ExistingIndex)
                 && equality_filters.len() == 1
                 && let Some(index_id) = single_field_index_id(table, field_name)
-                && table
-                    .indexes
-                    .values()
-                    .find(|index| index.index_id.0 == index_id)
-                    .is_some_and(|index| index.is_unique_key())
             {
                 let key = vec![lookup_value.clone()];
                 let key_variants = runtime_lookup_key_variants(&key);
@@ -6439,40 +6549,60 @@ where
                     });
 
                 if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
-                if let Some(row_ref) = key_variants
-                    .iter()
-                    .find_map(|key_variant| state.row_ref(key_variant))
-                    && should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id)
-                    && let Some((row_id, row_map)) = load_live_row_by_runtime_index_row_ref(
-                        wal,
-                        &runtime_index_scope_id,
-                        schema,
-                        field_name,
-                        lookup_value,
-                        row_ref,
-                    )
-                    && equality_filters.iter().all(|(filter_field_name, filter_lookup_value)| {
-                        row_map
-                            .get(filter_field_name)
-                            .map(|row_value| row_value.as_slice() == filter_lookup_value.as_slice())
-                            .unwrap_or(false)
-                    })
-                {
+                    if should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id) {
+                        let candidate_row_refs = key_variants
+                            .iter()
+                            .find_map(|key_variant| {
+                                let row_refs = state.row_refs_for_key(key_variant, row_limit);
+                                if row_refs.is_empty() {
+                                    None
+                                } else {
+                                    Some(row_refs)
+                                }
+                            })
+                            .unwrap_or_default();
+
+                        if !candidate_row_refs.is_empty() {
+                            let mut candidate_rows = load_live_rows_by_runtime_index_row_refs(
+                                wal,
+                                &runtime_index_scope_id,
+                                schema,
+                                &candidate_row_refs,
+                            );
+
+                            candidate_rows.retain(|(_, row_map)| {
+                                equality_filters.iter().all(|(filter_field_name, filter_lookup_value)| {
+                                    row_map
+                                        .get(filter_field_name)
+                                        .map(|row_value| row_value.as_slice() == filter_lookup_value.as_slice())
+                                        .unwrap_or(false)
+                                })
+                            });
+
+                            if let Some(limit) = row_limit {
+                                candidate_rows.truncate(limit);
+                            }
+
+                            if !candidate_rows.is_empty() {
+                                log::debug!(
+                                    "relation equality probe table={} field={} scope={} row_ref_candidates=true candidate_refs={} resolved_rows={}",
+                                    table.table_id,
+                                    field_name,
+                                    runtime_index_scope_id,
+                                    candidate_row_refs.len(),
+                                    candidate_rows.len(),
+                                );
+                                return candidate_rows;
+                            }
+                        }
+                    }
+
                     log::debug!(
-                        "relation equality probe table={} field={} scope={} row_ref_direct=true",
+                        "relation equality probe table={} field={} scope={} row_ref_candidates=false reason=fallback_scan",
                         table.table_id,
                         field_name,
                         runtime_index_scope_id,
                     );
-                    return vec![(row_id, row_map)];
-                }
-
-                log::debug!(
-                    "relation equality probe table={} field={} scope={} row_ref_direct=false reason=fallback_scan",
-                    table.table_id,
-                    field_name,
-                    runtime_index_scope_id,
-                );
                 }
             }
 
