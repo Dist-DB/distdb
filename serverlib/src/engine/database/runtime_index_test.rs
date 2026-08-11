@@ -378,3 +378,58 @@ fn runtime_index_state_range_scan_returns_unique_row_refs_with_limit() {
         vec![301, 302],
     );
 }
+
+#[test]
+fn runtime_index_state_btree_probe_paged_returns_candidate_rows_in_key_order_window() {
+    let mut state = RuntimeIndexState::new();
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "places",
+        DatabaseIndexKind::Indexed,
+        vec!["display_name".to_string()],
+    ));
+
+    state.insert_with_row_ref(vec![b"cologne".to_vec()], Some(10));
+    state.insert_with_row_ref(vec![b"neuss".to_vec()], Some(20));
+    state.insert_with_row_ref(vec![b"neuss".to_vec()], Some(21));
+    state.insert_with_row_ref(vec![b"sulz".to_vec()], Some(30));
+
+    let probes = vec![vec![b"neu".to_vec()]];
+
+    assert_eq!(
+        state.row_refs_for_probe_keys_paged(&probes, 2, 1, None),
+        vec![20, 21, 30],
+    );
+
+    assert_eq!(
+        state.row_refs_for_probe_keys_paged(&probes, 2, 2, Some(2)),
+        vec![20, 21],
+    );
+}
+
+#[test]
+fn runtime_index_state_btree_probe_paged_can_accumulate_multiple_pages() {
+    let mut state = RuntimeIndexState::new();
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "places",
+        DatabaseIndexKind::Indexed,
+        vec!["display_name".to_string()],
+    ));
+
+    state.insert_with_row_ref(vec![b"frankfurt".to_vec()], Some(1));
+    state.insert_with_row_ref(vec![b"frechen".to_vec()], Some(2));
+    state.insert_with_row_ref(vec![b"freiburg".to_vec()], Some(3));
+    state.insert_with_row_ref(vec![b"freising".to_vec()], Some(4));
+    state.insert_with_row_ref(vec![b"fremont".to_vec()], Some(5));
+
+    let probes = vec![vec![b"frank".to_vec()]];
+
+    assert_eq!(
+        state.row_refs_for_probe_keys_paged(&probes, 2, 1, None),
+        vec![2, 5],
+    );
+
+    assert_eq!(
+        state.row_refs_for_probe_keys_paged(&probes, 2, 3, None),
+        vec![1, 2, 3, 4, 5],
+    );
+}

@@ -30,7 +30,7 @@ use crate::engine::sql::{compare_like_value, compare_row_value};
 use crate::{
     TransactionPayloadContext,
     decode_row_payload, ConcurrentWalManager, DatabaseIndex, DatabaseTable, RuntimeIndexStore,
-    SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
+    FieldType, SelectComparisonOp, SelectCondition, SelectPredicate, TableSchema, TransactionKind,
     TransactionRecord,
     WalStreamMode,
 };
@@ -58,6 +58,7 @@ const ACCESSOR_SNAPSHOT_RESTORE_PARALLEL_MIN_POSTINGS: usize = 50_000;
 const ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS: usize = 250_000;
 const ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS: usize = 150_000;
 const RELATION_DEFAULT_ROW_CAP: usize = 50_000;
+const RUNTIME_INDEX_BTREE_PROBE_PAGE_SIZE: usize = 512;
 const ACCESSOR_POSTINGS_PARALLEL_MIN_ROWS: usize = 200_000;
 const ACCESSOR_CACHE_MAX_ROWS_BYTES: usize = 32 * 1024 * 1024;
 const ACCESSOR_SOURCE_LOG_INTERVAL_MS: u64 = 30_000;
@@ -3408,7 +3409,10 @@ fn row_matches_equality_filters(
     equality_filters.iter().all(|(field_name, lookup_value)| {
         row_map
             .get(field_name)
-            .map(|row_value| row_value.as_slice() == lookup_value.as_slice())
+            .map(|row_value| {
+                compare_stored_field_values(row_value.as_slice(), lookup_value.as_slice())
+                    == std::cmp::Ordering::Equal
+            })
             .unwrap_or(false)
     })
 
@@ -6226,6 +6230,81 @@ fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
 
 }
 
+fn runtime_index_probe_page_size(row_limit: Option<usize>) -> usize {
+
+    let requested = row_limit.unwrap_or(RUNTIME_INDEX_BTREE_PROBE_PAGE_SIZE);
+    requested.max(32).min(8_192)
+
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RuntimeIndexBtreeProbeProfile {
+    Generic,
+    Numeric,
+    Temporal,
+    StringLike,
+    Composite,
+}
+
+fn runtime_index_probe_profile_for_field(
+    schema: &TableSchema,
+    field_name: Option<&str>,
+    lookup_key_arity: usize,
+) -> RuntimeIndexBtreeProbeProfile {
+
+    if lookup_key_arity > 1 {
+        return RuntimeIndexBtreeProbeProfile::Composite;
+    }
+
+    let Some(field_name) = field_name else {
+        return RuntimeIndexBtreeProbeProfile::Generic;
+    };
+
+    let Some(field) = schema.field(field_name) else {
+        return RuntimeIndexBtreeProbeProfile::Generic;
+    };
+
+    match field.field_type {
+        FieldType::Int(_) | FieldType::UInt(_) | FieldType::Float(_) => {
+            RuntimeIndexBtreeProbeProfile::Numeric
+        }
+        FieldType::Date | FieldType::DateTime | FieldType::Timestamp => {
+            RuntimeIndexBtreeProbeProfile::Temporal
+        }
+        FieldType::StringFixed(_) | FieldType::Text | FieldType::Enum(_) | FieldType::Uuid => {
+            RuntimeIndexBtreeProbeProfile::StringLike
+        }
+        FieldType::Spatial | FieldType::Blob => RuntimeIndexBtreeProbeProfile::Generic,
+    }
+
+}
+
+fn runtime_index_probe_plan(
+    row_limit: Option<usize>,
+    profile: RuntimeIndexBtreeProbeProfile,
+) -> (usize, usize) {
+
+    let requested = runtime_index_probe_page_size(row_limit);
+
+    let (min_page_size, max_page_size, default_pages) = match profile {
+        RuntimeIndexBtreeProbeProfile::Composite => (96usize, 1_024usize, 12usize),
+        RuntimeIndexBtreeProbeProfile::StringLike => (128usize, 2_048usize, 8usize),
+        RuntimeIndexBtreeProbeProfile::Numeric => (64usize, 4_096usize, 4usize),
+        RuntimeIndexBtreeProbeProfile::Temporal => (64usize, 4_096usize, 4usize),
+        RuntimeIndexBtreeProbeProfile::Generic => (64usize, 2_048usize, 3usize),
+    };
+
+    let key_page_size = requested.max(min_page_size).min(max_page_size);
+    let needed_pages = row_limit
+        .map(|limit| limit.saturating_add(key_page_size.saturating_sub(1)) / key_page_size)
+        .unwrap_or(1)
+        .max(1);
+    let max_pages_per_probe = needed_pages.max(default_pages).min(32);
+
+    (key_page_size, max_pages_per_probe)
+
+}
+
 pub fn materialize_relation_rows<T, S>(
     wal: &ConcurrentWalManager,
     table: T,
@@ -6282,30 +6361,35 @@ where
                         })
                 });
 
-            let runtime_lookup_index_is_unique = table
+            let runtime_lookup_index = table
                 .indexes
                 .values()
-                .find(|index| index.index_id.0 == *index_id)
+                .find(|index| index.index_id.0 == *index_id);
+
+            let runtime_lookup_index_is_unique = runtime_lookup_index
                 .map(|index| index.is_unique_key())
                 .unwrap_or(false);
 
             let single_field_name = if lookup_key.len() == 1 {
-                table
-                    .indexes
-                    .values()
-                    .find(|index| index.index_id.0 == *index_id)
-                    .and_then(|index| {
-                        if index.field_names.len() == 1 {
-                            Some(index.field_names[0].as_str())
-                        } else if index.field_names.is_empty() && !index.field_name.is_empty() {
-                            Some(index.field_name.as_str())
-                        } else {
-                            None
-                        }
-                    })
+                runtime_lookup_index.and_then(|index| {
+                    if index.field_names.len() == 1 {
+                        Some(index.field_names[0].as_str())
+                    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+                        Some(index.field_name.as_str())
+                    } else {
+                        None
+                    }
+                })
             } else {
                 None
             };
+
+            let probe_profile = runtime_index_probe_profile_for_field(
+                schema,
+                single_field_name,
+                lookup_key.len(),
+            );
+            let (probe_page_size, probe_max_pages) = runtime_index_probe_plan(row_limit, probe_profile);
 
             if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
 
@@ -6345,7 +6429,16 @@ where
 
                 let can_direct_lookup =
                     should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id);
-                let candidate_row_refs = state.row_refs_for_key(matched_lookup_key, row_limit);
+                let mut candidate_row_refs = state.row_refs_for_key(matched_lookup_key, row_limit);
+
+                if candidate_row_refs.is_empty() {
+                    candidate_row_refs = state.row_refs_for_probe_keys_paged(
+                        &lookup_key_variants,
+                        probe_page_size,
+                        probe_max_pages,
+                        row_limit,
+                    );
+                }
 
                 if !candidate_row_refs.is_empty() {
                     let mut candidate_rows = if can_direct_lookup {
@@ -6393,21 +6486,38 @@ where
                             candidate_row_refs.len(),
                             candidate_rows.len(),
                             if can_direct_lookup {
-                                "loaded_stream"
+                                "loaded_stream_or_btree_probe"
                             } else {
-                                "live_row_checkpoint"
+                                "live_row_checkpoint_or_btree_probe"
                             },
                         );
                         return candidate_rows;
                     }
                 }
 
-                if let Some(single_field_name) = single_field_name {
-                    let mut equality_filters = HashMap::with_capacity(1);
-                    equality_filters
-                        .insert(single_field_name.to_string(), lookup_key[0].clone());
+                let lookup_equality_filters = runtime_lookup_index.and_then(|index| {
+                    let field_names = if !index.field_names.is_empty() {
+                        index.field_names.clone()
+                    } else if !index.field_name.is_empty() {
+                        vec![index.field_name.clone()]
+                    } else {
+                        Vec::new()
+                    };
 
-                    if let Some(checkpoint_rows) =
+                    if field_names.len() != lookup_key.len() {
+                        return None;
+                    }
+
+                    Some(
+                        field_names
+                            .into_iter()
+                            .zip(lookup_key.iter().cloned())
+                            .collect::<HashMap<_, _>>(),
+                    )
+                });
+
+                if let Some(equality_filters) = lookup_equality_filters
+                    && let Some(checkpoint_rows) =
                         load_live_rows_by_equality_filters_from_checkpoint_with_limit(
                             wal,
                             &runtime_index_scope_id,
@@ -6416,17 +6526,16 @@ where
                             &equality_filters,
                             row_limit,
                         )
-                        && !checkpoint_rows.is_empty()
-                    {
-                        log::debug!(
-                            "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
-                            table.table_id,
-                            index_id,
-                            runtime_index_scope_id,
-                            checkpoint_rows.len(),
-                        );
-                        return checkpoint_rows;
-                    }
+                    && !checkpoint_rows.is_empty()
+                {
+                    log::debug!(
+                        "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
+                        table.table_id,
+                        index_id,
+                        runtime_index_scope_id,
+                        checkpoint_rows.len(),
+                    );
+                    return checkpoint_rows;
                 }
 
                 if runtime_lookup_index_is_unique
@@ -6612,7 +6721,14 @@ where
                 if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
                     let can_direct_lookup =
                         should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id);
-                    let candidate_row_refs = key_variants
+                    let probe_profile = runtime_index_probe_profile_for_field(
+                        schema,
+                        Some(field_name.as_str()),
+                        1,
+                    );
+                    let (probe_page_size, probe_max_pages) =
+                        runtime_index_probe_plan(row_limit, probe_profile);
+                    let mut candidate_row_refs = key_variants
                         .iter()
                         .find_map(|key_variant| {
                             let row_refs = state.row_refs_for_key(key_variant, row_limit);
@@ -6623,6 +6739,15 @@ where
                             }
                         })
                         .unwrap_or_default();
+
+                    if candidate_row_refs.is_empty() {
+                        candidate_row_refs = state.row_refs_for_probe_keys_paged(
+                            &key_variants,
+                            probe_page_size,
+                            probe_max_pages,
+                            row_limit,
+                        );
+                    }
 
                     if !candidate_row_refs.is_empty() {
                         let mut candidate_rows = if can_direct_lookup {
@@ -6647,7 +6772,12 @@ where
                             equality_filters.iter().all(|(filter_field_name, filter_lookup_value)| {
                                 row_map
                                     .get(filter_field_name)
-                                    .map(|row_value| row_value.as_slice() == filter_lookup_value.as_slice())
+                                    .map(|row_value| {
+                                        compare_stored_field_values(
+                                            row_value.as_slice(),
+                                            filter_lookup_value.as_slice(),
+                                        ) == std::cmp::Ordering::Equal
+                                    })
                                     .unwrap_or(false)
                             })
                         });
@@ -6665,9 +6795,9 @@ where
                                 candidate_row_refs.len(),
                                 candidate_rows.len(),
                                 if can_direct_lookup {
-                                    "loaded_stream"
+                                    "loaded_stream_or_btree_probe"
                                 } else {
-                                    "live_row_checkpoint"
+                                    "live_row_checkpoint_or_btree_probe"
                                 },
                             );
                             return candidate_rows;

@@ -649,6 +649,102 @@ impl RuntimeIndexState {
 
     }
 
+    pub fn row_refs_for_probe_keys_paged(
+        &self,
+        probe_keys: &[Vec<Vec<u8>>],
+        key_page_size: usize,
+        max_pages_per_probe: usize,
+        limit: Option<usize>,
+    ) -> Vec<u64> {
+
+        if probe_keys.is_empty() || key_page_size == 0 || max_pages_per_probe == 0 {
+            return Vec::new();
+        }
+
+        let mut row_refs = Vec::new();
+        let mut seen_keys = AHashSet::<Vec<u8>>::new();
+
+        for probe_key in probe_keys {
+            let Some(encoded_probe_key) = encode_runtime_index_entry_key(probe_key) else {
+                continue;
+            };
+
+            let mut next_lower_bound = Bound::Included(encoded_probe_key);
+            let mut pages_visited = 0usize;
+
+            while pages_visited < max_pages_per_probe {
+                let page_keys = self
+                    .ordered_entry_keys
+                    .range((next_lower_bound.clone(), Bound::Unbounded))
+                    .take(key_page_size)
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                if page_keys.is_empty() {
+                    break;
+                }
+
+                for encoded_key in &page_keys {
+                    if !seen_keys.insert(encoded_key.clone()) {
+                        continue;
+                    }
+
+                    if let Some(row_ref) = self
+                        .entries
+                        .get(encoded_key)
+                        .copied()
+                        .flatten()
+                        .and_then(|row_ref| unpack_row_ref(Some(row_ref)))
+                    {
+                        row_refs.push(row_ref);
+                    }
+
+                    if let Some(non_unique_row_refs) = self.non_unique_row_refs.get(encoded_key) {
+                        row_refs.extend(
+                            non_unique_row_refs
+                                .iter()
+                                .filter_map(|row_ref| unpack_row_ref(Some(*row_ref))),
+                        );
+                    }
+                }
+
+                pages_visited = pages_visited.saturating_add(1);
+
+                if page_keys.len() < key_page_size {
+                    break;
+                }
+
+                let Some(last_key) = page_keys.last().cloned() else {
+                    break;
+                };
+
+                next_lower_bound = Bound::Excluded(last_key);
+
+                if let Some(limit) = limit
+                    && row_refs.len() >= limit
+                {
+                    break;
+                }
+            }
+
+            if let Some(limit) = limit
+                && row_refs.len() >= limit
+            {
+                break;
+            }
+        }
+
+        row_refs.sort_unstable();
+        row_refs.dedup();
+
+        if let Some(limit) = limit {
+            row_refs.truncate(limit);
+        }
+
+        row_refs
+
+    }
+
     pub fn first_row_refs(&self, limit: usize) -> Vec<u64> {
 
         if limit == 0 {
