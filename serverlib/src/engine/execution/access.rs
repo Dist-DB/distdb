@@ -436,6 +436,23 @@ fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: u
 
 }
 
+#[cfg(test)]
+pub(crate) fn accessor_load_source_stats_for_test(
+    stream_id: &str,
+) -> Option<(u64, u64, u64)> {
+
+    let stats_map = ACCESSOR_LOAD_SOURCE_STATS.get()?;
+    let guard = stats_map.lock().ok()?;
+    let stats = guard.get(stream_id)?;
+
+    Some((
+        stats.snapshot_loads,
+        stats.checkpoint_loads,
+        stats.wal_scan_loads,
+    ))
+
+}
+
 fn equality_cache_table_map_mut(
     cache_guard: &mut EqualityCacheScopeMap,
     cache_scope_id: usize,
@@ -3371,12 +3388,17 @@ fn apply_visible_equality_record(
 
 }
 
+struct EqualityDirectScanResult {
+    latest_tx_id: u64,
+    rows: Vec<LiveRow>,
+}
+
 fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
     schema: &TableSchema,
     equality_filters: &HashMap<String, Vec<u8>>,
-) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
+) -> Option<EqualityDirectScanResult> {
 
     let started_at = Instant::now();
 
@@ -3403,12 +3425,14 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
     let mut max_pending_groups = 0usize;
     let mut max_pending_records = 0usize;
     let mut current_pending_records = 0usize;
+    let mut latest_scanned_tx_id = 0u64;
     let mut decoded_candidate_rows = 0usize;
     let mut decoded_matching_rows = 0usize;
     let mut decode_elapsed_ns = 0u128;
 
     match wal.scan_durable_records_if_unloaded(table_stream_id, |record| {
         scanned_records = scanned_records.saturating_add(1);
+        latest_scanned_tx_id = std::cmp::max(latest_scanned_tx_id, record.id.0);
         let group_id = record.groupid.map(|group_id| group_id.0);
         if group_id.is_some() {
             grouped_records = grouped_records.saturating_add(1);
@@ -3556,7 +3580,10 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
         );
     }
 
-    Some(rows)
+    Some(EqualityDirectScanResult {
+        latest_tx_id: latest_scanned_tx_id,
+        rows,
+    })
 
 }
 
@@ -3565,25 +3592,32 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
     table_stream_id: &str,
     schema: &TableSchema,
     equality_filters: &HashMap<String, Vec<u8>>,
-) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+) -> EqualityDirectScanResult {
 
     if equality_filters.is_empty() {
-        return Vec::new();
+        return EqualityDirectScanResult {
+            latest_tx_id: 0,
+            rows: Vec::new(),
+        };
     }
 
     let started_at = Instant::now();
 
-    let rows = if let Some(rows) = load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
+    let scan_result = if let Some(scan_result) = load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
         wal,
         table_stream_id,
         schema,
         equality_filters,
     ) {
-        rows
+        scan_result
     } else {
         let schema_cache = row_payload_schema_cache(schema);
+        let mut latest_tx_id = wal
+            .latest_transaction_id_if_loaded(table_stream_id)
+            .map(|tx| tx.0)
+            .unwrap_or(0);
 
-        wal
+        let rows = wal
             .with_records(table_stream_id, |records| {
 
             let mut live_rows = AHashMap::with_capacity(equality_filters.len().saturating_mul(32));
@@ -3609,6 +3643,8 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                 apply_workers > 1 && records.len() >= LIVE_ROW_APPLY_PARALLEL_MIN_RECORDS;
 
             for record in records {
+
+                latest_tx_id = std::cmp::max(latest_tx_id, record.id.0);
 
                 match record.kind {
 
@@ -3764,7 +3800,12 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
                 .filter_map(|id| live_rows.remove(&id).map(|row_map| (id, row_map)))
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+        EqualityDirectScanResult {
+            latest_tx_id,
+            rows,
+        }
 
     };
 
@@ -3775,21 +3816,21 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
             "equality probe direct scan stream={} filters={} live_rows={} elapsed_ms={}",
             table_stream_id,
             equality_filters.len(),
-            rows.len(),
+            scan_result.rows.len(),
             elapsed_ms,
         );
     }
 
-    record_accessor_load_source(table_stream_id, "wal_scan_filtered", rows.len(), elapsed_ms);
+    record_accessor_load_source(table_stream_id, "wal_scan_filtered", scan_result.rows.len(), elapsed_ms);
 
     maybe_cache_equality_probe_rows(
         wal,
         table_stream_id,
         equality_filters,
-        &rows,
+        &scan_result.rows,
     );
 
-    rows
+    scan_result
 
 }
 
@@ -4054,21 +4095,27 @@ pub fn load_live_rows_by_equality_filters_with_limit(
     }
 
     if should_use_direct_scan_for_equality_probe(wal, table_stream_id, table_id, schema) {
-        let rows = load_live_rows_by_equality_filters_direct_wal_scan(
+        let direct_scan_result = load_live_rows_by_equality_filters_direct_wal_scan(
             wal,
             table_stream_id,
             schema,
             equality_filters,
         );
 
-        maybe_cache_equality_probe_rows(
-            wal,
-            table_stream_id,
-            equality_filters,
-            &rows,
-        );
+        if !direct_scan_result.rows.is_empty() {
+            let mut entry = build_rows_only_cache_entry(
+                direct_scan_result.latest_tx_id,
+                direct_scan_result.rows.clone(),
+            );
 
-        return apply_row_limit_if_any(rows, row_limit);
+            for field_name in equality_filters.keys() {
+                ensure_field_postings(&mut entry, field_name);
+            }
+
+            insert_scoped_equality_cache_entry(wal, table_stream_id, entry);
+        }
+
+        return apply_row_limit_if_any(direct_scan_result.rows, row_limit);
     }
 
     let warm_fields = equality_filters
@@ -4189,7 +4236,7 @@ fn count_live_rows_by_equality_filters_direct_wal_scan(
         schema,
         equality_filters,
     ) {
-        return rows.len();
+        return rows.rows.len();
     }
 
     wal.with_records(table_stream_id, |records| {

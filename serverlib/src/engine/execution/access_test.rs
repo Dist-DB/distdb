@@ -529,6 +529,61 @@ fn durable_cold_without_checkpoints_prefers_filtered_scan_without_hydration() {
 }
 
 #[test]
+fn durable_cold_repeated_equality_probe_reuses_scoped_cache_without_second_scan() {
+
+    let data_dir = unique_temp_dir("access-cold-repeat-equality-cache");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+
+    let rows_first = load_live_rows_by_equality_filters_with_limit(
+        &wal_cold,
+        &table.table_id,
+        &table.table_id,
+        &schema,
+        &filters,
+        None,
+    );
+
+    assert_eq!(rows_first.len(), 1);
+    assert_eq!(rows_first[0].0, 1);
+
+    let rows_second = load_live_rows_by_equality_filters_with_limit(
+        &wal_cold,
+        &table.table_id,
+        &table.table_id,
+        &schema,
+        &filters,
+        None,
+    );
+
+    assert_eq!(rows_second.len(), 1);
+    assert_eq!(rows_second[0].0, 1);
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
+        "repeated cold equality probes should not hydrate WAL",
+    );
+
+    let stats = accessor_load_source_stats_for_test(&table.table_id)
+        .expect("accessor load source stats should be recorded for stream");
+    assert_eq!(stats.2, 1, "only one WAL filtered scan should occur for repeated identical probe");
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn build_relation_probe_index_groups_duplicate_keys() {
 
     let rows = vec![
