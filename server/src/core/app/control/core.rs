@@ -8,6 +8,7 @@ use connector::{
 };
 use serverlib::{
     AclMutationKind, AccountAclEntry, ConcurrentWalManager, DatabaseCatalog, DatabaseId,
+    SelectComparisonOp, SelectCondition, SelectPredicate,
     SqlOperation, show_indexes_result,
     RuntimeIndexStore, SelectProjectionItem, SelectReadPlan, SqlRequest, TransactionId,
     UserCredential, UserId,
@@ -86,6 +87,102 @@ impl ServerApp {
         }
 
         table_ids
+
+    }
+
+    fn collect_read_only_equality_filter_fields(
+        condition: &SelectCondition,
+        fields: &mut HashSet<String>,
+    ) {
+
+        match condition {
+            SelectCondition::And(children) => {
+                for child in children {
+                    Self::collect_read_only_equality_filter_fields(child, fields);
+                }
+            }
+
+            SelectCondition::Predicate(SelectPredicate::Comparison {
+                field_name,
+                op: SelectComparisonOp::Eq,
+                ..
+            }) => {
+                let normalized = common::normalize_identifier!(field_name);
+                if !normalized.is_empty() {
+                    fields.insert(normalized.clone());
+                }
+
+                if let Some(unqualified) = field_name.rsplit('.').next() {
+                    let normalized_unqualified = common::normalize_identifier!(unqualified);
+                    if !normalized_unqualified.is_empty() {
+                        fields.insert(normalized_unqualified);
+                    }
+                }
+            }
+
+            SelectCondition::Predicate(_) => {}
+
+            SelectCondition::Or(children) => {
+                for child in children {
+                    Self::collect_read_only_equality_filter_fields(child, fields);
+                }
+            }
+
+            SelectCondition::Not(child) => {
+                Self::collect_read_only_equality_filter_fields(child, fields);
+            }
+        }
+
+    }
+
+    fn read_only_runtime_index_scope_selected_fields(
+        parsed_requests: &[SqlRequest],
+    ) -> HashMap<String, HashSet<String>> {
+
+        let mut selected_fields_by_table = HashMap::<String, HashSet<String>>::new();
+
+        for request in parsed_requests {
+            let Ok(read_plan) = parse_select_read_plan_from_statement(&request.sql) else {
+                continue;
+            };
+
+            let mut selected_fields = HashSet::new();
+
+            if let Some(condition) = read_plan.where_condition.as_ref() {
+                Self::collect_read_only_equality_filter_fields(condition, &mut selected_fields);
+            }
+
+            if selected_fields.is_empty() {
+                continue;
+            }
+
+            let mut candidate_tables = Vec::new();
+
+            let top_level_table = common::normalize_identifier!(&read_plan.table_id);
+            if !top_level_table.is_empty() {
+                candidate_tables.push(top_level_table);
+            }
+
+            for relation in &read_plan.relations {
+                let relation_table = common::normalize_identifier!(&relation.table_id);
+                if !relation_table.is_empty() {
+                    candidate_tables.push(relation_table);
+                }
+            }
+
+            if candidate_tables.is_empty() {
+                continue;
+            }
+
+            for table_id in candidate_tables {
+                selected_fields_by_table
+                    .entry(table_id)
+                    .or_default()
+                    .extend(selected_fields.iter().cloned());
+            }
+        }
+
+        selected_fields_by_table
 
     }
 
@@ -1042,7 +1139,12 @@ impl ServerApp {
         let catalog_clone_ms = catalog_clone_started_at.elapsed().as_millis() as u64;
 
         let scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
+        let selected_fields_by_table = Self::read_only_runtime_index_scope_selected_fields(&parsed_requests);
         let scope_table_count = scope_table_ids.len();
+        let selected_field_count = selected_fields_by_table
+            .values()
+            .map(HashSet::len)
+            .sum::<usize>();
         let scope_preview = if scope_table_ids.is_empty() {
             "<none>".to_string()
         } else {
@@ -1057,7 +1159,11 @@ impl ServerApp {
             self.runtime_indexes.clone()
         } else {
             self.runtime_indexes
-                .clone_for_tables_unique_indexes(&catalogs, &scope_table_ids)
+                .clone_for_tables_unique_and_selected_single_field_indexes(
+                    &catalogs,
+                    &scope_table_ids,
+                    &selected_fields_by_table,
+                )
         };
         let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
 
@@ -1072,7 +1178,11 @@ impl ServerApp {
                 if scope_table_ids.is_empty() {
                     "cloned_full"
                 } else {
-                    "cloned_scoped_unique"
+                    if selected_field_count == 0 {
+                        "cloned_scoped_unique"
+                    } else {
+                        "cloned_scoped_unique_with_selected_non_unique"
+                    }
                 },
             );
         }

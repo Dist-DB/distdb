@@ -1900,6 +1900,80 @@ impl RuntimeIndexStore {
 
     }
 
+    pub fn clone_for_tables_unique_and_selected_single_field_indexes(
+        &self,
+        catalogs: &HashMap<String, DatabaseCatalog>,
+        table_ids: &HashSet<String>,
+        selected_fields_by_table: &HashMap<String, HashSet<String>>,
+    ) -> Self {
+
+        let mut scoped = Self::new();
+
+        for catalog in catalogs.values() {
+
+            for table_id in catalog.table_ids() {
+
+                if !table_ids.contains(&table_id) {
+                    continue;
+                }
+
+                let Some(table_handle) = catalog.table_handle(&table_id) else {
+                    continue;
+                };
+
+                let table_stream_id = catalog
+                    .entity_wal_stream_id(&table_id)
+                    .unwrap_or_else(|| table_id.clone());
+
+                let selected_fields = selected_fields_by_table
+                    .get(&table_id)
+                    .or_else(|| {
+                        selected_fields_by_table
+                            .get(&common::normalize_identifier!(&table_id))
+                    });
+
+                table_handle.read_table(|table| {
+                    for index in table.indexes.values() {
+                        let include_index = if index.is_unique_key() {
+                            true
+                        } else {
+                            let Some(fields) = selected_fields else {
+                                continue;
+                            };
+
+                            if index.field_names.len() != 1 {
+                                continue;
+                            }
+
+                            let Some(index_field) = index.field_names.first() else {
+                                continue;
+                            };
+
+                            let normalized_index_field = common::normalize_identifier!(index_field);
+
+                            fields.contains(&normalized_index_field)
+                                || fields.contains(index_field)
+                        };
+
+                        if !include_index {
+                            continue;
+                        }
+
+                        if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
+                            let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
+                            scoped.indexes.insert(scoped_id, state.clone());
+                        }
+                    }
+                });
+
+            }
+
+        }
+
+        scoped
+
+    }
+
     pub fn persist_table_snapshot_on_commit(
         &mut self,
         table: &DatabaseTable,
