@@ -6214,20 +6214,87 @@ fn load_live_rows_with_optional_pk_cap(
 
 }
 
-fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
+fn push_unique_lookup_key_variant(
+    variants: &mut Vec<Vec<Vec<u8>>>,
+    candidate: Vec<Vec<u8>>,
+) {
 
-    let mut variants = Vec::with_capacity(2);
-    variants.push(lookup_key.to_vec());
+    if !variants.iter().any(|existing| existing == &candidate) {
+        variants.push(candidate);
+    }
 
-    if lookup_key.len() == 1 {
-        let rendered = render_stored_field_value(&lookup_key[0]);
-        if rendered != lookup_key[0] {
-            variants.push(vec![rendered]);
+}
+
+fn push_unique_scalar_lookup_variant(variants: &mut Vec<Vec<u8>>, candidate: Vec<u8>) {
+
+    if !variants.iter().any(|existing| existing == &candidate) {
+        variants.push(candidate);
+    }
+
+}
+
+fn normalized_string_probe_variants(value: &[u8]) -> Vec<Vec<u8>> {
+
+    let rendered = render_stored_field_value(value);
+    let Ok(as_text) = std::str::from_utf8(&rendered) else {
+        return Vec::new();
+    };
+
+    let lowered = as_text.trim().to_lowercase();
+    if lowered.is_empty() {
+        return Vec::new();
+    }
+
+    let mut variants = vec![lowered.as_bytes().to_vec()];
+    let chars = lowered.chars().collect::<Vec<_>>();
+
+    for prefix_len in [5usize, 4usize, 3usize] {
+        if chars.len() >= prefix_len {
+            let prefix = chars[..prefix_len].iter().collect::<String>();
+            push_unique_scalar_lookup_variant(&mut variants, prefix.into_bytes());
         }
     }
 
     variants
 
+}
+
+fn runtime_lookup_key_variants_with_profile(
+    lookup_key: &[Vec<u8>],
+    profile: RuntimeIndexBtreeProbeProfile,
+) -> Vec<Vec<Vec<u8>>> {
+
+    let mut variants = Vec::new();
+    push_unique_lookup_key_variant(&mut variants, lookup_key.to_vec());
+
+    if lookup_key.len() != 1 {
+        return variants;
+    }
+
+    let mut scalar_variants = vec![lookup_key[0].clone()];
+    let rendered = render_stored_field_value(&lookup_key[0]);
+    push_unique_scalar_lookup_variant(&mut scalar_variants, rendered.clone());
+
+    if matches!(profile, RuntimeIndexBtreeProbeProfile::StringLike) {
+        for normalized in normalized_string_probe_variants(&lookup_key[0]) {
+            push_unique_scalar_lookup_variant(&mut scalar_variants, normalized);
+        }
+
+        for normalized in normalized_string_probe_variants(&rendered) {
+            push_unique_scalar_lookup_variant(&mut scalar_variants, normalized);
+        }
+    }
+
+    for scalar in scalar_variants {
+        push_unique_lookup_key_variant(&mut variants, vec![scalar]);
+    }
+
+    variants
+
+}
+
+fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
+    runtime_lookup_key_variants_with_profile(lookup_key, RuntimeIndexBtreeProbeProfile::Generic)
 }
 
 fn runtime_index_probe_page_size(row_limit: Option<usize>) -> usize {
@@ -6358,21 +6425,6 @@ where
             lookup_key,
         } => {
 
-            let lookup_key_variants = runtime_lookup_key_variants(lookup_key);
-
-            let runtime_index_state_with_scope = runtime_indexes
-                .index_for_table(table_stream_id, index_id)
-                .map(|state| (table_stream_id.to_string(), state))
-                .or_else(|| {
-                    lookup_key_variants
-                        .iter()
-                        .find_map(|key_variant| {
-                            runtime_indexes
-                                .find_scoped_index_state_for_lookup(index_id, key_variant)
-                                .map(|(scope_id, state)| (scope_id.to_string(), state))
-                        })
-                });
-
             let runtime_lookup_index = table
                 .indexes
                 .values()
@@ -6402,6 +6454,21 @@ where
                 lookup_key.len(),
             );
             let (probe_page_size, probe_max_pages) = runtime_index_probe_plan(row_limit, probe_profile);
+            let lookup_key_variants =
+                runtime_lookup_key_variants_with_profile(lookup_key, probe_profile);
+
+            let runtime_index_state_with_scope = runtime_indexes
+                .index_for_table(table_stream_id, index_id)
+                .map(|state| (table_stream_id.to_string(), state))
+                .or_else(|| {
+                    lookup_key_variants
+                        .iter()
+                        .find_map(|key_variant| {
+                            runtime_indexes
+                                .find_scoped_index_state_for_lookup(index_id, key_variant)
+                                .map(|(scope_id, state)| (scope_id.to_string(), state))
+                        })
+                });
 
             if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
 
@@ -6418,8 +6485,11 @@ where
                 let matched_lookup_key = lookup_key_variants
                     .iter()
                     .find(|key_variant| state.contains(key_variant));
+                let key_present = matched_lookup_key.is_some();
 
-                if matched_lookup_key.is_none() {
+                if !key_present
+                    && !matches!(probe_profile, RuntimeIndexBtreeProbeProfile::StringLike)
+                {
                     log::debug!(
                         "relation runtime index lookup table={} index_id={} scope={} key_present=false -> empty_result_no_scan",
                         table.table_id,
@@ -6430,13 +6500,12 @@ where
                     return Vec::new();
                 }
 
-                let matched_lookup_key = matched_lookup_key.expect("checked is_some");
-
                 log::debug!(
-                    "relation runtime index lookup table={} index_id={} scope={} key_present=true",
+                    "relation runtime index lookup table={} index_id={} scope={} key_present={}",
                     table.table_id,
                     index_id,
                     runtime_index_scope_id,
+                    key_present,
                 );
 
                 log::debug!(
@@ -6454,7 +6523,9 @@ where
 
                 let can_direct_lookup =
                     should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id);
-                let mut candidate_row_refs = state.row_refs_for_key(matched_lookup_key, row_limit);
+                let mut candidate_row_refs = matched_lookup_key
+                    .map(|key_variant| state.row_refs_for_key(key_variant, row_limit))
+                    .unwrap_or_default();
                 let exact_candidate_count = candidate_row_refs.len();
 
                 if candidate_row_refs.is_empty() {
@@ -6600,6 +6671,7 @@ where
 
                 if runtime_lookup_index_is_unique
                     && can_direct_lookup
+                    && let Some(matched_lookup_key) = matched_lookup_key
                     && let Some(single_field_name) = single_field_name
                     && let Some(row_ref) = state.row_ref(matched_lookup_key)
                     && let Some(row) = load_live_row_by_runtime_index_row_ref(
@@ -6657,7 +6729,12 @@ where
             if matches!(source, EqualityProbeSource::ExistingIndex) {
                 if let Some(index_id) = single_field_index_id(table, field_name) {
                     let key = vec![lookup_value.clone()];
-                    let key_variants = runtime_lookup_key_variants(&key);
+                    let probe_profile = runtime_index_probe_profile_for_field(
+                        schema,
+                        Some(field_name.as_str()),
+                        1,
+                    );
+                    let key_variants = runtime_lookup_key_variants_with_profile(&key, probe_profile);
                     let scoped_state = runtime_indexes
                         .index_for_table(table_stream_id, &index_id)
                         .map(|state| (table_stream_id.to_string(), state))
@@ -6763,7 +6840,12 @@ where
                 && let Some(index_id) = single_field_index_id(table, field_name)
             {
                 let key = vec![lookup_value.clone()];
-                let key_variants = runtime_lookup_key_variants(&key);
+                let probe_profile = runtime_index_probe_profile_for_field(
+                    schema,
+                    Some(field_name.as_str()),
+                    1,
+                );
+                let key_variants = runtime_lookup_key_variants_with_profile(&key, probe_profile);
 
                 let runtime_index_state_with_scope = runtime_indexes
                     .index_for_table(table_stream_id, &index_id)
@@ -6783,7 +6865,9 @@ where
                         .iter()
                         .any(|key_variant| state.contains(key_variant));
 
-                    if !key_present {
+                    if !key_present
+                        && !matches!(probe_profile, RuntimeIndexBtreeProbeProfile::StringLike)
+                    {
                         log::debug!(
                             "relation equality probe table={} field={} scope={} key_present=false reason=empty_result_no_scan",
                             table.table_id,
@@ -6795,11 +6879,6 @@ where
 
                     let can_direct_lookup =
                         should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id);
-                    let probe_profile = runtime_index_probe_profile_for_field(
-                        schema,
-                        Some(field_name.as_str()),
-                        1,
-                    );
                     let (probe_page_size, probe_max_pages) =
                         runtime_index_probe_plan(row_limit, probe_profile);
 

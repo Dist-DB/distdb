@@ -860,6 +860,28 @@ impl RuntimeIndexState {
 
     }
 
+    pub fn row_ref_postings_count(&self) -> usize {
+
+        let unique_row_refs = self
+            .entries
+            .values()
+            .filter(|row_ref| row_ref.is_some())
+            .count();
+
+        let non_unique_row_refs = self
+            .non_unique_row_refs
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+
+        unique_row_refs.saturating_add(non_unique_row_refs)
+
+    }
+
+    pub fn has_row_ref_postings(&self) -> bool {
+        self.row_ref_postings_count() > 0
+    }
+
     pub fn reserve_entries(&mut self, additional: usize) {
         if additional == 0 {
             return;
@@ -2346,6 +2368,17 @@ impl RuntimeIndexStore {
                         }
 
                         if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
+                            if !index.is_unique_key() && !state.has_row_ref_postings() {
+                                log::debug!(
+                                    "runtime index scoped clone skipped selected non-unique index without postings table={} stream={} index_id={} entries={}",
+                                    table.table_id,
+                                    table_stream_id,
+                                    index.index_id.0,
+                                    state.cardinality(),
+                                );
+                                continue;
+                            }
+
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
                             scoped.indexes.insert(scoped_id, state.clone());
                         }

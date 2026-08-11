@@ -433,3 +433,72 @@ fn runtime_index_state_btree_probe_paged_can_accumulate_multiple_pages() {
         vec![1, 2, 3, 4, 5],
     );
 }
+
+#[test]
+fn clone_for_selected_non_unique_indexes_skips_states_without_postings() {
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = TableSchema::new(vec![
+        crate::FieldDef {
+            field_name: "id".to_string(),
+            seqno: 1,
+            field_type: crate::FieldType::UInt(64),
+            indexed: crate::FieldIndex::PrimaryKey,
+            nullable: false,
+            default_value: None,
+            metadata: None,
+        },
+        crate::FieldDef {
+            field_name: "display_name".to_string(),
+            seqno: 2,
+            field_type: crate::FieldType::Text,
+            indexed: crate::FieldIndex::Indexed,
+            nullable: false,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+
+    let table = catalog.table("places").expect("places table should exist");
+    let display_name_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["display_name".to_string()])
+        .cloned()
+        .expect("display_name index should exist");
+
+    let table_stream_id = catalog
+        .entity_wal_stream_id("places")
+        .unwrap_or_else(|| "places".to_string());
+
+    let mut store = RuntimeIndexStore::new();
+    let state = store.index_mut_for_table(&table_stream_id, &display_name_index.index_id.0);
+    state.index = Some(display_name_index.clone());
+    state.insert(vec![b"neuss".to_vec()]);
+
+    assert!(!state.has_row_ref_postings());
+
+    let catalogs = HashMap::from([(catalog.database_id.0.clone(), catalog)]);
+    let table_ids = HashSet::from(["places".to_string()]);
+    let selected_fields = HashMap::from([(
+        "places".to_string(),
+        HashSet::from(["display_name".to_string()]),
+    )]);
+
+    let scoped = store.clone_for_tables_unique_and_selected_single_field_indexes(
+        &catalogs,
+        &table_ids,
+        &selected_fields,
+    );
+
+    assert!(
+        scoped
+            .index_for_table(&table_stream_id, &display_name_index.index_id.0)
+            .is_none(),
+        "selected non-unique index without postings should not be cloned",
+    );
+}
