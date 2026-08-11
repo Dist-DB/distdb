@@ -568,6 +568,90 @@ fn scoped_equality_probe_key_present_without_row_refs_falls_back_to_legacy_strea
 }
 
 #[test]
+fn durable_scoped_equality_probe_key_present_without_row_refs_recovers_from_legacy_checkpoint() {
+
+    let data_dir = unique_temp_dir("access-durable-scoped-key-present-legacy-checkpoint");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(&table.table_id)
+        .map(|tx| tx.0)
+        .expect("latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        &table.table_id,
+    )
+    .expect("wal fingerprint should exist");
+
+    let live_rows = load_live_rows(&wal_writer, &table.table_id, &table.table_id, &schema);
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &live_rows,
+    )
+    .expect("legacy live-row checkpoint should save");
+
+    let email_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names.len() == 1 && index.field_names[0] == "email")
+        .cloned()
+        .expect("email index should exist");
+
+    let scoped_stream_id = "scope:durable:users";
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(scoped_stream_id, &email_index.index_id.0);
+    state.index = Some(email_index.clone());
+    state.insert(vec![b"sam@example.com".to_vec()]);
+
+    let mut relation_with_scoped_stream = table.clone();
+    relation_with_scoped_stream.entity_id = scoped_stream_id.to_string();
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &relation_with_scoped_stream,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::ExistingIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
+        "legacy checkpoint recovery should avoid cold WAL hydration",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydration() {
 
     let data_dir = unique_temp_dir("access-large-no-live-row-checkpoint");

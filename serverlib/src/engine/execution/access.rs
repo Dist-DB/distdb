@@ -6552,7 +6552,7 @@ where
                     )
                 });
 
-                if let Some(equality_filters) = lookup_equality_filters
+                if let Some(equality_filters) = lookup_equality_filters.as_ref()
                     && let Some(checkpoint_rows) =
                         load_live_rows_by_equality_filters_from_checkpoint_with_limit(
                             wal,
@@ -6572,6 +6572,30 @@ where
                         checkpoint_rows.len(),
                     );
                     return checkpoint_rows;
+                }
+
+                if runtime_index_scope_id != table.table_id {
+                    if let Some(equality_filters) = lookup_equality_filters.as_ref()
+                        && let Some(checkpoint_rows) =
+                            load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                                wal,
+                                &table.table_id,
+                                &table.table_id,
+                                schema,
+                                equality_filters,
+                                row_limit,
+                            )
+                        && !checkpoint_rows.is_empty()
+                    {
+                        log::debug!(
+                            "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=false source=legacy_live_row_checkpoint_filter resolved_rows={}",
+                            table.table_id,
+                            index_id,
+                            runtime_index_scope_id,
+                            checkpoint_rows.len(),
+                        );
+                        return checkpoint_rows;
+                    }
                 }
 
                 if runtime_lookup_index_is_unique
@@ -6893,6 +6917,28 @@ where
                     {
                         log::debug!(
                             "relation equality probe table={} field={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
+                            table.table_id,
+                            field_name,
+                            runtime_index_scope_id,
+                            checkpoint_rows.len(),
+                        );
+                        return checkpoint_rows;
+                    }
+
+                    if runtime_index_scope_id != table.table_id
+                        && let Some(checkpoint_rows) =
+                            load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                                wal,
+                                &table.table_id,
+                                &table.table_id,
+                                schema,
+                                equality_filters,
+                                row_limit,
+                            )
+                        && !checkpoint_rows.is_empty()
+                    {
+                        log::debug!(
+                            "relation equality probe table={} field={} scope={} row_ref_candidates=false source=legacy_live_row_checkpoint_filter resolved_rows={}",
                             table.table_id,
                             field_name,
                             runtime_index_scope_id,
