@@ -6114,6 +6114,41 @@ fn load_live_rows_by_runtime_index_row_refs_from_checkpoint(
 
 }
 
+fn load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+    row_limit: Option<usize>,
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>>
+{
+
+    if equality_filters.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let data_dir = wal.data_dir_path()?;
+    let (_, checkpoint_rows) = load_live_row_checkpoint_rows(
+        &data_dir,
+        table_stream_id,
+        table_id,
+        schema,
+    )?;
+
+    let mut rows = checkpoint_rows
+        .into_iter()
+        .filter(|(_, row_map)| row_matches_equality_filters(row_map, equality_filters))
+        .collect::<Vec<_>>();
+
+    if let Some(limit) = row_limit {
+        rows.truncate(limit);
+    }
+
+    Some(rows)
+
+}
+
 fn load_live_rows_via_primary_key_limit(
     wal: &ConcurrentWalManager,
     table: &DatabaseTable,
@@ -6367,6 +6402,33 @@ where
                     }
                 }
 
+                if let Some(single_field_name) = single_field_name {
+                    let mut equality_filters = HashMap::with_capacity(1);
+                    equality_filters
+                        .insert(single_field_name.to_string(), lookup_key[0].clone());
+
+                    if let Some(checkpoint_rows) =
+                        load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                            wal,
+                            &runtime_index_scope_id,
+                            &table.table_id,
+                            schema,
+                            &equality_filters,
+                            row_limit,
+                        )
+                        && !checkpoint_rows.is_empty()
+                    {
+                        log::debug!(
+                            "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
+                            table.table_id,
+                            index_id,
+                            runtime_index_scope_id,
+                            checkpoint_rows.len(),
+                        );
+                        return checkpoint_rows;
+                    }
+                }
+
                 if runtime_lookup_index_is_unique
                     && can_direct_lookup
                     && let Some(single_field_name) = single_field_name
@@ -6610,6 +6672,27 @@ where
                             );
                             return candidate_rows;
                         }
+                    }
+
+                    if let Some(checkpoint_rows) =
+                        load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                            wal,
+                            &runtime_index_scope_id,
+                            &table.table_id,
+                            schema,
+                            equality_filters,
+                            row_limit,
+                        )
+                        && !checkpoint_rows.is_empty()
+                    {
+                        log::debug!(
+                            "relation equality probe table={} field={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
+                            table.table_id,
+                            field_name,
+                            runtime_index_scope_id,
+                            checkpoint_rows.len(),
+                        );
+                        return checkpoint_rows;
                     }
 
                     log::debug!(

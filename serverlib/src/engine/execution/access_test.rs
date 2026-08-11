@@ -432,6 +432,91 @@ fn durable_cold_unique_row_ref_probe_uses_checkpoint_without_wal_hydration() {
 }
 
 #[test]
+fn durable_cold_non_unique_key_present_without_row_refs_recovers_from_checkpoint() {
+
+    let data_dir = unique_temp_dir("access-non-unique-key-present-no-row-refs");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(&table.table_id)
+        .map(|tx| tx.0)
+        .expect("latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        &table.table_id,
+    )
+    .expect("wal fingerprint should exist");
+
+    let live_rows = load_live_rows(&wal_writer, &table.table_id, &table.table_id, &schema);
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &live_rows,
+    )
+    .expect("live-row checkpoint should save");
+
+    let email_index = table
+        .indexes
+        .values()
+        .find(|index| {
+            index.field_names.len() == 1 && index.field_names[0] == "email"
+        })
+        .cloned()
+        .expect("email index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &email_index.index_id.0);
+    state.index = Some(email_index.clone());
+
+    // Reproduce stale/non-hydrated postings: index key exists, row-ref postings missing.
+    state.insert(vec![b"sam@example.com".to_vec()]);
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::ExistingIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
+        "checkpoint recovery should avoid cold WAL hydration",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydration() {
 
     let data_dir = unique_temp_dir("access-large-no-live-row-checkpoint");
