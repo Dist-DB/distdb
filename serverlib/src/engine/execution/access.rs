@@ -6246,6 +6246,18 @@ enum RuntimeIndexBtreeProbeProfile {
     Composite,
 }
 
+fn runtime_index_probe_profile_name(profile: RuntimeIndexBtreeProbeProfile) -> &'static str {
+
+    match profile {
+        RuntimeIndexBtreeProbeProfile::Generic => "generic",
+        RuntimeIndexBtreeProbeProfile::Numeric => "numeric",
+        RuntimeIndexBtreeProbeProfile::Temporal => "temporal",
+        RuntimeIndexBtreeProbeProfile::StringLike => "string_like",
+        RuntimeIndexBtreeProbeProfile::Composite => "composite",
+    }
+
+}
+
 fn runtime_index_probe_profile_for_field(
     schema: &TableSchema,
     field_name: Option<&str>,
@@ -6427,9 +6439,23 @@ where
                     runtime_index_scope_id,
                 );
 
+                log::debug!(
+                    "relation runtime index lookup paging table={} index_id={} scope={} profile={} lookup_arity={} variants={} page_size={} max_pages={} row_limit={:?}",
+                    table.table_id,
+                    index_id,
+                    runtime_index_scope_id,
+                    runtime_index_probe_profile_name(probe_profile),
+                    lookup_key.len(),
+                    lookup_key_variants.len(),
+                    probe_page_size,
+                    probe_max_pages,
+                    row_limit,
+                );
+
                 let can_direct_lookup =
                     should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id);
                 let mut candidate_row_refs = state.row_refs_for_key(matched_lookup_key, row_limit);
+                let exact_candidate_count = candidate_row_refs.len();
 
                 if candidate_row_refs.is_empty() {
                     candidate_row_refs = state.row_refs_for_probe_keys_paged(
@@ -6439,6 +6465,16 @@ where
                         row_limit,
                     );
                 }
+
+                log::debug!(
+                    "relation runtime index lookup paging result table={} index_id={} scope={} exact_candidates={} final_candidates={} used_paged_probe={}",
+                    table.table_id,
+                    index_id,
+                    runtime_index_scope_id,
+                    exact_candidate_count,
+                    candidate_row_refs.len(),
+                    exact_candidate_count == 0,
+                );
 
                 if !candidate_row_refs.is_empty() {
                     let mut candidate_rows = if can_direct_lookup {
@@ -6742,6 +6778,20 @@ where
                     );
                     let (probe_page_size, probe_max_pages) =
                         runtime_index_probe_plan(row_limit, probe_profile);
+
+                    log::debug!(
+                        "relation equality probe paging table={} field={} index_id={} scope={} profile={} variants={} page_size={} max_pages={} row_limit={:?}",
+                        table.table_id,
+                        field_name,
+                        index_id,
+                        runtime_index_scope_id,
+                        runtime_index_probe_profile_name(probe_profile),
+                        key_variants.len(),
+                        probe_page_size,
+                        probe_max_pages,
+                        row_limit,
+                    );
+
                     let mut candidate_row_refs = key_variants
                         .iter()
                         .find_map(|key_variant| {
@@ -6753,6 +6803,7 @@ where
                             }
                         })
                         .unwrap_or_default();
+                    let exact_candidate_count = candidate_row_refs.len();
 
                     if candidate_row_refs.is_empty() {
                         candidate_row_refs = state.row_refs_for_probe_keys_paged(
@@ -6762,6 +6813,17 @@ where
                             row_limit,
                         );
                     }
+
+                    log::debug!(
+                        "relation equality probe paging result table={} field={} index_id={} scope={} exact_candidates={} final_candidates={} used_paged_probe={}",
+                        table.table_id,
+                        field_name,
+                        index_id,
+                        runtime_index_scope_id,
+                        exact_candidate_count,
+                        candidate_row_refs.len(),
+                        exact_candidate_count == 0,
+                    );
 
                     if !candidate_row_refs.is_empty() {
                         let mut candidate_rows = if can_direct_lookup {
