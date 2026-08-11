@@ -6719,6 +6719,20 @@ where
                     });
 
                 if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
+                    let key_present = key_variants
+                        .iter()
+                        .any(|key_variant| state.contains(key_variant));
+
+                    if !key_present {
+                        log::debug!(
+                            "relation equality probe table={} field={} scope={} key_present=false reason=empty_result_no_scan",
+                            table.table_id,
+                            field_name,
+                            runtime_index_scope_id,
+                        );
+                        return Vec::new();
+                    }
+
                     let can_direct_lookup =
                         should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id);
                     let probe_profile = runtime_index_probe_profile_for_field(
@@ -6832,8 +6846,6 @@ where
                         runtime_index_scope_id,
                     );
                 }
-
-                return Vec::new();
             }
 
             let primary_rows = if equality_filters.len() > 1 {

@@ -517,6 +517,57 @@ fn durable_cold_non_unique_key_present_without_row_refs_recovers_from_checkpoint
 }
 
 #[test]
+fn scoped_equality_probe_key_present_without_row_refs_falls_back_to_legacy_stream() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let email_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names.len() == 1 && index.field_names[0] == "email")
+        .cloned()
+        .expect("email index should exist");
+
+    let scoped_stream_id = "scope:users";
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(scoped_stream_id, &email_index.index_id.0);
+    state.index = Some(email_index.clone());
+
+    // Reproduce scoped clone mismatch: key exists in scoped runtime state but
+    // row-ref postings are missing; data exists in legacy stream.
+    state.insert(vec![b"sam@example.com".to_vec()]);
+
+    let mut relation_with_scoped_stream = table.clone();
+    relation_with_scoped_stream.entity_id = scoped_stream_id.to_string();
+
+    let rows = materialize_relation_rows(
+        &wal,
+        &relation_with_scoped_stream,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::ExistingIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+
+}
+
+#[test]
 fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydration() {
 
     let data_dir = unique_temp_dir("access-large-no-live-row-checkpoint");
