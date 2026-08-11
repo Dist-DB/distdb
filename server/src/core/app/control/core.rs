@@ -1057,7 +1057,7 @@ impl ServerApp {
             self.runtime_indexes.clone()
         } else {
             self.runtime_indexes
-                .clone_for_tables(&catalogs, &scope_table_ids)
+                .clone_for_tables_unique_indexes(&catalogs, &scope_table_ids)
         };
         let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
 
@@ -1072,7 +1072,7 @@ impl ServerApp {
                 if scope_table_ids.is_empty() {
                     "cloned_full"
                 } else {
-                    "cloned_scoped"
+                    "cloned_scoped_unique"
                 },
             );
         }

@@ -1855,6 +1855,51 @@ impl RuntimeIndexStore {
         
     }
 
+    pub fn clone_for_tables_unique_indexes(
+        &self,
+        catalogs: &HashMap<String, DatabaseCatalog>,
+        table_ids: &HashSet<String>,
+    ) -> Self {
+
+        let mut scoped = Self::new();
+
+        for catalog in catalogs.values() {
+
+            for table_id in catalog.table_ids() {
+
+                if !table_ids.contains(&table_id) {
+                    continue;
+                }
+
+                let Some(table_handle) = catalog.table_handle(&table_id) else {
+                    continue;
+                };
+
+                let table_stream_id = catalog
+                    .entity_wal_stream_id(&table_id)
+                    .unwrap_or_else(|| table_id.clone());
+
+                table_handle.read_table(|table| {
+                    for index in table.indexes.values() {
+                        if !index.is_unique_key() {
+                            continue;
+                        }
+
+                        if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
+                            let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
+                            scoped.indexes.insert(scoped_id, state.clone());
+                        }
+                    }
+                });
+
+            }
+
+        }
+
+        scoped
+
+    }
+
     pub fn persist_table_snapshot_on_commit(
         &mut self,
         table: &DatabaseTable,
