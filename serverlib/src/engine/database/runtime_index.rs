@@ -220,6 +220,20 @@ fn runtime_index_bootstrap_index_build_chunk_rows() -> usize {
 
 }
 
+fn runtime_index_probe_paging_debug_enabled() -> bool {
+
+    std::env::var("DISTDB_RUNTIME_INDEX_PAGING_DEBUG")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+
+}
+
 fn should_preload_accessors_for_bootstrap(live_row_count: usize) -> bool {
     live_row_count <= runtime_index_bootstrap_accessor_preload_max_live_rows()
 }
@@ -661,10 +675,31 @@ impl RuntimeIndexState {
             return Vec::new();
         }
 
+        let paging_debug_enabled = runtime_index_probe_paging_debug_enabled();
+        let index_id = self
+            .index
+            .as_ref()
+            .map(|index| index.index_id.0.as_str())
+            .unwrap_or("unknown");
+
+        if paging_debug_enabled {
+            log::debug!(
+                "runtime indexor paging begin index_id={} probe_keys={} page_size={} max_pages_per_probe={} row_limit={:?} ordered_keys={} entries={} non_unique_postings={}",
+                index_id,
+                probe_keys.len(),
+                key_page_size,
+                max_pages_per_probe,
+                limit,
+                self.ordered_entry_keys.len(),
+                self.entries.len(),
+                self.non_unique_row_refs.len(),
+            );
+        }
+
         let mut row_refs = Vec::new();
         let mut seen_keys = AHashSet::<Vec<u8>>::new();
 
-        for probe_key in probe_keys {
+        for (probe_idx, probe_key) in probe_keys.iter().enumerate() {
             let Some(encoded_probe_key) = encode_runtime_index_entry_key(probe_key) else {
                 continue;
             };
@@ -673,6 +708,8 @@ impl RuntimeIndexState {
             let mut pages_visited = 0usize;
 
             while pages_visited < max_pages_per_probe {
+                let row_refs_before_page = row_refs.len();
+                let seen_keys_before_page = seen_keys.len();
                 let page_keys = self
                     .ordered_entry_keys
                     .range((next_lower_bound.clone(), Bound::Unbounded))
@@ -681,6 +718,14 @@ impl RuntimeIndexState {
                     .collect::<Vec<_>>();
 
                 if page_keys.is_empty() {
+                    if paging_debug_enabled {
+                        log::debug!(
+                            "runtime indexor paging page_empty index_id={} probe_idx={} page={} next_bound=unbounded_or_exhausted",
+                            index_id,
+                            probe_idx,
+                            pages_visited.saturating_add(1),
+                        );
+                    }
                     break;
                 }
 
@@ -710,7 +755,29 @@ impl RuntimeIndexState {
 
                 pages_visited = pages_visited.saturating_add(1);
 
+                if paging_debug_enabled {
+                    log::debug!(
+                        "runtime indexor paging page_result index_id={} probe_idx={} page={} page_keys={} new_keys={} row_refs_added={} cumulative_row_refs={}",
+                        index_id,
+                        probe_idx,
+                        pages_visited,
+                        page_keys.len(),
+                        seen_keys.len().saturating_sub(seen_keys_before_page),
+                        row_refs.len().saturating_sub(row_refs_before_page),
+                        row_refs.len(),
+                    );
+                }
+
                 if page_keys.len() < key_page_size {
+                    if paging_debug_enabled {
+                        log::debug!(
+                            "runtime indexor paging end_probe index_id={} probe_idx={} reason=partial_page pages_visited={} total_row_refs={}",
+                            index_id,
+                            probe_idx,
+                            pages_visited,
+                            row_refs.len(),
+                        );
+                    }
                     break;
                 }
 
@@ -723,6 +790,16 @@ impl RuntimeIndexState {
                 if let Some(limit) = limit
                     && row_refs.len() >= limit
                 {
+                    if paging_debug_enabled {
+                        log::debug!(
+                            "runtime indexor paging end_probe index_id={} probe_idx={} reason=row_limit_reached limit={} pages_visited={} total_row_refs={}",
+                            index_id,
+                            probe_idx,
+                            limit,
+                            pages_visited,
+                            row_refs.len(),
+                        );
+                    }
                     break;
                 }
             }
@@ -734,8 +811,20 @@ impl RuntimeIndexState {
             }
         }
 
+        let raw_row_refs = row_refs.len();
+
         row_refs.sort_unstable();
         row_refs.dedup();
+
+        if paging_debug_enabled {
+            log::debug!(
+                "runtime indexor paging finalize index_id={} raw_row_refs={} deduped_row_refs={} row_limit={:?}",
+                index_id,
+                raw_row_refs,
+                row_refs.len(),
+                limit,
+            );
+        }
 
         if let Some(limit) = limit {
             row_refs.truncate(limit);
