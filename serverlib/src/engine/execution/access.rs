@@ -3402,6 +3402,7 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
     let mut abort_records = 0usize;
     let mut max_pending_groups = 0usize;
     let mut max_pending_records = 0usize;
+    let mut current_pending_records = 0usize;
     let mut decoded_candidate_rows = 0usize;
     let mut decoded_matching_rows = 0usize;
     let mut decode_elapsed_ns = 0u128;
@@ -3422,11 +3423,14 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
 
                 committed_groups.insert(group_id);
                 if aborted_groups.contains(&group_id) {
-                    pending_group_records.remove(&group_id);
+                    if let Some(staged) = pending_group_records.remove(&group_id) {
+                        current_pending_records = current_pending_records.saturating_sub(staged.len());
+                    }
                     return;
                 }
 
                 if let Some(staged) = pending_group_records.remove(&group_id) {
+                    current_pending_records = current_pending_records.saturating_sub(staged.len());
                     for staged_record in staged {
                         apply_visible_equality_record(
                             &staged_record,
@@ -3453,7 +3457,9 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
                 };
 
                 aborted_groups.insert(group_id);
-                pending_group_records.remove(&group_id);
+                if let Some(staged) = pending_group_records.remove(&group_id) {
+                    current_pending_records = current_pending_records.saturating_sub(staged.len());
+                }
 
                 if let Some(applied_ids) = applied_group_row_ids.remove(&group_id) {
                     for row_id in applied_ids {
@@ -3490,13 +3496,10 @@ fn load_live_rows_by_equality_filters_direct_wal_scan_cold_stream(
                         .entry(group_id)
                         .or_default()
                         .push(record);
+                    current_pending_records = current_pending_records.saturating_add(1);
 
                     max_pending_groups = std::cmp::max(max_pending_groups, pending_group_records.len());
-                    let pending_records = pending_group_records
-                        .values()
-                        .map(|group_records| group_records.len())
-                        .sum::<usize>();
-                    max_pending_records = std::cmp::max(max_pending_records, pending_records);
+                    max_pending_records = std::cmp::max(max_pending_records, current_pending_records);
                     return;
                 }
 

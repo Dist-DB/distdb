@@ -61,6 +61,20 @@ impl ServerApp {
         Ok((parsed, parse_ms))
     }
 
+    fn read_only_scope_include_selected_non_unique_indexes() -> bool {
+
+        std::env::var("DISTDB_READONLY_SCOPE_INCLUDE_SELECTED_NON_UNIQUE_INDEXES")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+
+    }
+
     fn read_only_runtime_index_scope_table_ids(parsed_requests: &[SqlRequest]) -> HashSet<String> {
 
         let mut table_ids = HashSet::new();
@@ -1139,7 +1153,12 @@ impl ServerApp {
         let catalog_clone_ms = catalog_clone_started_at.elapsed().as_millis() as u64;
 
         let scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
-        let selected_fields_by_table = Self::read_only_runtime_index_scope_selected_fields(&parsed_requests);
+        let include_selected_non_unique = Self::read_only_scope_include_selected_non_unique_indexes();
+        let selected_fields_by_table = if include_selected_non_unique {
+            Self::read_only_runtime_index_scope_selected_fields(&parsed_requests)
+        } else {
+            HashMap::new()
+        };
         let scope_table_count = scope_table_ids.len();
         let selected_field_count = selected_fields_by_table
             .values()
