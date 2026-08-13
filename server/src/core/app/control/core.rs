@@ -135,6 +135,54 @@ impl ServerApp {
 
     }
 
+    fn collect_read_only_equality_filter_field_values(
+        condition: &SelectCondition,
+        field_values: &mut HashMap<String, HashSet<Vec<u8>>>,
+    ) {
+
+        match condition {
+            SelectCondition::And(children) => {
+                for child in children {
+                    Self::collect_read_only_equality_filter_field_values(child, field_values);
+                }
+            }
+
+            SelectCondition::Predicate(SelectPredicate::Comparison {
+                field_name,
+                op: SelectComparisonOp::Eq,
+                value,
+            }) => {
+                let normalized = common::normalize_identifier!(field_name);
+                if !normalized.is_empty() {
+                    field_values.entry(normalized).or_default().insert(value.clone());
+                }
+
+                if let Some(unqualified) = field_name.rsplit('.').next() {
+                    let normalized_unqualified = common::normalize_identifier!(unqualified);
+                    if !normalized_unqualified.is_empty() {
+                        field_values
+                            .entry(normalized_unqualified)
+                            .or_default()
+                            .insert(value.clone());
+                    }
+                }
+            }
+
+            SelectCondition::Predicate(_) => {}
+
+            SelectCondition::Or(children) => {
+                for child in children {
+                    Self::collect_read_only_equality_filter_field_values(child, field_values);
+                }
+            }
+
+            SelectCondition::Not(child) => {
+                Self::collect_read_only_equality_filter_field_values(child, field_values);
+            }
+        }
+
+    }
+
     fn read_only_runtime_index_scope_selected_fields(
         parsed_requests: &[SqlRequest],
     ) -> HashMap<String, HashSet<String>> {
@@ -183,6 +231,64 @@ impl ServerApp {
         }
 
         selected_fields_by_table
+
+    }
+
+    fn read_only_runtime_index_scope_selected_field_values(
+        parsed_requests: &[SqlRequest],
+    ) -> HashMap<String, HashMap<String, HashSet<Vec<u8>>>> {
+
+        let mut selected_field_values_by_table =
+            HashMap::<String, HashMap<String, HashSet<Vec<u8>>>>::new();
+
+        for request in parsed_requests {
+            let Ok(read_plan) = parse_select_read_plan_from_statement(&request.sql) else {
+                continue;
+            };
+
+            let mut selected_field_values = HashMap::<String, HashSet<Vec<u8>>>::new();
+
+            if let Some(condition) = read_plan.where_condition.as_ref() {
+                Self::collect_read_only_equality_filter_field_values(
+                    condition,
+                    &mut selected_field_values,
+                );
+            }
+
+            if selected_field_values.is_empty() {
+                continue;
+            }
+
+            let mut candidate_tables = Vec::new();
+
+            let top_level_table = common::normalize_identifier!(&read_plan.table_id);
+            if !top_level_table.is_empty() {
+                candidate_tables.push(top_level_table);
+            }
+
+            for relation in &read_plan.relations {
+                let relation_table = common::normalize_identifier!(&relation.table_id);
+                if !relation_table.is_empty() {
+                    candidate_tables.push(relation_table);
+                }
+            }
+
+            if candidate_tables.is_empty() {
+                continue;
+            }
+
+            for table_id in candidate_tables {
+                let table_entry = selected_field_values_by_table.entry(table_id).or_default();
+                for (field_name, values) in &selected_field_values {
+                    table_entry
+                        .entry(field_name.clone())
+                        .or_default()
+                        .extend(values.iter().cloned());
+                }
+            }
+        }
+
+        selected_field_values_by_table
 
     }
 
@@ -1099,6 +1205,7 @@ impl ServerApp {
             return None;
         }
 
+        let authorize_started_at = Instant::now();
         if let Err(message) = self.authorize_sql_requests_for_session(
             session_id,
             query.database_id.as_str(),
@@ -1106,6 +1213,7 @@ impl ServerApp {
         ) {
             return Some(ConnectorResponse::rejected(request.request_id.clone(), message));
         }
+        let authorize_ms = authorize_started_at.elapsed().as_millis() as u64;
 
         let read_only = parsed_requests.iter().all(|statement| {
             matches!(statement.operation, SqlOperation::Select | SqlOperation::UnionQuery)
@@ -1141,6 +1249,8 @@ impl ServerApp {
         let scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
         let selected_fields_by_table =
             Self::read_only_runtime_index_scope_selected_fields(&parsed_requests);
+        let selected_field_values_by_table =
+            Self::read_only_runtime_index_scope_selected_field_values(&parsed_requests);
         let scope_table_count = scope_table_ids.len();
         let selected_field_count = selected_fields_by_table
             .values()
@@ -1160,10 +1270,11 @@ impl ServerApp {
             self.runtime_indexes.clone()
         } else {
             self.runtime_indexes
-                .clone_for_tables_unique_and_selected_single_field_indexes(
+                .clone_for_tables_unique_and_selected_single_field_indexes_with_values(
                     &catalogs,
                     &scope_table_ids,
                     &selected_fields_by_table,
+                    &selected_field_values_by_table,
                 )
         };
         let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
@@ -1188,15 +1299,17 @@ impl ServerApp {
             );
         }
         
+        let session_ctx_started_at = Instant::now();
         let Some(session_ctx) = self.query_session_context(session_id) else {
             return Some(ConnectorResponse::rejected(
                 request.request_id.clone(),
                 format!("invalid session '{}'", session_id),
             ));
         };
-
         let mut session_variable_overrides = self.session_variable_overrides_for(session_id);
+        let session_ctx_ms = session_ctx_started_at.elapsed().as_millis() as u64;
 
+        let dispatch_started_at = Instant::now();
         let response = Self::execute_parsed_query_with_session_context(
             &request.request_id,
             query.database_id.as_str(),
@@ -1209,8 +1322,22 @@ impl ServerApp {
             &session_ctx,
             &mut session_variable_overrides,
         );
+        let dispatch_ms = dispatch_started_at.elapsed().as_millis() as u64;
 
         let total_ms = request_started_at.elapsed().as_millis() as u64;
+
+        if total_ms >= 100 {
+            log::info!(
+                "read-only request stage timing request_id={} auth_ms={} catalog_clone_ms={} runtime_index_clone_ms={} session_ctx_ms={} dispatch_ms={} total_ms={}",
+                request.request_id,
+                authorize_ms,
+                catalog_clone_ms,
+                runtime_clone_ms,
+                session_ctx_ms,
+                dispatch_ms,
+                total_ms,
+            );
+        }
 
         Some(match response {
             ConnectorResponse {

@@ -1,5 +1,8 @@
 {
   "folders": [
+    { "name": "local",
+      "path": "../local"
+    },
     {
       "name": "util_lib",
       "path": "../../util_lib"

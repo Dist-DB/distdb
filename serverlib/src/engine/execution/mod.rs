@@ -19,7 +19,7 @@ pub use access::{
     collect_indexable_range_filter_for_schema,
     collect_indexable_range_filters_for_schema,
     collect_indexable_prefix_like_filter_for_schema, count_condition_predicates,
-    count_live_rows_by_equality_filters,
+    count_live_rows_by_equality_filters, count_runtime_index_equality_probe_rows,
     field_has_single_column_index, load_live_row_count,
     load_live_rows, load_live_rows_by_equality_with_limit,
     load_live_rows_by_equality_filters_with_limit,
@@ -27,6 +27,7 @@ pub use access::{
     snapshot_equality_cache, restore_equality_cache_from_snapshot, EqualityTableCacheSnapshot,
     apply_equality_cache_row_mutation, apply_equality_cache_row_mutation_batch,
     materialize_relation_rows, materialize_relation_rows_with_limit, plan_relation_access,
+    plan_relation_access_with_runtime_hint,
     relation_access_plan_diagnostics, EqualityProbeSource, RelationAccessCandidateDiagnostic,
     RelationAccessPlan, RelationAccessPlanDiagnostics, RelationAccessStrategy,
 };

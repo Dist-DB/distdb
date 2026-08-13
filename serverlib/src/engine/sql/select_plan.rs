@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArguments, GroupByExpr, JoinConstraint, JoinOperator, Query,
     NamedWindowDefinition, NamedWindowExpr, SelectItem, SetExpr, SetOperator, SetQuantifier,
-    Statement, TableFactor, WindowSpec, WindowType, With,
+    Statement, TableFactor, UnaryOperator, Value, WindowSpec, WindowType, With,
 };
 
 use super::literals::parse_default_value;
@@ -3572,6 +3572,18 @@ fn parse_condition_literal_value(expression: &Expr) -> Result<Vec<u8>, SqlParseE
                 "WHERE inbuilt function returned NULL; use IS NULL where appropriate".to_string(),
             )
         });
+    }
+
+    if let Expr::UnaryOp { op, expr } = expression
+        && let Expr::Value(Value::Number(number, _)) = unwrap_nested_expression(expr)
+    {
+        return match op {
+            UnaryOperator::Minus => Ok(format!("-{number}").into_bytes()),
+            UnaryOperator::Plus => Ok(number.clone().into_bytes()),
+            _ => Err(SqlParseError::UnsupportedStatement(
+                "WHERE currently supports only literal values".to_string(),
+            )),
+        };
     }
 
     if !matches!(expression, Expr::Value(_)) {

@@ -111,13 +111,20 @@ pub(super) fn execute_select_plan_result(
         })
         .unwrap_or(true);
 
-    let access_plan = plan_relation_access(
+    let table_scope_id = if scoped_table.entity_id.is_empty() {
+        table_id
+    } else {
+        scoped_table.entity_id.as_str()
+    };
+
+    let access_plan = plan_relation_access_with_runtime_hint(
         &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
         in_list_filter,
         range_filters,
         like_filter,
+        Some((runtime_indexes, table_scope_id)),
     );
 
     serverlib::execute_relation_select_plan(
@@ -1875,6 +1882,8 @@ fn execute_select_read_plan_without_lock(
 
     }
 
+    let table_lookup_started_at = std::time::Instant::now();
+
     let Some(schema) = catalog.table_schema(table_id) else {
         return ConnectorResponse::rejected(
             request_id.to_string(),
@@ -1899,7 +1908,19 @@ fn execute_select_read_plan_without_lock(
         scoped_table.entity_id = stream_id;
     }
 
+    let table_lookup_elapsed_ms = table_lookup_started_at.elapsed().as_millis();
+    if table_lookup_elapsed_ms >= 50 {
+        log::debug!(
+            "select table lookup path table={} explain={} elapsed_ms={}",
+            table_id,
+            read_plan.is_explain,
+            table_lookup_elapsed_ms,
+        );
+    }
+
     let mut index_filter_map = HashMap::new();
+
+    let planning_started_at = std::time::Instant::now();
 
     let range_filters = read_plan
         .where_condition
@@ -1934,34 +1955,59 @@ fn execute_select_read_plan_without_lock(
         })
         .unwrap_or(true);
 
-    let access_plan = plan_relation_access(
+    let table_scope_id = if scoped_table.entity_id.is_empty() {
+        table_id
+    } else {
+        scoped_table.entity_id.as_str()
+    };
+
+    let access_plan = plan_relation_access_with_runtime_hint(
         &scoped_table,
         allow_index_short_circuit,
         index_filter_map,
         in_list_filter,
         range_filters,
         like_filter,
+        Some((runtime_indexes, table_scope_id)),
     );
 
     let index_lookup = access_plan.runtime_index_lookup(&scoped_table);
 
-    if read_plan.is_explain {
-        return explain_select_plan(
-            request_id,
-            serverlib::explain_select_plan_result(
-                table_id,
-                read_plan
-                    .where_condition
-                    .as_ref()
-                    .map(count_condition_predicates)
-                    .unwrap_or(0),
-                Some(&access_plan),
-                index_lookup,
-                runtime_indexes,
-                read_plan,
-                Some(&scoped_table),
-            ),
+    let planning_elapsed_ms = planning_started_at.elapsed().as_millis();
+    if planning_elapsed_ms >= 50 {
+        log::debug!(
+            "select planner path table={} explain={} filter_count={} elapsed_ms={}",
+            table_id,
+            read_plan.is_explain,
+            read_plan.where_condition.as_ref().map(count_condition_predicates).unwrap_or(0),
+            planning_elapsed_ms,
         );
+    }
+
+    if read_plan.is_explain {
+        let explain_started_at = std::time::Instant::now();
+        let explain_result = serverlib::explain_select_plan_result(
+            table_id,
+            read_plan
+                .where_condition
+                .as_ref()
+                .map(count_condition_predicates)
+                .unwrap_or(0),
+            Some(&access_plan),
+            index_lookup,
+            runtime_indexes,
+            read_plan,
+            Some(&scoped_table),
+        );
+        let explain_elapsed_ms = explain_started_at.elapsed().as_millis();
+        if explain_elapsed_ms >= 50 {
+            log::debug!(
+                "select explain plan path table={} elapsed_ms={}",
+                table_id,
+                explain_elapsed_ms,
+            );
+        }
+        return explain_select_plan(request_id, explain_result);
     }
 
     match serverlib::execute_relation_select_plan(

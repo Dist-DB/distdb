@@ -137,6 +137,27 @@ fn select_where_computed_expression_comparison_parses() {
 }
 
 #[test]
+fn select_where_negative_numeric_literal_comparison_parses() {
+    let plan = parse_select_read_plan_from_statement(
+        "select id from places where id=-1810561",
+    )
+    .expect("negative numeric literal WHERE comparison should parse");
+
+    let Some(SelectCondition::Predicate(SelectPredicate::Comparison {
+        field_name,
+        op,
+        value,
+    })) = plan.where_condition
+    else {
+        panic!("expected comparison predicate");
+    };
+
+    assert_eq!(field_name, "id");
+    assert_eq!(op, SelectComparisonOp::Eq);
+    assert_eq!(value, b"-1810561".to_vec());
+}
+
+#[test]
 fn derive_relation_pushdown_conditions_resolves_alias_qualified_conditions() {
     let relation_bindings = vec![
         SelectRelation {

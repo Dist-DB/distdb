@@ -44,7 +44,7 @@ use serverlib::{
     collect_indexable_like_filter_for_schema,
     decode_row_payload, encode_row_payload, index_value_tuple,
     load_live_rows_with_context,
-    plan_relation_access, primary_key_index,
+    plan_relation_access_with_runtime_hint, primary_key_index,
 };
 
 use super::catalogs::{

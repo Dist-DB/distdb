@@ -17,6 +17,7 @@ use crate::engine::sql::{
 use crate::engine::execution::{
     build_joined_row_tuples, collect_indexable_equality_filters_for_schema,
     count_condition_predicates, count_live_rows_by_equality_filters,
+    count_runtime_index_equality_probe_rows,
     materialize_relation_rows, materialize_relation_rows_with_limit,
     relation_qualifier, JoinedRowTuple,
 };
@@ -24,7 +25,7 @@ use crate::engine::execution::{
 use crate::engine::execution::SelectExecutionResult;
 use crate::engine::execution::commands::control_flow::evaluate_case_projection;
 
-use super::explain::explain_joined_select_plan_result;
+use super::explain::{explain_joined_select_plan_result, explain_select_plan_result};
 use super::post_processing::{
     apply_select_post_processing, column_metadata_with_visibility, strip_hidden_output_columns,
 };
@@ -487,6 +488,18 @@ where
     T: Borrow<DatabaseTable>,
     S: Borrow<TableSchema>,
 {
+    if read_plan.is_explain {
+        return Ok(explain_select_plan_result(
+            table.borrow().table_id.as_str(),
+            read_plan.where_condition.as_ref().map_or(0, count_condition_predicates),
+            Some(access_plan),
+            None,
+            runtime_indexes,
+            read_plan,
+            Some(table.borrow()),
+        ));
+    }
+
     let table = table.borrow();
     let schema = schema.borrow();
 
@@ -521,6 +534,7 @@ where
             wal,
             table,
             schema,
+            runtime_indexes,
             read_plan,
             access_plan,
         ) {
@@ -1102,6 +1116,7 @@ fn count_star_indexed_equality_fast_path(
     wal: &ConcurrentWalManager,
     table: &crate::DatabaseTable,
     schema: &TableSchema,
+    runtime_indexes: &RuntimeIndexStore,
     read_plan: &SelectReadPlan,
     access_plan: &RelationAccessPlan,
 ) -> Option<usize> {
@@ -1119,6 +1134,8 @@ fn count_star_indexed_equality_fast_path(
     }
 
     let crate::RelationAccessStrategy::EqualityProbe {
+        field_name,
+        lookup_value,
         equality_filters,
         ..
     } = &access_plan.strategy else {
@@ -1166,6 +1183,16 @@ fn count_star_indexed_equality_fast_path(
     } else {
         scoped_stream_id
     };
+
+    if let Some(count) = count_runtime_index_equality_probe_rows(
+        runtime_indexes,
+        table,
+        table_stream_id,
+        field_name,
+        lookup_value,
+    ) {
+        return Some(count);
+    }
 
     Some(count_live_rows_by_equality_filters(
         wal,

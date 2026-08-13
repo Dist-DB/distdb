@@ -15,6 +15,7 @@ pub mod databaseindex;
 pub mod index_lifecycle_payload;
 pub mod row_payload;
 pub mod runtime_index;
+pub mod runtime_index_key_codec;
 pub mod runtime_index_snapshot;
 pub mod relationship;
 pub mod schema;

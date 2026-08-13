@@ -865,10 +865,18 @@ pub(super) fn rebuild_runtime_indexes_for_table(
             .map(|(_, row_map)| index_value_tuple(index, row_map))
             .collect();
 
-        let row_refs = live_rows
-            .iter()
-            .map(|(row_id, row_map)| (index_value_tuple(index, row_map), *row_id))
-            .collect();
+        // Group by key rather than collecting straight into a map: multiple rows
+        // can share the same non-unique key, and a plain key->row_id map would
+        // silently keep only the last row seen for each duplicate key.
+        let mut row_refs_by_key: std::collections::HashMap<Vec<Vec<u8>>, Vec<u64>> =
+            std::collections::HashMap::new();
+        for (row_id, row_map) in &live_rows {
+            row_refs_by_key
+                .entry(index_value_tuple(index, row_map))
+                .or_default()
+                .push(*row_id);
+        }
+        let row_refs = row_refs_by_key.into_iter().collect();
 
         let state = runtime_indexes.index_mut_for_table(&stream_id, &index.index_id.0);
         state.index = Some(index.clone());

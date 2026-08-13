@@ -88,21 +88,21 @@ fn explain_row_ref_hydration_hint(
                 return "fallback_missing_index_metadata".to_string();
             };
 
-            let Some(state) = runtime_indexes
-                .index_for_table(table_scope_id, index_id)
-                .or_else(|| {
-                    runtime_indexes
-                        .find_scoped_index_state_for_lookup(index_id, lookup_key)
-                        .map(|(_, state)| state)
-                })
-            else {
+            let (state, hit, _) = explain_runtime_index_lookup_summary(
+                runtime_indexes,
+                table_scope_id,
+                index_id,
+                lookup_key,
+            );
+
+            let Some(state) = state else {
                 if runtime_indexes.has_scoped_index_state(index_id) {
                     return "fallback_key_not_present".to_string();
                 }
                 return "fallback_missing_runtime_state".to_string();
             };
 
-            if !state.contains(lookup_key) {
+            if !hit {
                 return "fallback_key_not_present".to_string();
             }
 
@@ -144,31 +144,21 @@ fn explain_row_ref_hydration_hint(
             };
 
             let key = vec![lookup_value.clone()];
-            let key_variants = runtime_lookup_key_variants(&key);
+            let (state, hit, _) = explain_runtime_index_lookup_summary(
+                runtime_indexes,
+                table_scope_id,
+                &index_id,
+                &key,
+            );
 
-            let Some(state) = runtime_indexes
-                .index_for_table(table_scope_id, &index_id)
-                .or_else(|| {
-                    key_variants
-                        .iter()
-                        .find_map(|key_variant| {
-                            runtime_indexes
-                                .find_scoped_index_state_for_lookup(&index_id, key_variant)
-                                .map(|(_, state)| state)
-                        })
-                })
-            else {
+            let Some(state) = state else {
                 if runtime_indexes.has_scoped_index_state(&index_id) {
                     return "fallback_key_not_present".to_string();
                 }
                 return "fallback_missing_runtime_state".to_string();
             };
 
-            let matched_key = key_variants
-                .iter()
-                .find(|key_variant| state.contains(key_variant));
-
-            if matched_key.is_none() {
+            if !hit {
                 return "fallback_key_not_present".to_string();
             }
 
@@ -176,7 +166,9 @@ fn explain_row_ref_hydration_hint(
                 return "non_unique_key_present".to_string();
             }
 
-            if let Some(matched_key) = matched_key
+            if let Some(matched_key) = runtime_lookup_key_variants(&key)
+                .iter()
+                .find(|key_variant| state.contains(key_variant))
                 && state.row_ref(matched_key).is_some()
             {
                 "eligible_direct_row_ref".to_string()
@@ -205,6 +197,116 @@ fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
 
 }
 
+fn explain_runtime_index_lookup_summary<'a>(
+    runtime_indexes: &'a RuntimeIndexStore,
+    table_scope_id: &str,
+    index_id: &str,
+    lookup_key: &[Vec<u8>],
+) -> (Option<&'a crate::engine::database::runtime_index::RuntimeIndexState>, bool, usize) {
+    let key_variants = runtime_lookup_key_variants(lookup_key);
+
+    let state = runtime_indexes
+        .index_for_table(table_scope_id, index_id)
+        .or_else(|| {
+            key_variants
+                .iter()
+                .find_map(|key_variant| {
+                    runtime_indexes
+                        .find_scoped_index_state_for_lookup(index_id, key_variant)
+                        .map(|(_, state)| state)
+                })
+        });
+
+    let hit = state
+        .map(|state| key_variants.iter().any(|key_variant| state.contains(key_variant)))
+        .unwrap_or(false);
+
+    let cardinality = state.map(|state| state.cardinality()).unwrap_or(0);
+
+    (state, hit, cardinality)
+}
+
+fn explain_fast_plan_ranking(
+    index: &DatabaseIndex,
+    access_plan: Option<&RelationAccessPlan>,
+) -> (String, String, String) {
+    let score = if index.is_primary_key() {
+        1010
+    } else if index.is_unique_key() {
+        990
+    } else if index.is_relationship_driven() {
+        930
+    } else {
+        850
+    };
+
+    let index_hint = index.index_id.0.clone();
+    let reason = format!("runtime lookup for index {}", index.index_id.0);
+    let equality_reason = if access_plan
+        .and_then(|plan| match &plan.strategy {
+            RelationAccessStrategy::EqualityProbe { .. } => Some(()),
+            _ => None,
+        })
+        .is_some()
+    {
+        "equality filter matched indexed field"
+    } else {
+        "equality filter matched indexed field"
+    };
+
+    let prioritization = format!(
+        "1.index_lookup_then_scan(score={},index={},reason={}) > 2.equality_probe(score=780,index={},reason={}) > 3.full_scan(score=0,index=-,reason=fallback when no candidate can beat scan)",
+        score,
+        index_hint,
+        reason,
+        index_hint,
+        equality_reason,
+    );
+
+    (score.to_string(), prioritization, index_hint)
+}
+
+fn explain_direct_access_plan_ranking(
+    table: &DatabaseTable,
+    access_plan: &RelationAccessPlan,
+) -> (String, String, String) {
+    match &access_plan.strategy {
+        RelationAccessStrategy::EqualityProbe {
+            field_name,
+            source: _,
+            equality_filters: _,
+            ..
+        } => {
+            let index_hint = single_field_index_id(table, field_name).unwrap_or_default();
+            let score = "780".to_string();
+            let prioritization = format!(
+                "1.equality_probe(score=780,index={},reason=equality filter matched indexed field) > 2.full_scan(score=0,index=-,reason=fallback when no candidate can beat scan)",
+                index_hint
+            );
+            (score, prioritization, index_hint)
+        }
+        RelationAccessStrategy::InListProbe {
+            field_name,
+            source: _,
+            ..
+        } => {
+            let index_hint = single_field_index_id(table, field_name).unwrap_or_default();
+            let score = "700".to_string();
+            let prioritization = format!(
+                "1.in_list_probe(score=700,index={},reason=IN-list on field '{}') > 2.full_scan(score=0,index=-,reason=fallback when no candidate can beat scan)",
+                index_hint,
+                field_name
+            );
+            (score, prioritization, index_hint)
+        }
+        _ => (
+            "0".to_string(),
+            "1.full_scan(score=0,index=-,reason=fallback when no candidate can beat scan)".to_string(),
+            String::new(),
+        ),
+    }
+}
+
 pub fn explain_select_plan_result(
     table_id: &str,
     filter_count: usize,
@@ -215,6 +317,7 @@ pub fn explain_select_plan_result(
     table: Option<&DatabaseTable>,
 ) -> SelectExecutionResult {
 
+    let started_at = std::time::Instant::now();
     let table_scope_id = explain_table_scope_id(table_id, table);
     
     let columns = vec![
@@ -343,24 +446,12 @@ pub fn explain_select_plan_result(
 
         if let Some((index, key)) = index_lookup {
 
-            let key_variants = runtime_lookup_key_variants(key);
-
-            let state = runtime_indexes
-                .index_for_table(table_scope_id, &index.index_id.0)
-                .or_else(|| {
-                    key_variants
-                        .iter()
-                        .find_map(|key_variant| {
-                            runtime_indexes
-                                .find_scoped_index_state_for_lookup(&index.index_id.0, key_variant)
-                                .map(|(_, state)| state)
-                        })
-                });
-
-            let hit = state
-                .map(|s| key_variants.iter().any(|key_variant| s.contains(key_variant)))
-                .unwrap_or(false);
-            let card = state.map(|s| s.cardinality()).unwrap_or(0);
+            let (state, hit, card) = explain_runtime_index_lookup_summary(
+                runtime_indexes,
+                table_scope_id,
+                &index.index_id.0,
+                key,
+            );
 
             let key_text = key
                 .iter()
@@ -432,77 +523,91 @@ pub fn explain_select_plan_result(
 
     let (planner_score, index_prioritization, chosen_index_hint) = if let Some(table) = table {
 
-        let schema = &table.schema;
-        let mut index_filter_map = std::collections::HashMap::new();
-        let range_filters = read_plan
-            .where_condition
-            .as_ref()
-            .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
-            .unwrap_or_default();
-        let in_list_filter = read_plan
-            .where_condition
-            .as_ref()
-            .and_then(|condition| collect_indexable_in_list_filter_for_schema(schema, condition));
-        let like_filter = read_plan
-            .where_condition
-            .as_ref()
-            .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
+        if let Some((index, _)) = index_lookup {
+            let (score, prioritization, chosen_index_hint) =
+                explain_fast_plan_ranking(index, access_plan);
+            (score, prioritization, chosen_index_hint)
+        } else if let Some(access_plan) = access_plan
+            && matches!(
+                &access_plan.strategy,
+                RelationAccessStrategy::EqualityProbe { .. }
+                    | RelationAccessStrategy::InListProbe { .. }
+            )
+        {
+            explain_direct_access_plan_ranking(table, access_plan)
+        } else {
+            let schema = &table.schema;
+            let mut index_filter_map = std::collections::HashMap::new();
+            let range_filters = read_plan
+                .where_condition
+                .as_ref()
+                .map(|condition| collect_indexable_range_filters_for_schema(schema, condition))
+                .unwrap_or_default();
+            let in_list_filter = read_plan
+                .where_condition
+                .as_ref()
+                .and_then(|condition| collect_indexable_in_list_filter_for_schema(schema, condition));
+            let like_filter = read_plan
+                .where_condition
+                .as_ref()
+                .and_then(|condition| collect_indexable_like_filter_for_schema(schema, condition));
 
-        let allow_index_short_circuit = read_plan
-            .where_condition
-            .as_ref()
-            .map(|condition| {
-                collect_indexable_equality_filters_for_schema(
-                    schema,
-                    condition,
-                    &mut index_filter_map,
-                )
-            })
-            .unwrap_or(true);
+            let allow_index_short_circuit = read_plan
+                .where_condition
+                .as_ref()
+                .map(|condition| {
+                    collect_indexable_equality_filters_for_schema(
+                        schema,
+                        condition,
+                        &mut index_filter_map,
+                    )
+                })
+                .unwrap_or(true);
 
-        let diagnostics = relation_access_plan_diagnostics(
-            table,
-            allow_index_short_circuit,
-            index_filter_map,
-            in_list_filter,
-            range_filters,
-            like_filter,
-        );
+            let diagnostics = relation_access_plan_diagnostics(
+                table,
+                allow_index_short_circuit,
+                index_filter_map,
+                in_list_filter,
+                range_filters,
+                like_filter,
+            );
 
-        let prioritization = diagnostics
-            .candidates
-            .iter()
-            .enumerate()
-            .map(|(position, candidate)| {
-                let index_text = if candidate.index_hint.is_empty() {
-                    "-".to_string()
-                } else {
-                    candidate.index_hint.clone()
-                };
+            let prioritization = diagnostics
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(position, candidate)| {
+                    let index_text = if candidate.index_hint.is_empty() {
+                        "-".to_string()
+                    } else {
+                        candidate.index_hint.clone()
+                    };
 
-                format!(
-                    "{}.{}(score={},index={},reason={})",
-                    position + 1,
-                    candidate.access_path,
-                    candidate.score,
-                    index_text,
-                    candidate.reason,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" > ");
+                    format!(
+                        "{}.{}(score={},index={},reason={})",
+                        position + 1,
+                        candidate.access_path,
+                        candidate.score,
+                        index_text,
+                        candidate.reason,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" > ");
 
-        let chosen_index_hint = diagnostics
-            .candidates
-            .first()
-            .map(|candidate| candidate.index_hint.clone())
-            .unwrap_or_default();
+            let chosen_index_hint = diagnostics
+                .candidates
+                .first()
+                .map(|candidate| candidate.index_hint.clone())
+                .unwrap_or_default();
 
-        (
-            diagnostics.chosen_score.to_string(),
-            prioritization,
-            chosen_index_hint,
-        )
+            (
+                diagnostics.chosen_score.to_string(),
+                prioritization,
+                chosen_index_hint,
+            )
+        }
 
     } else {
 
@@ -536,6 +641,17 @@ pub fn explain_select_plan_result(
         index_prioritization.into_bytes(),
         row_ref_hydration.into_bytes(),
     ]];
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+    if elapsed_ms >= 50 {
+        log::debug!(
+            "explain plan summary table={} access_path={} filters={} elapsed_ms={}",
+            table_id,
+            rows[0][1].as_slice().iter().map(|b| *b as char).collect::<String>(),
+            filter_count,
+            elapsed_ms,
+        );
+    }
 
     SelectExecutionResult { columns, rows }
 

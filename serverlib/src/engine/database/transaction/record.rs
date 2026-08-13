@@ -456,7 +456,7 @@ impl TransactionRecord {
         // If we already have a resolved logical payload, mutate that canonical view.
         if let Some(shadow) = self.payload_shadow.take()
             && shadow.is_resolved
-            && let Some(resolved_payload) = (*shadow).resolved_payload
+            && let Some(resolved_payload) = shadow.resolved_payload
         {
             self.payload = Some(resolved_payload);
         }

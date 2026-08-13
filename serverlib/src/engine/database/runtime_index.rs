@@ -9,6 +9,10 @@ use std::num::NonZeroU64;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use super::runtime_index_key_codec::{
+    decode_runtime_index_entry_key,
+    encode_runtime_index_entry_key,
+};
 use super::runtime_index_snapshot::{
     RuntimeIndexSnapshotIndex,
     RuntimeIndexSnapshotService,
@@ -164,7 +168,7 @@ fn runtime_index_incremental_persistence_large_table_interval_ms(
 }
 
 fn runtime_index_preload_accessors_on_bootstrap() -> bool {
-    
+
     std::env::var("DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP")
         .ok()
         .map(|value| {
@@ -174,7 +178,7 @@ fn runtime_index_preload_accessors_on_bootstrap() -> bool {
             )
         })
         .unwrap_or(false)
-        
+
 }
 
 fn runtime_index_bootstrap_accessor_preload_max_live_rows() -> usize {
@@ -303,8 +307,99 @@ fn spawn_background_accessor_prewarm_from_checkpoint(
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
     entries: AHashMap<Vec<u8>, Option<NonZeroU64>>,
-    non_unique_row_refs: AHashMap<Vec<u8>, Vec<NonZeroU64>>,
+    non_unique_row_refs: AHashMap<Vec<u8>, PostingPages>,
     ordered_entry_keys: BTreeSet<Vec<u8>>,
+}
+
+const RUNTIME_INDEX_POSTING_PAGE_SIZE: usize = 1_024;
+
+#[derive(Debug, Clone, Default)]
+struct PostingPages {
+    pages: Vec<Vec<NonZeroU64>>,
+    len: usize,
+}
+
+impl PostingPages {
+    fn insert_unique_sorted(&mut self, row_ref: NonZeroU64) {
+        if let Some(last_page) = self.pages.last_mut()
+            && last_page.last().is_some_and(|last| *last < row_ref)
+        {
+            if last_page.len() == RUNTIME_INDEX_POSTING_PAGE_SIZE {
+                self.pages.push(Vec::with_capacity(RUNTIME_INDEX_POSTING_PAGE_SIZE));
+                self.pages.last_mut().expect("posting page should exist").push(row_ref);
+            } else {
+                last_page.push(row_ref);
+            }
+            self.len = self.len.saturating_add(1);
+            return;
+        }
+
+        let page_index = self.pages.partition_point(|page| {
+            page.last().is_some_and(|last| *last < row_ref)
+        });
+
+        if page_index == self.pages.len() {
+            self.pages.push(Vec::with_capacity(RUNTIME_INDEX_POSTING_PAGE_SIZE));
+        }
+
+        let search_result = self.pages[page_index].binary_search(&row_ref);
+        match search_result {
+            Ok(_) => {}
+            Err(insert_at) => {
+                let split_page = {
+                    let page = &mut self.pages[page_index];
+                    page.insert(insert_at, row_ref);
+                    (page.len() > RUNTIME_INDEX_POSTING_PAGE_SIZE)
+                        .then(|| page.split_off(page.len() / 2))
+                };
+                self.len = self.len.saturating_add(1);
+                if let Some(split_page) = split_page {
+                    self.pages.insert(page_index + 1, split_page);
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, row_ref: NonZeroU64) -> bool {
+        for page_index in 0..self.pages.len() {
+            let page = &mut self.pages[page_index];
+            if let Ok(remove_at) = page.binary_search(&row_ref) {
+                page.remove(remove_at);
+                self.len = self.len.saturating_sub(1);
+                if page.is_empty() {
+                    self.pages.remove(page_index);
+                }
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn append_row_refs(&self, row_refs: &mut Vec<u64>, limit: Option<usize>) {
+        for page in &self.pages {
+            for row_ref in page {
+                if limit.is_some_and(|limit| row_refs.len() >= limit) {
+                    return;
+                }
+                if let Some(row_ref) = unpack_row_ref(Some(*row_ref)) {
+                    row_refs.push(row_ref);
+                }
+            }
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = NonZeroU64> + '_ {
+        self.pages.iter().flat_map(|page| page.iter().copied())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,6 +416,26 @@ fn pack_row_ref(row_ref: u64) -> Option<NonZeroU64> {
 
 fn unpack_row_ref(row_ref: Option<NonZeroU64>) -> Option<u64> {
     row_ref.map(|row_ref| row_ref.get().saturating_sub(1))
+}
+
+fn collect_row_refs_for_encoded_key(
+    state: &RuntimeIndexState,
+    encoded_key: &Vec<u8>,
+    row_refs: &mut Vec<u64>,
+) {
+    if let Some(row_ref) = state
+        .entries
+        .get(encoded_key)
+        .copied()
+        .flatten()
+        .and_then(|row_ref| unpack_row_ref(Some(row_ref)))
+    {
+        row_refs.push(row_ref);
+    }
+
+    if let Some(non_unique_row_refs) = state.non_unique_row_refs.get(encoded_key) {
+        non_unique_row_refs.append_row_refs(row_refs, None);
+    }
 }
 
 fn log_runtime_index_bootstrap_table_memory_profile(
@@ -406,14 +521,6 @@ fn log_runtime_index_bootstrap_table_memory_profile(
     );
 }
 
-fn encode_runtime_index_entry_key(key: &[Vec<u8>]) -> Option<Vec<u8>> {
-    common::helpers::bincode_compat::serialize(key).ok()
-}
-
-fn decode_runtime_index_entry_key(key: &[u8]) -> Option<Vec<Vec<u8>>> {
-    common::helpers::bincode_compat::deserialize::<Vec<Vec<u8>>>(key).ok()
-}
-
 impl RuntimeIndexState {
 
     pub fn new() -> Self {
@@ -453,10 +560,8 @@ impl RuntimeIndexState {
         if !is_unique_key
             && let Some(row_ref) = row_ref.and_then(pack_row_ref)
         {
-            self.non_unique_row_refs
-                .entry(encoded_key)
-                .or_default()
-                .push(row_ref);
+            let postings = self.non_unique_row_refs.entry(encoded_key).or_default();
+            postings.insert_unique_sorted(row_ref);
         }
     }
 
@@ -480,7 +585,7 @@ impl RuntimeIndexState {
 
             let should_remove_key = if let Some(non_unique_row_refs) = self.non_unique_row_refs.get_mut(&encoded_key) {
                 if let Some(row_ref) = row_ref.and_then(pack_row_ref) {
-                    non_unique_row_refs.retain(|existing| *existing != row_ref);
+                    non_unique_row_refs.remove(row_ref);
                     non_unique_row_refs.is_empty()
                 } else {
                     true
@@ -521,29 +626,51 @@ impl RuntimeIndexState {
     pub fn rebuild_with_row_refs(
         &mut self,
         entries: AHashSet<Vec<Vec<u8>>>,
-        mut row_refs: AHashMap<Vec<Vec<u8>>, u64>,
+        mut row_refs: AHashMap<Vec<Vec<u8>>, Vec<u64>>,
     ) {
         self.non_unique_row_refs.clear();
         self.ordered_entry_keys.clear();
         row_refs.retain(|key, _| entries.contains(key));
+
+        let is_unique_key = self
+            .index
+            .as_ref()
+            .is_some_and(|index| index.is_unique_key());
+
         self.entries = entries
             .into_iter()
             .filter_map(|key| {
                 let encoded = encode_runtime_index_entry_key(&key)?;
                 self.ordered_entry_keys.insert(encoded.clone());
-                let row_ref = row_refs.get(&key).copied();
-                let stored_row_ref = if self
-                    .index
-                    .as_ref()
-                    .is_some_and(|index| index.is_unique_key())
-                {
-                    row_ref.and_then(pack_row_ref)
+                let stored_row_ref = if is_unique_key {
+                    row_refs
+                        .get(&key)
+                        .and_then(|refs| refs.first())
+                        .copied()
+                        .and_then(pack_row_ref)
                 } else {
                     None
                 };
                 Some((encoded, stored_row_ref))
             })
             .collect();
+
+        if !is_unique_key {
+            // Multiple rows can legitimately share the same non-unique key; keep
+            // every row ref instead of collapsing to a single entry per key.
+            for (key, refs) in row_refs {
+                let Some(encoded) = encode_runtime_index_entry_key(&key) else {
+                    continue;
+                };
+                for row_ref in refs {
+                    let Some(packed) = pack_row_ref(row_ref) else {
+                        continue;
+                    };
+                    let postings = self.non_unique_row_refs.entry(encoded.clone()).or_default();
+                    postings.insert_unique_sorted(packed);
+                }
+            }
+        }
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
@@ -565,20 +692,24 @@ impl RuntimeIndexState {
             return Vec::new();
         };
 
-        let mut row_refs = non_unique_row_refs
-            .iter()
-            .filter_map(|row_ref| unpack_row_ref(Some(*row_ref)))
-            .collect::<Vec<_>>();
-
-        row_refs.sort_unstable();
-        row_refs.dedup();
-
-        if let Some(limit) = limit {
-            row_refs.truncate(limit);
-        }
+        let mut row_refs = Vec::with_capacity(limit.unwrap_or(non_unique_row_refs.len()));
+        non_unique_row_refs.append_row_refs(&mut row_refs, limit);
 
         row_refs
 
+    }
+
+    pub fn row_ref_count_for_key(&self, pk_val: &[Vec<u8>]) -> Option<usize> {
+        let encoded_key = encode_runtime_index_entry_key(pk_val)?;
+
+        if self.entries.get(&encoded_key).copied().flatten().is_some() {
+            return Some(1);
+        }
+
+        self.non_unique_row_refs
+            .get(&encoded_key)
+            .filter(|postings| !postings.is_empty())
+            .map(PostingPages::len)
     }
 
     pub fn row_refs_for_key_range(
@@ -604,6 +735,7 @@ impl RuntimeIndexState {
         };
 
         let upper = match upper {
+
             Some(bound) => {
                 let Some(encoded) = encode_runtime_index_entry_key(&bound.key) else {
                     return Vec::new();
@@ -614,11 +746,16 @@ impl RuntimeIndexState {
                 } else {
                     Bound::Excluded(encoded)
                 }
-            }
+            },
+
             None => Bound::Unbounded,
+
         };
 
-        if let (Bound::Included(lower_key) | Bound::Excluded(lower_key), Bound::Included(upper_key) | Bound::Excluded(upper_key)) = (&lower, &upper) {
+        if let (Bound::Included(lower_key) | 
+            Bound::Excluded(lower_key), Bound::Included(upper_key) | 
+            Bound::Excluded(upper_key)) = (&lower, &upper) {
+            
             if lower_key > upper_key {
                 return Vec::new();
             }
@@ -628,28 +765,13 @@ impl RuntimeIndexState {
             {
                 return Vec::new();
             }
+
         }
 
         let mut row_refs = Vec::new();
 
         for encoded_key in self.ordered_entry_keys.range((lower, upper)) {
-            if let Some(row_ref) = self
-                .entries
-                .get(encoded_key)
-                .copied()
-                .flatten()
-                .and_then(|row_ref| unpack_row_ref(Some(row_ref)))
-            {
-                row_refs.push(row_ref);
-            }
-
-            if let Some(non_unique_row_refs) = self.non_unique_row_refs.get(encoded_key) {
-                row_refs.extend(
-                    non_unique_row_refs
-                        .iter()
-                        .filter_map(|row_ref| unpack_row_ref(Some(*row_ref))),
-                );
-            }
+            collect_row_refs_for_encoded_key(self, encoded_key, &mut row_refs);
         }
 
         row_refs.sort_unstable();
@@ -734,23 +856,7 @@ impl RuntimeIndexState {
                         continue;
                     }
 
-                    if let Some(row_ref) = self
-                        .entries
-                        .get(encoded_key)
-                        .copied()
-                        .flatten()
-                        .and_then(|row_ref| unpack_row_ref(Some(row_ref)))
-                    {
-                        row_refs.push(row_ref);
-                    }
-
-                    if let Some(non_unique_row_refs) = self.non_unique_row_refs.get(encoded_key) {
-                        row_refs.extend(
-                            non_unique_row_refs
-                                .iter()
-                                .filter_map(|row_ref| unpack_row_ref(Some(*row_ref))),
-                        );
-                    }
+                    collect_row_refs_for_encoded_key(self, encoded_key, &mut row_refs);
                 }
 
                 pages_visited = pages_visited.saturating_add(1);
@@ -849,8 +955,8 @@ impl RuntimeIndexState {
         row_refs.extend(
             self.non_unique_row_refs
                 .values()
-                .flatten()
-                .filter_map(|row_ref| unpack_row_ref(Some(*row_ref))),
+                .flat_map(PostingPages::iter)
+                .filter_map(|row_ref| unpack_row_ref(Some(row_ref))),
         );
 
         row_refs.sort_unstable();
@@ -871,7 +977,7 @@ impl RuntimeIndexState {
         let non_unique_row_refs = self
             .non_unique_row_refs
             .values()
-            .map(Vec::len)
+            .map(PostingPages::len)
             .sum::<usize>();
 
         unique_row_refs.saturating_add(non_unique_row_refs)
@@ -880,6 +986,63 @@ impl RuntimeIndexState {
 
     pub fn has_row_ref_postings(&self) -> bool {
         self.row_ref_postings_count() > 0
+    }
+
+    /// Build a scoped clone containing only postings for the given raw field
+    /// values, avoiding an O(table rows) deep clone of the full posting map
+    /// when the caller already knows the exact equality lookup value(s).
+    pub fn clone_scoped_to_field_values(&self, raw_values: &HashSet<Vec<u8>>) -> Self {
+
+        let mut encoded_keys: HashSet<Vec<u8>> = HashSet::new();
+
+        for raw_value in raw_values {
+            if let Some(encoded) = encode_runtime_index_entry_key(&[raw_value.clone()]) {
+                encoded_keys.insert(encoded);
+            }
+
+            let rendered = crate::render_stored_field_value(raw_value);
+            if &rendered != raw_value
+                && let Some(encoded) = encode_runtime_index_entry_key(&[rendered])
+            {
+                encoded_keys.insert(encoded);
+            }
+        }
+
+        let mut scoped = RuntimeIndexState {
+            index: self.index.clone(),
+            entries: AHashMap::new(),
+            non_unique_row_refs: AHashMap::new(),
+            ordered_entry_keys: BTreeSet::new(),
+        };
+
+        for encoded_key in &encoded_keys {
+
+            if let Some(value) = self.entries.get(encoded_key) {
+                scoped.entries.insert(encoded_key.clone(), *value);
+                scoped.ordered_entry_keys.insert(encoded_key.clone());
+            }
+
+            if let Some(row_refs) = self.non_unique_row_refs.get(encoded_key) {
+                scoped.non_unique_row_refs.insert(encoded_key.clone(), row_refs.clone());
+            }
+
+        }
+
+        scoped
+
+    }
+
+    /// Build a clone carrying only the index metadata (no entries/postings),
+    /// used when a table's index isn't referenced by the current query's
+    /// known equality values; avoids an O(table rows) deep clone while still
+    /// leaving a present-but-empty state for downstream miss-fallback paths.
+    pub fn metadata_only_clone(&self) -> Self {
+        RuntimeIndexState {
+            index: self.index.clone(),
+            entries: AHashMap::new(),
+            non_unique_row_refs: AHashMap::new(),
+            ordered_entry_keys: BTreeSet::new(),
+        }
     }
 
     pub fn reserve_entries(&mut self, additional: usize) {
@@ -1835,58 +1998,6 @@ impl RuntimeIndexStore {
 
                     if preload_accessors_on_bootstrap && !warm_fields.is_empty() {
 
-                        if !should_preload_accessors_for_bootstrap(snapshot.live_row_count) {
-                            log::info!(
-                                "runtime index bootstrap accessor preload skipped database={} table={} live_rows={} max_live_rows={}",
-                                database_id,
-                                table_id,
-                                snapshot.live_row_count,
-                                runtime_index_bootstrap_accessor_preload_max_live_rows(),
-                            );
-
-                            if runtime_index_background_prewarm_skipped_accessors()
-                                && let Some(data_dir) = snapshot_data_dir.as_ref()
-                            {
-                                spawn_background_accessor_prewarm_from_checkpoint(
-                                    data_dir.clone(),
-                                    wal.cache_scope_id(),
-                                    database_id.to_string(),
-                                    table_id.clone(),
-                                    table_stream_id.clone(),
-                                    table.schema.clone(),
-                                    warm_fields.clone(),
-                                );
-
-                                log::info!(
-                                    "runtime index bootstrap accessor background prewarm scheduled database={} table={} source=live_row_checkpoint warm_fields={}",
-                                    database_id,
-                                    table_id,
-                                    warm_fields.len(),
-                                );
-                            }
-
-                            log::info!(
-                                "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=snapshot elapsed_ms={}",
-                                database_id,
-                                table_id,
-                                tracked_indexes.len(),
-                                effective_live_row_count,
-                                table_started_at.elapsed().as_millis(),
-                            );
-
-                            log_runtime_index_bootstrap_table_memory_profile(
-                                self,
-                                &table_stream_id,
-                                database_id,
-                                &table_id,
-                                &tracked_indexes,
-                            );
-
-                            mark_runtime_index_bootstrap_table_complete();
-
-                            continue;
-                        }
-                        
                         let preload_started_at = Instant::now();
 
                         if let Some(data_dir) = snapshot_data_dir.as_ref()
@@ -2082,7 +2193,6 @@ impl RuntimeIndexStore {
                 );
 
                 let warm_elapsed_ms = if preload_accessors_on_bootstrap
-                    && should_preload_accessors_for_bootstrap(live_row_count)
                 {
                     let warm_started_at = Instant::now();
                     warm_equality_cache_from_live_rows(
@@ -2314,6 +2424,25 @@ impl RuntimeIndexStore {
         table_ids: &HashSet<String>,
         selected_fields_by_table: &HashMap<String, HashSet<String>>,
     ) -> Self {
+        self.clone_for_tables_unique_and_selected_single_field_indexes_with_values(
+            catalogs,
+            table_ids,
+            selected_fields_by_table,
+            &HashMap::new(),
+        )
+    }
+
+    /// Same as `clone_for_tables_unique_and_selected_single_field_indexes`, but when the
+    /// caller already knows the exact equality lookup value(s) for a selected non-unique
+    /// field, only the matching postings are cloned instead of the entire index's
+    /// row-ref map (which is O(table rows) to deep-clone on large tables).
+    pub fn clone_for_tables_unique_and_selected_single_field_indexes_with_values(
+        &self,
+        catalogs: &HashMap<String, DatabaseCatalog>,
+        table_ids: &HashSet<String>,
+        selected_fields_by_table: &HashMap<String, HashSet<String>>,
+        selected_field_values_by_table: &HashMap<String, HashMap<String, HashSet<Vec<u8>>>>,
+    ) -> Self {
 
         let mut scoped = Self::new();
 
@@ -2340,27 +2469,34 @@ impl RuntimeIndexStore {
                             .get(&common::normalize_identifier!(&table_id))
                     });
 
+                let selected_field_values = selected_field_values_by_table
+                    .get(&table_id)
+                    .or_else(|| {
+                        selected_field_values_by_table
+                            .get(&common::normalize_identifier!(&table_id))
+                    });
+
                 table_handle.read_table(|table| {
                     for index in table.indexes.values() {
+                        let index_single_field = if index.field_names.len() == 1 {
+                            index.field_names.first()
+                        } else if index.field_names.is_empty() {
+                            Some(&index.field_name)
+                        } else {
+                            None
+                        };
+
+                        let field_is_selected = index_single_field.is_some_and(|index_field| {
+                            let normalized_index_field = common::normalize_identifier!(index_field);
+                            selected_fields.is_some_and(|fields| {
+                                fields.contains(&normalized_index_field) || fields.contains(index_field)
+                            })
+                        });
+
                         let include_index = if index.is_unique_key() {
                             true
                         } else {
-                            let Some(fields) = selected_fields else {
-                                continue;
-                            };
-
-                            if index.field_names.len() != 1 {
-                                continue;
-                            }
-
-                            let Some(index_field) = index.field_names.first() else {
-                                continue;
-                            };
-
-                            let normalized_index_field = common::normalize_identifier!(index_field);
-
-                            fields.contains(&normalized_index_field)
-                                || fields.contains(index_field)
+                            field_is_selected
                         };
 
                         if !include_index {
@@ -2368,6 +2504,41 @@ impl RuntimeIndexStore {
                         }
 
                         if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
+
+                            let known_values = index_single_field.and_then(|index_field| {
+                                let normalized_index_field = common::normalize_identifier!(index_field);
+                                selected_field_values.and_then(|values| {
+                                    values
+                                        .get(&normalized_index_field)
+                                        .or_else(|| values.get(index_field))
+                                })
+                            });
+
+                            // When we know the exact lookup value(s), scope-clone first and
+                            // gate on postings in the (tiny) scoped result instead of
+                            // scanning the full O(table rows) index up front.
+                            if !index.is_unique_key()
+                                && let Some(values) = known_values
+                                && !values.is_empty()
+                            {
+                                let scoped_state = state.clone_scoped_to_field_values(values);
+
+                                if !scoped_state.has_row_ref_postings() {
+                                    log::debug!(
+                                        "runtime index scoped clone skipped selected non-unique index without postings table={} stream={} index_id={} entries={}",
+                                        table.table_id,
+                                        table_stream_id,
+                                        index.index_id.0,
+                                        scoped_state.cardinality(),
+                                    );
+                                    continue;
+                                }
+
+                                let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
+                                scoped.indexes.insert(scoped_id, scoped_state);
+                                continue;
+                            }
+
                             if !index.is_unique_key() && !state.has_row_ref_postings() {
                                 log::debug!(
                                     "runtime index scoped clone skipped selected non-unique index without postings table={} stream={} index_id={} entries={}",
@@ -2379,8 +2550,23 @@ impl RuntimeIndexStore {
                                 continue;
                             }
 
+                            let scoped_state = if index.is_unique_key()
+                                && index_single_field.is_some()
+                                && !field_is_selected
+                            {
+                                // Single-field unique/primary index not referenced by any
+                                // known equality filter for this request: keep metadata
+                                // only rather than deep-cloning the full O(table rows)
+                                // posting map. Composite-key unique indexes still fall
+                                // through to a full clone since we can't cheaply scope
+                                // a multi-field match here.
+                                state.metadata_only_clone()
+                            } else {
+                                state.clone()
+                            };
+
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                            scoped.indexes.insert(scoped_id, state.clone());
+                            scoped.indexes.insert(scoped_id, scoped_state);
                         }
                     }
                 });

@@ -4,6 +4,7 @@ use openssl::rand::rand_bytes;
 use openssl::sha::sha256;
 use openssl::symm::{Cipher, Crypter, Mode};
 
+use crate::compare_stored_field_values;
 use crate::engine::database::schema::migration::{convert_value_to_field_type, TypeConversionPolicy};
 use crate::engine::database::table::schema::TableSchema;
 use crate::engine::database::transaction::record::{
@@ -240,12 +241,15 @@ impl RowPayloadEncryptionProvider for AesGcmRowPayloadCryptoProvider {
         let mut written = crypter
             .update(plaintext, &mut ciphertext)
             .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
+
         written += crypter
             .finalize(&mut ciphertext[written..])
             .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
+
         ciphertext.truncate(written);
 
         let mut auth_tag = vec![0u8; ENCRYPTED_ROW_PAYLOAD_AUTH_TAG_SIZE_BYTES];
+        
         crypter
             .get_tag(&mut auth_tag)
             .map_err(|_| PayloadTransformError::InternalTransformError("payload encrypt failed".to_string()))?;
@@ -889,7 +893,7 @@ pub fn decode_row_payload_if_field_equals_with_schema_cache(
             );
             let matches_lookup = position
                 .and_then(|idx| ordinal_row.get(idx).and_then(|value| value.as_ref()))
-                .map(|value| value.as_slice() == lookup_value)
+                .map(|value| compare_stored_field_values(value.as_slice(), lookup_value) == std::cmp::Ordering::Equal)
                 .unwrap_or(false);
 
             if !matches_lookup {
@@ -922,7 +926,7 @@ pub fn decode_row_payload_if_field_equals_with_schema_cache(
         CompatibleRowPayload::LegacyMap(legacy_row) => {
             let matches_lookup = legacy_row
                 .get(field_name)
-                .map(|value| value.as_slice() == lookup_value)
+                .map(|value| compare_stored_field_values(value.as_slice(), lookup_value) == std::cmp::Ordering::Equal)
                 .unwrap_or(false);
 
             if matches_lookup {
@@ -943,7 +947,7 @@ pub fn decode_row_payload_if_field_equals_with_schema_cache(
             );
             let matches_lookup = position
                 .and_then(|idx| legacy_ordinal_row.get(idx))
-                .map(|value| value.as_slice() == lookup_value)
+                .map(|value| compare_stored_field_values(value.as_slice(), lookup_value) == std::cmp::Ordering::Equal)
                 .unwrap_or(false);
 
             if !matches_lookup {

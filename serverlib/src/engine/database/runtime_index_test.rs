@@ -40,6 +40,53 @@ fn runtime_index_state_tracks_membership_and_rebuilds() {
 }
 
 #[test]
+fn rebuild_with_row_refs_keeps_all_rows_sharing_a_non_unique_key() {
+    let mut state = RuntimeIndexState::new();
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "places",
+        DatabaseIndexKind::Indexed,
+        vec!["display_name".to_string()],
+    ));
+
+    let cologne_key = vec![b"Cologne".to_vec()];
+    let berlin_key = vec![b"Berlin".to_vec()];
+
+    let entries = AHashSet::from([cologne_key.clone(), berlin_key.clone()]);
+    let row_refs = HashMap::from([
+        (cologne_key.clone(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+        (berlin_key.clone(), vec![11]),
+    ])
+    .into_iter()
+    .collect();
+
+    state.rebuild_with_row_refs(entries, row_refs);
+
+    let mut cologne_refs = state.row_refs_for_key(&cologne_key, None);
+    cologne_refs.sort_unstable();
+    assert_eq!(cologne_refs, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert_eq!(state.row_refs_for_key(&berlin_key, None), vec![11]);
+}
+
+#[test]
+fn rebuild_with_row_refs_keeps_single_row_ref_for_unique_key() {
+    let mut state = RuntimeIndexState::new();
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "users",
+        DatabaseIndexKind::Unique,
+        vec!["email".to_string()],
+    ));
+
+    let key = vec![b"a@example.com".to_vec()];
+    let entries = AHashSet::from([key.clone()]);
+    let row_refs = HashMap::from([(key.clone(), vec![42])]).into_iter().collect();
+
+    state.rebuild_with_row_refs(entries, row_refs);
+
+    assert_eq!(state.row_ref(&key), Some(42));
+}
+
+
+#[test]
 fn index_value_tuple_uses_field_names_and_empty_fallbacks() {
 
     let multi_field_index = DatabaseIndex::from_table_fields(
@@ -72,6 +119,49 @@ fn index_value_tuple_uses_field_names_and_empty_fallbacks() {
         vec![b"alice@example.com".to_vec()],
     );
 
+}
+
+#[test]
+fn runtime_index_deduplicates_live_postings_for_repeated_row_refs() {
+    let mut state = RuntimeIndexState::new();
+    let key = vec![b"tenant-42".to_vec()];
+    let index = DatabaseIndex::from_table_fields(
+        "orders",
+        DatabaseIndexKind::Indexed,
+        vec!["tenant_id".to_string()],
+    );
+    state.index = Some(index);
+
+    state.insert_with_row_ref(key.clone(), Some(9));
+    state.insert_with_row_ref(key.clone(), Some(9));
+    state.insert_with_row_ref(key.clone(), Some(11));
+    state.insert_with_row_ref(key.clone(), Some(11));
+
+    assert_eq!(state.row_refs_for_key(&key, None), vec![9, 11]);
+    assert_eq!(state.row_refs_for_key(&key, Some(1)), vec![9]);
+}
+
+#[test]
+fn runtime_index_postings_cross_fixed_page_boundary_without_losing_order() {
+    let mut state = RuntimeIndexState::new();
+    let key = vec![b"US".to_vec()];
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "places",
+        DatabaseIndexKind::Indexed,
+        vec!["country_code".to_string()],
+    ));
+
+    for row_ref in (0..1_025).rev() {
+        state.insert_with_row_ref(key.clone(), Some(row_ref));
+    }
+
+    assert_eq!(state.row_ref_count_for_key(&key), Some(1_025));
+    assert_eq!(state.row_refs_for_key(&key, Some(3)), vec![0, 1, 2]);
+
+    let row_refs = state.row_refs_for_key(&key, None);
+    assert_eq!(row_refs.len(), 1_025);
+    assert_eq!(row_refs.first(), Some(&0));
+    assert_eq!(row_refs.last(), Some(&1_024));
 }
 
 #[test]
@@ -502,3 +592,194 @@ fn clone_for_selected_non_unique_indexes_skips_states_without_postings() {
         "selected non-unique index without postings should not be cloned",
     );
 }
+
+#[test]
+fn clone_scoped_to_field_values_only_carries_matching_postings() {
+    let mut state = RuntimeIndexState::new();
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "places",
+        DatabaseIndexKind::Indexed,
+        vec!["display_name".to_string()],
+    ));
+
+    state.insert_with_row_ref(vec![b"neuss".to_vec()], Some(1));
+    state.insert_with_row_ref(vec![b"neuss".to_vec()], Some(2));
+    state.insert_with_row_ref(vec![b"cologne".to_vec()], Some(3));
+    state.insert_with_row_ref(vec![b"berlin".to_vec()], Some(4));
+
+    let requested_values = HashSet::from([b"neuss".to_vec()]);
+    let scoped = state.clone_scoped_to_field_values(&requested_values);
+
+    assert_eq!(scoped.row_refs_for_key(&[b"neuss".to_vec()], None), vec![1, 2]);
+    assert!(scoped.row_refs_for_key(&[b"cologne".to_vec()], None).is_empty());
+    assert!(scoped.row_refs_for_key(&[b"berlin".to_vec()], None).is_empty());
+    assert_eq!(scoped.cardinality(), 1);
+}
+
+#[test]
+fn clone_for_tables_with_values_scopes_non_unique_index_to_requested_value() {
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = TableSchema::new(vec![
+        crate::FieldDef {
+            field_name: "id".to_string(),
+            seqno: 1,
+            field_type: crate::FieldType::UInt(64),
+            indexed: crate::FieldIndex::PrimaryKey,
+            nullable: false,
+            default_value: None,
+            metadata: None,
+        },
+        crate::FieldDef {
+            field_name: "display_name".to_string(),
+            seqno: 2,
+            field_type: crate::FieldType::Text,
+            indexed: crate::FieldIndex::Indexed,
+            nullable: false,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+
+    let table = catalog.table("places").expect("places table should exist");
+    let display_name_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["display_name".to_string()])
+        .cloned()
+        .expect("display_name index should exist");
+
+    let table_stream_id = catalog
+        .entity_wal_stream_id("places")
+        .unwrap_or_else(|| "places".to_string());
+
+    let mut store = RuntimeIndexStore::new();
+    let state = store.index_mut_for_table(&table_stream_id, &display_name_index.index_id.0);
+    state.index = Some(display_name_index.clone());
+    state.insert_with_row_ref(vec![b"neuss".to_vec()], Some(1));
+    state.insert_with_row_ref(vec![b"cologne".to_vec()], Some(2));
+
+    let catalogs = HashMap::from([(catalog.database_id.0.clone(), catalog)]);
+    let table_ids = HashSet::from(["places".to_string()]);
+    let selected_fields = HashMap::from([(
+        "places".to_string(),
+        HashSet::from(["display_name".to_string()]),
+    )]);
+    let selected_field_values = HashMap::from([(
+        "places".to_string(),
+        HashMap::from([("display_name".to_string(), HashSet::from([b"neuss".to_vec()]))]),
+    )]);
+
+    let scoped = store.clone_for_tables_unique_and_selected_single_field_indexes_with_values(
+        &catalogs,
+        &table_ids,
+        &selected_fields,
+        &selected_field_values,
+    );
+
+    let scoped_state = scoped
+        .index_for_table(&table_stream_id, &display_name_index.index_id.0)
+        .expect("scoped state should be present");
+
+    assert_eq!(scoped_state.row_refs_for_key(&[b"neuss".to_vec()], None), vec![1]);
+    assert!(scoped_state.row_refs_for_key(&[b"cologne".to_vec()], None).is_empty());
+}
+
+#[test]
+fn clone_for_tables_with_values_keeps_unreferenced_unique_index_metadata_only() {
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = TableSchema::new(vec![
+        crate::FieldDef {
+            field_name: "id".to_string(),
+            seqno: 1,
+            field_type: crate::FieldType::UInt(64),
+            indexed: crate::FieldIndex::PrimaryKey,
+            nullable: false,
+            default_value: None,
+            metadata: None,
+        },
+        crate::FieldDef {
+            field_name: "display_name".to_string(),
+            seqno: 2,
+            field_type: crate::FieldType::Text,
+            indexed: crate::FieldIndex::Indexed,
+            nullable: false,
+            default_value: None,
+            metadata: None,
+        },
+    ]);
+
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+
+    let table = catalog.table("places").expect("places table should exist");
+    let primary_index = table
+        .indexes
+        .values()
+        .find(|index| index.is_unique_key())
+        .cloned()
+        .expect("primary key index should exist");
+    let display_name_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["display_name".to_string()])
+        .cloned()
+        .expect("display_name index should exist");
+
+    let table_stream_id = catalog
+        .entity_wal_stream_id("places")
+        .unwrap_or_else(|| "places".to_string());
+
+    let mut store = RuntimeIndexStore::new();
+
+    let primary_state = store.index_mut_for_table(&table_stream_id, &primary_index.index_id.0);
+    primary_state.index = Some(primary_index.clone());
+    primary_state.insert_with_row_ref(vec![b"1".to_vec()], Some(1));
+    primary_state.insert_with_row_ref(vec![b"2".to_vec()], Some(2));
+
+    let display_name_state =
+        store.index_mut_for_table(&table_stream_id, &display_name_index.index_id.0);
+    display_name_state.index = Some(display_name_index.clone());
+    display_name_state.insert_with_row_ref(vec![b"neuss".to_vec()], Some(1));
+
+    let catalogs = HashMap::from([(catalog.database_id.0.clone(), catalog)]);
+    let table_ids = HashSet::from(["places".to_string()]);
+    // Query only filters on display_name; the primary key isn't referenced at all.
+    let selected_fields = HashMap::from([(
+        "places".to_string(),
+        HashSet::from(["display_name".to_string()]),
+    )]);
+    let selected_field_values = HashMap::from([(
+        "places".to_string(),
+        HashMap::from([("display_name".to_string(), HashSet::from([b"neuss".to_vec()]))]),
+    )]);
+
+    let scoped = store.clone_for_tables_unique_and_selected_single_field_indexes_with_values(
+        &catalogs,
+        &table_ids,
+        &selected_fields,
+        &selected_field_values,
+    );
+
+    let scoped_primary_state = scoped
+        .index_for_table(&table_stream_id, &primary_index.index_id.0)
+        .expect("primary key state should still be present (metadata-only)");
+
+    assert_eq!(scoped_primary_state.cardinality(), 0, "unreferenced unique index should not carry postings");
+    assert!(!scoped_primary_state.contains(&[b"1".to_vec()]));
+
+    let scoped_display_name_state = scoped
+        .index_for_table(&table_stream_id, &display_name_index.index_id.0)
+        .expect("scoped display_name state should be present");
+    assert_eq!(
+        scoped_display_name_state.row_refs_for_key(&[b"neuss".to_vec()], None),
+        vec![1],
+    );
+}
+

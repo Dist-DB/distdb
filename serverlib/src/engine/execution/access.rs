@@ -14,6 +14,10 @@ use crate::engine::database::runtime_index::{
     load_live_row_count_checkpoint,
     load_live_row_checkpoint_rows,
 };
+use crate::engine::database::runtime_index_key_codec::{
+    RuntimeIndexKeyStrategy,
+    runtime_index_string_probe_variants,
+};
 use crate::engine::database::runtime_index_snapshot::RuntimeIndexSnapshotService;
 use crate::engine::database::row_payload::{
     RowPayloadSchemaCache,
@@ -346,6 +350,18 @@ fn cached_equality_probe_rows(
         return None;
     };
 
+    if entry.rows.is_empty() {
+        table_cache.remove(&filter_key);
+        if debug_enabled {
+            log::info!(
+                "equality probe result cache miss stream={} reason=empty_cached_result filters={}",
+                table_stream_id,
+                equality_filters.len(),
+            );
+        }
+        return None;
+    }
+
     let entry_latest_tx_id = entry.latest_tx_id;
     let entry_rows = entry.rows.clone();
 
@@ -376,6 +392,11 @@ fn cached_equality_probe_rows(
             );
         }
         return None;
+    }
+
+    let entry_accessed_at = Instant::now();
+    if let Some(entry_ref) = table_cache.get_mut(&filter_key) {
+        entry_ref.cached_at = entry_accessed_at;
     }
 
     if debug_enabled {
@@ -423,6 +444,10 @@ fn maybe_cache_equality_probe_rows_with_latest_tx_id(
     let max_bytes = equality_probe_result_cache_max_entry_bytes();
     let ttl = equality_probe_result_cache_ttl();
 
+    if rows.is_empty() {
+        return;
+    }
+
     if max_entries == 0 || rows.len() > max_rows {
         return;
     }
@@ -451,13 +476,19 @@ fn maybe_cache_equality_probe_rows_with_latest_tx_id(
 
     let table_cache = guard.entry(table_key).or_default();
     table_cache.retain(|_, entry| {
-        entry.latest_tx_id == latest_tx_id && !equality_probe_cache_entry_is_expired(entry, ttl)
+        !entry.rows.is_empty()
+            && entry.latest_tx_id == latest_tx_id
+            && !equality_probe_cache_entry_is_expired(entry, ttl)
     });
 
-    if table_cache.len() >= max_entries
-        && let Some(evict_key) = table_cache.keys().next().cloned()
-    {
-        table_cache.remove(&evict_key);
+    if table_cache.len() >= max_entries {
+        if let Some(evict_key) = table_cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.cached_at)
+            .map(|(key, _)| key.clone())
+        {
+            table_cache.remove(&evict_key);
+        }
     }
 
     table_cache.insert(
@@ -483,12 +514,17 @@ fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: u
     let stats = guard.entry(table_stream_id.to_string()).or_default();
 
     match source {
+
         "accessor_snapshot" => stats.snapshot_loads = stats.snapshot_loads.saturating_add(1),
+
         "live_row_checkpoint" => stats.checkpoint_loads = stats.checkpoint_loads.saturating_add(1),
+
         "wal_scan" | "wal_scan_filtered" => {
             stats.wal_scan_loads = stats.wal_scan_loads.saturating_add(1)
         },
+
         _ => {}
+
     }
 
     stats.total_live_rows = stats.total_live_rows.saturating_add(live_rows as u64);
@@ -559,8 +595,10 @@ fn equality_cache_entry_mut<'a>(
     cache_scope_id: usize,
     table_id: &str,
 ) -> Option<&'a mut EqualityTableCacheEntry> {
+    
     equality_cache_table_map_mut(cache_guard, cache_scope_id)
         .and_then(|tables| tables.get_mut(table_id))
+
 }
 
 fn equality_cache_entry<'a>(
@@ -568,9 +606,11 @@ fn equality_cache_entry<'a>(
     cache_scope_id: usize,
     table_id: &str,
 ) -> Option<&'a EqualityTableCacheEntry> {
+
     cache_guard
         .get(&cache_scope_id)
         .and_then(|tables| tables.get(table_id))
+
 }
 
 fn insert_equality_cache_entry(
@@ -579,38 +619,20 @@ fn insert_equality_cache_entry(
     table_id: &str,
     entry: EqualityTableCacheEntry,
 ) {
+
     cache_guard
         .entry(cache_scope_id)
         .or_default()
         .insert(table_id.to_string(), entry);
+
 }
 
 fn accessor_snapshot_restore_string_indexes() -> bool {
-    
-    std::env::var("DISTDB_ACCESSOR_SNAPSHOT_RESTORE_STRING_INDEXES")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true)
-
+    true
 }
 
 fn accessor_snapshot_persist_string_indexes() -> bool {
-    
-    std::env::var("DISTDB_ACCESSOR_SNAPSHOT_PERSIST_STRING_INDEXES")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-            .unwrap_or(true)
-
+    true
 }
 
 fn cache_entry_matches_loaded_wal_head(
@@ -1005,7 +1027,7 @@ fn build_row_ids_by_field_value_from_snapshot(
 
     }
 
-    let row_ids_by_field_value = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
 
         let mut handles = Vec::with_capacity(postings_by_field.len());
 
@@ -1028,9 +1050,7 @@ fn build_row_ids_by_field_value_from_snapshot(
 
         row_ids_by_field_value
 
-    });
-
-    row_ids_by_field_value
+    })
 
 }
 
@@ -1643,11 +1663,42 @@ fn rows_for_field_string_like(
 
 }
 
-fn rows_for_field_string_like_case_insensitive(
+fn rows_for_field_string_like_case_insensitive_indexed(
     entry: &EqualityTableCacheEntry,
     field_name: &str,
     pattern: &[u8],
 ) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if let Some(index) = entry.string_index_ci_by_field.get(field_name) {
+
+        let pattern_text = String::from_utf8_lossy(pattern);
+        let normalized_pattern = pattern_text.to_ascii_lowercase();
+
+        let matching_keys = if pattern_text.contains('%') || pattern_text.contains('_') {
+            let mut matches = Vec::new();
+            for (key, row_ids) in index.iter() {
+                if compare_like_value(key.as_bytes(), pattern, true, None) {
+                    matches.extend(row_ids.iter().copied());
+                }
+            }
+            matches
+        } else {
+            index
+                .get(&normalized_pattern)
+                .map(|row_ids| row_ids.iter().copied().collect())
+                .unwrap_or_default()
+        };
+
+        let mut rows = Vec::with_capacity(matching_keys.len());
+        for row_id in matching_keys {
+            if let Some(row_map) = entry.rows_by_id.get(&row_id) {
+                rows.push((row_id, row_map.clone()));
+            }
+        }
+        
+        return rows;
+
+    }
 
     entry
         .rows_by_id
@@ -1660,6 +1711,14 @@ fn rows_for_field_string_like_case_insensitive(
         })
         .collect()
 
+}
+
+fn rows_for_field_string_like_case_insensitive(
+    entry: &EqualityTableCacheEntry,
+    field_name: &str,
+    pattern: &[u8],
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+    rows_for_field_string_like_case_insensitive_indexed(entry, field_name, pattern)
 }
 
 fn rows_for_field_string_like_indexed(
@@ -1725,9 +1784,29 @@ fn rows_for_field_values(
         return rows_for_field_value(entry, field_name, lookup_value);
     }
 
+    let mut ordered_filters = equality_filters
+        .iter()
+        .collect::<Vec<_>>();
+    ordered_filters.sort_unstable_by(|(left_field, left_value), (right_field, right_value)| {
+        let left_len = entry
+            .row_ids_by_field_value
+            .get(*left_field)
+            .and_then(|postings| postings.get(left_value.as_slice()))
+            .map(|row_ids| row_ids.len())
+            .unwrap_or(usize::MAX);
+        let right_len = entry
+            .row_ids_by_field_value
+            .get(*right_field)
+            .and_then(|postings| postings.get(right_value.as_slice()))
+            .map(|row_ids| row_ids.len())
+            .unwrap_or(usize::MAX);
+
+        left_len.cmp(&right_len)
+    });
+
     let mut seed_row_ids = None::<Vec<u64>>;
 
-    for (field_name, lookup_value) in equality_filters {
+    for (field_name, lookup_value) in ordered_filters {
         let Some(row_ids_by_value) = entry.row_ids_by_field_value.get(field_name.as_str()) else {
             return Vec::new();
         };
@@ -2914,6 +2993,10 @@ fn simple_like_prefix(pattern: &[u8]) -> Option<Vec<u8>> {
 
 fn index_fields_exist_in_schema(index: &DatabaseIndex, schema: &TableSchema) -> bool {
 
+    if schema.fields.is_empty() {
+        return !index.field_names.is_empty() || !index.field_name.is_empty();
+    }
+
     if !index.field_names.is_empty() {
         return index
             .field_names
@@ -3304,17 +3387,7 @@ fn collect_live_rows_from_records_limited(
 }
 
 fn equality_probe_direct_scan_enabled() -> bool {
-
-    std::env::var("DISTDB_EQUALITY_PROBE_DIRECT_SCAN")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true)
-
+    true
 }
 
 fn equality_probe_runtime_state_debug_enabled() -> bool {
@@ -3332,17 +3405,7 @@ fn equality_probe_runtime_state_debug_enabled() -> bool {
 }
 
 fn equality_probe_cold_durable_direct_scan_enabled() -> bool {
-
-    std::env::var("DISTDB_EQUALITY_PROBE_COLD_DURABLE_DIRECT_SCAN")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true)
-
+    true
 }
 
 fn should_use_direct_scan_for_equality_probe(
@@ -4187,7 +4250,7 @@ pub fn load_live_rows_by_equality_filters_with_limit(
         return apply_row_limit_if_any(result, row_limit);
     }
 
-    if let Some(rows) = cached_equality_probe_rows(wal, table_stream_id, equality_filters) {
+    if let Some(rows) = planner_equality_probe_cache_rows(wal, table_stream_id, table_id, equality_filters) {
         return apply_row_limit_if_any(rows, row_limit);
     }
 
@@ -4404,6 +4467,37 @@ fn count_live_rows_by_equality_filters_direct_wal_scan(
 
 }
 
+/// Returns a posting cardinality only when the selected runtime index has
+/// concrete row references. Missing or incomplete postings must use the
+/// existing cache/WAL fallbacks to preserve count correctness.
+pub fn count_runtime_index_equality_probe_rows(
+    runtime_indexes: &RuntimeIndexStore,
+    table: &DatabaseTable,
+    table_stream_id: &str,
+    field_name: &str,
+    lookup_value: &[u8],
+) -> Option<usize> {
+
+    let index_id = single_field_index_id(table, field_name)?;
+    let probe_profile =
+        runtime_index_probe_profile_for_field(&table.schema, Some(field_name), 1);
+    let key_variants = runtime_lookup_key_variants_with_profile(
+        &[lookup_value.to_vec()],
+        probe_profile,
+    );
+    let (_, state) = runtime_index_state_with_scope(
+        runtime_indexes,
+        table_stream_id,
+        &index_id,
+        &key_variants,
+    )?;
+
+    key_variants
+        .iter()
+        .find_map(|key_variant| state.row_ref_count_for_key(key_variant))
+
+}
+
 pub fn count_live_rows_by_equality_filters(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
@@ -4426,7 +4520,7 @@ pub fn count_live_rows_by_equality_filters(
         return count;
     }
 
-    if let Some(rows) = cached_equality_probe_rows(wal, table_stream_id, equality_filters) {
+    if let Some(rows) = planner_equality_probe_cache_rows(wal, table_stream_id, table_id, equality_filters) {
         return rows.len();
     }
 
@@ -4484,6 +4578,7 @@ pub fn load_live_rows_by_prefix(
     if live_rows.len() >= accessor_cold_direct_scan_min_rows() {
 
         let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
+
         ensure_field_postings(&mut entry, field_name);
         ensure_string_like_index(&mut entry, field_name, case_insensitive);
         
@@ -4523,6 +4618,7 @@ pub fn load_live_rows_by_string_like(
     if case_insensitive {
 
         if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
+            ensure_string_like_index(entry, field_name, true);
             rows_for_field_string_like_case_insensitive(entry, field_name, pattern)
         }) {
             return result;
@@ -4536,7 +4632,8 @@ pub fn load_live_rows_by_string_like(
             &[],
         );
 
-        let entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
+        let mut entry = build_rows_only_cache_entry(latest_tx_id, live_rows);
+        ensure_string_like_index(&mut entry, field_name, true);
 
         let result = rows_for_field_string_like_case_insensitive(&entry, field_name, pattern);
 
@@ -5526,6 +5623,80 @@ pub fn load_live_row_count(
 
 }
 
+fn planner_equality_probe_cache_rows(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    equality_filters: &HashMap<String, Vec<u8>>,
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
+
+    let mut stream_ids = vec![table_stream_id.to_string()];
+    if table_stream_id != table_id {
+        stream_ids.push(table_id.to_string());
+    }
+
+    for stream_id in stream_ids {
+        if let Some(rows) = cached_equality_probe_rows(wal, &stream_id, equality_filters) {
+            return Some(rows);
+        }
+    }
+
+    None
+}
+
+pub fn planner_cached_rows_for_access_plan<T, S>(
+    wal: &ConcurrentWalManager,
+    table: T,
+    schema: S,
+    _runtime_indexes: &RuntimeIndexStore,
+    access_plan: &RelationAccessPlan,
+    row_limit: Option<usize>,
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>>
+where
+    T: Borrow<DatabaseTable>,
+    S: Borrow<TableSchema>,
+{
+let started_at = Instant::now();
+    
+    let table = table.borrow();
+    let _schema = schema.borrow();
+    let table_stream_id = resolve_materialization_stream_id(wal, table);
+
+    let equality_filters = match &access_plan.strategy {
+        RelationAccessStrategy::RuntimeIndexLookup {
+            index_id,
+            lookup_key,
+        } => table
+            .indexes
+            .values()
+            .find(|index| index.index_id.0 == *index_id)
+            .and_then(|index| equality_filters_for_index_lookup(index, lookup_key)),
+        RelationAccessStrategy::EqualityProbe {
+            equality_filters,
+            ..
+        } => Some(equality_filters.clone()),
+        _ => None,
+    }?;
+
+    let result = planner_equality_probe_cache_rows(wal, table_stream_id, &table.table_id, &equality_filters)
+        .map(|rows| apply_row_limit_if_any(rows, row_limit));
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+    if elapsed_ms >= 25 {
+        log::debug!(
+            "planner cache lookup table={} strategy={} filters={} row_limit={:?} elapsed_ms={}",
+            table.table_id,
+            access_path_name(&access_plan.strategy),
+            equality_filters.len(),
+            row_limit,
+            elapsed_ms,
+        );
+    }
+
+    result
+
+}
+
 pub fn plan_relation_access<T>(
     table: T,
     allow_index_short_circuit: bool,
@@ -5537,7 +5708,37 @@ pub fn plan_relation_access<T>(
 where
     T: Borrow<DatabaseTable>,
 {
+    plan_relation_access_with_runtime_hint(
+        table,
+        allow_index_short_circuit,
+        index_filter_map,
+        in_list_filter,
+        range_filters,
+        like_filter,
+        None,
+    )
+}
 
+/// Same as `plan_relation_access`, but when a runtime index store is supplied,
+/// multi-filter equality probes prefer the field whose runtime index reports
+/// the fewest matching rows for its specific literal, instead of an arbitrary
+/// (alphabetical) tie-break. This avoids picking a low-selectivity field (e.g.
+/// `country_code='US'`) over a highly selective one (e.g. `display_name='Cologne'`)
+/// when both fields have an existing index.
+pub fn plan_relation_access_with_runtime_hint<T>(
+    table: T,
+    allow_index_short_circuit: bool,
+    index_filter_map: HashMap<String, Vec<u8>>,
+    in_list_filter: Option<(String, Vec<Vec<u8>>)>,
+    range_filters: Vec<RangeFilterBounds>,
+    like_filter: Option<(String, Vec<u8>, bool)>,
+    runtime_hint: Option<(&RuntimeIndexStore, &str)>,
+) -> RelationAccessPlan
+where
+    T: Borrow<DatabaseTable>,
+{
+
+    let started_at = Instant::now();
     let table = table.borrow();
     let candidates = collect_relation_access_candidates(
         table,
@@ -5546,14 +5747,28 @@ where
         in_list_filter.as_ref(),
         &range_filters,
         like_filter.as_ref(),
+        runtime_hint,
     );
 
-    candidates
+    let plan = candidates
         .first()
         .map(|candidate| candidate.plan.clone())
         .unwrap_or(RelationAccessPlan {
             strategy: RelationAccessStrategy::FullScan,
-        })
+        });
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+    if elapsed_ms >= 25 {
+        log::debug!(
+            "planner access plan table={} filter_count={} candidate_count={} elapsed_ms={}",
+            table.table_id,
+            index_filter_map.len() + range_filters.len() + usize::from(in_list_filter.is_some()) + usize::from(like_filter.is_some()),
+            candidates.len(),
+            elapsed_ms,
+        );
+    }
+
+    plan
 
 }
 
@@ -5569,6 +5784,7 @@ where
     T: Borrow<DatabaseTable>,
 {
 
+    let started_at = Instant::now();
     let table = table.borrow();
 
     let candidates = collect_relation_access_candidates(
@@ -5578,6 +5794,7 @@ where
         in_list_filter.as_ref(),
         &range_filters,
         like_filter.as_ref(),
+        None,
     );
 
     if candidates.is_empty() {
@@ -5599,11 +5816,24 @@ where
         })
         .collect::<Vec<_>>();
 
-    RelationAccessPlanDiagnostics {
+    let diagnostics = RelationAccessPlanDiagnostics {
         chosen_access_path: access_path_name(&chosen.plan.strategy).to_string(),
         chosen_score: chosen.score,
         candidates: serialized_candidates,
+    };
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+    if elapsed_ms >= 25 {
+        log::debug!(
+            "planner diagnostics table={} candidate_count={} chosen={} elapsed_ms={}",
+            table.table_id,
+            candidates.len(),
+            diagnostics.chosen_access_path,
+            elapsed_ms,
+        );
     }
+
+    diagnostics
 
 }
 
@@ -5623,6 +5853,7 @@ fn collect_relation_access_candidates(
     in_list_filter: Option<&(String, Vec<Vec<u8>>)>,
     range_filters: &[RangeFilterBounds],
     like_filter: Option<&(String, Vec<u8>, bool)>,
+    runtime_hint: Option<(&RuntimeIndexStore, &str)>,
 ) -> Vec<ScoredRelationAccessCandidate> {
 
     let mut candidates = Vec::new();
@@ -5646,7 +5877,7 @@ fn collect_relation_access_candidates(
     }
 
     if let Some((field_name, lookup_value, source)) =
-        choose_equality_probe_filter(table, index_filter_map)
+        choose_equality_probe_filter_with_runtime_hint(table, index_filter_map, runtime_hint)
     {
         let index_hint = single_field_index_id(table, &field_name).unwrap_or_default();
 
@@ -5855,9 +6086,7 @@ fn access_path_name(strategy: &RelationAccessStrategy) -> &'static str {
 
 fn single_field_index_id(table: &DatabaseTable, field_name: &str) -> Option<String> {
 
-    if table.schema.field(field_name).is_none() {
-        return None;
-    }
+    table.schema.field(field_name)?;
 
     table
         .indexes
@@ -6125,15 +6354,15 @@ fn load_live_rows_by_equality_filters_from_checkpoint_with_limit(
     schema: &TableSchema,
     equality_filters: &HashMap<String, Vec<u8>>,
     row_limit: Option<usize>,
-) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>>
+) -> Option<(u64, Vec<(u64, HashMap<String, Vec<u8>>)>)>
 {
 
     if equality_filters.is_empty() {
-        return Some(Vec::new());
+        return Some((0, Vec::new()));
     }
 
     let data_dir = wal.data_dir_path()?;
-    let (_, checkpoint_rows) = load_live_row_checkpoint_rows(
+    let (checkpoint_tx_id, checkpoint_rows) = load_live_row_checkpoint_rows(
         &data_dir,
         table_stream_id,
         table_id,
@@ -6149,7 +6378,34 @@ fn load_live_rows_by_equality_filters_from_checkpoint_with_limit(
         rows.truncate(limit);
     }
 
-    Some(rows)
+    Some((checkpoint_tx_id, rows))
+
+}
+
+fn load_live_rows_by_equality_filters_from_checkpoint_for_scopes(
+    wal: &ConcurrentWalManager,
+    equality_filters: &HashMap<String, Vec<u8>>,
+    schema: &TableSchema,
+    scopes: &[&str],
+    row_limit: Option<usize>,
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
+
+    for scope in scopes {
+        if let Some((_, rows)) = load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+            wal,
+            scope,
+            scope,
+            schema,
+            equality_filters,
+            row_limit,
+        )
+            && !rows.is_empty()
+        {
+            return Some(rows);
+        }
+    }
+
+    None
 
 }
 
@@ -6236,22 +6492,17 @@ fn push_unique_scalar_lookup_variant(variants: &mut Vec<Vec<u8>>, candidate: Vec
 fn normalized_string_probe_variants(value: &[u8]) -> Vec<Vec<u8>> {
 
     let rendered = render_stored_field_value(value);
-    let Ok(as_text) = std::str::from_utf8(&rendered) else {
-        return Vec::new();
-    };
-
-    let lowered = as_text.trim().to_lowercase();
-    if lowered.is_empty() {
+    let strategy = RuntimeIndexKeyStrategy::String { case_insensitive: true };
+    let normalized = strategy.normalize(&rendered);
+    if normalized.is_empty() {
         return Vec::new();
     }
 
-    let mut variants = vec![lowered.as_bytes().to_vec()];
-    let chars = lowered.chars().collect::<Vec<_>>();
-
-    for prefix_len in [5usize, 4usize, 3usize] {
-        if chars.len() >= prefix_len {
-            let prefix = chars[..prefix_len].iter().collect::<String>();
-            push_unique_scalar_lookup_variant(&mut variants, prefix.into_bytes());
+    let mut variants = vec![normalized.clone()];
+    for head_len in [5usize, 4usize, 3usize] {
+        if normalized.len() >= head_len {
+            let head = strategy.page_head(&normalized, head_len);
+            push_unique_scalar_lookup_variant(&mut variants, head);
         }
     }
 
@@ -6276,12 +6527,24 @@ fn runtime_lookup_key_variants_with_profile(
     push_unique_scalar_lookup_variant(&mut scalar_variants, rendered.clone());
 
     if matches!(profile, RuntimeIndexBtreeProbeProfile::StringLike) {
-        for normalized in normalized_string_probe_variants(&lookup_key[0]) {
+        let string_strategy = RuntimeIndexKeyStrategy::String { case_insensitive: true };
+        let rendered_normalized = string_strategy.normalize(&rendered);
+        let value_normalized = string_strategy.normalize(&lookup_key[0]);
+
+        for normalized in runtime_index_string_probe_variants(&lookup_key[0], true) {
             push_unique_scalar_lookup_variant(&mut scalar_variants, normalized);
         }
 
-        for normalized in normalized_string_probe_variants(&rendered) {
+        for normalized in runtime_index_string_probe_variants(&rendered, true) {
             push_unique_scalar_lookup_variant(&mut scalar_variants, normalized);
+        }
+
+        if !rendered_normalized.is_empty() {
+            push_unique_scalar_lookup_variant(&mut scalar_variants, rendered_normalized.clone());
+        }
+
+        if !value_normalized.is_empty() {
+            push_unique_scalar_lookup_variant(&mut scalar_variants, value_normalized.clone());
         }
     }
 
@@ -6300,7 +6563,7 @@ fn runtime_lookup_key_variants(lookup_key: &[Vec<u8>]) -> Vec<Vec<Vec<u8>>> {
 fn runtime_index_probe_page_size(row_limit: Option<usize>) -> usize {
 
     let requested = row_limit.unwrap_or(RUNTIME_INDEX_BTREE_PROBE_PAGE_SIZE);
-    requested.max(32).min(8_192)
+    requested.clamp(32, 8_192)
 
 }
 
@@ -6418,6 +6681,17 @@ where
 
     let table_stream_id = resolve_materialization_stream_id(wal, table);
 
+    if let Some(cached_rows) = planner_cached_rows_for_access_plan(
+        wal,
+        table,
+        schema,
+        runtime_indexes,
+        access_plan,
+        row_limit,
+    ) {
+        return cached_rows;
+    }
+
     match &access_plan.strategy {
 
         RelationAccessStrategy::RuntimeIndexLookup {
@@ -6434,16 +6708,11 @@ where
                 .map(|index| index.is_unique_key())
                 .unwrap_or(false);
 
+            let lookup_equality_filters = runtime_lookup_index
+                .and_then(|index| equality_filters_for_index_lookup(index, lookup_key));
+
             let single_field_name = if lookup_key.len() == 1 {
-                runtime_lookup_index.and_then(|index| {
-                    if index.field_names.len() == 1 {
-                        Some(index.field_names[0].as_str())
-                    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
-                        Some(index.field_name.as_str())
-                    } else {
-                        None
-                    }
-                })
+                runtime_lookup_index.and_then(single_field_name_for_index)
             } else {
                 None
             };
@@ -6453,22 +6722,13 @@ where
                 single_field_name,
                 lookup_key.len(),
             );
+
             let (probe_page_size, probe_max_pages) = runtime_index_probe_plan(row_limit, probe_profile);
             let lookup_key_variants =
                 runtime_lookup_key_variants_with_profile(lookup_key, probe_profile);
 
-            let runtime_index_state_with_scope = runtime_indexes
-                .index_for_table(table_stream_id, index_id)
-                .map(|state| (table_stream_id.to_string(), state))
-                .or_else(|| {
-                    lookup_key_variants
-                        .iter()
-                        .find_map(|key_variant| {
-                            runtime_indexes
-                                .find_scoped_index_state_for_lookup(index_id, key_variant)
-                                .map(|(scope_id, state)| (scope_id.to_string(), state))
-                        })
-                });
+            let runtime_index_state_with_scope =
+                runtime_index_state_with_scope(runtime_indexes, table_stream_id, index_id, &lookup_key_variants);
 
             if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
 
@@ -6485,10 +6745,25 @@ where
                 let matched_lookup_key = lookup_key_variants
                     .iter()
                     .find(|key_variant| state.contains(key_variant));
+
                 let key_present = matched_lookup_key.is_some();
+
+                let key_shape_mismatch = runtime_lookup_index
+                    .map(|index| {
+                        let field_count = if !index.field_names.is_empty() {
+                            index.field_names.len()
+                        } else if !index.field_name.is_empty() {
+                            1
+                        } else {
+                            0
+                        };
+                        field_count != lookup_key.len()
+                    })
+                    .unwrap_or(false);
 
                 if !key_present
                     && !matches!(probe_profile, RuntimeIndexBtreeProbeProfile::StringLike)
+                    && !key_shape_mismatch
                 {
                     log::debug!(
                         "relation runtime index lookup table={} index_id={} scope={} key_present=false -> empty_result_no_scan",
@@ -6496,8 +6771,24 @@ where
                         index_id,
                         runtime_index_scope_id,
                     );
-
                     return Vec::new();
+                }
+
+                if key_shape_mismatch {
+                    log::debug!(
+                        "relation runtime index lookup table={} index_id={} scope={} key_shape_mismatch=true -> fallback_pk_cap",
+                        table.table_id,
+                        index_id,
+                        runtime_index_scope_id,
+                    );
+                    return load_live_rows_with_optional_pk_cap(
+                        wal,
+                        table,
+                        table_stream_id,
+                        schema,
+                        runtime_indexes,
+                        row_limit,
+                    );
                 }
 
                 log::debug!(
@@ -6523,10 +6814,12 @@ where
 
                 let can_direct_lookup =
                     should_attempt_row_ref_direct_lookup(wal, &runtime_index_scope_id);
-                let mut candidate_row_refs = matched_lookup_key
+
+                let exact_key_row_refs = matched_lookup_key
                     .map(|key_variant| state.row_refs_for_key(key_variant, row_limit))
                     .unwrap_or_default();
-                let exact_candidate_count = candidate_row_refs.len();
+                let exact_candidate_count = exact_key_row_refs.len();
+                let mut candidate_row_refs = exact_key_row_refs;
 
                 if candidate_row_refs.is_empty() {
                     candidate_row_refs = state.row_refs_for_probe_keys_paged(
@@ -6548,6 +6841,7 @@ where
                 );
 
                 if !candidate_row_refs.is_empty() {
+
                     let mut candidate_rows = if can_direct_lookup {
                         load_live_rows_by_runtime_index_row_refs(
                             wal,
@@ -6585,6 +6879,17 @@ where
                     }
 
                     if !candidate_rows.is_empty() {
+                        if let Some(equality_filters) = lookup_equality_filters.as_ref() {
+                            maybe_cache_equality_probe_rows_with_latest_tx_id(
+                                wal,
+                                &runtime_index_scope_id,
+                                equality_filters,
+                                &candidate_rows,
+                                wal.latest_transaction_id_if_loaded(&runtime_index_scope_id)
+                                    .map(|tx| tx.0),
+                            );
+                        }
+
                         log::debug!(
                             "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=true candidate_refs={} resolved_rows={} source={}",
                             table.table_id,
@@ -6600,73 +6905,48 @@ where
                         );
                         return candidate_rows;
                     }
+
                 }
 
-                let lookup_equality_filters = runtime_lookup_index.and_then(|index| {
-                    let field_names = if !index.field_names.is_empty() {
-                        index.field_names.clone()
-                    } else if !index.field_name.is_empty() {
-                        vec![index.field_name.clone()]
-                    } else {
-                        Vec::new()
-                    };
+                if let Some(equality_filters) = lookup_equality_filters.as_ref() {
 
-                    if field_names.len() != lookup_key.len() {
-                        return None;
+                    let mut checkpoint_scopes = vec![runtime_index_scope_id.as_str()];
+                    
+                    if runtime_index_scope_id != table.table_id {
+                        checkpoint_scopes.push(table.table_id.as_str());
                     }
 
-                    Some(
-                        field_names
-                            .into_iter()
-                            .zip(lookup_key.iter().cloned())
-                            .collect::<HashMap<_, _>>(),
-                    )
-                });
+                    if let Some(checkpoint_rows) = load_live_rows_by_equality_filters_from_checkpoint_for_scopes(
+                        wal,
+                        equality_filters,
+                        schema,
+                        &checkpoint_scopes,
+                        row_limit,
+                    ) {
+                        
+                        let source = "live_row_checkpoint_filter";
 
-                if let Some(equality_filters) = lookup_equality_filters.as_ref()
-                    && let Some(checkpoint_rows) =
-                        load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                        maybe_cache_equality_probe_rows_with_latest_tx_id(
                             wal,
                             &runtime_index_scope_id,
-                            &table.table_id,
-                            schema,
-                            &equality_filters,
-                            row_limit,
-                        )
-                    && !checkpoint_rows.is_empty()
-                {
-                    log::debug!(
-                        "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
-                        table.table_id,
-                        index_id,
-                        runtime_index_scope_id,
-                        checkpoint_rows.len(),
-                    );
-                    return checkpoint_rows;
-                }
+                            equality_filters,
+                            &checkpoint_rows,
+                            wal.latest_transaction_id_if_loaded(&runtime_index_scope_id)
+                                .map(|tx| tx.0),
+                        );
 
-                if runtime_index_scope_id != table.table_id {
-                    if let Some(equality_filters) = lookup_equality_filters.as_ref()
-                        && let Some(checkpoint_rows) =
-                            load_live_rows_by_equality_filters_from_checkpoint_with_limit(
-                                wal,
-                                &table.table_id,
-                                &table.table_id,
-                                schema,
-                                equality_filters,
-                                row_limit,
-                            )
-                        && !checkpoint_rows.is_empty()
-                    {
                         log::debug!(
-                            "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=false source=legacy_live_row_checkpoint_filter resolved_rows={}",
+                            "relation runtime index lookup table={} index_id={} scope={} row_ref_candidates=false source={} resolved_rows={}",
                             table.table_id,
                             index_id,
                             runtime_index_scope_id,
+                            source,
                             checkpoint_rows.len(),
                         );
+
                         return checkpoint_rows;
                     }
+
                 }
 
                 if runtime_lookup_index_is_unique
@@ -6694,10 +6974,20 @@ where
 
                 if runtime_lookup_index_is_unique {
                     log::debug!(
-                        "relation runtime index lookup table={} index_id={} scope={} row_ref_direct=false reason=empty_result_no_scan",
+                        "relation runtime index lookup table={} index_id={} scope={} row_ref_direct=false reason=fallback_equality_scan",
                         table.table_id,
                         index_id,
                         runtime_index_scope_id,
+                    );
+                }
+
+                if let Some(equality_filters) = lookup_equality_filters.as_ref() {
+                    return load_equality_probe_rows_for_filters(
+                        wal,
+                        &table.table_id,
+                        schema,
+                        equality_filters,
+                        row_limit,
                     );
                 }
 
@@ -6706,12 +6996,45 @@ where
             } else {
 
                 log::debug!(
-                    "relation runtime index lookup table={} index_id={} state_missing -> empty_result_no_scan",
+                    "relation runtime index lookup table={} index_id={} state_missing -> fallback_equality_scan",
                     table.table_id,
                     index_id,
                 );
 
-                Vec::new()
+                if let Some(index) = runtime_lookup_index {
+
+                    let field_names = index_field_names_for_lookup(index);
+
+                    if field_names.len() != lookup_key.len() {
+                        return load_live_rows_with_optional_pk_cap(
+                            wal,
+                            table,
+                            table_stream_id,
+                            schema,
+                            runtime_indexes,
+                            row_limit,
+                        );
+                    }
+
+                    if let Some(equality_filters) = equality_filters_for_index_lookup(index, lookup_key) {
+                        return load_equality_probe_rows_for_filters(
+                            wal,
+                            &table.table_id,
+                            schema,
+                            &equality_filters,
+                            row_limit,
+                        );
+                    }
+                }
+
+                load_live_rows_with_optional_pk_cap(
+                    wal,
+                    table,
+                    table_stream_id,
+                    schema,
+                    runtime_indexes,
+                    row_limit,
+                )
 
             }
 
@@ -6727,26 +7050,19 @@ where
             let mut equality_probe_stream_scope: Cow<'_, str> = Cow::Borrowed(table_stream_id);
 
             if matches!(source, EqualityProbeSource::ExistingIndex) {
+                
                 if let Some(index_id) = single_field_index_id(table, field_name) {
+
                     let key = vec![lookup_value.clone()];
                     let probe_profile = runtime_index_probe_profile_for_field(
                         schema,
                         Some(field_name.as_str()),
                         1,
                     );
+
                     let key_variants = runtime_lookup_key_variants_with_profile(&key, probe_profile);
-                    let scoped_state = runtime_indexes
-                        .index_for_table(table_stream_id, &index_id)
-                        .map(|state| (table_stream_id.to_string(), state))
-                        .or_else(|| {
-                            key_variants
-                                .iter()
-                                .find_map(|key_variant| {
-                                    runtime_indexes
-                                        .find_scoped_index_state_for_lookup(&index_id, key_variant)
-                                        .map(|(scope_id, state)| (scope_id.to_string(), state))
-                                })
-                        });
+                    let scoped_state =
+                        runtime_index_state_with_scope(runtime_indexes, table_stream_id, &index_id, &key_variants);
 
                     if equality_probe_runtime_state_debug_enabled() {
                         if let Some((scope_id, state)) = scoped_state.as_ref() {
@@ -6785,6 +7101,7 @@ where
                     {
                         equality_probe_stream_scope = Cow::Owned(runtime_index_scope_id.to_string());
                     }
+
                 } else if equality_probe_runtime_state_debug_enabled() {
                     log::info!(
                         "equality probe runtime state table={} field={} source=existing_index result=index_metadata_missing",
@@ -6792,6 +7109,7 @@ where
                         field_name,
                     );
                 }
+
             }
 
             if equality_probe_stream_scope.as_ref() != table.table_id {
@@ -6823,6 +7141,61 @@ where
                     equality_probe_stream_scope = Cow::Borrowed(table.table_id.as_str());
                 }
 
+                if equality_probe_stream_scope.as_ref() != table.table_id
+                    && let Some(data_dir) = wal.data_dir_path()
+                {
+                    let scoped_has_checkpoint_rows =
+                        load_live_row_checkpoint_rows(
+                            &data_dir,
+                            equality_probe_stream_scope.as_ref(),
+                            &table.table_id,
+                            schema,
+                        )
+                        .is_some();
+
+                    let scoped_has_checkpoint_count =
+                        load_live_row_count_checkpoint(
+                            &data_dir,
+                            equality_probe_stream_scope.as_ref(),
+                            &table.table_id,
+                            schema,
+                        )
+                        .is_some();
+
+                    let legacy_has_checkpoint_rows =
+                        load_live_row_checkpoint_rows(
+                            &data_dir,
+                            &table.table_id,
+                            &table.table_id,
+                            schema,
+                        )
+                        .is_some();
+
+                    let legacy_has_checkpoint_count =
+                        load_live_row_count_checkpoint(
+                            &data_dir,
+                            &table.table_id,
+                            &table.table_id,
+                            schema,
+                        )
+                        .is_some();
+
+                    if !scoped_has_checkpoint_rows
+                        && !scoped_has_checkpoint_count
+                        && (legacy_has_checkpoint_rows || legacy_has_checkpoint_count)
+                    {
+                        log::debug!(
+                            "relation equality probe table={} field={} scoped_stream={} scoped_checkpoint=false legacy_stream={} legacy_checkpoint=true -> fallback_legacy_stream",
+                            table.table_id,
+                            field_name,
+                            equality_probe_stream_scope.as_ref(),
+                            table.table_id,
+                        );
+                        equality_probe_stream_scope = Cow::Borrowed(table.table_id.as_str());
+                    }
+
+                }
+
             }
 
             log::debug!(
@@ -6836,37 +7209,43 @@ where
             );
 
             if matches!(source, EqualityProbeSource::ExistingIndex)
-                && equality_filters.len() == 1
                 && let Some(index_id) = single_field_index_id(table, field_name)
             {
+                
                 let key = vec![lookup_value.clone()];
                 let probe_profile = runtime_index_probe_profile_for_field(
                     schema,
                     Some(field_name.as_str()),
                     1,
                 );
+
                 let key_variants = runtime_lookup_key_variants_with_profile(&key, probe_profile);
 
-                let runtime_index_state_with_scope = runtime_indexes
-                    .index_for_table(table_stream_id, &index_id)
-                    .map(|state| (table_stream_id.to_string(), state))
-                    .or_else(|| {
-                        key_variants
-                            .iter()
-                            .find_map(|key_variant| {
-                                runtime_indexes
-                                    .find_scoped_index_state_for_lookup(&index_id, key_variant)
-                                    .map(|(scope_id, state)| (scope_id.to_string(), state))
-                            })
-                    });
+                let runtime_index_state_with_scope =
+                    runtime_index_state_with_scope(runtime_indexes, table_stream_id, &index_id, &key_variants);
 
                 if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
                     let key_present = key_variants
                         .iter()
                         .any(|key_variant| state.contains(key_variant));
+                    let key_shape_mismatch = table
+                        .indexes
+                        .get(&index_id)
+                        .map(|index| {
+                            let field_count = if !index.field_names.is_empty() {
+                                index.field_names.len()
+                            } else if !index.field_name.is_empty() {
+                                1
+                            } else {
+                                0
+                            };
+                            field_count != 1
+                        })
+                        .unwrap_or(false);
 
                     if !key_present
                         && !matches!(probe_profile, RuntimeIndexBtreeProbeProfile::StringLike)
+                        && !key_shape_mismatch
                     {
                         log::debug!(
                             "relation equality probe table={} field={} scope={} key_present=false reason=empty_result_no_scan",
@@ -6966,6 +7345,15 @@ where
                         }
 
                         if !candidate_rows.is_empty() {
+                            maybe_cache_equality_probe_rows_with_latest_tx_id(
+                                wal,
+                                &runtime_index_scope_id,
+                                equality_filters,
+                                &candidate_rows,
+                                wal.latest_transaction_id_if_loaded(&runtime_index_scope_id)
+                                    .map(|tx| tx.0),
+                            );
+
                             log::debug!(
                                 "relation equality probe table={} field={} scope={} row_ref_candidates=true candidate_refs={} resolved_rows={} source={}",
                                 table.table_id,
@@ -6983,17 +7371,28 @@ where
                         }
                     }
 
-                    if let Some(checkpoint_rows) =
-                        load_live_rows_by_equality_filters_from_checkpoint_with_limit(
-                            wal,
-                            &runtime_index_scope_id,
-                            &table.table_id,
-                            schema,
-                            equality_filters,
-                            row_limit,
-                        )
-                        && !checkpoint_rows.is_empty()
-                    {
+                    let mut checkpoint_scopes = vec![runtime_index_scope_id.as_str()];
+                    if runtime_index_scope_id != table.table_id {
+                        checkpoint_scopes.push(table.table_id.as_str());
+                    }
+
+                    if let Some(checkpoint_rows) = load_live_rows_by_equality_filters_from_checkpoint_for_scopes(
+                        wal,
+                        equality_filters,
+                        schema,
+                        &checkpoint_scopes,
+                        row_limit,
+                    ) {
+                        if !checkpoint_rows.is_empty() {
+                            maybe_cache_equality_probe_rows_with_latest_tx_id(
+                                wal,
+                                &runtime_index_scope_id,
+                                equality_filters,
+                                &checkpoint_rows,
+                                wal.latest_transaction_id_if_loaded(&runtime_index_scope_id)
+                                    .map(|tx| tx.0),
+                            );
+                        }
                         log::debug!(
                             "relation equality probe table={} field={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
                             table.table_id,
@@ -7005,8 +7404,18 @@ where
                     }
 
                     if runtime_index_scope_id != table.table_id
-                        && let Some(checkpoint_rows) =
-                            load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                        && key_present
+                        && candidate_row_refs.is_empty()
+                    {
+                        log::debug!(
+                            "relation equality probe table={} field={} scope={} key_present=true but row_refs_missing -> retry_legacy_stream",
+                            table.table_id,
+                            field_name,
+                            runtime_index_scope_id,
+                        );
+
+                        let legacy_rows = if equality_filters.len() > 1 {
+                            load_live_rows_by_equality_filters_with_limit(
                                 wal,
                                 &table.table_id,
                                 &table.table_id,
@@ -7014,16 +7423,21 @@ where
                                 equality_filters,
                                 row_limit,
                             )
-                        && !checkpoint_rows.is_empty()
-                    {
-                        log::debug!(
-                            "relation equality probe table={} field={} scope={} row_ref_candidates=false source=legacy_live_row_checkpoint_filter resolved_rows={}",
-                            table.table_id,
-                            field_name,
-                            runtime_index_scope_id,
-                            checkpoint_rows.len(),
-                        );
-                        return checkpoint_rows;
+                        } else {
+                            load_live_rows_by_equality_with_limit(
+                                wal,
+                                &table.table_id,
+                                &table.table_id,
+                                schema,
+                                field_name,
+                                lookup_value,
+                                row_limit,
+                            )
+                        };
+
+                        if !legacy_rows.is_empty() {
+                            return legacy_rows;
+                        }
                     }
 
                     log::debug!(
@@ -7032,7 +7446,124 @@ where
                         field_name,
                         runtime_index_scope_id,
                     );
+
+                    // Hard-exit only on durable cold streams to prevent expensive WAL hydration.
+                    // When the stream is already loaded, fall through to the generic equality path.
+                    if wal.stream_mode(&runtime_index_scope_id) == WalStreamMode::Durable
+                        && wal.latest_transaction_id_if_loaded(&runtime_index_scope_id).is_none()
+                    {
+                        return Vec::new();
+                    }
                 }
+
+                log::debug!(
+                    "relation equality probe table={} field={} index_id={} scope={} state_missing=true",
+                    table.table_id,
+                    field_name,
+                    index_id,
+                    table_stream_id,
+                );
+
+                // Index state absent from scoped clone (e.g. no postings); try checkpoint
+                // recovery on both the scoped and legacy streams before giving up.
+
+                // Check accessor cache (populated by bootstrap preloading) before checkpoint.
+                if let Some(result) = with_matching_equality_cache_entry(wal, table_stream_id, |entry| {
+                    for field_name in equality_filters.keys() {
+                        ensure_field_postings(entry, field_name);
+                    }
+                    rows_for_field_values(entry, equality_filters)
+                }) {
+                    return apply_row_limit_if_any(result, row_limit);
+                }
+
+                if table_stream_id != table.table_id
+                    && let Some(result) = with_matching_equality_cache_entry(wal, &table.table_id, |entry| {
+                        for field_name in equality_filters.keys() {
+                            ensure_field_postings(entry, field_name);
+                        }
+                        rows_for_field_values(entry, equality_filters)
+                    }) {
+                        return apply_row_limit_if_any(result, row_limit);
+                    }
+
+                // Cache check before expensive checkpoint scan; populated on first miss below.
+                if let Some(cached) = cached_equality_probe_rows(wal, table_stream_id, equality_filters) {
+                    return cached;
+                }
+
+                if let Some((checkpoint_tx_id, checkpoint_rows)) =
+                    load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                        wal,
+                        table_stream_id,
+                        &table.table_id,
+                        schema,
+                        equality_filters,
+                        row_limit,
+                    )
+                    && !checkpoint_rows.is_empty()
+                {
+                    log::debug!(
+                        "relation equality probe table={} field={} index_id={} state_missing source=scoped_checkpoint_filter resolved_rows={}",
+                        table.table_id,
+                        field_name,
+                        index_id,
+                        checkpoint_rows.len(),
+                    );
+                    maybe_cache_equality_probe_rows_with_latest_tx_id(
+                        wal,
+                        table_stream_id,
+                        equality_filters,
+                        &checkpoint_rows,
+                        Some(checkpoint_tx_id),
+                    );
+                    return checkpoint_rows;
+                }
+
+                if table_stream_id != table.table_id
+                    && let Some((checkpoint_tx_id, checkpoint_rows)) =
+                        load_live_rows_by_equality_filters_from_checkpoint_with_limit(
+                            wal,
+                            &table.table_id,
+                            &table.table_id,
+                            schema,
+                            equality_filters,
+                            row_limit,
+                        )
+                    && !checkpoint_rows.is_empty()
+                {
+                    log::debug!(
+                        "relation equality probe table={} field={} index_id={} state_missing source=legacy_checkpoint_filter resolved_rows={}",
+                        table.table_id,
+                        field_name,
+                        index_id,
+                        checkpoint_rows.len(),
+                    );
+                    maybe_cache_equality_probe_rows_with_latest_tx_id(
+                        wal,
+                        &table.table_id,
+                        equality_filters,
+                        &checkpoint_rows,
+                        Some(checkpoint_tx_id),
+                    );
+                    return checkpoint_rows;
+                }
+
+                // Only block WAL hydration when all candidate streams are durable and cold.
+                // If equality_probe_stream_scope was redirected to a loaded stream, fall through.
+                let scope_stream_loaded = wal
+                    .latest_transaction_id_if_loaded(equality_probe_stream_scope.as_ref())
+                    .is_some();
+                if !scope_stream_loaded
+                    && wal.stream_mode(table_stream_id) == WalStreamMode::Durable
+                    && wal.latest_transaction_id_if_loaded(table_stream_id).is_none()
+                    && wal.latest_transaction_id_if_loaded(&table.table_id).is_none()
+                {
+                    // When no checkpoint exists yet, fall through to primary_rows to allow
+                    // the initial cold scan which writes the checkpoint for future requests.
+                    // Only hard-exit if an unrelated TemporaryIndex plan would also have no data.
+                }
+
             }
 
             let primary_rows = if equality_filters.len() > 1 {
@@ -7294,6 +7825,96 @@ fn resolve_materialization_stream_id<'a>(
 
 }
 
+fn index_field_names_for_lookup(index: &DatabaseIndex) -> Vec<String> {
+    if !index.field_names.is_empty() {
+        index.field_names.clone()
+    } else if !index.field_name.is_empty() {
+        vec![index.field_name.clone()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn single_field_name_for_index(index: &DatabaseIndex) -> Option<&str> {
+    if index.field_names.len() == 1 {
+        Some(index.field_names[0].as_str())
+    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+        Some(index.field_name.as_str())
+    } else {
+        None
+    }
+}
+
+fn runtime_index_state_with_scope<'a>(
+    runtime_indexes: &'a RuntimeIndexStore,
+    table_stream_id: &str,
+    index_id: &str,
+    lookup_key_variants: &[Vec<Vec<u8>>],
+) -> Option<(String, &'a crate::engine::database::runtime_index::RuntimeIndexState)> {
+    runtime_indexes
+        .index_for_table(table_stream_id, index_id)
+        .map(|state| (table_stream_id.to_string(), state))
+        .or_else(|| {
+            lookup_key_variants
+                .iter()
+                .find_map(|key_variant| {
+                    runtime_indexes
+                        .find_scoped_index_state_for_lookup(index_id, key_variant)
+                        .map(|(scope_id, state)| (scope_id.to_string(), state))
+                })
+        })
+}
+
+fn equality_filters_for_index_lookup(
+    index: &DatabaseIndex,
+    lookup_key: &[Vec<u8>],
+) -> Option<HashMap<String, Vec<u8>>> {
+    let field_names = index_field_names_for_lookup(index);
+    if field_names.len() != lookup_key.len() {
+        return None;
+    }
+
+    Some(
+        field_names
+            .into_iter()
+            .zip(lookup_key.iter().cloned())
+            .collect(),
+    )
+}
+
+fn load_equality_probe_rows_for_filters(
+    wal: &ConcurrentWalManager,
+    table_id: &str,
+    schema: &TableSchema,
+    equality_filters: &HashMap<String, Vec<u8>>,
+    row_limit: Option<usize>,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+    if equality_filters.len() > 1 {
+        load_live_rows_by_equality_filters_with_limit(
+            wal,
+            table_id,
+            table_id,
+            schema,
+            equality_filters,
+            row_limit,
+        )
+    } else {
+        let Some((field_name, lookup_value)) = equality_filters.iter().next() else {
+            return Vec::new();
+        };
+
+        load_live_rows_by_equality_with_limit(
+            wal,
+            table_id,
+            table_id,
+            schema,
+            field_name,
+            lookup_value,
+            row_limit,
+        )
+    }
+}
+
 pub fn collect_indexable_equality_filters(
     condition: &SelectCondition,
     filters: &mut HashMap<String, Vec<u8>>,
@@ -7460,33 +8081,94 @@ fn choose_equality_probe_filter<T>(
 where
     T: Borrow<DatabaseTable>,
 {
+    choose_equality_probe_filter_with_runtime_hint(table, filters, None)
+}
+
+/// Estimate how many rows a single equality filter would match by consulting the
+/// runtime index for that field, when one is loaded. Returns `None` when no
+/// runtime state is available (cold/unknown), so callers can fall back to a
+/// deterministic tie-break instead of treating "no data" as "zero matches".
+fn estimate_equality_probe_candidate_count(
+    table: &DatabaseTable,
+    runtime_indexes: &RuntimeIndexStore,
+    table_scope_id: &str,
+    field_name: &str,
+    value: &[u8],
+) -> Option<usize> {
+
+    let index_id = single_field_index_id(table, field_name)?;
+    let key = vec![value.to_vec()];
+    let probe_profile = runtime_index_probe_profile_for_field(&table.schema, Some(field_name), 1);
+    let key_variants = runtime_lookup_key_variants_with_profile(&key, probe_profile);
+
+    let (_, state) = runtime_index_state_with_scope(runtime_indexes, table_scope_id, &index_id, &key_variants)?;
+
+    key_variants
+        .iter()
+        .find_map(|key_variant| {
+            let row_refs = state.row_refs_for_key(key_variant, None);
+            if row_refs.is_empty() { None } else { Some(row_refs.len()) }
+        })
+        .or(Some(0))
+
+}
+
+fn choose_equality_probe_filter_with_runtime_hint<T>(
+    table: T,
+    filters: &HashMap<String, Vec<u8>>,
+    runtime_hint: Option<(&RuntimeIndexStore, &str)>,
+) -> Option<(String, Vec<u8>, EqualityProbeSource)>
+where
+    T: Borrow<DatabaseTable>,
+{
     let table = table.borrow();
 
-    let mut selected: Option<(String, Vec<u8>, EqualityProbeSource)> = None;
+    let mut selected: Option<(String, Vec<u8>, EqualityProbeSource, Option<usize>)> = None;
 
     for (field_name, lookup_value) in filters {
-        
+
         let source = if field_has_single_column_index(table, field_name) {
             EqualityProbeSource::ExistingIndex
         } else {
             EqualityProbeSource::TemporaryIndex
         };
 
-        let should_replace = selected.as_ref().is_none_or(|(best_field_name, _, best_source)| {
-            matches!(source, EqualityProbeSource::ExistingIndex)
-                && matches!(best_source, EqualityProbeSource::TemporaryIndex)
-                || (matches!(source, EqualityProbeSource::ExistingIndex)
-                    == matches!(best_source, EqualityProbeSource::ExistingIndex)
-                    && field_name < best_field_name)
+        let candidate_count = runtime_hint.and_then(|(runtime_indexes, table_scope_id)| {
+            estimate_equality_probe_candidate_count(
+                table,
+                runtime_indexes,
+                table_scope_id,
+                field_name,
+                lookup_value,
+            )
         });
 
+        let should_replace = match &selected {
+            None => true,
+            Some((best_field_name, _, best_source, best_count)) => {
+                let source_is_existing = matches!(source, EqualityProbeSource::ExistingIndex);
+                let best_is_existing = matches!(best_source, EqualityProbeSource::ExistingIndex);
+
+                if source_is_existing != best_is_existing {
+                    // Prefer any candidate backed by an existing index over one that
+                    // would require building a temporary index.
+                    source_is_existing
+                } else {
+                    match (candidate_count, *best_count) {
+                        (Some(count), Some(best_count)) if count != best_count => count < best_count,
+                        _ => field_name < best_field_name,
+                    }
+                }
+            }
+        };
+
         if should_replace {
-            selected = Some((field_name.clone(), lookup_value.clone(), source));
+            selected = Some((field_name.clone(), lookup_value.clone(), source, candidate_count));
         }
 
     }
 
-    selected
+    selected.map(|(field_name, lookup_value, source, _)| (field_name, lookup_value, source))
 }
 
 

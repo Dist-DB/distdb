@@ -2901,6 +2901,58 @@ fn execute_joined_select_plan_returns_explain_rows_when_requested() {
 }
 
 #[test]
+fn execute_relation_select_plan_returns_explain_rows_without_materializing_rows() {
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let places_schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("places", places_schema)
+        .expect("places table should register");
+
+    let table = catalog.table("places").expect("places table should exist");
+    let read_plan = parse_select_read_plan_from_statement(
+        "explain select * from places where uid=4980768",
+    )
+    .expect("explain relation plan should parse");
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::RuntimeIndexLookup {
+            index_id: table
+                .indexes
+                .values()
+                .find(|index| index.is_primary_key())
+                .expect("primary key index should exist")
+                .index_id
+                .0
+                .clone(),
+            lookup_key: vec![4980768_u64.to_le_bytes().to_vec()],
+        },
+    };
+
+    let result = execute_relation_select_plan(
+        &ConcurrentWalManager::in_memory(),
+        &table,
+        &table.schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_inbuilt_for_test,
+        &mut |_, _| Ok(true),
+    )
+    .expect("explain relation plan should succeed");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.columns[0].field_name, "table");
+    assert_eq!(result.rows[0][1], b"index_lookup_then_scan".to_vec());
+}
+
+#[test]
 fn explain_select_plan_lists_indexed_equality_filters_for_equality_probe() {
     let runtime_indexes = RuntimeIndexStore::new();
     let mut catalog =

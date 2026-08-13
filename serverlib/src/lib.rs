@@ -37,6 +37,8 @@
 
 #![allow(dead_code)]
 #![allow(unused_imports)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
 
 pub mod core;
 pub mod engine;
@@ -144,7 +146,8 @@ pub use engine::execution::{
 	field_has_single_column_index, join_condition_field_names, join_condition_matches_provider,
 	apply_limit_by_rows, apply_percent_rows, apply_with_ties_rows,
 	load_live_row_count, load_live_rows, load_live_rows_with_context, warm_equality_cache_from_live_rows, 
-	materialize_relation_rows, materialize_relation_rows_with_limit, plan_relation_access, relation_qualifier,
+	materialize_relation_rows, materialize_relation_rows_with_limit, plan_relation_access,
+	plan_relation_access_with_runtime_hint, relation_qualifier,
 	snapshot_equality_cache, restore_equality_cache_from_snapshot, EqualityTableCacheSnapshot,
 	apply_equality_cache_row_mutation, apply_equality_cache_row_mutation_batch,
 	row_matches_condition_with, row_matches_select_condition, ConditionValueProvider,

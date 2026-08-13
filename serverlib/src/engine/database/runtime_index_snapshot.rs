@@ -129,6 +129,101 @@ mod tests {
 
         let _ = fs::remove_dir_all(data_dir);
     }
+
+    #[test]
+    fn save_and_load_snapshot_preserves_all_row_refs_for_duplicate_non_unique_key() {
+        let data_dir = make_temp_data_dir();
+        let table_stream_id = "places";
+
+        // Fake WAL file so wal_stream_fingerprint() has something stable to read.
+        let wal_path = RuntimeIndexSnapshotService::wal_stream_path(&data_dir, table_stream_id);
+        fs::create_dir_all(wal_path.parent().expect("wal path has parent"))
+            .expect("create wal parent dir");
+        fs::write(&wal_path, b"fake-wal-bytes").expect("write fake wal file");
+        let wal_fingerprint =
+            RuntimeIndexSnapshotService::wal_stream_fingerprint(&data_dir, table_stream_id);
+
+        let schema = TableSchema::new(vec![
+            crate::FieldDef {
+                field_name: "id".to_string(),
+                seqno: 1,
+                field_type: crate::FieldType::UInt(64),
+                indexed: crate::FieldIndex::PrimaryKey,
+                nullable: false,
+                default_value: None,
+                metadata: None,
+            },
+            crate::FieldDef {
+                field_name: "display_name".to_string(),
+                seqno: 2,
+                field_type: crate::FieldType::Text,
+                indexed: crate::FieldIndex::Indexed,
+                nullable: false,
+                default_value: None,
+                metadata: None,
+            },
+        ]);
+
+        let index = DatabaseIndex::from_table_fields(
+            table_stream_id,
+            crate::DatabaseIndexKind::Indexed,
+            vec!["display_name".to_string()],
+        );
+
+        let mut indexes = HashMap::new();
+        indexes.insert(index.index_id.0.clone(), index.clone());
+
+        let table = DatabaseTable::new(table_stream_id.to_string(), schema, indexes);
+
+        let cologne_key = vec![b"Cologne".to_vec()];
+        let snapshot_index = RuntimeIndexSnapshotIndex {
+            index_id: index.index_id.0.clone(),
+            entries: vec![cologne_key.clone()],
+            row_refs_by_entry: Vec::new(),
+            row_refs: (1..=10u64)
+                .map(|row_ref| (cologne_key.clone(), row_ref))
+                .collect(),
+        };
+
+        RuntimeIndexSnapshotService::save_runtime_index_snapshot(
+            &data_dir,
+            &table,
+            table_stream_id,
+            100,
+            10,
+            wal_fingerprint,
+            vec![snapshot_index],
+        )
+        .expect("save runtime index snapshot");
+
+        let loaded = RuntimeIndexSnapshotService::load_runtime_index_snapshot(
+            &data_dir,
+            &table,
+            table_stream_id,
+            std::slice::from_ref(&index),
+            wal_fingerprint,
+        )
+        .expect("load runtime index snapshot");
+
+        let restored_index = loaded
+            .snapshot
+            .indexes
+            .iter()
+            .find(|snapshot_index| snapshot_index.index_id == index.index_id.0)
+            .expect("display_name index present in restored snapshot");
+
+        let mut restored_refs = restored_index
+            .row_refs
+            .iter()
+            .filter(|(key, _)| key == &cologne_key)
+            .map(|(_, row_ref)| *row_ref)
+            .collect::<Vec<_>>();
+        restored_refs.sort_unstable();
+
+        assert_eq!(restored_refs, (1..=10u64).collect::<Vec<_>>());
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
 }
 use common::helpers::io::{read_bytes, write_bytes_atomic};
 use flate2::Compression;
@@ -143,8 +238,8 @@ use crate::{
     snapshot_equality_cache,
 };
 
-const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtix";
-const RUNTIME_INDEX_SNAPSHOT_CHUNK_FILE_STEM_PREFIX: &str = "rtixc";
+const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtixp2";
+const RUNTIME_INDEX_SNAPSHOT_CHUNK_FILE_STEM_PREFIX: &str = "rtixpc2";
 const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
 const LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrcnt";
 const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";
@@ -841,11 +936,14 @@ impl RuntimeIndexSnapshotService {
                 continue;
             }
 
-            let row_refs_lookup = index
-                .row_refs
-                .iter()
-                .map(|(key, row_ref)| (key.clone(), *row_ref))
-                .collect::<HashMap<_, _>>();
+            // Group by key rather than collecting straight into a map: a
+            // non-unique index can have multiple row refs sharing the same
+            // key, and a plain key->row_ref map would silently keep only the
+            // last row ref seen for each duplicate key.
+            let mut row_refs_lookup: HashMap<Vec<Vec<u8>>, Vec<u64>> = HashMap::new();
+            for (key, row_ref) in &index.row_refs {
+                row_refs_lookup.entry(key.clone()).or_default().push(*row_ref);
+            }
 
             for (chunk_seq, entry_chunk) in index.entries.chunks(max_entries_per_chunk).enumerate() {
                 let entries = entry_chunk.to_vec();
@@ -863,11 +961,13 @@ impl RuntimeIndexSnapshotService {
                 } else {
                     entries
                         .iter()
-                        .filter_map(|entry| {
+                        .flat_map(|entry| {
                             row_refs_lookup
                                 .get(entry)
-                                .copied()
-                                .map(|row_ref| (entry.clone(), row_ref))
+                                .into_iter()
+                                .flat_map(move |refs| {
+                                    refs.iter().map(move |row_ref| (entry.clone(), *row_ref))
+                                })
                         })
                         .collect::<Vec<_>>()
                 };
@@ -1156,7 +1256,7 @@ impl RuntimeIndexSnapshotService {
     fn runtime_index_snapshot_chunk_path(data_dir: &Path, file_name: &str) -> PathBuf {
         data_dir
             .join("runtime-index")
-            .join(FileKind::Entity.file_name(file_name.to_string()))
+            .join(FileKind::Entity.file_name(file_name))
     }
 
     fn remove_runtime_index_snapshot_chunk_files(data_dir: &Path, table_stream_id: &str) {

@@ -212,7 +212,6 @@ pub enum WalStreamMode {
     Ephemeral,
 }
 
-#[expect(clippy::large_enum_variant, reason="WalCommand variants are small enough to be efficient, and we want to avoid heap allocations for the enum itself")]
 #[derive(Debug)]
 enum WalCommand {
     Append {

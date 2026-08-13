@@ -139,6 +139,34 @@ fn users_filter_condition() -> SelectCondition {
 }
 
 #[test]
+fn case_insensitive_string_like_uses_index_when_available() {
+    let mut rows_by_id = AHashMap::new();
+    rows_by_id.insert(1, HashMap::from([("email".to_string(), b"Sam@Example.com".to_vec())]));
+    rows_by_id.insert(2, HashMap::from([("email".to_string(), b"alex@example.com".to_vec())]));
+
+    let mut string_index_ci_by_field = AHashMap::new();
+    let mut index = TPHashSet::new();
+    index.insert("sam@example.com".to_string(), vec![1]);
+    index.insert("alex@example.com".to_string(), vec![2]);
+    string_index_ci_by_field.insert("email".to_string(), index);
+
+    let entry = EqualityTableCacheEntry {
+        latest_tx_id: 42,
+        rows_by_id,
+        approx_rows_bytes: 0,
+        row_ids_by_field_value: AHashMap::new(),
+        string_index_by_field: AHashMap::new(),
+        string_index_ci_by_field,
+        range_row_ids_cache: AHashMap::new(),
+    };
+
+    let rows = rows_for_field_string_like_case_insensitive_indexed(&entry, "email", b"%@example.com");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|(row_id, _)| *row_id == 1));
+    assert!(rows.iter().any(|(row_id, _)| *row_id == 2));
+}
+
+#[test]
 fn collect_indexable_equality_filters_rejects_or() {
 
     let condition = SelectCondition::Or(vec![
@@ -328,6 +356,48 @@ fn durable_scoped_equality_fallback_to_legacy_stream_avoids_wal_hydration() {
         wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
         "legacy stream should remain cold during scoped fallback when checkpoints are available",
     );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
+fn durable_existing_index_equality_without_runtime_state_falls_through_to_cold_scan() {
+
+    let data_dir = unique_temp_dir("access-existing-index-no-runtime-state");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &table,
+        &schema,
+        &RuntimeIndexStore::new(),
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::ExistingIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    // When no checkpoint exists and the state is missing, the path falls through
+    // to a cold scan so the first request populates the checkpoint for future use.
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
 
     let _ = fs::remove_dir_all(&data_dir);
 
@@ -652,6 +722,78 @@ fn durable_scoped_equality_probe_key_present_without_row_refs_recovers_from_lega
 }
 
 #[test]
+fn durable_scoped_equality_probe_without_scoped_checkpoint_prefers_legacy_checkpoint_stream() {
+
+    let data_dir = unique_temp_dir("access-durable-scoped-no-checkpoint-prefers-legacy");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(&table.table_id)
+        .map(|tx| tx.0)
+        .expect("latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        &table.table_id,
+    )
+    .expect("wal fingerprint should exist");
+
+    let live_rows = load_live_rows(&wal_writer, &table.table_id, &table.table_id, &schema);
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        &table.table_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &live_rows,
+    )
+    .expect("legacy live-row checkpoint should save");
+
+    let mut relation_with_scoped_stream = table.clone();
+    relation_with_scoped_stream.entity_id = "scope:checkpoint:users".to_string();
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &relation_with_scoped_stream,
+        &schema,
+        &RuntimeIndexStore::new(),
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::TemporaryIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+    assert!(
+        wal_cold
+            .latest_transaction_id_if_loaded(relation_with_scoped_stream.entity_id.as_str())
+            .is_none(),
+        "scoped stream should not hydrate when legacy checkpoint fallback is used",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn durable_large_without_live_row_checkpoint_prefers_filtered_scan_without_hydration() {
 
     let data_dir = unique_temp_dir("access-large-no-live-row-checkpoint");
@@ -744,6 +886,105 @@ fn durable_cold_without_checkpoints_prefers_filtered_scan_without_hydration() {
         wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
         "cold durable equality probe without checkpoints should avoid full WAL hydration",
     );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
+fn planner_cache_uses_equality_probe_hits_before_runtime_index_materialization() {
+
+    let data_dir = unique_temp_dir("access-planner-cache");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+    let email_index = table.indexes.values().find(|index| index.field_names == vec!["email".to_string()]).cloned().expect("email index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &email_index.index_id.0);
+    state.index = Some(email_index.clone());
+    state.insert_with_row_ref(vec![b"sam@example.com".to_vec()], Some(1));
+
+    let wal = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let hydrated_latest_tx = wal.latest_transaction_id(&table.table_id);
+    assert!(hydrated_latest_tx.is_some());
+    assert!(wal.latest_transaction_id_if_loaded(&table.table_id).is_some());
+
+    let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+    let latest_tx_id = wal.latest_transaction_id_if_loaded(&table.table_id).map(|tx| tx.0).unwrap_or(1);
+
+    maybe_cache_equality_probe_rows_with_latest_tx_id(
+        &wal,
+        &table.table_id,
+        &filters,
+        &[(1, HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]))],
+        Some(latest_tx_id),
+    );
+
+    let rows = planner_cached_rows_for_access_plan(
+        &wal,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::RuntimeIndexLookup {
+                index_id: email_index.index_id.0.clone(),
+                lookup_key: vec![b"sam@example.com".to_vec()],
+            },
+        },
+        Some(10),
+    );
+
+    assert_eq!(rows.as_ref().map(Vec::len), Some(1));
+    assert_eq!(rows.unwrap()[0].0, 1);
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
+fn runtime_index_lookup_populates_equality_probe_result_cache() {
+
+    let data_dir = unique_temp_dir("access-runtime-index-cache");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+    let email_index = table.indexes.values().find(|index| index.field_names == vec!["email".to_string()]).cloned().expect("email index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &email_index.index_id.0);
+    state.index = Some(email_index.clone());
+    state.insert_with_row_ref(vec![b"sam@example.com".to_vec()], Some(1));
+
+    let wal = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
+
+    let rows = materialize_relation_rows_with_limit(
+        &wal,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::RuntimeIndexLookup {
+                index_id: email_index.index_id.0.clone(),
+                lookup_key: vec![b"sam@example.com".to_vec()],
+            },
+        },
+        Some(10),
+    );
+
+    assert_eq!(rows.len(), 1);
+    let cached = cached_equality_probe_rows(&wal, &table.table_id, &filters);
+    assert!(cached.is_some(), "runtime index lookup should populate equality probe result cache");
+    assert_eq!(cached.unwrap().len(), 1);
 
     let _ = fs::remove_dir_all(&data_dir);
 
@@ -1168,6 +1409,111 @@ fn plan_relation_access_prefers_equality_probe_for_multi_filter_non_unique_index
     assert_eq!(equality_filters.len(), 2);
     assert_eq!(equality_filters.get("display_name"), Some(&b"Cologne".to_vec()));
     assert_eq!(equality_filters.get("country_code"), Some(&b"GM".to_vec()));
+}
+
+#[test]
+fn plan_relation_access_with_runtime_hint_prefers_more_selective_multi_filter_field() {
+    let schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("display_name", 2, FieldType::Text, FieldIndex::Indexed, false),
+        ("country_code", 3, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+    let table = catalog.table("places").expect("places table should exist");
+
+    let display_name_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["display_name".to_string()])
+        .cloned()
+        .expect("display_name index should exist");
+    let country_code_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["country_code".to_string()])
+        .cloned()
+        .expect("country_code index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+
+    // country_code='US' matches many rows (low selectivity).
+    let country_code_state =
+        runtime_indexes.index_mut_for_table(&table.table_id, &country_code_index.index_id.0);
+    country_code_state.index = Some(country_code_index.clone());
+    for row_ref in 1..=50u64 {
+        country_code_state.insert_with_row_ref(vec![b"US".to_vec()], Some(row_ref));
+    }
+
+    // display_name='Cologne' matches a single row (high selectivity).
+    let display_name_state =
+        runtime_indexes.index_mut_for_table(&table.table_id, &display_name_index.index_id.0);
+    display_name_state.index = Some(display_name_index.clone());
+    display_name_state.insert_with_row_ref(vec![b"Cologne".to_vec()], Some(4976506));
+
+    let plan = plan_relation_access_with_runtime_hint(
+        &table,
+        true,
+        HashMap::from([
+            ("display_name".to_string(), b"Cologne".to_vec()),
+            ("country_code".to_string(), b"US".to_vec()),
+        ]),
+        None,
+        Vec::new(),
+        None,
+        Some((&runtime_indexes, table.table_id.as_str())),
+    );
+
+    let RelationAccessStrategy::EqualityProbe { field_name, .. } = plan.strategy else {
+        panic!("expected equality probe plan, got {:?}", plan.strategy);
+    };
+
+    assert_eq!(
+        field_name, "display_name",
+        "planner should prefer the more selective field over the alphabetically-first one",
+    );
+}
+
+#[test]
+fn runtime_index_equality_count_uses_posting_cardinality() {
+    let schema = table_schema(vec![
+        ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("country_code", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    catalog
+        .register_table("places", schema)
+        .expect("places table should register");
+    let table = catalog.table("places").expect("places table should exist");
+    let country_code_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["country_code".to_string()])
+        .cloned()
+        .expect("country_code index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &country_code_index.index_id.0);
+    state.index = Some(country_code_index);
+    state.insert_with_row_ref(vec![b"US".to_vec()], Some(101));
+    state.insert_with_row_ref(vec![b"US".to_vec()], Some(202));
+
+    assert_eq!(
+        count_runtime_index_equality_probe_rows(
+            &runtime_indexes,
+            &table,
+            &table.table_id,
+            "country_code",
+            b"US",
+        ),
+        Some(2),
+    );
 }
 
 #[test]
