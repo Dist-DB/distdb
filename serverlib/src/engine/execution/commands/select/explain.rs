@@ -202,7 +202,7 @@ fn explain_runtime_index_lookup_summary<'a>(
     table_scope_id: &str,
     index_id: &str,
     lookup_key: &[Vec<u8>],
-) -> (Option<&'a crate::engine::database::runtime_index::RuntimeIndexState>, bool, usize) {
+) -> (Option<&'a crate::engine::database::indexing::runtime_index::RuntimeIndexState>, bool, usize) {
     let key_variants = runtime_lookup_key_variants(lookup_key);
 
     let state = runtime_indexes

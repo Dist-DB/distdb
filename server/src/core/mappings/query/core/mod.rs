@@ -27,7 +27,7 @@ use serverlib::engine::database::inbuilt::{
     with_inbuilt_sql_runtime_context,
     InbuiltSqlRuntimeContext,
 };
-use serverlib::engine::database::runtime_index::derived_indexes_for_table;
+use serverlib::engine::database::indexing::runtime_index::derived_indexes_for_table;
 use serverlib::engine::database::transaction::TransactionLog;
 use serverlib::{
     AlterTableChangeOp, ConcurrentWalManager, DatabaseCatalog, DatabaseId, DatabaseObjectType,

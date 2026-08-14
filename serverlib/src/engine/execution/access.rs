@@ -9,16 +9,16 @@ use ahash::{AHashMap, AHashSet};
 use common::helpers::tphashset::TPHashSet;
 
 use crate::engine::database::transaction::TransactionLog;
-use crate::engine::database::runtime_index::{
+use crate::engine::database::indexing::runtime_index::{
     derived_indexes_for_table,
     load_live_row_count_checkpoint,
     load_live_row_checkpoint_rows,
 };
-use crate::engine::database::runtime_index_key_codec::{
+use crate::engine::database::indexing::runtime_index_key_codec::{
     RuntimeIndexKeyStrategy,
     runtime_index_string_probe_variants,
 };
-use crate::engine::database::runtime_index_snapshot::RuntimeIndexSnapshotService;
+use crate::engine::database::indexing::runtime_index_snapshot::RuntimeIndexSnapshotService;
 use crate::engine::database::row_payload::{
     RowPayloadSchemaCache,
     decode_row_field_value_with_schema_cache,
@@ -7210,8 +7210,8 @@ where
 
                 if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
                     let key_present = key_variants
-                        .first()
-                        .is_some_and(|key_variant| state.contains(key_variant));
+                        .iter()
+                        .any(|key_variant| state.contains(key_variant));
                     let key_shape_mismatch = table
                         .indexes
                         .get(&index_id)
@@ -7755,7 +7755,7 @@ fn runtime_index_state_with_scope<'a>(
     table_stream_id: &str,
     index_id: &str,
     lookup_key_variants: &[Vec<Vec<u8>>],
-) -> Option<(String, &'a crate::engine::database::runtime_index::RuntimeIndexState)> {
+) -> Option<(String, &'a crate::engine::database::indexing::runtime_index::RuntimeIndexState)> {
     runtime_indexes
         .index_for_table(table_stream_id, index_id)
         .map(|state| (table_stream_id.to_string(), state))

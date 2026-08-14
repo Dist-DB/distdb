@@ -8,6 +8,36 @@ pub enum RuntimeIndexKeyStrategy {
     Binary,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeIndexNumericKind {
+    Signed,
+    Unsigned,
+}
+
+pub fn numeric_gate_depth(bit_width: usize) -> usize {
+    bit_width.saturating_sub(8).div_ceil(8)
+}
+
+pub fn numeric_gate_prefix(value: &[u8], kind: RuntimeIndexNumericKind, bit_width: usize) -> Option<Vec<u8>> {
+    let sortable = encode_sortable_numeric(value, kind)?;
+    let byte_width = bit_width.div_ceil(8).min(sortable.len());
+    let depth = numeric_gate_depth(bit_width).min(byte_width);
+    Some(sortable[..depth].to_vec())
+}
+
+pub fn encode_sortable_numeric(value: &[u8], kind: RuntimeIndexNumericKind) -> Option<Vec<u8>> {
+    match kind {
+        RuntimeIndexNumericKind::Signed => {
+            let value = std::str::from_utf8(value).ok()?.parse::<i64>().ok()?;
+            Some(((value as u64) ^ (1u64 << 63)).to_be_bytes().to_vec())
+        }
+        RuntimeIndexNumericKind::Unsigned => {
+            let value = std::str::from_utf8(value).ok()?.parse::<u64>().ok()?;
+            Some(value.to_be_bytes().to_vec())
+        }
+    }
+}
+
 impl RuntimeIndexKeyStrategy {
 
     pub fn for_field_kind(field_kind: &FieldKind, case_insensitive: bool) -> Self {
@@ -97,67 +127,5 @@ pub fn decode_runtime_index_entry_key(key: &[u8]) -> Option<Vec<Vec<u8>>> {
 }
 
 #[cfg(test)]
-mod tests {
-    
-    use common::schema::FieldKind;
-
-    use super::{
-        normalize_runtime_index_string_key, runtime_index_string_page_head,
-        runtime_index_string_probe_variants, RuntimeIndexKeyStrategy,
-    };
-
-    #[test]
-    fn runtime_index_string_key_normalization_is_ascii_case_insensitive() {
-        let value = b"Alpha-42";
-        let normalized = normalize_runtime_index_string_key(value, true);
-
-        assert_eq!(normalized, b"alpha-42");
-    }
-
-    #[test]
-    fn runtime_index_string_page_head_uses_normalized_prefix_only() {
-        let head = runtime_index_string_page_head(b"Alpha-42", 5, true);
-        assert_eq!(head, b"alpha");
-    }
-
-    #[test]
-    fn runtime_index_key_strategy_matches_field_kind_family() {
-        
-        assert_eq!(
-            RuntimeIndexKeyStrategy::for_field_kind(&FieldKind::Text, true),
-            RuntimeIndexKeyStrategy::String { case_insensitive: true }
-        );
-        
-        assert_eq!(
-            RuntimeIndexKeyStrategy::for_field_kind(&FieldKind::Int(64), false),
-            RuntimeIndexKeyStrategy::Numeric
-        );
-        
-        assert_eq!(
-            RuntimeIndexKeyStrategy::for_field_kind(&FieldKind::DateTime, false),
-            RuntimeIndexKeyStrategy::DateTime
-        );
-
-    }
-
-    #[test]
-    fn runtime_index_numeric_and_datetime_page_heads_are_stable() {
-
-        let numeric = RuntimeIndexKeyStrategy::Numeric.page_head(b"123456", 3);
-        let datetime = RuntimeIndexKeyStrategy::DateTime.page_head(b"2026-08-12 15:31:00", 4);
-
-        assert_eq!(numeric, b"123");
-        assert_eq!(datetime, b"2026");
-
-    }
-
-    #[test]
-    fn runtime_index_string_probe_variants_include_normalized_prefix_heads() {
-
-        let variants = runtime_index_string_probe_variants(b"Alpha-42", true);
-
-        assert!(variants.iter().any(|value| value == b"alpha-42"));
-        assert!(variants.iter().any(|value| value == b"alpha"));
-
-    }
-}
+#[path = "runtime_index_key_codec_test.rs"]
+mod tests;

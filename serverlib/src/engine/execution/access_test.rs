@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 
 use super::*;
-use crate::engine::database::runtime_index_snapshot::RuntimeIndexSnapshotService;
+use crate::engine::database::indexing::runtime_index_snapshot::RuntimeIndexSnapshotService;
 use crate::engine::database::transaction::TransactionLog;
 use crate::{
     DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin,

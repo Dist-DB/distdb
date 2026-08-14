@@ -165,6 +165,29 @@ fn runtime_index_postings_cross_fixed_page_boundary_without_losing_order() {
 }
 
 #[test]
+fn runtime_index_numeric_keys_follow_numeric_range_order() {
+    let mut state = RuntimeIndexState::new();
+    state.set_numeric_kind(Some(RuntimeIndexNumericKind::Unsigned));
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "regions",
+        DatabaseIndexKind::Indexed,
+        vec!["id_parent".to_string()],
+    ));
+
+    for (value, row_ref) in [(b"2".to_vec(), 2), (b"256".to_vec(), 256), (b"1024".to_vec(), 1024)] {
+        state.insert_with_row_ref(vec![value], Some(row_ref));
+    }
+
+    let refs = state.row_refs_for_key_range(
+        Some(&RuntimeIndexRangeBound { key: vec![b"2".to_vec()], inclusive: true }),
+        Some(&RuntimeIndexRangeBound { key: vec![b"256".to_vec()], inclusive: true }),
+        None,
+    );
+
+    assert_eq!(refs, vec![2, 256]);
+}
+
+#[test]
 fn parsed_allowlist_entries_are_trimmed_normalized_and_deduplicated() {
 
     let entries = parse_runtime_index_allowlist_entries(" User_Id , email, , USER_id , tenant_id ");

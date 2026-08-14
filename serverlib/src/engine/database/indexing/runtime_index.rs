@@ -12,21 +12,25 @@ use std::time::Instant;
 use super::runtime_index_key_codec::{
     decode_runtime_index_entry_key,
     encode_runtime_index_entry_key,
+    encode_sortable_numeric,
+    RuntimeIndexNumericKind,
+    normalize_runtime_index_string_key,
 };
 use super::runtime_index_snapshot::{
     RuntimeIndexSnapshotIndex,
     RuntimeIndexSnapshotService,
     RuntimeIndexTableSnapshot,
 };
-use super::table::DatabaseTable;
+use super::runtime_indexors::DatatypeIndexor;
+use super::super::table::DatabaseTable;
 use crate::engine::execution::access::{
     load_live_rows_in_place,
     warm_string_like_cache_for_fields,
 };
 use crate::{
     restore_equality_cache_from_snapshot,
-    warm_equality_cache_from_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex, DatabaseIndexOrigin,
-    TransactionKind,
+    warm_equality_cache_from_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex,
+    DatabaseIndexOrigin, FieldKind, FieldType, TableSchema, TransactionKind,
 };
 
 const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: usize = 1_000_000;
@@ -212,6 +216,22 @@ fn runtime_index_background_prewarm_skipped_accessors() -> bool {
 
 }
 
+fn numeric_kind_for_index(index: &DatabaseIndex, schema: &TableSchema) -> Option<RuntimeIndexNumericKind> {
+    let field_name = if index.field_names.len() == 1 {
+        index.field_names.first()?
+    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+        &index.field_name
+    } else {
+        return None;
+    };
+
+    match schema.field(field_name)?.field_type {
+        FieldType::Int(_) => Some(RuntimeIndexNumericKind::Signed),
+        FieldType::UInt(_) => Some(RuntimeIndexNumericKind::Unsigned),
+        _ => None,
+    }
+}
+
 fn runtime_index_bootstrap_live_row_checkpoint_max_rows() -> usize {
 
     std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS")
@@ -313,6 +333,8 @@ fn spawn_background_accessor_prewarm_from_checkpoint(
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
+    numeric_kind: Option<RuntimeIndexNumericKind>,
+    string_case_insensitive: bool,
     entries: AHashMap<Vec<u8>, Option<NonZeroU64>>,
     non_unique_row_refs: AHashMap<Vec<u8>, PostingPages>,
     ordered_entry_keys: BTreeSet<Vec<u8>>,
@@ -534,8 +556,35 @@ impl RuntimeIndexState {
         Self::default()
     }
 
+    pub fn set_numeric_kind(&mut self, numeric_kind: Option<RuntimeIndexNumericKind>) {
+        self.numeric_kind = numeric_kind;
+    }
+
+    pub fn set_string_case_insensitive(&mut self, enabled: bool) {
+        self.string_case_insensitive = enabled;
+    }
+
+    fn encode_key(&self, key: &[Vec<u8>]) -> Option<Vec<u8>> {
+        let key = if self.string_case_insensitive {
+            key.iter()
+                .map(|value| normalize_runtime_index_string_key(value, true))
+                .collect::<Vec<_>>()
+        } else {
+            key.to_vec()
+        };
+
+        if key.len() == 1
+            && let Some(numeric_kind) = self.numeric_kind
+            && let Some(value) = encode_sortable_numeric(&key[0], numeric_kind)
+        {
+            return encode_runtime_index_entry_key(&[value]);
+        }
+
+        encode_runtime_index_entry_key(&key)
+    }
+
     pub fn contains(&self, pk_val: &[Vec<u8>]) -> bool {
-        encode_runtime_index_entry_key(pk_val)
+        self.encode_key(pk_val)
             .as_ref()
             .is_some_and(|encoded| self.entries.contains_key(encoded))
     }
@@ -545,7 +594,7 @@ impl RuntimeIndexState {
     }
 
     pub fn insert_with_row_ref(&mut self, pk_val: Vec<Vec<u8>>, row_ref: Option<u64>) {
-        let Some(encoded_key) = encode_runtime_index_entry_key(&pk_val) else {
+        let Some(encoded_key) = self.encode_key(&pk_val) else {
             return;
         };
 
@@ -577,7 +626,7 @@ impl RuntimeIndexState {
     }
 
     pub fn remove_with_row_ref(&mut self, pk_val: &[Vec<u8>], row_ref: Option<u64>) {
-        if let Some(encoded_key) = encode_runtime_index_entry_key(pk_val) {
+        if let Some(encoded_key) = self.encode_key(pk_val) {
             let is_unique_key = self
                 .index
                 .as_ref()
@@ -623,7 +672,7 @@ impl RuntimeIndexState {
         self.entries = entries
             .into_iter()
             .filter_map(|key| {
-                let encoded = encode_runtime_index_entry_key(&key)?;
+                let encoded = self.encode_key(&key)?;
                 self.ordered_entry_keys.insert(encoded.clone());
                 Some((encoded, None))
             })
@@ -647,7 +696,7 @@ impl RuntimeIndexState {
         self.entries = entries
             .into_iter()
             .filter_map(|key| {
-                let encoded = encode_runtime_index_entry_key(&key)?;
+                let encoded = self.encode_key(&key)?;
                 self.ordered_entry_keys.insert(encoded.clone());
                 let stored_row_ref = if is_unique_key {
                     row_refs
@@ -666,7 +715,7 @@ impl RuntimeIndexState {
             // Multiple rows can legitimately share the same non-unique key; keep
             // every row ref instead of collapsing to a single entry per key.
             for (key, refs) in row_refs {
-                let Some(encoded) = encode_runtime_index_entry_key(&key) else {
+                let Some(encoded) = self.encode_key(&key) else {
                     continue;
                 };
                 for row_ref in refs {
@@ -681,13 +730,13 @@ impl RuntimeIndexState {
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
-        let encoded_key = encode_runtime_index_entry_key(pk_val)?;
+        let encoded_key = self.encode_key(pk_val)?;
         unpack_row_ref(self.entries.get(&encoded_key).copied().flatten())
     }
 
     pub fn row_refs_for_key(&self, pk_val: &[Vec<u8>], limit: Option<usize>) -> Vec<u64> {
 
-        let Some(encoded_key) = encode_runtime_index_entry_key(pk_val) else {
+        let Some(encoded_key) = self.encode_key(pk_val) else {
             return Vec::new();
         };
 
@@ -707,7 +756,7 @@ impl RuntimeIndexState {
     }
 
     pub fn row_ref_count_for_key(&self, pk_val: &[Vec<u8>]) -> Option<usize> {
-        let encoded_key = encode_runtime_index_entry_key(pk_val)?;
+        let encoded_key = self.encode_key(pk_val)?;
 
         if self.entries.get(&encoded_key).copied().flatten().is_some() {
             return Some(1);
@@ -728,7 +777,7 @@ impl RuntimeIndexState {
 
         let lower = match lower {
             Some(bound) => {
-                let Some(encoded) = encode_runtime_index_entry_key(&bound.key) else {
+                let Some(encoded) = self.encode_key(&bound.key) else {
                     return Vec::new();
                 };
 
@@ -744,7 +793,7 @@ impl RuntimeIndexState {
         let upper = match upper {
 
             Some(bound) => {
-                let Some(encoded) = encode_runtime_index_entry_key(&bound.key) else {
+                let Some(encoded) = self.encode_key(&bound.key) else {
                     return Vec::new();
                 };
 
@@ -829,7 +878,7 @@ impl RuntimeIndexState {
         let mut seen_keys = AHashSet::<Vec<u8>>::new();
 
         for (probe_idx, probe_key) in probe_keys.iter().enumerate() {
-            let Some(encoded_probe_key) = encode_runtime_index_entry_key(probe_key) else {
+            let Some(encoded_probe_key) = self.encode_key(probe_key) else {
                 continue;
             };
 
@@ -1003,13 +1052,13 @@ impl RuntimeIndexState {
         let mut encoded_keys: HashSet<Vec<u8>> = HashSet::new();
 
         for raw_value in raw_values {
-            if let Some(encoded) = encode_runtime_index_entry_key(std::slice::from_ref(raw_value)) {
+            if let Some(encoded) = self.encode_key(std::slice::from_ref(raw_value)) {
                 encoded_keys.insert(encoded);
             }
 
             let rendered = crate::render_stored_field_value(raw_value);
             if &rendered != raw_value
-                && let Some(encoded) = encode_runtime_index_entry_key(&[rendered])
+                && let Some(encoded) = self.encode_key(&[rendered])
             {
                 encoded_keys.insert(encoded);
             }
@@ -1017,6 +1066,8 @@ impl RuntimeIndexState {
 
         let mut scoped = RuntimeIndexState {
             index: self.index.clone(),
+            numeric_kind: self.numeric_kind,
+            string_case_insensitive: self.string_case_insensitive,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
             ordered_entry_keys: BTreeSet::new(),
@@ -1046,6 +1097,8 @@ impl RuntimeIndexState {
     pub fn metadata_only_clone(&self) -> Self {
         RuntimeIndexState {
             index: self.index.clone(),
+            numeric_kind: self.numeric_kind,
+            string_case_insensitive: self.string_case_insensitive,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
             ordered_entry_keys: BTreeSet::new(),
@@ -1151,7 +1204,7 @@ impl RuntimeIndexState {
 /// Runtime indexes for all tables across all databases.
 #[derive(Debug, Clone)]
 pub struct RuntimeIndexStore {
-    indexes: AHashMap<String, RuntimeIndexState>,
+    indexes: AHashMap<String, DatatypeIndexor>,
     materialize_non_primary: bool,
     non_primary_field_allowlist: AHashSet<String>,
     non_primary_index_allowlist: AHashSet<String>,
@@ -1271,12 +1324,12 @@ impl RuntimeIndexStore {
     }
 
     pub fn index(&self, index_id: &str) -> Option<&RuntimeIndexState> {
-        self.indexes.get(index_id)
+        self.indexes.get(index_id).map(DatatypeIndexor::state)
     }
 
     pub fn index_for_table(&self, table_scope_id: &str, index_id: &str) -> Option<&RuntimeIndexState> {
         let scoped = scoped_index_id(table_scope_id, index_id);
-        self.indexes.get(&scoped)
+        self.indexes.get(&scoped).map(DatatypeIndexor::state)
     }
 
     pub fn find_scoped_index_state_for_lookup<'a>(
@@ -1306,7 +1359,8 @@ impl RuntimeIndexStore {
 
                 None
             })
-            .find(|(_, state)| state.contains(lookup_key))
+            .find(|(_, state)| state.state().contains(lookup_key))
+            .map(|(scope_id, state)| (scope_id, state.state()))
 
     }
 
@@ -1337,8 +1391,8 @@ impl RuntimeIndexStore {
     pub fn index_mut(&mut self, index_id: &str) -> &mut RuntimeIndexState {
         
         match self.indexes.entry(index_id.to_string()) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(RuntimeIndexState::default()),
+            Entry::Occupied(entry) => entry.into_mut().state_mut(),
+            Entry::Vacant(entry) => entry.insert(DatatypeIndexor::from_state(RuntimeIndexState::default())).state_mut(),
         }
 
     }
@@ -1348,8 +1402,8 @@ impl RuntimeIndexStore {
         let scoped = scoped_index_id(table_scope_id, index_id);
 
         match self.indexes.entry(scoped) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(RuntimeIndexState::default()),
+            Entry::Occupied(entry) => entry.into_mut().state_mut(),
+            Entry::Vacant(entry) => entry.insert(DatatypeIndexor::from_state(RuntimeIndexState::default())).state_mut(),
         }
 
     }
@@ -1393,12 +1447,14 @@ impl RuntimeIndexStore {
         }
 
         let index_id = index.index_id.0.clone();
-        self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
+        self.indexes.entry(index_id).or_insert_with(|| DatatypeIndexor::from_state(RuntimeIndexState {
             index: Some(index),
+            numeric_kind: None,
+            string_case_insensitive: false,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
             ordered_entry_keys: BTreeSet::new(),
-        });
+        }));
 
     }
 
@@ -1409,13 +1465,30 @@ impl RuntimeIndexStore {
         }
 
         let index_id = scoped_index_id(table_scope_id, &index.index_id.0);
-        self.indexes.entry(index_id).or_insert_with(|| RuntimeIndexState {
+        self.indexes.entry(index_id).or_insert_with(|| DatatypeIndexor::from_state(RuntimeIndexState {
             index: Some(index.clone()),
+            numeric_kind: None,
+            string_case_insensitive: false,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
             ordered_entry_keys: BTreeSet::new(),
-        });
+        }));
 
+    }
+
+    pub fn select_indexor_for_table(
+        &mut self,
+        table_scope_id: &str,
+        index: &DatabaseIndex,
+        field_kind: &FieldKind,
+    ) {
+        if !self.should_track_index(index) {
+            return;
+        }
+
+        let scoped_id = scoped_index_id(table_scope_id, &index.index_id.0);
+        self.indexes
+            .insert(scoped_id, DatatypeIndexor::for_field_kind(index.clone(), field_kind));
     }
 
     pub fn record_row(&mut self, index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) {
@@ -1848,6 +1921,18 @@ impl RuntimeIndexStore {
 
                 for index in &tracked_indexes {
                     self.register_index_for_table(&table_stream_id, index);
+                    let field_kind = if index.field_names.len() == 1 {
+                        table.schema.field(&index.field_names[0]).map(|field| field.field_type.clone())
+                    } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+                        table.schema.field(&index.field_name).map(|field| field.field_type.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(field_kind) = field_kind {
+                        self.select_indexor_for_table(&table_stream_id, index, &field_kind);
+                    }
+                    let state = self.index_mut_for_table(&table_stream_id, &index.index_id.0);
+                    state.set_numeric_kind(numeric_kind_for_index(index, &table.schema));
                 }
 
                 let wal_fingerprint = snapshot_data_dir
@@ -2438,7 +2523,7 @@ impl RuntimeIndexStore {
                     for index in table.indexes.values() {
                         if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                            scoped.indexes.insert(scoped_id, state.clone());
+                            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
                         }
                     }
                 });
@@ -2483,7 +2568,7 @@ impl RuntimeIndexStore {
 
                         if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                            scoped.indexes.insert(scoped_id, state.clone());
+                            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
                         }
                     }
                 });
@@ -2613,7 +2698,7 @@ impl RuntimeIndexStore {
                                 }
 
                                 let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                                scoped.indexes.insert(scoped_id, scoped_state);
+                                scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(scoped_state));
                                 continue;
                             }
 
@@ -2644,7 +2729,7 @@ impl RuntimeIndexStore {
                             };
 
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                            scoped.indexes.insert(scoped_id, scoped_state);
+                            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(scoped_state));
                         }
                     }
                 });
@@ -2686,12 +2771,14 @@ impl RuntimeIndexStore {
                         let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
                         scoped.indexes.insert(
                             scoped_id,
-                            RuntimeIndexState {
+                            DatatypeIndexor::from_state(RuntimeIndexState {
                                 index: Some(index.clone()),
+                                numeric_kind: None,
+                                string_case_insensitive: false,
                                 entries: AHashMap::new(),
                                 non_unique_row_refs: AHashMap::new(),
                                 ordered_entry_keys: BTreeSet::new(),
-                            },
+                            }),
                         );
                     }
                 });
@@ -2822,12 +2909,12 @@ fn runtime_index_store_for_table(
         let scoped_id = scoped_index_id(table_stream_id, &index.index_id.0);
 
         if let Some(state) = store.index_for_table(table_stream_id, &index.index_id.0) {
-            scoped.indexes.insert(scoped_id, state.clone());
+            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
             continue;
         }
 
         if let Some(state) = store.index(&index.index_id.0) {
-            scoped.indexes.insert(scoped_id, state.clone());
+            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
         }
     }
 
