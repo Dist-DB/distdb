@@ -502,7 +502,7 @@ fn durable_cold_unique_row_ref_probe_uses_checkpoint_without_wal_hydration() {
 }
 
 #[test]
-fn durable_cold_non_unique_key_present_without_row_refs_recovers_from_checkpoint() {
+fn durable_cold_non_unique_key_present_without_row_refs_returns_empty() {
 
     let data_dir = unique_temp_dir("access-non-unique-key-present-no-row-refs");
     fs::create_dir_all(&data_dir).expect("temp data dir should be created");
@@ -574,8 +574,7 @@ fn durable_cold_non_unique_key_present_without_row_refs_recovers_from_checkpoint
         },
     );
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, 1);
+    assert!(rows.is_empty());
 
     assert!(
         wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
@@ -587,7 +586,7 @@ fn durable_cold_non_unique_key_present_without_row_refs_recovers_from_checkpoint
 }
 
 #[test]
-fn scoped_equality_probe_key_present_without_row_refs_falls_back_to_legacy_stream() {
+fn scoped_equality_probe_key_present_without_row_refs_returns_empty() {
 
     let wal = ConcurrentWalManager::in_memory();
     let mut catalog =
@@ -632,13 +631,12 @@ fn scoped_equality_probe_key_present_without_row_refs_falls_back_to_legacy_strea
         },
     );
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, 1);
+    assert!(rows.is_empty());
 
 }
 
 #[test]
-fn durable_scoped_equality_probe_key_present_without_row_refs_recovers_from_legacy_checkpoint() {
+fn durable_scoped_equality_probe_key_present_without_row_refs_returns_empty() {
 
     let data_dir = unique_temp_dir("access-durable-scoped-key-present-legacy-checkpoint");
     fs::create_dir_all(&data_dir).expect("temp data dir should be created");
@@ -709,8 +707,7 @@ fn durable_scoped_equality_probe_key_present_without_row_refs_recovers_from_lega
         },
     );
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, 1);
+    assert!(rows.is_empty());
 
     assert!(
         wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
@@ -2217,6 +2214,70 @@ fn materialize_relation_rows_returns_empty_when_runtime_lookup_key_misses() {
 }
 
 #[test]
+fn non_unique_numeric_equality_miss_returns_empty_from_index() {
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::Int(32), FieldIndex::PrimaryKey, false),
+        ("id_parent", 2, FieldType::Int(32), FieldIndex::Indexed, true),
+    ]);
+    catalog
+        .register_table("regions", schema.clone())
+        .expect("regions table should register");
+
+    let actor = UserId("test-user".to_string());
+    for (transaction_id, id, parent_id) in [(1, 233, 254), (2, 147, 254)] {
+        let row = HashMap::from([
+            ("id".to_string(), id.to_string().into_bytes()),
+            ("id_parent".to_string(), parent_id.to_string().into_bytes()),
+        ]);
+        wal.append(
+            "regions",
+            TransactionRecord::with_payload(
+                TransactionId(transaction_id),
+                None,
+                None,
+                transaction_id,
+                actor.clone(),
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &row).expect("row should encode"),
+            ),
+        )
+        .expect("row should append");
+    }
+
+    let table = catalog.table("regions").expect("regions table should exist");
+    let id_parent_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["id_parent".to_string()])
+        .cloned()
+        .expect("id_parent index should exist");
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &id_parent_index.index_id.0);
+    state.index = Some(id_parent_index.clone());
+    state.insert_with_row_ref(vec![b"252".to_vec()], Some(99));
+
+    let rows = materialize_relation_rows(
+        &wal,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "id_parent".to_string(),
+                lookup_value: b"254".to_vec(),
+                source: EqualityProbeSource::ExistingIndex,
+                equality_filters: HashMap::from([("id_parent".to_string(), b"254".to_vec())]),
+            },
+        },
+    );
+
+    assert!(rows.is_empty());
+}
+
+#[test]
 fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_state_missing() {
     let wal = ConcurrentWalManager::in_memory();
     let mut catalog =
@@ -2266,8 +2327,8 @@ fn load_live_rows_via_primary_key_limit_uses_runtime_row_refs() {
     let mut runtime_indexes = RuntimeIndexStore::new();
     let state = runtime_indexes.index_mut_for_table(&table_stream_id, &pk_index.index_id.0);
     state.index = Some(pk_index);
-    state.insert_with_row_ref(vec![b"1".to_vec()], Some(1));
-    state.insert_with_row_ref(vec![b"2".to_vec()], Some(2));
+    state.insert_with_row_ref(vec![b"1".to_vec()], Some(0));
+    state.insert_with_row_ref(vec![b"2".to_vec()], Some(1));
 
     let rows = load_live_rows_via_primary_key_limit(
         &wal,

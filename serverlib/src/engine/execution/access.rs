@@ -1685,7 +1685,7 @@ fn rows_for_field_string_like_case_insensitive_indexed(
         } else {
             index
                 .get(&normalized_pattern)
-                .map(|row_ids| row_ids.iter().copied().collect())
+                .map(|row_ids| row_ids.to_vec())
                 .unwrap_or_default()
         };
 
@@ -3340,7 +3340,7 @@ fn collect_live_rows_from_records_limited(
                     continue;
                 }
 
-                if deleted_rows.contains(&record.id.0) {
+                if deleted_rows.contains(&(record.id.0)) {
                     continue;
                 }
 
@@ -6211,28 +6211,12 @@ fn score_string_like_probe(source: EqualityProbeSource) -> u32 {
 
 }
 
-fn find_record_by_transaction_id(
+fn record_at_wal_offset(
     records: &[TransactionRecord],
-    tx_id: u64,
+    row_id: u64,
 ) -> Option<&TransactionRecord> {
 
-    let mut low = 0usize;
-    let mut high = records.len();
-
-    while low < high {
-        let mid = low + (high - low) / 2;
-        let current = records[mid].id.0;
-
-        if current < tx_id {
-            low = mid.saturating_add(1);
-        } else {
-            high = mid;
-        }
-    }
-
-    records
-        .get(low)
-        .filter(|record| record.id.0 == tx_id)
+    records.get(usize::try_from(row_id).ok()?)
 
 }
 
@@ -6246,7 +6230,7 @@ fn load_live_row_by_runtime_index_row_ref(
 ) -> Option<(u64, HashMap<String, Vec<u8>>)> {
 
     wal.with_records(table_stream_id, |records| {
-        let record = find_record_by_transaction_id(records, row_ref)?;
+        let record = record_at_wal_offset(records, row_ref)?;
 
         if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
             return None;
@@ -6295,7 +6279,7 @@ fn load_live_rows_by_runtime_index_row_refs(
         row_refs
             .iter()
             .filter_map(|row_ref| {
-                let record = find_record_by_transaction_id(records, *row_ref)?;
+                let record = record_at_wal_offset(records, *row_ref)?;
 
                 if !matches!(record.kind, TransactionKind::Insert | TransactionKind::Update) {
                     return None;
@@ -6540,11 +6524,11 @@ fn runtime_lookup_key_variants_with_profile(
         }
 
         if !rendered_normalized.is_empty() {
-            push_unique_scalar_lookup_variant(&mut scalar_variants, rendered_normalized.clone());
+            push_unique_scalar_lookup_variant(&mut scalar_variants, rendered_normalized);
         }
 
         if !value_normalized.is_empty() {
-            push_unique_scalar_lookup_variant(&mut scalar_variants, value_normalized.clone());
+            push_unique_scalar_lookup_variant(&mut scalar_variants, value_normalized);
         }
     }
 
@@ -7226,8 +7210,8 @@ where
 
                 if let Some((runtime_index_scope_id, state)) = runtime_index_state_with_scope {
                     let key_present = key_variants
-                        .iter()
-                        .any(|key_variant| state.contains(key_variant));
+                        .first()
+                        .is_some_and(|key_variant| state.contains(key_variant));
                     let key_shape_mismatch = table
                         .indexes
                         .get(&index_id)
@@ -7243,10 +7227,7 @@ where
                         })
                         .unwrap_or(false);
 
-                    if !key_present
-                        && !matches!(probe_profile, RuntimeIndexBtreeProbeProfile::StringLike)
-                        && !key_shape_mismatch
-                    {
+                    if !key_present && !key_shape_mismatch {
                         log::debug!(
                             "relation equality probe table={} field={} scope={} key_present=false reason=empty_result_no_scan",
                             table.table_id,
@@ -7371,89 +7352,13 @@ where
                         }
                     }
 
-                    let mut checkpoint_scopes = vec![runtime_index_scope_id.as_str()];
-                    if runtime_index_scope_id != table.table_id {
-                        checkpoint_scopes.push(table.table_id.as_str());
-                    }
-
-                    if let Some(checkpoint_rows) = load_live_rows_by_equality_filters_from_checkpoint_for_scopes(
-                        wal,
-                        equality_filters,
-                        schema,
-                        &checkpoint_scopes,
-                        row_limit,
-                    ) {
-                        if !checkpoint_rows.is_empty() {
-                            maybe_cache_equality_probe_rows_with_latest_tx_id(
-                                wal,
-                                &runtime_index_scope_id,
-                                equality_filters,
-                                &checkpoint_rows,
-                                wal.latest_transaction_id_if_loaded(&runtime_index_scope_id)
-                                    .map(|tx| tx.0),
-                            );
-                        }
-                        log::debug!(
-                            "relation equality probe table={} field={} scope={} row_ref_candidates=false source=live_row_checkpoint_filter resolved_rows={}",
-                            table.table_id,
-                            field_name,
-                            runtime_index_scope_id,
-                            checkpoint_rows.len(),
-                        );
-                        return checkpoint_rows;
-                    }
-
-                    if runtime_index_scope_id != table.table_id
-                        && key_present
-                        && candidate_row_refs.is_empty()
-                    {
-                        log::debug!(
-                            "relation equality probe table={} field={} scope={} key_present=true but row_refs_missing -> retry_legacy_stream",
-                            table.table_id,
-                            field_name,
-                            runtime_index_scope_id,
-                        );
-
-                        let legacy_rows = if equality_filters.len() > 1 {
-                            load_live_rows_by_equality_filters_with_limit(
-                                wal,
-                                &table.table_id,
-                                &table.table_id,
-                                schema,
-                                equality_filters,
-                                row_limit,
-                            )
-                        } else {
-                            load_live_rows_by_equality_with_limit(
-                                wal,
-                                &table.table_id,
-                                &table.table_id,
-                                schema,
-                                field_name,
-                                lookup_value,
-                                row_limit,
-                            )
-                        };
-
-                        if !legacy_rows.is_empty() {
-                            return legacy_rows;
-                        }
-                    }
-
                     log::debug!(
-                        "relation equality probe table={} field={} scope={} row_ref_candidates=false reason=empty_result_no_scan",
+                        "relation equality probe table={} field={} scope={} row_ref_candidates=false reason=index_row_refs_unresolvable",
                         table.table_id,
                         field_name,
                         runtime_index_scope_id,
                     );
-
-                    // Hard-exit only on durable cold streams to prevent expensive WAL hydration.
-                    // When the stream is already loaded, fall through to the generic equality path.
-                    if wal.stream_mode(&runtime_index_scope_id) == WalStreamMode::Durable
-                        && wal.latest_transaction_id_if_loaded(&runtime_index_scope_id).is_none()
-                    {
-                        return Vec::new();
-                    }
+                    return Vec::new();
                 }
 
                 log::debug!(

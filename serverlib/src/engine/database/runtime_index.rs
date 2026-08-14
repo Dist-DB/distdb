@@ -191,6 +191,13 @@ fn runtime_index_bootstrap_accessor_preload_max_live_rows() -> usize {
 
 }
 
+fn runtime_index_realign_wal_records_on_bootstrap() -> bool {
+    std::env::var("DISTDB_REALIGN_WAL_RECORDS")
+        .ok()
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 fn runtime_index_background_prewarm_skipped_accessors() -> bool {
 
     std::env::var("DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS")
@@ -996,7 +1003,7 @@ impl RuntimeIndexState {
         let mut encoded_keys: HashSet<Vec<u8>> = HashSet::new();
 
         for raw_value in raw_values {
-            if let Some(encoded) = encode_runtime_index_entry_key(&[raw_value.clone()]) {
+            if let Some(encoded) = encode_runtime_index_entry_key(std::slice::from_ref(raw_value)) {
                 encoded_keys.insert(encoded);
             }
 
@@ -1680,6 +1687,26 @@ impl RuntimeIndexStore {
 
         let bootstrap_started_at = Instant::now();
         let preload_accessors_on_bootstrap = runtime_index_preload_accessors_on_bootstrap();
+        let realign_wal_records = runtime_index_realign_wal_records_on_bootstrap();
+        let snapshot_data_dir = wal.data_dir_path();
+
+        if realign_wal_records
+            && let Some(data_dir) = snapshot_data_dir.as_ref()
+        {
+            let derived_dir = data_dir.join("runtime-index");
+            if let Err(err) = std::fs::remove_dir_all(&derived_dir)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!(
+                    "runtime index realignment could not clear derived state path={} error={}",
+                    derived_dir.display(),
+                    err,
+                );
+            }
+            log::warn!(
+                "runtime index WAL realignment enabled; derived snapshots/caches will be rebuilt"
+            );
+        }
 
         log::info!(
             "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} preload_accessor_max_live_rows={} warm_equality_cache_on_bootstrap={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
@@ -1732,8 +1759,6 @@ impl RuntimeIndexStore {
             progress.last_update_epoch_ms = now;
         });
 
-        let snapshot_data_dir = wal.data_dir_path();
-
         for (database_id, catalog) in catalogs {
             
             for table_id in catalog.table_ids() {
@@ -1756,6 +1781,51 @@ impl RuntimeIndexStore {
                 };
 
                 let table_stream_id = resolve_table_stream_id_for_bootstrap(catalog, &table_id, wal);
+
+                if realign_wal_records {
+                    match wal.validate_stream_record_positions(&table_stream_id) {
+                        Ok(()) => log::info!(
+                            "runtime index WAL positions already aligned database={} table={} stream={}",
+                            database_id,
+                            table_id,
+                            table_stream_id,
+                        ),
+                        Err(err) => log::warn!(
+                            "runtime index WAL positions misaligned database={} table={} stream={} reason={}",
+                            database_id,
+                            table_id,
+                            table_stream_id,
+                            err,
+                        ),
+                    }
+
+                    if let Err(err) = wal.realign_stream_records(&table_stream_id) {
+                        log::warn!(
+                            "runtime index WAL realignment skipped database={} table={} stream={} reason={}",
+                            database_id,
+                            table_id,
+                            table_stream_id,
+                            err,
+                        );
+                    } else {
+                        match wal.validate_stream_record_positions(&table_stream_id) {
+                            Ok(()) => log::info!(
+                                "runtime index WAL realigned and positions validated database={} table={} stream={}",
+                                database_id,
+                                table_id,
+                                table_stream_id,
+                            ),
+                            Err(err) => log::error!(
+                                "runtime index WAL realignment validation failed database={} table={} stream={} reason={}",
+                                database_id,
+                                table_id,
+                                table_stream_id,
+                                err,
+                            ),
+                        }
+                    }
+                }
+
                 if table.indexes.is_empty() {
                     mark_runtime_index_bootstrap_table_complete();
                     continue;
@@ -1783,7 +1853,6 @@ impl RuntimeIndexStore {
                 let wal_fingerprint = snapshot_data_dir
                     .as_ref()
                     .and_then(|data_dir| RuntimeIndexSnapshotService::wal_stream_fingerprint(data_dir, &table_stream_id));
-
                 let mut warm_fields = Vec::with_capacity(tracked_indexes.len());
 
                 for index in &tracked_indexes {
@@ -1824,6 +1893,7 @@ impl RuntimeIndexStore {
 
                     let mut restored_index_count = 0usize;
                     let mut restored_entry_count = 0usize;
+                    let mut snapshot_postings_incomplete = false;
 
                     for index in &tracked_indexes {
                         let Some(snapshot_index) = snapshot
@@ -1835,6 +1905,13 @@ impl RuntimeIndexStore {
 
                         restored_index_count = restored_index_count.saturating_add(1);
                         restored_entry_count = restored_entry_count.saturating_add(snapshot_index.entries.len());
+
+                        if !index.is_unique_key()
+                            && !snapshot_index.entries.is_empty()
+                            && snapshot_index.row_refs.len() < snapshot_index.entries.len()
+                        {
+                            snapshot_postings_incomplete = true;
+                        }
 
                         let state = self.index_mut_for_table(&table_stream_id, &index.index_id.0);
                         state.index = Some(index.clone());
@@ -1892,13 +1969,14 @@ impl RuntimeIndexStore {
                         }
                     }
 
-                    if restored_index_count != tracked_indexes.len() {
+                    if restored_index_count != tracked_indexes.len() || snapshot_postings_incomplete {
                         log::warn!(
-                            "runtime index snapshot restore mismatch database={} table={} expected_indexes={} restored_indexes={}",
+                            "runtime index snapshot restore backfill required database={} table={} expected_indexes={} restored_indexes={} snapshot_postings_incomplete={}",
                             database_id,
                             table_id,
                             tracked_indexes.len(),
                             restored_index_count,
+                            snapshot_postings_incomplete,
                         );
 
                         let (latest_tx_id, live_rows, live_rows_mode, live_rows_elapsed_ms) =

@@ -931,6 +931,12 @@ pub(super) fn execute_truncate_table_impl(
         );
     }
 
+    serverlib::clear_cached_table_state(
+        wal.cache_scope_id(),
+        &normalized_table_id,
+        &stream_id,
+    );
+
     for index in derived_indexes_for_table(&table) {
         if !runtime_indexes.should_track_index(index) {
             continue;

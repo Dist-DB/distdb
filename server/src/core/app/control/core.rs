@@ -109,7 +109,7 @@ impl ServerApp {
             }) => {
                 let normalized = common::normalize_identifier!(field_name);
                 if !normalized.is_empty() {
-                    fields.insert(normalized.clone());
+                    fields.insert(normalized);
                 }
 
                 if let Some(unqualified) = field_name.rsplit('.').next() {

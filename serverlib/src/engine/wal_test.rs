@@ -324,13 +324,17 @@ fn compact_keeps_latest_schema_metadata_and_appends_truncate_marker() {
     let records = wal.since("users", None);
     assert_eq!(records.len(), 3);
     assert_eq!(records[0].kind, TransactionKind::SchemaChange);
-    assert_eq!(records[0].id, TransactionId(2));
+    assert_eq!(records[0].id, TransactionId(0));
     assert_eq!(records[1].kind, TransactionKind::SecurityChange);
-    assert_eq!(records[1].id, TransactionId(4));
+    assert_eq!(records[1].id, TransactionId(1));
     assert_eq!(records[2].kind, TransactionKind::Truncate);
-    assert_eq!(records[2].id, TransactionId(6));
+    assert_eq!(records[2].id, TransactionId(2));
     assert_eq!(records[2].refid, None);
     assert_eq!(records[2].timestamp_epoch_ms, 99);
+    assert!(records
+        .iter()
+        .enumerate()
+        .all(|(position, record)| record.id == TransactionId(position as u64)));
 }
 
 #[test]
@@ -367,13 +371,13 @@ fn compact_clears_refids_to_removed_records() {
 
     let records = wal.since("users", None);
     assert_eq!(records.len(), 3);
-    assert_eq!(records[0].id, TransactionId(2));
+    assert_eq!(records[0].id, TransactionId(0));
     assert_eq!(records[0].refid, None);
-    assert_eq!(records[1].id, TransactionId(3));
+    assert_eq!(records[1].id, TransactionId(1));
     assert_eq!(records[1].refid, None);
     assert_eq!(records[2].kind, TransactionKind::Truncate);
-    assert_eq!(records[2].id, TransactionId(4));
-    assert_eq!(records[2].refid, Some(TransactionId(3)));
+    assert_eq!(records[2].id, TransactionId(2));
+    assert_eq!(records[2].refid, None);
 }
 
 #[test]
@@ -403,6 +407,46 @@ fn compact_prefers_latest_metadata_change_record_when_present() {
     let records = wal.since("users", None);
     assert_eq!(records.len(), 3);
     assert_eq!(records[1].kind, TransactionKind::MetadataChange);
+}
+
+#[test]
+fn realign_stream_records_preserves_rows_and_renumbers_positions() {
+    let wal = ConcurrentWalManager::new();
+    let actor = UserId::from_username("tester");
+
+    wal.append("users", make_record(10, TransactionKind::Insert, &actor))
+        .expect("append should succeed");
+    wal.append("users", make_record(20, TransactionKind::Insert, &actor))
+        .expect("append should succeed");
+    wal.append(
+        "users",
+        TransactionRecord::with_payload(
+            TransactionId(30),
+            None,
+            Some(TransactionId(10)),
+            30,
+            actor,
+            TransactionKind::Update,
+            vec![3],
+        ),
+    )
+    .expect("append should succeed");
+
+    wal.realign_stream_records("users")
+        .expect("realignment should succeed");
+
+    let records = wal.since("users", None);
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].id, TransactionId(0));
+    assert_eq!(records[1].id, TransactionId(1));
+    assert_eq!(records[2].id, TransactionId(2));
+    assert_eq!(records[2].refid, Some(TransactionId(0)));
+    assert!(records
+        .iter()
+        .enumerate()
+        .all(|(position, record)| record.id.0 == position as u64));
+    wal.validate_stream_record_positions("users")
+        .expect("realigned WAL positions should validate");
 }
 
 #[test]

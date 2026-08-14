@@ -12,7 +12,8 @@ pub mod row_windowing;
 mod mutation_test;
 
 pub use access::{
-    build_relation_probe_index, choose_index_lookup, collect_indexable_equality_filters,
+    build_relation_probe_index, choose_index_lookup, clear_cached_table_state,
+    collect_indexable_equality_filters,
     collect_indexable_equality_filters_for_schema,
     collect_indexable_in_list_filter_for_schema,
     collect_indexable_like_filter_for_schema,

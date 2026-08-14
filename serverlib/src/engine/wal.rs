@@ -144,7 +144,6 @@ impl TransactionPayloadWriteTransform for WalCompressionPayloadWriteTransform {
             ))?;
 
         Ok(Some(compressed))
-    
     }
 
 }
@@ -673,6 +672,79 @@ impl ConcurrentWalManager {
 
         Ok(())
 
+    }
+
+    /// Rebuild a WAL after invalidated records have been identified. The
+    /// resulting vector is positional: every surviving record has id equal to
+    /// its zero-based index, and references are remapped to the new positions.
+    pub fn realign_stream_records(&self, wal_id: &str) -> Result<(), &'static str> {
+        let stream_key = obfuscated_stream_key(wal_id)?;
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
+
+        let entries_handle = self
+            .stream_entries_handle(&stream_key)
+            .ok_or("WAL stream is unavailable")?;
+        let mut entries = entries_handle.lock().map_err(|_| "failed to lock WAL records")?;
+
+        let mut id_remap = HashMap::new();
+        let mut rebuilt = entries
+            .iter()
+            .filter(|record| record.kind != TransactionKind::Ignore)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for (position, record) in rebuilt.iter().enumerate() {
+            id_remap.insert(record.id.0, position as u64);
+        }
+
+        if id_remap.is_empty() && !entries.is_empty() {
+            return Err("WAL realignment refused: no live records remain");
+        }
+
+        for (position, record) in rebuilt.iter_mut().enumerate() {
+            record.id = TransactionId(position as u64);
+            record.refid = record
+                .refid
+                .and_then(|refid| id_remap.get(&refid.0).copied().map(TransactionId));
+            record.groupid = record
+                .groupid
+                .and_then(|groupid| id_remap.get(&groupid.0).copied().map(TransactionId));
+        }
+
+        if let Some(data_dir) = &self.data_dir {
+            let wal_path = data_dir.join(FileKind::Data.file_name(&stream_key));
+            rewrite_wal_file(&wal_path, &rebuilt)?;
+        }
+
+        if !rebuilt
+            .iter()
+            .enumerate()
+            .all(|(position, record)| record.id.0 == position as u64)
+        {
+            return Err("WAL realignment validation failed");
+        }
+
+        *entries = rebuilt;
+        Ok(())
+    }
+
+    pub fn validate_stream_record_positions(&self, wal_id: &str) -> Result<(), String> {
+        self.with_records(wal_id, |records| {
+            for (position, record) in records.iter().enumerate() {
+                if record.id.0 != position as u64 {
+                    return Err(format!(
+                        "WAL position mismatch stream={} position={} record_id={} record_kind={:?}",
+                        wal_id,
+                        position,
+                        record.id.0,
+                        record.kind,
+                    ));
+                }
+            }
+
+            Ok(())
+        })
+        .ok_or_else(|| format!("WAL stream unavailable: {wal_id}"))?
     }
 
     pub fn delete_stream(&self, wal_id: &str) -> Result<(), &'static str> {
@@ -1736,8 +1808,6 @@ fn compact_entries_to_latest_schema_and_metadata(
     timestamp_epoch_ms: u64,
 ) {
 
-    let last_id = entries.last().map(|record| record.id).unwrap_or(TransactionId(0));
-
     let mut latest_schema = None;
     let mut latest_metadata = None;
 
@@ -1779,39 +1849,34 @@ fn compact_entries_to_latest_schema_and_metadata(
         }
     }
 
-    let mut retained = Vec::new();
+    let mut rebuilt = entries
+        .drain(..)
+        .filter(|record| record.kind != TransactionKind::Ignore)
+        .collect::<Vec<_>>();
 
-    if let Some(mut schema) = latest_schema {
-        if schema.refid.is_some_and(|refid| !retained_ids.contains(&refid.0)) {
-            schema.refid = None;
+    for record in &mut rebuilt {
+        if record
+            .refid
+            .is_some_and(|refid| !retained_ids.contains(&refid.0))
+        {
+            record.refid = None;
         }
-        retained.push(schema);
     }
 
-    if let Some(mut metadata) = latest_metadata {
-        if metadata.refid.is_some_and(|refid| !retained_ids.contains(&refid.0)) {
-            metadata.refid = None;
-        }
-        retained.push(metadata);
-    }
-
-    retained.sort_by_key(|record| record.id.0);
-
-    let truncate_refid = entries
-        .last()
-        .map(|record| record.id)
-        .filter(|refid| retained_ids.contains(&refid.0));
-
-    retained.push(TransactionRecord::without_payload(
-        TransactionId(last_id.0 + 1),
+    rebuilt.push(TransactionRecord::without_payload(
+        TransactionId(0),
         None,
-        truncate_refid,
+        None,
         timestamp_epoch_ms,
         actor,
         TransactionKind::Truncate,
     ));
 
-    *entries = retained;
+    for (position, record) in rebuilt.iter_mut().enumerate() {
+        record.id = TransactionId(position as u64);
+    }
+
+    *entries = rebuilt;
 
 }
 
