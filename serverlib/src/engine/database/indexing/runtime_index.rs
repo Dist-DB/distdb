@@ -407,6 +407,10 @@ impl PostingPages {
             .into_iter()
             .chain(self.pages.iter().flat_map(|page| page.iter().copied()))
     }
+
+    fn only_row_ref(&self) -> Option<NonZeroU64> {
+        (self.len == 1).then(|| self.iter().next()).flatten()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,17 +434,13 @@ fn collect_row_refs_for_encoded_key(
     encoded_key: &[u8],
     row_refs: &mut Vec<u64>,
 ) {
-    if let Some(row_ref) = state
-        .entries
-        .get(encoded_key)
-        .copied()
-        .flatten()
-        .and_then(|row_ref| unpack_row_ref(Some(row_ref)))
-    {
-        row_refs.push(row_ref);
-    }
+    let Some(entry) = state.entries.get(encoded_key).copied() else {
+        return;
+    };
 
-    if let Some(non_unique_row_refs) = state.non_unique_row_refs.get(encoded_key) {
+    if let Some(row_ref) = entry.and_then(|row_ref| unpack_row_ref(Some(row_ref))) {
+        row_refs.push(row_ref);
+    } else if let Some(non_unique_row_refs) = state.non_unique_row_refs.get(encoded_key) {
         non_unique_row_refs.append_row_refs(row_refs, None);
     }
 }
@@ -585,22 +585,42 @@ impl RuntimeIndexState {
             .map(|index| index.is_unique_key())
             .unwrap_or(true);
 
-        let stored_row_ref = if is_unique_key {
-            row_ref.and_then(pack_row_ref)
-        } else {
-            None
+        if is_unique_key {
+            let shared_key = self.intern_key(encoded_key);
+            self.entries.insert(Arc::clone(&shared_key), row_ref.and_then(pack_row_ref));
+            self.ordered_entry_keys.insert(shared_key);
+            return;
+        }
+
+        let Some(row_ref) = row_ref.and_then(pack_row_ref) else {
+            let shared_key = self.intern_key(encoded_key);
+            self.entries.entry(shared_key.clone()).or_insert(None);
+            self.ordered_entry_keys.insert(shared_key);
+            return;
         };
 
         let shared_key = self.intern_key(encoded_key);
-
-        self.entries.insert(Arc::clone(&shared_key), stored_row_ref);
-        self.ordered_entry_keys.insert(Arc::clone(&shared_key));
-
-        if !is_unique_key
-            && let Some(row_ref) = row_ref.and_then(pack_row_ref)
-        {
-            let postings = self.non_unique_row_refs.entry(shared_key).or_default();
-            postings.insert_unique_sorted(row_ref);
+        match self.entries.entry(Arc::clone(&shared_key)) {
+            Entry::Vacant(entry) => {
+                entry.insert(Some(row_ref));
+                self.ordered_entry_keys.insert(shared_key);
+            }
+            Entry::Occupied(mut entry) => match *entry.get() {
+                Some(existing_row_ref) if existing_row_ref == row_ref => {}
+                Some(existing_row_ref) => {
+                    let mut postings = PostingPages::default();
+                    postings.insert_unique_sorted(existing_row_ref);
+                    postings.insert_unique_sorted(row_ref);
+                    *entry.get_mut() = None;
+                    self.non_unique_row_refs.insert(shared_key, postings);
+                }
+                None => {
+                    self.non_unique_row_refs
+                        .entry(shared_key)
+                        .or_default()
+                        .insert_unique_sorted(row_ref);
+                }
+            },
         }
     }
 
@@ -630,9 +650,23 @@ impl RuntimeIndexState {
                 return;
             }
 
+            let Some(entry) = self.entries.get(encoded_key).copied() else {
+                return;
+            };
+
+            if let Some(single_row_ref) = entry {
+                if row_ref.is_none_or(|row_ref| pack_row_ref(row_ref) == Some(single_row_ref)) {
+                    self.entries.remove(encoded_key);
+                    self.ordered_entry_keys.remove(encoded_key);
+                }
+                return;
+            }
+
+            let mut replacement = None;
             let should_remove_key = if let Some(non_unique_row_refs) = self.non_unique_row_refs.get_mut(encoded_key) {
                 if let Some(row_ref) = row_ref.and_then(pack_row_ref) {
                     non_unique_row_refs.remove(row_ref);
+                    replacement = non_unique_row_refs.only_row_ref();
                     non_unique_row_refs.is_empty()
                 } else {
                     true
@@ -641,7 +675,12 @@ impl RuntimeIndexState {
                 true
             };
 
-            if should_remove_key {
+            if let Some(single_row_ref) = replacement {
+                self.non_unique_row_refs.remove(encoded_key);
+                if let Some(entry) = self.entries.get_mut(encoded_key) {
+                    *entry = Some(single_row_ref);
+                }
+            } else if should_remove_key {
                 self.non_unique_row_refs.remove(encoded_key);
                 self.entries.remove(encoded_key);
                 self.ordered_entry_keys.remove(encoded_key);
@@ -709,6 +748,14 @@ impl RuntimeIndexState {
                 let Some(encoded) = self.encode_key(&key) else {
                     continue;
                 };
+
+                if refs.len() == 1 {
+                    if let Some(entry) = self.entries.get_mut(encoded.as_slice()) {
+                        *entry = refs.first().copied().and_then(pack_row_ref);
+                    }
+                    continue;
+                }
+
                 let Some(shared_key) = self
                     .entries
                     .get_key_value(encoded.as_slice())
@@ -732,7 +779,13 @@ impl RuntimeIndexState {
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
         let encoded_key = self.encode_key(pk_val)?;
-        unpack_row_ref(self.entries.get(encoded_key.as_slice()).copied().flatten())
+        self.index
+            .as_ref()
+            .is_some_and(|index| index.is_unique_key())
+            .then(|| {
+                unpack_row_ref(self.entries.get(encoded_key.as_slice()).copied().flatten())
+            })
+            .flatten()
     }
 
     pub fn row_refs_for_key(&self, pk_val: &[Vec<u8>], limit: Option<usize>) -> Vec<u64> {
@@ -741,7 +794,20 @@ impl RuntimeIndexState {
             return Vec::new();
         };
 
-        if let Some(row_ref) = unpack_row_ref(self.entries.get(encoded_key.as_slice()).copied().flatten()) {
+        let entry = self.entries.get(encoded_key.as_slice()).copied();
+        if self
+            .index
+            .as_ref()
+            .is_some_and(|index| index.is_unique_key())
+        {
+            return entry
+                .flatten()
+                .and_then(|row_ref| unpack_row_ref(Some(row_ref)))
+                .into_iter()
+                .collect();
+        }
+
+        if let Some(row_ref) = entry.flatten().and_then(|row_ref| unpack_row_ref(Some(row_ref))) {
             return vec![row_ref];
         }
 
@@ -760,7 +826,8 @@ impl RuntimeIndexState {
     pub fn row_ref_count_for_key(&self, pk_val: &[Vec<u8>]) -> Option<usize> {
         let encoded_key = self.encode_key(pk_val)?;
 
-        if self.entries.get(encoded_key.as_slice()).copied().flatten().is_some() {
+        let entry = self.entries.get(encoded_key.as_slice()).copied()?;
+        if entry.is_some() {
             return Some(1);
         }
 
