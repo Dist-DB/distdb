@@ -302,6 +302,7 @@ fn cached_equality_probe_rows(
     let filter_key = equality_probe_cache_key(equality_filters);
 
     let cache = EQUALITY_PROBE_RESULT_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
+    
     let Ok(mut guard) = cache.lock() else {
         if debug_enabled {
             log::info!(
@@ -464,15 +465,14 @@ fn maybe_cache_equality_probe_rows_with_latest_tx_id(
             && !equality_probe_cache_entry_is_expired(entry, ttl)
     });
 
-    if table_cache.len() >= max_entries {
-        if let Some(evict_key) = table_cache
+    if table_cache.len() >= max_entries
+        && let Some(evict_key) = table_cache
             .iter()
             .min_by_key(|(_, entry)| entry.cached_at)
             .map(|(key, _)| key.clone())
         {
             table_cache.remove(&evict_key);
         }
-    }
 
     table_cache.insert(
         filter_key,
@@ -6985,7 +6985,7 @@ where
                     if let Some(equality_filters) = equality_filters_for_index_lookup(index, lookup_key) {
                         return load_equality_probe_rows_for_filters(
                             wal,
-                            &table_stream_id,
+                            table_stream_id,
                             &table.table_id,
                             schema,
                             &equality_filters,

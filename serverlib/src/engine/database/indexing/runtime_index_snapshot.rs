@@ -55,6 +55,8 @@ pub(crate) struct RuntimeIndexSnapshotIndex {
     #[serde(default)]
     pub(crate) row_refs_by_entry: Vec<u64>,
     #[serde(default)]
+    pub(crate) postings_by_entry: Vec<Vec<u64>>,
+    #[serde(default)]
     pub(crate) row_refs: Vec<(Vec<Vec<u8>>, u64)>,
 }
 
@@ -84,6 +86,8 @@ struct RuntimeIndexSnapshotChunkPayload {
     entries: Vec<Vec<Vec<u8>>>,
     #[serde(default)]
     row_refs_by_entry: Vec<u64>,
+    #[serde(default)]
+    postings_by_entry: Vec<Vec<u64>>,
     #[serde(default)]
     row_refs: Vec<(Vec<Vec<u8>>, u64)>,
 }
@@ -430,11 +434,18 @@ impl RuntimeIndexSnapshotService {
             return None;
         }
 
-        let (index_count, entry_count, key_bytes, row_refs_legacy_count, row_refs_compact_count) =
+        let (
+            index_count,
+            entry_count,
+            key_bytes,
+            row_refs_legacy_count,
+            row_refs_compact_count,
+            row_refs_posting_count,
+        ) =
             snapshot_memory_shape(&snapshot);
 
         log::info!(
-            "runtime index snapshot restore shape table={} stream={} file_bytes={} indexes={} entries={} key_bytes={} row_refs_legacy={} row_refs_compact={} legacy_plain_encoding={}",
+            "runtime index snapshot restore shape table={} stream={} file_bytes={} indexes={} entries={} key_bytes={} row_refs_legacy={} row_refs_compact={} row_refs_postings={} legacy_plain_encoding={}",
             table.table_id,
             table_stream_id,
             bytes.len(),
@@ -443,6 +454,7 @@ impl RuntimeIndexSnapshotService {
             key_bytes,
             row_refs_legacy_count,
             row_refs_compact_count,
+            row_refs_posting_count,
             legacy_plain_encoding,
         );
 
@@ -468,6 +480,7 @@ impl RuntimeIndexSnapshotService {
                     index_id: index_id.clone(),
                     entries: Vec::new(),
                     row_refs_by_entry: Vec::new(),
+                    postings_by_entry: Vec::new(),
                     row_refs: Vec::new(),
                 });
         }
@@ -509,11 +522,13 @@ impl RuntimeIndexSnapshotService {
                     index_id: chunk.index_id.clone(),
                     entries: Vec::new(),
                     row_refs_by_entry: Vec::new(),
+                    postings_by_entry: Vec::new(),
                     row_refs: Vec::new(),
                 });
 
             state.entries.extend(chunk.entries);
             state.row_refs_by_entry.extend(chunk.row_refs_by_entry);
+            state.postings_by_entry.extend(chunk.postings_by_entry);
             state.row_refs.extend(chunk.row_refs);
         }
 
@@ -703,47 +718,29 @@ impl RuntimeIndexSnapshotService {
                 continue;
             }
 
-            // Group by key rather than collecting straight into a map: a
-            // non-unique index can have multiple row refs sharing the same
-            // key, and a plain key->row_ref map would silently keep only the
-            // last row ref seen for each duplicate key.
-            let mut row_refs_lookup: HashMap<Vec<Vec<u8>>, Vec<u64>> = HashMap::new();
-            for (key, row_ref) in &index.row_refs {
-                row_refs_lookup.entry(key.clone()).or_default().push(*row_ref);
-            }
-
             for (chunk_seq, entry_chunk) in index.entries.chunks(max_entries_per_chunk).enumerate() {
                 let entries = entry_chunk.to_vec();
+                let start = chunk_seq.saturating_mul(max_entries_per_chunk);
+                let end = start.saturating_add(entries.len());
 
                 let row_refs_by_entry = if index.row_refs_by_entry.len() == index.entries.len() {
-                    let start = chunk_seq.saturating_mul(max_entries_per_chunk);
-                    let end = start.saturating_add(entries.len());
                     index.row_refs_by_entry[start..end].to_vec()
                 } else {
                     Vec::new()
                 };
 
-                let row_refs = if row_refs_lookup.is_empty() {
-                    Vec::new()
+                let postings_by_entry = if index.postings_by_entry.len() == index.entries.len() {
+                    index.postings_by_entry[start..end].to_vec()
                 } else {
-                    entries
-                        .iter()
-                        .flat_map(|entry| {
-                            row_refs_lookup
-                                .get(entry)
-                                .into_iter()
-                                .flat_map(move |refs| {
-                                    refs.iter().map(move |row_ref| (entry.clone(), *row_ref))
-                                })
-                        })
-                        .collect::<Vec<_>>()
+                    Vec::new()
                 };
 
                 let chunk_payload = RuntimeIndexSnapshotChunkPayload {
                     index_id: index.index_id.clone(),
                     entries,
                     row_refs_by_entry,
-                    row_refs,
+                    postings_by_entry,
+                    row_refs: Vec::new(),
                 };
 
                 let file_name = Self::runtime_index_snapshot_chunk_file_name(
@@ -1217,7 +1214,9 @@ fn decode_snapshot_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Op
     decode_snapshot_payload_with_reason(payload, None).ok()
 }
 
-fn snapshot_memory_shape(snapshot: &RuntimeIndexTableSnapshot) -> (usize, usize, usize, usize, usize) {
+fn snapshot_memory_shape(
+    snapshot: &RuntimeIndexTableSnapshot,
+) -> (usize, usize, usize, usize, usize, usize) {
     let index_count = snapshot.indexes.len();
 
     let entry_count = snapshot
@@ -1246,11 +1245,19 @@ fn snapshot_memory_shape(snapshot: &RuntimeIndexTableSnapshot) -> (usize, usize,
         .map(|index| index.row_refs_by_entry.iter().filter(|item| **item != 0).count())
         .sum::<usize>();
 
+    let row_refs_posting_count = snapshot
+        .indexes
+        .iter()
+        .flat_map(|index| index.postings_by_entry.iter())
+        .map(Vec::len)
+        .sum::<usize>();
+
     (
         index_count,
         entry_count,
         key_bytes,
         row_refs_legacy_count,
         row_refs_compact_count,
+        row_refs_posting_count,
     )
 }

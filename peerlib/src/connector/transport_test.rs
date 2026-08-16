@@ -319,8 +319,8 @@
         }
 
         assert_eq!(connector_stream_timeout_secs(), 5);
-        assert_eq!(connector_connect_timeout_secs(), 30);
-        assert_eq!(connector_handshake_timeout_secs(), 1);
+        assert_eq!(connector_connect_timeout_secs(), 60);
+        assert_eq!(connector_handshake_timeout_secs(), 5);
 
         unsafe {
             std::env::remove_var(CONNECTOR_STREAM_TIMEOUT_SECS_ENV);
@@ -329,8 +329,8 @@
         }
 
         assert_eq!(connector_stream_timeout_secs(), 300);
-        assert_eq!(connector_connect_timeout_secs(), 1);
-        assert_eq!(connector_handshake_timeout_secs(), 1);
+        assert_eq!(connector_connect_timeout_secs(), 3);
+        assert_eq!(connector_handshake_timeout_secs(), 60);
     }
 
     #[test]

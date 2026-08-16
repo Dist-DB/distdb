@@ -1908,8 +1908,12 @@ impl RuntimeIndexStore {
                         restored_index_count = restored_index_count.saturating_add(1);
                         restored_entry_count = restored_entry_count.saturating_add(snapshot_index.entries.len());
 
+                        let has_aligned_postings =
+                            snapshot_index.postings_by_entry.len() == snapshot_index.entries.len();
+
                         if !index.is_unique_key()
                             && !snapshot_index.entries.is_empty()
+                            && !has_aligned_postings
                             && snapshot_index.row_refs.len() < snapshot_index.entries.len()
                         {
                             snapshot_postings_incomplete = true;
@@ -1947,6 +1951,21 @@ impl RuntimeIndexStore {
                                 for key in &snapshot_index.entries {
                                     let row_ref = row_refs_lookup.get(key).copied();
                                     state.insert_with_row_ref(key.clone(), row_ref);
+                                }
+                            } else if has_aligned_postings {
+                                for (key, row_refs) in snapshot_index
+                                    .entries
+                                    .iter()
+                                    .zip(snapshot_index.postings_by_entry.iter())
+                                {
+                                    if row_refs.is_empty() {
+                                        state.insert_with_row_ref(key.clone(), None);
+                                        continue;
+                                    }
+
+                                    for row_ref in row_refs {
+                                        state.insert_with_row_ref(key.clone(), Some(*row_ref));
+                                    }
                                 }
                             } else {
                                 let mut row_refs_lookup = AHashMap::<Vec<Vec<u8>>, Vec<u64>>::new();
@@ -3059,23 +3078,22 @@ fn snapshot_indexes_for_table(
 
         let mut entries = Vec::with_capacity(state.entries.len());
         let mut row_refs_by_entry = Vec::with_capacity(state.entries.len());
-        let mut row_refs = Vec::new();
+        let mut postings_by_entry = Vec::with_capacity(state.entries.len());
 
         for (key, row_ref) in &state.entries {
             if let Some(decoded_key) = decode_runtime_index_entry_key(key) {
+                let postings = if index.is_unique_key() {
+                    Vec::new()
+                } else {
+                    state.row_refs_for_key(&decoded_key, None)
+                };
+
                 entries.push(decoded_key);
                 let packed_row_ref = unpack_row_ref(*row_ref)
                     .and_then(|row_ref| row_ref.checked_add(1))
                     .unwrap_or(0);
                 row_refs_by_entry.push(packed_row_ref);
-
-                if !index.is_unique_key()
-                    && let Some(decoded_key) = decode_runtime_index_entry_key(key)
-                {
-                    for row_ref in state.row_refs_for_key(&decoded_key, None) {
-                        row_refs.push((decoded_key.clone(), row_ref));
-                    }
-                }
+                postings_by_entry.push(postings);
             }
         }
 
@@ -3083,9 +3101,8 @@ fn snapshot_indexes_for_table(
             index_id: index.index_id.0.clone(),
             entries,
             row_refs_by_entry,
-            // Keep legacy field for backward compatibility. For non-unique
-            // indexes, this stores full postings row refs keyed by index value.
-            row_refs,
+            postings_by_entry,
+            row_refs: Vec::new(),
         });
     }
 

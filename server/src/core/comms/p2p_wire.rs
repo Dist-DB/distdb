@@ -380,11 +380,10 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
             return positional_host;
         }
 
-    if let Some(explicit_host) = common::settings::text(common::settings::ADVERTISE_HOST) {
-        if !is_placeholder_host(&explicit_host) {
+    if let Some(explicit_host) = common::settings::text(common::settings::ADVERTISE_HOST)
+        && !is_placeholder_host(&explicit_host) {
             return explicit_host;
         }
-    }
 
     if let Some(tls_san_host) = resolve_public_host_from_tls_sans(args) {
         return tls_san_host;

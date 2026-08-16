@@ -57,6 +57,7 @@ fn chunked_loader_merges_empty_and_chunked_indexes() {
         index_id: index_id.clone(),
         entries: vec![vec![b"alice@example.com".to_vec()]],
         row_refs_by_entry: vec![42],
+        postings_by_entry: vec![Vec::new()],
         row_refs: Vec::new(),
     };
     let mut encoded_chunk = make_header(FileKind::Entity).to_vec();
@@ -128,7 +129,8 @@ fn save_and_load_snapshot_preserves_all_row_refs_for_duplicate_non_unique_key() 
     let snapshot_index = RuntimeIndexSnapshotIndex {
         index_id: index.index_id.0.clone(), entries: vec![cologne_key.clone()],
         row_refs_by_entry: Vec::new(),
-        row_refs: (1..=10u64).map(|row_ref| (cologne_key.clone(), row_ref)).collect(),
+        postings_by_entry: vec![(1..=10u64).collect()],
+        row_refs: Vec::new(),
     };
     RuntimeIndexSnapshotService::save_runtime_index_snapshot(
         &data_dir, &table, table_stream_id, 100, 10, wal_fingerprint, vec![snapshot_index],
@@ -139,10 +141,9 @@ fn save_and_load_snapshot_preserves_all_row_refs_for_duplicate_non_unique_key() 
     let restored_index = loaded.snapshot.indexes.iter()
         .find(|snapshot_index| snapshot_index.index_id == index.index_id.0)
         .expect("display_name index present in restored snapshot");
-    let mut restored_refs = restored_index.row_refs.iter()
-        .filter(|(key, _)| key == &cologne_key)
-        .map(|(_, row_ref)| *row_ref).collect::<Vec<_>>();
-    restored_refs.sort_unstable();
-    assert_eq!(restored_refs, (1..=10u64).collect::<Vec<_>>());
+    assert_eq!(
+        restored_index.postings_by_entry,
+        vec![(1..=10u64).collect::<Vec<_>>()],
+    );
     let _ = fs::remove_dir_all(data_dir);
 }
