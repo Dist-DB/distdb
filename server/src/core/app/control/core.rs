@@ -2415,7 +2415,7 @@ impl ServerApp {
                 
                 (
                     self.catalogs.clone(),
-                    Some(self.runtime_indexes.clone()),
+                    None,
                     None,
                 )
 
