@@ -624,6 +624,41 @@ impl RuntimeIndexState {
         }
     }
 
+    fn restore_non_unique_entry(&mut self, pk_val: Vec<Vec<u8>>, row_refs: &[u64]) {
+        let Some(encoded_key) = self.encode_key(&pk_val) else {
+            return;
+        };
+
+        let shared_key = self.intern_key(encoded_key);
+        self.ordered_entry_keys.insert(Arc::clone(&shared_key));
+
+        match row_refs {
+            [] => {
+                self.entries.insert(shared_key, None);
+            }
+            [row_ref] => {
+                self.entries.insert(shared_key, pack_row_ref(*row_ref));
+            }
+            _ => {
+                let mut postings = PostingPages::default();
+                for row_ref in row_refs {
+                    if let Some(row_ref) = pack_row_ref(*row_ref) {
+                        postings.insert_unique_sorted(row_ref);
+                    }
+                }
+
+                if let Some(row_ref) = postings.only_row_ref() {
+                    self.entries.insert(shared_key, Some(row_ref));
+                } else if postings.is_empty() {
+                    self.entries.insert(shared_key, None);
+                } else {
+                    self.entries.insert(Arc::clone(&shared_key), None);
+                    self.non_unique_row_refs.insert(shared_key, postings);
+                }
+            }
+        }
+    }
+
     fn intern_key(&self, encoded_key: Vec<u8>) -> IndexKey {
         match self.entries.get_key_value(encoded_key.as_slice()) {
             Some((existing, _)) => Arc::clone(existing),
@@ -1994,6 +2029,100 @@ impl RuntimeIndexStore {
                 warm_fields.sort();
                 warm_fields.dedup();
 
+                if !preload_accessors_on_bootstrap
+                    && let Some(data_dir) = snapshot_data_dir.as_ref()
+                {
+                    let mut restored_index_ids = HashSet::new();
+                    let mut restored_entry_count = 0usize;
+                    let streamed_snapshot = RuntimeIndexSnapshotService::stream_runtime_index_snapshot_chunks(
+                        data_dir,
+                        &table,
+                        &table_stream_id,
+                        &tracked_indexes,
+                        wal_fingerprint,
+                        |snapshot_index| {
+                            let index = tracked_indexes
+                                .iter()
+                                .find(|index| index.index_id.0 == snapshot_index.index_id)
+                                .ok_or_else(|| format!("unexpected_index={}", snapshot_index.index_id))?;
+                            let is_first_chunk = restored_index_ids.insert(index.index_id.0.clone());
+                            let state = self.index_mut_for_table(&table_stream_id, &index.index_id.0);
+
+                            if is_first_chunk {
+                                state.index = Some(index.clone());
+                                state.entries.clear();
+                                state.non_unique_row_refs.clear();
+                            }
+
+                            state.reserve_entries(snapshot_index.entries.len());
+                            restored_entry_count = restored_entry_count
+                                .saturating_add(snapshot_index.entries.len());
+
+                            if index.is_unique_key() {
+                                if snapshot_index.row_refs_by_entry.len() != snapshot_index.entries.len() {
+                                    return Err("unique_row_refs_missing".to_string());
+                                }
+
+                                for (key, packed_row_ref) in snapshot_index
+                                    .entries
+                                    .into_iter()
+                                    .zip(snapshot_index.row_refs_by_entry)
+                                {
+                                    let row_ref = (packed_row_ref != 0)
+                                        .then(|| packed_row_ref.saturating_sub(1));
+                                    state.insert_with_row_ref(key, row_ref);
+                                }
+                            } else {
+                                if snapshot_index.postings_by_entry.len() != snapshot_index.entries.len() {
+                                    return Err("non_unique_postings_missing".to_string());
+                                }
+
+                                for (key, row_refs) in snapshot_index
+                                    .entries
+                                    .into_iter()
+                                    .zip(snapshot_index.postings_by_entry)
+                                {
+                                    state.restore_non_unique_entry(key, &row_refs);
+                                }
+                            }
+
+                            Ok(())
+                        },
+                    );
+
+                    if let Ok(metadata) = streamed_snapshot {
+                        bootstrapped_tables += 1;
+                        bootstrapped_indexes += tracked_indexes.len();
+                        bootstrapped_rows += metadata.live_row_count;
+
+                        log::info!(
+                            "runtime index snapshot stream restore database={} table={} restored_indexes={} index_tuples={} live_rows={}",
+                            database_id,
+                            table_id,
+                            restored_index_ids.len(),
+                            restored_entry_count,
+                            metadata.live_row_count,
+                        );
+                        log::info!(
+                            "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=snapshot_stream elapsed_ms={}",
+                            database_id,
+                            table_id,
+                            tracked_indexes.len(),
+                            metadata.live_row_count,
+                            table_started_at.elapsed().as_millis(),
+                        );
+                        log_runtime_index_bootstrap_table_memory_profile(
+                            self,
+                            &table_stream_id,
+                            database_id,
+                            &table_id,
+                            &tracked_indexes,
+                        );
+                        mark_runtime_index_bootstrap_table_complete();
+                        continue;
+                    }
+                }
+
                 if let Some(snapshot_info) = snapshot_data_dir
                     .as_ref()
                     .and_then(|data_dir| {
@@ -2078,14 +2207,7 @@ impl RuntimeIndexStore {
                                     .iter()
                                     .zip(snapshot_index.postings_by_entry.iter())
                                 {
-                                    if row_refs.is_empty() {
-                                        state.insert_with_row_ref(key.clone(), None);
-                                        continue;
-                                    }
-
-                                    for row_ref in row_refs {
-                                        state.insert_with_row_ref(key.clone(), Some(*row_ref));
-                                    }
+                                    state.restore_non_unique_entry(key.clone(), row_refs);
                                 }
                             } else {
                                 let mut row_refs_lookup = AHashMap::<Vec<Vec<u8>>, Vec<u64>>::new();

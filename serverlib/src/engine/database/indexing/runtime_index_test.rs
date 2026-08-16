@@ -164,6 +164,22 @@ fn runtime_index_postings_return_to_inline_storage_after_removal() {
 }
 
 #[test]
+fn runtime_index_bulk_restore_deduplicates_and_orders_non_unique_postings() {
+    let mut state = RuntimeIndexState::new();
+    let key = vec![b"tenant-42".to_vec()];
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "orders",
+        DatabaseIndexKind::Indexed,
+        vec!["tenant_id".to_string()],
+    ));
+
+    state.restore_non_unique_entry(key.clone(), &[12, 3, 12, 8]);
+
+    assert_eq!(state.row_ref_count_for_key(&key), Some(3));
+    assert_eq!(state.row_refs_for_key(&key, None), vec![3, 8, 12]);
+}
+
+#[test]
 fn runtime_index_postings_cross_fixed_page_boundary_without_losing_order() {
     let mut state = RuntimeIndexState::new();
     let key = vec![b"US".to_vec()];

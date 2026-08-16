@@ -147,3 +147,63 @@ fn save_and_load_snapshot_preserves_all_row_refs_for_duplicate_non_unique_key() 
     );
     let _ = fs::remove_dir_all(data_dir);
 }
+
+#[test]
+fn stream_snapshot_chunks_visits_compact_non_unique_postings() {
+    let data_dir = make_temp_data_dir();
+    let table_stream_id = "places";
+    let wal_path = RuntimeIndexSnapshotService::wal_stream_path(&data_dir, table_stream_id);
+    fs::create_dir_all(wal_path.parent().expect("wal path has parent"))
+        .expect("create wal parent dir");
+    fs::write(&wal_path, b"fake-wal-bytes").expect("write fake wal file");
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(&data_dir, table_stream_id);
+    let schema = TableSchema::new(vec![crate::FieldDef {
+        field_name: "display_name".to_string(), seqno: 1, field_type: crate::FieldType::Text,
+        indexed: crate::FieldIndex::Indexed, nullable: false, default_value: None, metadata: None,
+    }]);
+    let index = DatabaseIndex::from_table_fields(
+        table_stream_id, crate::DatabaseIndexKind::Indexed, vec!["display_name".to_string()],
+    );
+    let mut indexes = HashMap::new();
+    indexes.insert(index.index_id.0.clone(), index.clone());
+    let table = DatabaseTable::new(table_stream_id.to_string(), schema, indexes);
+    let cologne_key = vec![b"Cologne".to_vec()];
+
+    RuntimeIndexSnapshotService::save_runtime_index_snapshot(
+        &data_dir,
+        &table,
+        table_stream_id,
+        100,
+        2,
+        wal_fingerprint,
+        vec![RuntimeIndexSnapshotIndex {
+            index_id: index.index_id.0.clone(),
+            entries: vec![cologne_key.clone()],
+            row_refs_by_entry: Vec::new(),
+            postings_by_entry: vec![vec![10, 20]],
+            row_refs: Vec::new(),
+        }],
+    )
+    .expect("save snapshot");
+
+    let mut chunks = Vec::new();
+    let metadata = RuntimeIndexSnapshotService::stream_runtime_index_snapshot_chunks(
+        &data_dir,
+        &table,
+        table_stream_id,
+        std::slice::from_ref(&index),
+        wal_fingerprint,
+        |chunk| {
+            chunks.push(chunk);
+            Ok(())
+        },
+    )
+    .expect("stream snapshot chunks");
+
+    assert_eq!(metadata.latest_tx_id, 100);
+    assert_eq!(metadata.live_row_count, 2);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].entries, vec![cologne_key]);
+    assert_eq!(chunks[0].postings_by_entry, vec![vec![10, 20]]);
+    let _ = fs::remove_dir_all(data_dir);
+}

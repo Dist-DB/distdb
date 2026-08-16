@@ -104,6 +104,12 @@ pub(crate) struct LoadedRuntimeIndexSnapshot {
     pub(crate) legacy_plain_encoding: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimeIndexSnapshotMetadata {
+    pub(crate) latest_tx_id: u64,
+    pub(crate) live_row_count: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TableLiveRowCheckpoint {
     pub(crate) table_id: String,
@@ -463,6 +469,107 @@ impl RuntimeIndexSnapshotService {
             legacy_plain_encoding,
         })
 
+    }
+
+    pub(crate) fn stream_runtime_index_snapshot_chunks<F>(
+        data_dir: &Path,
+        table: &DatabaseTable,
+        table_stream_id: &str,
+        tracked_indexes: &[DatabaseIndex],
+        wal_fingerprint: Option<(u64, u64)>,
+        mut visit_chunk: F,
+    ) -> Result<RuntimeIndexSnapshotMetadata, String>
+    where
+        F: FnMut(RuntimeIndexSnapshotIndex) -> Result<(), String>,
+    {
+        let snapshot_path = Self::runtime_index_snapshot_path(data_dir, table_stream_id);
+        let bytes = read_bytes(&snapshot_path)
+            .map_err(|err| format!("snapshot_read_failed path={} error={}", snapshot_path.display(), err))?;
+
+        if verify_header(FileKind::Entity, &bytes).is_err() || bytes.len() <= HEADER_SIZE {
+            return Err("invalid_header_or_empty".to_string());
+        }
+
+        let max_decode_bytes = Some(Self::runtime_index_snapshot_max_decode_bytes());
+        let (envelope, _) = decode_snapshot_payload_with_reason::<RuntimeIndexSnapshotEnvelope>(
+            &bytes[HEADER_SIZE..],
+            max_decode_bytes,
+        )?;
+        let RuntimeIndexSnapshotEnvelope::Chunked(manifest) = envelope else {
+            return Err("inline_snapshot_not_supported".to_string());
+        };
+
+        let schema_fingerprint = table_schema_fingerprint(table)
+            .ok_or_else(|| "schema_fingerprint_unavailable".to_string())?;
+        if manifest.table_id != table.table_id || manifest.schema_fingerprint != schema_fingerprint {
+            return Err("table_or_schema_mismatch".to_string());
+        }
+
+        let Some((wal_size_bytes, wal_modified_epoch_ms)) = wal_fingerprint else {
+            return Err("wal_fingerprint_unavailable".to_string());
+        };
+        if manifest.wal_size_bytes != wal_size_bytes
+            || manifest.wal_modified_epoch_ms != wal_modified_epoch_ms
+        {
+            return Err("wal_fingerprint_mismatch".to_string());
+        }
+
+        let snapshot_index_ids = manifest
+            .empty_index_ids
+            .iter()
+            .map(String::as_str)
+            .chain(manifest.chunk_refs.iter().map(|chunk| chunk.index_id.as_str()))
+            .collect::<HashSet<_>>();
+        if tracked_indexes
+            .iter()
+            .any(|index| !snapshot_index_ids.contains(index.index_id.0.as_str()))
+        {
+            return Err("tracked_index_missing".to_string());
+        }
+
+        for index_id in &manifest.empty_index_ids {
+            visit_chunk(RuntimeIndexSnapshotIndex {
+                index_id: index_id.clone(),
+                entries: Vec::new(),
+                row_refs_by_entry: Vec::new(),
+                postings_by_entry: Vec::new(),
+                row_refs: Vec::new(),
+            })?;
+        }
+
+        for chunk_ref in &manifest.chunk_refs {
+            let chunk_path = Self::runtime_index_snapshot_chunk_path(data_dir, &chunk_ref.file_name);
+            let chunk_bytes = read_bytes(&chunk_path).map_err(|err| {
+                format!("chunk_read_failed file={} error={}", chunk_path.display(), err)
+            })?;
+            if verify_header(FileKind::Entity, &chunk_bytes).is_err() || chunk_bytes.len() <= HEADER_SIZE {
+                return Err(format!("chunk_decode_failed file={} reason=invalid_header_or_empty", chunk_path.display()));
+            }
+
+            let (chunk, _) = decode_snapshot_payload_with_reason::<RuntimeIndexSnapshotChunkPayload>(
+                &chunk_bytes[HEADER_SIZE..],
+                max_decode_bytes,
+            )?;
+            if chunk.index_id != chunk_ref.index_id {
+                return Err(format!(
+                    "chunk_decode_failed file={} reason=index_id_mismatch expected={} actual={}",
+                    chunk_path.display(), chunk_ref.index_id, chunk.index_id,
+                ));
+            }
+
+            visit_chunk(RuntimeIndexSnapshotIndex {
+                index_id: chunk.index_id,
+                entries: chunk.entries,
+                row_refs_by_entry: chunk.row_refs_by_entry,
+                postings_by_entry: chunk.postings_by_entry,
+                row_refs: chunk.row_refs,
+            })?;
+        }
+
+        Ok(RuntimeIndexSnapshotMetadata {
+            latest_tx_id: manifest.latest_tx_id,
+            live_row_count: manifest.live_row_count,
+        })
     }
 
     fn load_runtime_index_snapshot_chunks(
