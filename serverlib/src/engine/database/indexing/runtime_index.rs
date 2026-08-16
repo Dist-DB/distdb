@@ -3024,31 +3024,22 @@ impl RuntimeIndexStore {
             return Ok(());
         }
 
-        let snapshot_store = runtime_index_store_for_table(self, table_stream_id, &tracked_indexes);
-        let table_owned = table.clone();
-        let table_stream_id_owned = table_stream_id.to_string();
-        let tracked_indexes_owned = tracked_indexes.clone();
-
-        std::thread::spawn(move || {
-            
-            if let Err(err) = persist_runtime_index_snapshot(
-                &snapshot_store,
-                &data_dir,
-                &table_owned,
-                &table_stream_id_owned,
-                latest_tx_id,
-                live_row_count,
-                wal_fingerprint,
-                &tracked_indexes_owned,
-            ) {
-                log::warn!(
-                    "runtime index snapshot save skipped table={} reason={}",
-                    table_owned.table_id,
-                    err,
-                );
-            }
-
-        });
+        if let Err(err) = persist_runtime_index_snapshot(
+            self,
+            &data_dir,
+            table,
+            table_stream_id,
+            latest_tx_id,
+            live_row_count,
+            wal_fingerprint,
+            &tracked_indexes,
+        ) {
+            log::warn!(
+                "runtime index snapshot save skipped table={} reason={}",
+                table.table_id,
+                err,
+            );
+        }
 
         self.incremental_persist_last_saved_ms
             .insert(table_stream_id.to_string(), now_ms);
@@ -3260,19 +3251,80 @@ fn persist_runtime_index_snapshot(
     tracked_indexes: &[DatabaseIndex],
 ) -> Result<(), String> {
 
-    let indexes = snapshot_indexes_for_table(store, table_stream_id, tracked_indexes)?;
-
-    let snapshot_path = RuntimeIndexSnapshotService::runtime_index_snapshot_path(data_dir, table_stream_id);
-
-    RuntimeIndexSnapshotService::save_runtime_index_snapshot(
+    RuntimeIndexSnapshotService::save_runtime_index_snapshot_streaming(
         data_dir,
         table,
         table_stream_id,
         latest_tx_id,
         live_row_count,
         wal_fingerprint,
-        indexes,
+        |emit_chunk| {
+            let chunk_limit = RuntimeIndexSnapshotService::snapshot_chunk_entry_limit();
+
+            for index in tracked_indexes {
+                let state = store
+                    .index_for_table(table_stream_id, &index.index_id.0)
+                    .or_else(|| store.index(&index.index_id.0))
+                    .ok_or_else(|| {
+                        format!(
+                            "missing runtime index state '{}' (scope '{}')",
+                            index.index_id.0,
+                            table_stream_id,
+                        )
+                    })?;
+
+                let mut entries = Vec::with_capacity(chunk_limit);
+                let mut row_refs_by_entry = Vec::with_capacity(chunk_limit);
+                let mut postings_by_entry = Vec::with_capacity(chunk_limit);
+
+                for (encoded_key, row_ref) in &state.entries {
+                    let Some(decoded_key) = decode_runtime_index_entry_key(encoded_key) else {
+                        continue;
+                    };
+                    let postings = if index.is_unique_key() {
+                        Vec::new()
+                    } else {
+                        state.row_refs_for_key(&decoded_key, None)
+                    };
+                    let packed_row_ref = unpack_row_ref(*row_ref)
+                        .and_then(|row_ref| row_ref.checked_add(1))
+                        .unwrap_or(0);
+
+                    entries.push(decoded_key);
+                    row_refs_by_entry.push(packed_row_ref);
+                    postings_by_entry.push(postings);
+
+                    if entries.len() == chunk_limit {
+                        emit_chunk(RuntimeIndexSnapshotIndex {
+                            index_id: index.index_id.0.clone(),
+                            entries: std::mem::take(&mut entries),
+                            row_refs_by_entry: std::mem::take(&mut row_refs_by_entry),
+                            postings_by_entry: std::mem::take(&mut postings_by_entry),
+                            row_refs: Vec::new(),
+                        })?;
+                        entries = Vec::with_capacity(chunk_limit);
+                        row_refs_by_entry = Vec::with_capacity(chunk_limit);
+                        postings_by_entry = Vec::with_capacity(chunk_limit);
+                    }
+                }
+
+                emit_chunk(RuntimeIndexSnapshotIndex {
+                    index_id: index.index_id.0.clone(),
+                    entries,
+                    row_refs_by_entry,
+                    postings_by_entry,
+                    row_refs: Vec::new(),
+                })?;
+            }
+
+            Ok(())
+        },
     )?;
+
+    let snapshot_path = RuntimeIndexSnapshotService::runtime_index_snapshot_path(
+        data_dir,
+        table_stream_id,
+    );
 
     if !snapshot_path.exists() {
         return Err(format!(

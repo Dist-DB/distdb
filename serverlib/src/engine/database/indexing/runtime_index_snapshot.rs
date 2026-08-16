@@ -181,6 +181,10 @@ impl RuntimeIndexSnapshotService {
         )
     }
 
+    pub(crate) fn snapshot_chunk_entry_limit() -> usize {
+        Self::runtime_index_snapshot_max_entries_per_chunk().max(1)
+    }
+
     pub(crate) fn wal_stream_fingerprint(data_dir: &Path, table_stream_id: &str) -> Option<(u64, u64)> {
 
         let path = Self::wal_stream_path(data_dir, table_stream_id);
@@ -790,6 +794,59 @@ impl RuntimeIndexSnapshotService {
         indexes: Vec<RuntimeIndexSnapshotIndex>,
     ) -> Result<(), String> {
 
+        Self::save_runtime_index_snapshot_streaming(
+            data_dir,
+            table,
+            table_stream_id,
+            latest_tx_id,
+            live_row_count,
+            wal_fingerprint,
+            |emit_chunk| {
+                for index in indexes {
+                    if index.entries.is_empty() {
+                        emit_chunk(index)?;
+                        continue;
+                    }
+
+                    let chunk_limit = Self::snapshot_chunk_entry_limit();
+                    for (chunk_seq, entries) in index.entries.chunks(chunk_limit).enumerate() {
+                        let start = chunk_seq.saturating_mul(chunk_limit);
+                        let end = start.saturating_add(entries.len());
+                        emit_chunk(RuntimeIndexSnapshotIndex {
+                            index_id: index.index_id.clone(),
+                            entries: entries.to_vec(),
+                            row_refs_by_entry: if index.row_refs_by_entry.len() == index.entries.len() {
+                                index.row_refs_by_entry[start..end].to_vec()
+                            } else {
+                                Vec::new()
+                            },
+                            postings_by_entry: if index.postings_by_entry.len() == index.entries.len() {
+                                index.postings_by_entry[start..end].to_vec()
+                            } else {
+                                Vec::new()
+                            },
+                            row_refs: Vec::new(),
+                        })?;
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn save_runtime_index_snapshot_streaming<F>(
+        data_dir: &Path,
+        table: &DatabaseTable,
+        table_stream_id: &str,
+        latest_tx_id: u64,
+        live_row_count: usize,
+        wal_fingerprint: Option<(u64, u64)>,
+        produce_chunks: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(&mut dyn FnMut(RuntimeIndexSnapshotIndex) -> Result<(), String>) -> Result<(), String>,
+    {
+
         let (wal_size_bytes, wal_modified_epoch_ms) = wal_fingerprint
             .ok_or_else(|| "wal fingerprint unavailable".to_string())?;
 
@@ -812,70 +869,57 @@ impl RuntimeIndexSnapshotService {
             indexes: Vec::new(),
         };
 
-        let max_entries_per_chunk = Self::runtime_index_snapshot_max_entries_per_chunk().max(1);
         let mut chunk_refs = Vec::new();
         let mut chunk_files_written = Vec::new();
         let mut empty_index_ids = Vec::new();
+        let mut next_chunk_seq_by_index = HashMap::<String, usize>::new();
 
         Self::remove_runtime_index_snapshot_chunk_files(data_dir, table_stream_id);
 
-        for index in indexes {
+        let mut emit_chunk = |index: RuntimeIndexSnapshotIndex| -> Result<(), String> {
             if index.entries.is_empty() {
                 empty_index_ids.push(index.index_id.clone());
-                continue;
+                return Ok(());
             }
 
-            for (chunk_seq, entry_chunk) in index.entries.chunks(max_entries_per_chunk).enumerate() {
-                let entries = entry_chunk.to_vec();
-                let start = chunk_seq.saturating_mul(max_entries_per_chunk);
-                let end = start.saturating_add(entries.len());
+            let chunk_seq = next_chunk_seq_by_index
+                .entry(index.index_id.clone())
+                .and_modify(|seq| *seq = seq.saturating_add(1))
+                .or_insert(0);
+            let file_name = Self::runtime_index_snapshot_chunk_file_name(
+                table_stream_id,
+                &index.index_id,
+                *chunk_seq,
+            );
+            let chunk_path = Self::runtime_index_snapshot_chunk_path(data_dir, &file_name);
+            let mut chunk_content = make_header(FileKind::Entity).to_vec();
+            let chunk_payload = RuntimeIndexSnapshotChunkPayload {
+                index_id: index.index_id.clone(),
+                entries: index.entries,
+                row_refs_by_entry: index.row_refs_by_entry,
+                postings_by_entry: index.postings_by_entry,
+                row_refs: Vec::new(),
+            };
+            let chunk_encoded = encode_snapshot_payload(&chunk_payload)?;
+            chunk_content.extend_from_slice(&chunk_encoded);
 
-                let row_refs_by_entry = if index.row_refs_by_entry.len() == index.entries.len() {
-                    index.row_refs_by_entry[start..end].to_vec()
-                } else {
-                    Vec::new()
-                };
-
-                let postings_by_entry = if index.postings_by_entry.len() == index.entries.len() {
-                    index.postings_by_entry[start..end].to_vec()
-                } else {
-                    Vec::new()
-                };
-
-                let chunk_payload = RuntimeIndexSnapshotChunkPayload {
-                    index_id: index.index_id.clone(),
-                    entries,
-                    row_refs_by_entry,
-                    postings_by_entry,
-                    row_refs: Vec::new(),
-                };
-
-                let file_name = Self::runtime_index_snapshot_chunk_file_name(
-                    table_stream_id,
-                    &index.index_id,
-                    chunk_seq,
-                );
-
-                let chunk_path = Self::runtime_index_snapshot_chunk_path(data_dir, &file_name);
-                let mut chunk_content = make_header(FileKind::Entity).to_vec();
-                let chunk_encoded = encode_snapshot_payload(&chunk_payload)?;
-                chunk_content.extend_from_slice(&chunk_encoded);
-
-                if let Err(err) = write_bytes_atomic(&chunk_path, &chunk_content) {
-                    for written in &chunk_files_written {
-                        let _ = fs::remove_file(written);
-                    }
-                    return Err(format!("snapshot chunk write failed: {err}"));
+            if let Err(err) = write_bytes_atomic(&chunk_path, &chunk_content) {
+                for written in &chunk_files_written {
+                    let _ = fs::remove_file(written);
                 }
-
-                chunk_files_written.push(chunk_path);
-                chunk_refs.push(RuntimeIndexSnapshotChunkRef {
-                    index_id: index.index_id.clone(),
-                    chunk_seq,
-                    file_name,
-                });
+                return Err(format!("snapshot chunk write failed: {err}"));
             }
-        }
+
+            chunk_files_written.push(chunk_path);
+            chunk_refs.push(RuntimeIndexSnapshotChunkRef {
+                index_id: index.index_id,
+                chunk_seq: *chunk_seq,
+                file_name,
+            });
+            Ok(())
+        };
+
+        produce_chunks(&mut emit_chunk)?;
 
         chunk_refs.sort_by(|left, right| {
             left.index_id
