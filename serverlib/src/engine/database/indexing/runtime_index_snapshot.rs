@@ -24,8 +24,8 @@ use crate::{
     snapshot_equality_cache,
 };
 
-const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtixp2";
-const RUNTIME_INDEX_SNAPSHOT_CHUNK_FILE_STEM_PREFIX: &str = "rtixpc2";
+const RUNTIME_INDEX_SNAPSHOT_FILE_STEM_PREFIX: &str = "rtixp3";
+const RUNTIME_INDEX_SNAPSHOT_CHUNK_FILE_STEM_PREFIX: &str = "rtixpc3";
 const LIVE_ROW_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrows";
 const LIVE_ROW_COUNT_CHECKPOINT_FILE_STEM_PREFIX: &str = "lrcnt";
 const ACCESSOR_CACHE_SNAPSHOT_FILE_STEM_PREFIX: &str = "acix";

@@ -146,6 +146,24 @@ fn runtime_index_deduplicates_live_postings_for_repeated_row_refs() {
 }
 
 #[test]
+fn runtime_index_postings_return_to_inline_storage_after_removal() {
+    let mut state = RuntimeIndexState::new();
+    let key = vec![b"tenant-42".to_vec()];
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "orders",
+        DatabaseIndexKind::Indexed,
+        vec!["tenant_id".to_string()],
+    ));
+
+    state.insert_with_row_ref(key.clone(), Some(9));
+    state.insert_with_row_ref(key.clone(), Some(11));
+    state.remove_with_row_ref(&key, Some(11));
+
+    assert_eq!(state.row_ref_count_for_key(&key), Some(1));
+    assert_eq!(state.row_refs_for_key(&key, None), vec![9]);
+}
+
+#[test]
 fn runtime_index_postings_cross_fixed_page_boundary_without_losing_order() {
     let mut state = RuntimeIndexState::new();
     let key = vec![b"US".to_vec()];

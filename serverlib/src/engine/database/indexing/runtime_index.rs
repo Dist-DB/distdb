@@ -267,12 +267,39 @@ type IndexKey = Arc<[u8]>;
 
 #[derive(Debug, Clone, Default)]
 struct PostingPages {
+    inline_row_ref: Option<NonZeroU64>,
     pages: Vec<Vec<NonZeroU64>>,
     len: usize,
 }
 
 impl PostingPages {
     fn insert_unique_sorted(&mut self, row_ref: NonZeroU64) {
+        if self.len == 0 {
+            self.inline_row_ref = Some(row_ref);
+            self.len = 1;
+            return;
+        }
+
+        if self.len == 1 {
+            let existing = self.inline_row_ref.expect("single posting should be inline");
+            if existing == row_ref {
+                return;
+            }
+
+            let mut page = Vec::with_capacity(2);
+            if existing < row_ref {
+                page.push(existing);
+                page.push(row_ref);
+            } else {
+                page.push(row_ref);
+                page.push(existing);
+            }
+            self.inline_row_ref = None;
+            self.pages.push(page);
+            self.len = 2;
+            return;
+        }
+
         if let Some(last_page) = self.pages.last_mut()
             && last_page.last().is_some_and(|last| *last < row_ref)
         {
@@ -315,6 +342,15 @@ impl PostingPages {
     }
 
     fn remove(&mut self, row_ref: NonZeroU64) -> bool {
+        if self.len == 1 {
+            if self.inline_row_ref == Some(row_ref) {
+                self.inline_row_ref = None;
+                self.len = 0;
+                return true;
+            }
+            return false;
+        }
+
         for page_index in 0..self.pages.len() {
             let page = &mut self.pages[page_index];
             if let Ok(remove_at) = page.binary_search(&row_ref) {
@@ -322,6 +358,14 @@ impl PostingPages {
                 self.len = self.len.saturating_sub(1);
                 if page.is_empty() {
                     self.pages.remove(page_index);
+                }
+
+                if self.len == 1 {
+                    self.inline_row_ref = self
+                        .pages
+                        .iter()
+                        .find_map(|page| page.first().copied());
+                    self.pages.clear();
                 }
                 return true;
             }
@@ -339,6 +383,13 @@ impl PostingPages {
     }
 
     fn append_row_refs(&self, row_refs: &mut Vec<u64>, limit: Option<usize>) {
+        if let Some(row_ref) = self.inline_row_ref {
+            if let Some(row_ref) = unpack_row_ref(Some(row_ref)) {
+                row_refs.push(row_ref);
+            }
+            return;
+        }
+
         for page in &self.pages {
             for row_ref in page {
                 if limit.is_some_and(|limit| row_refs.len() >= limit) {
@@ -352,7 +403,9 @@ impl PostingPages {
     }
 
     fn iter(&self) -> impl Iterator<Item = NonZeroU64> + '_ {
-        self.pages.iter().flat_map(|page| page.iter().copied())
+        self.inline_row_ref
+            .into_iter()
+            .chain(self.pages.iter().flat_map(|page| page.iter().copied()))
     }
 }
 
