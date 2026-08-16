@@ -290,7 +290,7 @@ pub(crate) fn import_transport_error_is_retryable(message: &str) -> bool {
 }
 
 pub(crate) fn import_transaction_batch_size() -> usize {
-    std::env::var("IMPORT_TX_BATCH_SIZE")
+    std::env::var(common::settings::IMPORT_TX_BATCH_SIZE)
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -298,7 +298,7 @@ pub(crate) fn import_transaction_batch_size() -> usize {
 }
 
 pub(crate) fn import_transaction_batch_max_age_ms() -> u128 {
-    std::env::var("IMPORT_TX_BATCH_MAX_AGE_MS")
+    std::env::var(common::settings::IMPORT_TX_BATCH_MAX_AGE_MS)
         .ok()
         .and_then(|raw| raw.trim().parse::<u128>().ok())
         .filter(|value| *value > 0)
@@ -478,7 +478,7 @@ fn coerce_import_insert_to_insert_ignore(statement: &str) -> String {
 }
 
 fn import_insert_chunk_target_bytes() -> usize {
-    std::env::var("IMPORT_INSERT_CHUNK_BYTES")
+    std::env::var(common::settings::IMPORT_INSERT_CHUNK_BYTES)
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 8_192)
@@ -486,7 +486,7 @@ fn import_insert_chunk_target_bytes() -> usize {
 }
 
 fn import_insert_chunk_max_tuples() -> usize {
-    std::env::var("IMPORT_INSERT_CHUNK_MAX_TUPLES")
+    std::env::var(common::settings::IMPORT_INSERT_CHUNK_MAX_TUPLES)
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)

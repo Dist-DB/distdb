@@ -307,35 +307,16 @@ fn append_catalog_entity_rows(
         preserve_inflight_state: bool,
     ) -> String {
 
-        if !bootstrap_ready {
-            if status == "load" {
-                return "indexing".to_string();
-            }
-            return status.to_string();
-        }
+        let _ = (bootstrap_ready, preserve_inflight_state);
 
-        if preserve_inflight_state {
-            return status.to_string();
-        }
-
-        match status {
-            "load" | "lock" | "sync" | "indexing" => "ready".to_string(),
-            _ => status.to_string(),
-        }
+        // Report the entity's real status: tables become readable independently,
+        // so masking in-progress states here would contradict query rejections.
+        status.to_string()
 
     }
 
-    fn load_state_for_status(status: &str, bootstrap_ready: bool) -> Vec<u8> {
-        if bootstrap_ready {
-            // Once bootstrap is complete, entity status may still carry transient
-            // lock/load markers from earlier phases, but load state should reflect
-            // readiness rather than bootstrap progress.
-            if status == "indexing" {
-                return b"loading".to_vec();
-            }
-
-            b"loaded".to_vec()
-        } else if status == "ready" {
+    fn load_state_for_status(status: &str, _bootstrap_ready: bool) -> Vec<u8> {
+        if matches!(status, "ready" | "sync" | "lock") {
             b"loaded".to_vec()
         } else {
             b"loading".to_vec()
@@ -402,19 +383,8 @@ fn append_catalog_entity_rows(
 
                 for index_id in indexes {
 
-                    let index_status = if bootstrap_ready {
-                        if preserve_inflight_state && entity_status != "ready" {
-                            "indexing"
-                        } else {
-                            "ready"
-                        }
-                    } else if entity_status == "ready" {
-                        "ready"
-                    } else if entity_status == "indexing" {
-                        "indexing"
-                    } else {
-                        "load"
-                    };
+                    // An index is queryable exactly when its table is.
+                    let index_status = entity_status.as_str();
 
                     rows.push(vec![
                         resolved_database_id.as_bytes().to_vec(),

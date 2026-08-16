@@ -312,7 +312,7 @@ fn resolve_public_hostname_from_hosts_paths(paths: &[&str]) -> Option<String> {
 
 pub(crate) fn resolve_hostname_hint() -> Option<String> {
 
-    std::env::var("DISTDB_ADVERTISE_HOST")
+    std::env::var(common::settings::ADVERTISE_HOST)
         .ok()
         .filter(|value| looks_like_public_hostname(value))
         .or_else(|| resolve_public_hostname_from_hosts_paths(&["/etc/hosts", "/etc/hosts.deny"]))
@@ -380,11 +380,7 @@ pub fn resolve_advertise_host(args: &[String], listen_addr: &str, hostname_hint:
             return positional_host;
         }
 
-    if let Some(explicit_host) = std::env::var("DISTDB_ADVERTISE_HOST")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        let explicit_host = explicit_host.trim().to_string();
+    if let Some(explicit_host) = common::settings::text(common::settings::ADVERTISE_HOST) {
         if !is_placeholder_host(&explicit_host) {
             return explicit_host;
         }

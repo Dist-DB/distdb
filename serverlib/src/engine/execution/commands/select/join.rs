@@ -31,15 +31,7 @@ use super::post_processing::{
 };
 
 fn select_stage_diagnostics_enabled() -> bool {
-    std::env::var("DISTDB_SELECT_STAGE_DIAGNOSTICS")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    common::settings::flag(common::settings::SELECT_STAGE_DIAGNOSTICS, false)
 }
 
 struct ResultRowCollector {
@@ -1133,13 +1125,33 @@ fn count_star_indexed_equality_fast_path(
         return None;
     }
 
-    let crate::RelationAccessStrategy::EqualityProbe {
-        field_name,
-        lookup_value,
-        equality_filters,
-        ..
-    } = &access_plan.strategy else {
-        return None;
+    let (field_name, lookup_value, equality_filters) = match &access_plan.strategy {
+        crate::RelationAccessStrategy::EqualityProbe {
+            field_name,
+            lookup_value,
+            equality_filters,
+            ..
+        } => (field_name.as_str(), lookup_value.as_slice(), equality_filters.clone()),
+        crate::RelationAccessStrategy::RuntimeIndexLookup { index_id, lookup_key } => {
+            let index = table
+                .indexes
+                .values()
+                .find(|index| index.index_id.0 == *index_id)?;
+            let field_name = if index.field_names.len() == 1 {
+                index.field_names.first()?.as_str()
+            } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+                index.field_name.as_str()
+            } else {
+                return None;
+            };
+            let lookup_value = lookup_key.first()?;
+            (
+                field_name,
+                lookup_value.as_slice(),
+                HashMap::from([(field_name.to_string(), lookup_value.clone())]),
+            )
+        }
+        _ => return None,
     };
 
     if equality_filters.is_empty() {
@@ -1191,15 +1203,29 @@ fn count_star_indexed_equality_fast_path(
         field_name,
         lookup_value,
     ) {
+        log::debug!(
+            "count equality probe table={} field={} stream={} source=runtime_posting count={}",
+            table.table_id,
+            field_name,
+            table_stream_id,
+            count,
+        );
         return Some(count);
     }
+
+    log::debug!(
+        "count equality probe table={} field={} stream={} source=equality_scan reason=runtime_posting_missing",
+        table.table_id,
+        field_name,
+        table_stream_id,
+    );
 
     Some(count_live_rows_by_equality_filters(
         wal,
         table_stream_id,
         &table.table_id,
         schema,
-        equality_filters,
+        &equality_filters,
     ))
 
 }

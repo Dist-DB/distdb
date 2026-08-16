@@ -1,0 +1,7 @@
+show peers;
+password root;
+create database opsdb;
+use opsdb;
+create table heartbeat (id uint64 primary key, origin text);
+insert into heartbeat (id, origin) values (1, 'seed');
+quit;

@@ -1,0 +1,41 @@
+{
+  "run_id": "20260815-213431-73020",
+  "generated_at_utc": "2026-08-15T19:34:33Z",
+  "compatibility_window": {
+    "old_ref": "unknown",
+    "window_label": "unknown"
+  },
+  "server": {
+    "old_binary": "/Users/samcolak/Source Code/rust/distdb/distdb/target/debug/server",
+    "new_binary": "/Users/samcolak/Source Code/rust/distdb/distdb/target/debug/server",
+    "old_sha256": "e3854358686c6fbaf958ebd261fe923afe3743372ecac60e478692db3cfc5cda",
+    "new_sha256": "e3854358686c6fbaf958ebd261fe923afe3743372ecac60e478692db3cfc5cda"
+  },
+  "nodes": {
+    "node_a": {
+      "id": "op-node-a",
+      "port": 19501,
+      "final_row_count": 4,
+      "log_file": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-unknown-20260815-213431-73020/node-a.log"
+    },
+    "node_b": {
+      "id": "op-node-b",
+      "port": 19502,
+      "final_row_count": 4,
+      "log_file": "/Users/samcolak/Source Code/rust/distdb/distdb/artifacts/e2e/rolling-upgrade-safety-unknown-20260815-213431-73020/node-b.log"
+    }
+  },
+  "timings_ms": {
+    "rolling_restart_a": 252,
+    "rolling_restart_b": 254,
+    "upgrade_restart_a": 264,
+    "upgrade_restart_b": 266,
+    "rollback_restart_a": 267,
+    "rollback_restart_b": 263
+  },
+  "checks": {
+    "rolling_restart_survived": true,
+    "cross_version_upgrade_survived": true,
+    "cross_version_rollback_survived": true
+  }
+}

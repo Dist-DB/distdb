@@ -1876,6 +1876,36 @@ impl DatabaseCatalog {
         self.with_table_read(table_id, DatabaseTable::status)
     }
 
+    /// Mark a single table's index build complete, leaving other tables untouched.
+    pub fn complete_table_indexing(&mut self, table_id: &str) -> DatabaseResult<()> {
+
+        let table_id = common::normalize_identifier!(table_id);
+
+        self.with_table_mut(&table_id, |table| {
+            table.complete_indexing()?;
+            Ok(())
+        })?;
+
+        Ok(())
+
+    }
+
+    /// Reject reads against a table whose data is not materialized yet. The
+    /// catalog is not checked: individual tables become readable independently.
+    pub fn ensure_available_for_read(&self, table_id: &str) -> DatabaseResult<()> {
+
+        let table = self
+            .with_table_read(table_id, DatabaseTable::status)
+            .ok_or(DatabaseError::TableNotFound)?;
+
+        if !table.allows_reads() {
+            return Err(DatabaseError::ResourceUnavailable);
+        }
+
+        Ok(())
+
+    }
+
     pub fn file_name(&self) -> String {
         FileKind::Catalog.file_name(common::normalize_identifier!(self.database_id.0.clone()))
     }

@@ -183,7 +183,7 @@ fn select_from_dotted_table_without_active_database_resolves_catalog_prefix() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
     catalog
-        .register_table("users", TableSchema::new(Vec::new()))
+        .create_table("users", TableSchema::new(Vec::new()))
         .expect("table should be created");
 
     let mut catalogs = HashMap::new();
@@ -221,7 +221,7 @@ fn select_from_dotted_table_with_active_database_strips_matching_prefix() {
     let mut catalog =
         DatabaseCatalog::create_empty_from_name("locations").expect("catalog should be created");
     catalog
-        .register_table("places", TableSchema::new(Vec::new()))
+        .create_table("places", TableSchema::new(Vec::new()))
         .expect("table should be created");
 
     let mut catalogs = HashMap::new();
@@ -7616,7 +7616,7 @@ fn call_procedure_supports_cursor_fetch_with_not_found_handler() {
     }]);
 
     catalog
-        .register_table("users", schema)
+        .create_table("users", schema)
         .expect("users table should register");
 
     let wal = ConcurrentWalManager::in_memory();
@@ -7700,7 +7700,7 @@ fn call_procedure_rejects_unhandled_cursor_not_found() {
     }]);
 
     catalog
-        .register_table("users", schema)
+        .create_table("users", schema)
         .expect("users table should register");
 
     let table = catalog.table("users").expect("users table should exist");
@@ -8387,7 +8387,7 @@ fn select_fetch_first_rows_only_limits_single_relation_query() {
     }]);
 
     catalog
-        .register_table("users", schema)
+        .create_table("users", schema)
         .expect("users table should register");
 
     for id in ["1", "2", "3"] {
@@ -8958,7 +8958,7 @@ fn select_top_limits_rows() {
     }]);
 
     catalog
-        .register_table("users", schema)
+        .create_table("users", schema)
         .expect("users table should register");
 
     for id in ["1", "2", "3"] {
@@ -9440,7 +9440,7 @@ fn select_limit_by_with_offset_applies_global_offset_after_group_caps() {
     ]);
 
     catalog
-        .register_table("users", schema)
+        .create_table("users", schema)
         .expect("users table should register");
 
     for (id, team) in [("1", "a"), ("2", "a"), ("3", "b"), ("4", "b")] {
@@ -10758,7 +10758,7 @@ fn select_distinct_group_having_order_executes_in_first_pass_model() {
     }]);
 
     catalog
-        .register_table("users", schema)
+        .create_table("users", schema)
         .expect("users table should register");
 
     for id in ["1", "1", "2", "3"] {

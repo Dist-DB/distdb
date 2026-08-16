@@ -1,0 +1,208 @@
+//! Single registry for every `DISTDB_*` environment setting.
+//!
+//! Names and defaults live here so operators and code cannot drift apart, and so
+//! a setting can never be documented or exported without a reader.
+
+pub const ACCESSOR_CACHE_MAX_ROWS_BYTES: &str = "DISTDB_ACCESSOR_CACHE_MAX_ROWS_BYTES";
+pub const ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS: &str = "DISTDB_ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS";
+pub const ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS: &str = "DISTDB_ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS";
+pub const ACCESSOR_SNAPSHOT_PERSIST_ROWS: &str = "DISTDB_ACCESSOR_SNAPSHOT_PERSIST_ROWS";
+pub const ADVERTISE_HOST: &str = "DISTDB_ADVERTISE_HOST";
+pub const BACKGROUND_TABLE_LOAD_WORKERS: &str = "DISTDB_BACKGROUND_TABLE_LOAD_WORKERS";
+pub const CONNECTOR_CONNECT_RETRY_ATTEMPTS: &str = "DISTDB_CONNECTOR_CONNECT_RETRY_ATTEMPTS";
+pub const CONNECTOR_CONNECT_TIMEOUT_SECS: &str = "DISTDB_CONNECTOR_CONNECT_TIMEOUT_SECS";
+pub const CONNECTOR_HANDSHAKE_TIMEOUT_SECS: &str = "DISTDB_CONNECTOR_HANDSHAKE_TIMEOUT_SECS";
+pub const CONNECTOR_STREAM_TIMEOUT_SECS: &str = "DISTDB_CONNECTOR_STREAM_TIMEOUT_SECS";
+pub const CONNECTOR_TLS_FINGERPRINT: &str = "DISTDB_CONNECTOR_TLS_FINGERPRINT";
+pub const CONSOLE_SHOW_PEERS_TIMEOUT_SECS: &str = "DISTDB_CONSOLE_SHOW_PEERS_TIMEOUT_SECS";
+pub const CONSOLE_SQL_TIMEOUT_SECS: &str = "DISTDB_CONSOLE_SQL_TIMEOUT_SECS";
+pub const DEBUG_EQUALITY_PROBE_RESULT_CACHE: &str = "DISTDB_DEBUG_EQUALITY_PROBE_RESULT_CACHE";
+pub const DEBUG_EQUALITY_PROBE_RUNTIME_STATE: &str = "DISTDB_DEBUG_EQUALITY_PROBE_RUNTIME_STATE";
+pub const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES: &str =
+    "DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES";
+pub const EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES: &str =
+    "DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES";
+pub const EQUALITY_PROBE_RESULT_CACHE_MAX_ROWS: &str =
+    "DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ROWS";
+pub const EQUALITY_PROBE_RESULT_CACHE_TTL_MS: &str = "DISTDB_EQUALITY_PROBE_RESULT_CACHE_TTL_MS";
+pub const LIVE_ROW_APPLY_WORKERS: &str = "DISTDB_LIVE_ROW_APPLY_WORKERS";
+pub const LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS: &str =
+    "DISTDB_LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS";
+pub const LIVE_ROW_CHECKPOINT_MAX_BYTES: &str = "DISTDB_LIVE_ROW_CHECKPOINT_MAX_BYTES";
+pub const PLATFORM_TLS_FINGERPRINT: &str = "DISTDB_PLATFORM_TLS_FINGERPRINT";
+pub const RANGE_INTERSECTION_DIAGNOSTICS: &str = "DISTDB_RANGE_INTERSECTION_DIAGNOSTICS";
+pub const REALIGN_WAL_RECORDS: &str = "DISTDB_REALIGN_WAL_RECORDS";
+pub const RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS: &str =
+    "DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS";
+pub const RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS: &str =
+    "DISTDB_RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS";
+pub const RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS: &str =
+    "DISTDB_RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS";
+pub const RUNTIME_INDEX_BUILD_WORKERS: &str = "DISTDB_RUNTIME_INDEX_BUILD_WORKERS";
+pub const RUNTIME_INDEX_INCREMENTAL_PERSIST_MIN_INTERVAL_MS: &str =
+    "DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_MIN_INTERVAL_MS";
+pub const RUNTIME_INDEX_INCREMENTAL_PERSIST_ON_COMMIT: &str =
+    "DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_ON_COMMIT";
+pub const RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP: &str =
+    "DISTDB_RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP";
+pub const RUNTIME_INDEX_NON_PRIMARY_FIELDS: &str = "DISTDB_RUNTIME_INDEX_NON_PRIMARY_FIELDS";
+pub const RUNTIME_INDEX_NON_PRIMARY_INDEX_IDS: &str = "DISTDB_RUNTIME_INDEX_NON_PRIMARY_INDEX_IDS";
+pub const RUNTIME_INDEX_PAGING_DEBUG: &str = "DISTDB_RUNTIME_INDEX_PAGING_DEBUG";
+pub const RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS: &str =
+    "DISTDB_RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS";
+pub const RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP: &str =
+    "DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP";
+pub const RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES: &str =
+    "DISTDB_RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES";
+pub const RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK: &str =
+    "DISTDB_RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK";
+pub const RUNTIME_INDEX_WARM_WORKERS: &str = "DISTDB_RUNTIME_INDEX_WARM_WORKERS";
+pub const SELECT_STAGE_DIAGNOSTICS: &str = "DISTDB_SELECT_STAGE_DIAGNOSTICS";
+pub const TX_SNAPSHOT_CAPTURE_RUNTIME_INDEXES: &str = "DISTDB_TX_SNAPSHOT_CAPTURE_RUNTIME_INDEXES";
+pub const TX_SNAPSHOT_MAX_SESSIONS: &str = "DISTDB_TX_SNAPSHOT_MAX_SESSIONS";
+pub const TX_SNAPSHOT_TTL_SECONDS: &str = "DISTDB_TX_SNAPSHOT_TTL_SECONDS";
+pub const WAL_MAX_FRAME_BYTES: &str = "DISTDB_WAL_MAX_FRAME_BYTES";
+pub const WAL_SYNC_ON_APPEND: &str = "DISTDB_WAL_SYNC_ON_APPEND";
+
+/// Every `DISTDB_*` setting the binaries read. Kept sorted so it can be diffed
+/// against operator scripts and documentation.
+pub const ALL: &[&str] = &[
+    ACCESSOR_CACHE_MAX_ROWS_BYTES,
+    ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS,
+    ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS,
+    ACCESSOR_SNAPSHOT_PERSIST_ROWS,
+    ADVERTISE_HOST,
+    BACKGROUND_TABLE_LOAD_WORKERS,
+    CONNECTOR_CONNECT_RETRY_ATTEMPTS,
+    CONNECTOR_CONNECT_TIMEOUT_SECS,
+    CONNECTOR_HANDSHAKE_TIMEOUT_SECS,
+    CONNECTOR_STREAM_TIMEOUT_SECS,
+    CONNECTOR_TLS_FINGERPRINT,
+    CONSOLE_SHOW_PEERS_TIMEOUT_SECS,
+    CONSOLE_SQL_TIMEOUT_SECS,
+    DEBUG_EQUALITY_PROBE_RESULT_CACHE,
+    DEBUG_EQUALITY_PROBE_RUNTIME_STATE,
+    EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES,
+    EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES,
+    EQUALITY_PROBE_RESULT_CACHE_MAX_ROWS,
+    EQUALITY_PROBE_RESULT_CACHE_TTL_MS,
+    LIVE_ROW_APPLY_WORKERS,
+    LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS,
+    LIVE_ROW_CHECKPOINT_MAX_BYTES,
+    PLATFORM_TLS_FINGERPRINT,
+    RANGE_INTERSECTION_DIAGNOSTICS,
+    REALIGN_WAL_RECORDS,
+    RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS,
+    RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS,
+    RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS,
+    RUNTIME_INDEX_BUILD_WORKERS,
+    RUNTIME_INDEX_INCREMENTAL_PERSIST_MIN_INTERVAL_MS,
+    RUNTIME_INDEX_INCREMENTAL_PERSIST_ON_COMMIT,
+    RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP,
+    RUNTIME_INDEX_NON_PRIMARY_FIELDS,
+    RUNTIME_INDEX_NON_PRIMARY_INDEX_IDS,
+    RUNTIME_INDEX_PAGING_DEBUG,
+    RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS,
+    RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP,
+    RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES,
+    RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK,
+    RUNTIME_INDEX_WARM_WORKERS,
+    SELECT_STAGE_DIAGNOSTICS,
+    TX_SNAPSHOT_CAPTURE_RUNTIME_INDEXES,
+    TX_SNAPSHOT_MAX_SESSIONS,
+    TX_SNAPSHOT_TTL_SECONDS,
+    WAL_MAX_FRAME_BYTES,
+    WAL_SYNC_ON_APPEND,
+];
+
+pub const IMPORT_INSERT_CHUNK_BYTES: &str = "IMPORT_INSERT_CHUNK_BYTES";
+pub const IMPORT_INSERT_CHUNK_MAX_TUPLES: &str = "IMPORT_INSERT_CHUNK_MAX_TUPLES";
+pub const IMPORT_TX_BATCH_MAX_AGE_MS: &str = "IMPORT_TX_BATCH_MAX_AGE_MS";
+pub const IMPORT_TX_BATCH_SIZE: &str = "IMPORT_TX_BATCH_SIZE";
+
+/// Bulk import tuning, kept unprefixed for compatibility with existing operator
+/// scripts and the import documentation.
+pub const IMPORT_ALL: &[&str] = &[
+    IMPORT_INSERT_CHUNK_BYTES,
+    IMPORT_INSERT_CHUNK_MAX_TUPLES,
+    IMPORT_TX_BATCH_MAX_AGE_MS,
+    IMPORT_TX_BATCH_SIZE,
+];
+
+/// Truthy values accepted for every boolean setting.
+pub fn flag(name: &str, default: bool) -> bool {
+
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+
+}
+
+/// Parsed count, ignoring values that fail to parse. Zero is rejected because
+/// every count-valued setting treats it as "unset" rather than "disabled".
+pub fn positive_usize(name: &str, default: usize) -> usize {
+
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+
+}
+
+/// Parsed count that accepts zero, for settings where zero disables a limit.
+pub fn usize_allowing_zero(name: &str, default: usize) -> usize {
+
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+
+}
+
+pub fn positive_u64(name: &str, default: u64) -> u64 {
+
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+
+}
+
+pub fn u64_allowing_zero(name: &str, default: u64) -> u64 {
+
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+
+}
+
+pub fn i64_allowing_zero(name: &str, default: i64) -> i64 {
+
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(default)
+
+}
+
+pub fn text(name: &str) -> Option<String> {
+
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+
+}
+
+#[cfg(test)]
+#[path = "settings_test.rs"]
+mod tests;

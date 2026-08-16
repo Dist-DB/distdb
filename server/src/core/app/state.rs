@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use common::helpers::create_dir;
@@ -30,7 +31,7 @@ pub struct QuerySessionContext {
 pub struct ServerApp {
     pub(super) config: ServerRuntimeConfig,
     pub(super) node_data_dir: PathBuf,
-    pub(super) wal: ConcurrentWalManager,
+    pub(super) wal: Arc<ConcurrentWalManager>,
     pub(super) catalogs: HashMap<String, DatabaseCatalog>,
     pub(super) runtime_indexes: RuntimeIndexStore,
     pub(super) transaction_coordinator: TransactionCoordinator,
@@ -62,22 +63,20 @@ impl ServerApp {
 
     fn transaction_snapshot_ttl_nanos() -> u64 {
 
-        let ttl_seconds = std::env::var("DISTDB_TX_SNAPSHOT_TTL_SECONDS")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(TX_SNAPSHOT_TTL_SECONDS_DEFAULT);
+        let ttl_seconds = common::settings::u64_allowing_zero(
+            common::settings::TX_SNAPSHOT_TTL_SECONDS,
+            TX_SNAPSHOT_TTL_SECONDS_DEFAULT,
+        );
 
         ttl_seconds.saturating_mul(1_000_000_000)
 
     }
 
     fn transaction_snapshot_max_sessions() -> usize {
-
-        std::env::var("DISTDB_TX_SNAPSHOT_MAX_SESSIONS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(TX_SNAPSHOT_MAX_SESSIONS_DEFAULT)
-
+        common::settings::usize_allowing_zero(
+            common::settings::TX_SNAPSHOT_MAX_SESSIONS,
+            TX_SNAPSHOT_MAX_SESSIONS_DEFAULT,
+        )
     }
 
     pub(super) fn enforce_transaction_snapshot_limits(&mut self, reason: &str) {
@@ -173,7 +172,7 @@ impl ServerApp {
 
         log::info!("node data directory: {}", node_data_dir.display());
 
-        let wal = ConcurrentWalManager::with_data_dir(node_data_dir.clone());
+        let wal = Arc::new(ConcurrentWalManager::with_data_dir(node_data_dir.clone()));
         log::info!("server app created for node_id={}", config.node_id);
 
         Ok(Self {
@@ -241,6 +240,100 @@ impl ServerApp {
             index_elapsed_ms,
             total_elapsed_ms,
         );
+
+        Ok(())
+
+    }
+
+    /// Load catalogs and replay their WAL, leaving every table in `Indexing`.
+    /// Returns the tables still needing their runtime indexes materialized.
+    pub fn bootstrap_catalogs(&mut self) -> Result<Vec<(String, String)>, ServerAppError> {
+
+        let started_at = Instant::now();
+
+        self.load_catalogs_from_disk()?;
+        self.replay_catalog_state_from_wal()?;
+
+        for catalog in self.catalogs.values_mut() {
+            catalog
+                .begin_indexing()
+                .map_err(|err| ServerAppError::Runtime(format!("failed to enter indexing state: {}", err)))?;
+
+            // A catalog with no tables has nothing to materialize, so no table
+            // completion will ever promote it out of the indexing state.
+            if catalog.table_ids().is_empty() {
+                catalog
+                    .complete_indexing()
+                    .map_err(|err| ServerAppError::Runtime(format!("failed to complete indexing state: {}", err)))?;
+            }
+        }
+
+        let mut pending = Vec::new();
+
+        for (database_id, catalog) in &self.catalogs {
+            for table_id in catalog.table_ids() {
+                pending.push((database_id.clone(), table_id));
+            }
+        }
+
+        pending.sort();
+
+        log::info!(
+            "server catalog bootstrap complete for node_id={} catalogs={} tables_pending={} elapsed_ms={}",
+            self.config.node_id,
+            self.catalogs.len(),
+            pending.len(),
+            started_at.elapsed().as_millis(),
+        );
+
+        Ok(pending)
+
+    }
+
+    pub fn wal_handle(&self) -> Arc<ConcurrentWalManager> {
+        Arc::clone(&self.wal)
+    }
+
+    pub fn catalogs_snapshot(&self) -> HashMap<String, DatabaseCatalog> {
+        self.catalogs.clone()
+    }
+
+    /// Adopt indexes built off-thread for one table and mark it queryable.
+    pub fn install_bootstrapped_table(
+        &mut self,
+        database_id: &str,
+        table_id: &str,
+        indexes: RuntimeIndexStore,
+    ) -> Result<(), ServerAppError> {
+
+        self.runtime_indexes.merge_from(indexes);
+
+        let Some(catalog) = self.catalogs.get_mut(database_id) else {
+            return Err(ServerAppError::Runtime(format!(
+                "database '{database_id}' disappeared while bootstrapping table '{table_id}'"
+            )));
+        };
+
+        catalog
+            .complete_table_indexing(table_id)
+            .map_err(|err| {
+                ServerAppError::Runtime(format!(
+                    "failed to mark table '{table_id}' ready: {err}"
+                ))
+            })?;
+
+        if catalog
+            .table_ids()
+            .iter()
+            .all(|table_id| catalog.table_status(table_id) == Some(serverlib::ObjectStatus::Ready))
+            && catalog.status() != serverlib::ObjectStatus::Ready
+        {
+            catalog
+                .transition_status(serverlib::ObjectStatus::Ready)
+                .map_err(|err| {
+                    ServerAppError::Runtime(format!("failed to mark database ready: {err}"))
+                })?;
+        }
 
         Ok(())
 

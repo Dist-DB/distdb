@@ -173,6 +173,118 @@ fn validate_startup_tls_requirements(tls_extra_sans: &[String]) -> Result<(), St
 
 }
 
+/// Materialize each table's runtime indexes after the connector gate opens.
+/// Index building happens without the app lock held so already-ready tables stay
+/// queryable; the lock is only taken to install a finished table.
+fn load_tables_in_background(
+    app: Arc<RwLock<ServerApp>>,
+    pending_tables: Vec<(String, String)>,
+) {
+
+    if pending_tables.is_empty() {
+        return;
+    }
+
+    let started_at = std::time::Instant::now();
+    let total = pending_tables.len();
+
+    let (wal, catalogs) = {
+        let app_guard = app.blocking_read();
+        (app_guard.wal_handle(), app_guard.catalogs_snapshot())
+    };
+
+    let workers = background_table_load_workers().min(total);
+    let next_table = AtomicUsize::new(0);
+    let completed = AtomicUsize::new(0);
+
+    // Tables load concurrently so one large table cannot hold back small ones.
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next_table.fetch_add(1, Ordering::SeqCst);
+                    let Some((database_id, table_id)) = pending_tables.get(index) else {
+                        return;
+                    };
+
+                    let table_started_at = std::time::Instant::now();
+                    let mut table_indexes = serverlib::RuntimeIndexStore::new();
+                    let only = HashSet::from([table_id.clone()]);
+
+                    table_indexes.bootstrap_from_catalogs_filtered(
+                        &catalogs,
+                        wal.as_ref(),
+                        Some(&only),
+                    );
+
+                    let build_ms = table_started_at.elapsed().as_millis();
+
+                    // Materialize the stream before the table is marked ready, so
+                    // row refs resolve from memory instead of the first query
+                    // paying a full WAL file load.
+                    let hydrate_started_at = std::time::Instant::now();
+                    let stream_id = catalogs
+                        .get(database_id)
+                        .and_then(|catalog| catalog.entity_wal_stream_id(table_id))
+                        .unwrap_or_else(|| table_id.clone());
+                    let hydrated_records = wal
+                        .with_records(&stream_id, |records| records.len())
+                        .unwrap_or(0);
+                    let hydrate_ms = hydrate_started_at.elapsed().as_millis();
+
+                    let install_started_at = std::time::Instant::now();
+
+                    if let Err(err) = app.blocking_write().install_bootstrapped_table(
+                        database_id,
+                        table_id,
+                        table_indexes,
+                    ) {
+                        log::error!(
+                            "background table load failed database={} table={} error={}",
+                            database_id,
+                            table_id,
+                            err,
+                        );
+                        continue;
+                    }
+
+                    log::info!(
+                        "background table load ready database={} table={} build_ms={} hydrate_ms={} hydrated_records={} install_ms={} progress={}/{}",
+                        database_id,
+                        table_id,
+                        build_ms,
+                        hydrate_ms,
+                        hydrated_records,
+                        install_started_at.elapsed().as_millis(),
+                        completed.fetch_add(1, Ordering::SeqCst).saturating_add(1),
+                        total,
+                    );
+                }
+            });
+        }
+    });
+
+    log::info!(
+        "background table load complete tables={} workers={} elapsed_ms={}",
+        total,
+        workers,
+        started_at.elapsed().as_millis(),
+    );
+
+}
+
+fn background_table_load_workers() -> usize {
+
+    common::settings::positive_usize(
+        common::settings::BACKGROUND_TABLE_LOAD_WORKERS,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1)
+            .min(4),
+    )
+
+}
+
 #[expect(clippy::too_many_arguments, reason="this function is a connection handler and needs to pass many arguments to the executor closure")]
 async fn handle_wss_connection(
     stream: tokio::net::TcpStream,
@@ -1069,14 +1181,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_for_bootstrap = Arc::clone(&app);
     let bootstrap_result = tokio::task::spawn_blocking(move || {
         let mut app_guard = app_for_bootstrap.blocking_write();
-        app_guard.bootstrap()?;
+        let pending_tables = app_guard.bootstrap_catalogs()?;
         let result = app_guard.run_wal_smoke_test()?;
-        Ok::<(String, _), server::helpers::ServerAppError>((app_guard.node_id().to_string(), result))
+        Ok::<(String, _, _), server::helpers::ServerAppError>((
+            app_guard.node_id().to_string(),
+            result,
+            pending_tables,
+        ))
     })
     .await
     .map_err(|err| format!("server bootstrap task failed to join: {err}"))?;
 
-    let (bootstrapped_node_id, result) = bootstrap_result?;
+    let (bootstrapped_node_id, result, pending_tables) = bootstrap_result?;
 
     log::info!(
         "server runtime initialized for node={} with {} active WAL worker(s) and {} probe records",
@@ -1087,6 +1203,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     bootstrap_ready.store(true, Ordering::SeqCst);
     log::info!("connector bootstrap gate opened; server is ready to accept requests");
+
+    let app_for_table_load = Arc::clone(&app);
+    let _table_load_task = tokio::task::spawn_blocking(move || {
+        load_tables_in_background(app_for_table_load, pending_tables);
+    });
 
     let mut affinity_replication_task = None;
 

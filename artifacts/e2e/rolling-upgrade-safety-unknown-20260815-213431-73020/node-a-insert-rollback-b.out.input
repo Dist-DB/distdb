@@ -1,0 +1,5 @@
+show peers;
+password root;
+use opsdb;
+insert into heartbeat (id, origin) values (4, 'rollback-b-node-old-peer-active');
+quit;

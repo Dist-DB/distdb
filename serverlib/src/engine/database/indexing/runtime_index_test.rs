@@ -4,7 +4,11 @@ use ahash::AHashSet;
 
 use super::*;
 use crate::{
-    DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin, DatabaseTable, IndexId, TableSchema,
+    DatabaseIndex, DatabaseIndexKind, DatabaseIndexOrigin, DatabaseTable, FieldType, IndexId,
+    TableSchema,
+};
+use crate::engine::database::schema::migration::{
+    TypeConversionPolicy, convert_value_to_field_type,
 };
 
 #[test]
@@ -185,6 +189,29 @@ fn runtime_index_numeric_keys_follow_numeric_range_order() {
     );
 
     assert_eq!(refs, vec![2, 256]);
+}
+
+#[test]
+fn runtime_index_numeric_key_matches_tagged_stored_integer_to_sql_literal() {
+    let mut state = RuntimeIndexState::new();
+    state.set_numeric_kind(Some(RuntimeIndexNumericKind::Signed));
+    state.index = Some(DatabaseIndex::from_table_fields(
+        "places",
+        DatabaseIndexKind::Indexed,
+        vec!["id_region".to_string()],
+    ));
+
+    let stored_value = convert_value_to_field_type(
+        b"5412",
+        &FieldType::Int(32),
+        TypeConversionPolicy::Safe,
+    )
+    .expect("integer should convert to tagged storage");
+
+    state.insert_with_row_ref(vec![stored_value], Some(101));
+
+    assert_eq!(state.row_ref_count_for_key(&[b"5412".to_vec()]), Some(1));
+    assert_eq!(state.row_refs_for_key(&[b"5412".to_vec()], None), vec![101]);
 }
 
 #[test]

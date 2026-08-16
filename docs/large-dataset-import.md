@@ -16,11 +16,6 @@ The console import path is optimized for large files:
 - A reachable server peer address.
 - A prepared target database and table schema.
 - A SQL file with row data (typically many `INSERT ... VALUES` statements).
-- The server should be started with non-primary runtime index materialization disabled unless you explicitly need selected secondary indexes during ingest:
-
-```bash
-DISTDB_RUNTIME_INDEX_MATERIALIZE_NON_PRIMARY=0
-```
 
 ## Fast-start command
 
@@ -78,7 +73,6 @@ Recommended starting points:
 - Keep statements simple to stay on the fast insert path:
   - Prefer plain `INSERT INTO ... VALUES ...`.
   - Avoid `ON DUPLICATE KEY UPDATE`, `REPLACE`, and `RETURNING` for initial bulk load.
-- Confirm the server boot log reports `materialize_non_primary=false` before starting the import.
 - Disable or defer non-essential secondary indexes during initial load when possible.
 - Run imports from a stable host close to the server node to reduce transport jitter.
 - Start with the balanced profile, then increase only one knob at a time.

@@ -137,57 +137,38 @@ pub(crate) struct RuntimeIndexSnapshotService;
 impl RuntimeIndexSnapshotService {
 
     fn accessor_snapshot_persist_rows() -> bool {
-
-        std::env::var("DISTDB_ACCESSOR_SNAPSHOT_PERSIST_ROWS")
-            .ok()
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(ACCESSOR_SNAPSHOT_PERSIST_ROWS_DEFAULT)
-
+        common::settings::flag(
+            common::settings::ACCESSOR_SNAPSHOT_PERSIST_ROWS,
+            ACCESSOR_SNAPSHOT_PERSIST_ROWS_DEFAULT,
+        )
     }
 
     fn live_row_checkpoint_compress_max_rows() -> usize {
-
-        std::env::var("DISTDB_LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS)
-
+        common::settings::positive_usize(
+            common::settings::LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS,
+            LIVE_ROW_CHECKPOINT_COMPRESS_MAX_ROWS,
+        )
     }
 
     fn live_row_checkpoint_max_bytes() -> u64 {
-
-        std::env::var("DISTDB_LIVE_ROW_CHECKPOINT_MAX_BYTES")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(LIVE_ROW_CHECKPOINT_MAX_BYTES_DEFAULT)
-
+        common::settings::positive_u64(
+            common::settings::LIVE_ROW_CHECKPOINT_MAX_BYTES,
+            LIVE_ROW_CHECKPOINT_MAX_BYTES_DEFAULT,
+        )
     }
 
     fn runtime_index_snapshot_max_decode_bytes() -> usize {
-
-        std::env::var("DISTDB_RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES_DEFAULT)
-
+        common::settings::positive_usize(
+            common::settings::RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES,
+            RUNTIME_INDEX_SNAPSHOT_MAX_DECODE_BYTES_DEFAULT,
+        )
     }
 
     fn runtime_index_snapshot_max_entries_per_chunk() -> usize {
-
-        std::env::var("DISTDB_RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK_DEFAULT)
-
+        common::settings::positive_usize(
+            common::settings::RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK,
+            RUNTIME_INDEX_SNAPSHOT_MAX_ENTRIES_PER_CHUNK_DEFAULT,
+        )
     }
 
     pub(crate) fn wal_stream_fingerprint(data_dir: &Path, table_stream_id: &str) -> Option<(u64, u64)> {

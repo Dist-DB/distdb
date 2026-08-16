@@ -34,17 +34,7 @@ use crate::core::transaction_coordinator::QueryRoutingDecision;
 impl ServerApp {
 
     fn capture_runtime_indexes_in_tx_snapshot() -> bool {
-
-        std::env::var("DISTDB_TX_SNAPSHOT_CAPTURE_RUNTIME_INDEXES")
-            .ok()
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false)
-
+        common::settings::flag(common::settings::TX_SNAPSHOT_CAPTURE_RUNTIME_INDEXES, false)
     }
 
     fn parse_query_requests(query: &connector::DataQuery) -> Result<Vec<SqlRequest>, String> {

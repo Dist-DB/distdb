@@ -1598,13 +1598,10 @@ fn decode_records_sequential_from_reader_with_context<R: Read>(
 }
 
 fn wal_max_frame_size_bytes() -> usize {
-
-    std::env::var("DISTDB_WAL_MAX_FRAME_BYTES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(64 * 1024 * 1024)
-
+    common::settings::positive_usize(
+        common::settings::WAL_MAX_FRAME_BYTES,
+        64 * 1024 * 1024,
+    )
 }
 
 fn load_records_from_stream(bytes: Vec<u8>) -> Vec<TransactionRecord> {
@@ -1789,17 +1786,7 @@ fn rewrite_wal_file_with_context(
 }
 
 fn wal_sync_on_append() -> bool {
-
-    std::env::var("DISTDB_WAL_SYNC_ON_APPEND")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true)
-
+    common::settings::flag(common::settings::WAL_SYNC_ON_APPEND, true)
 }
 
 fn compact_entries_to_latest_schema_and_metadata(

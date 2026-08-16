@@ -1904,6 +1904,19 @@ fn execute_select_read_plan_without_lock(
         );
     };
 
+    if let Err(err) = catalog.ensure_available_for_read(table_id) {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!(
+                "table '{}' in database '{}' is unavailable: {} (status={}); check progress with `show entities;`",
+                table_id,
+                database_id,
+                err,
+                scoped_table.status().to_string().to_ascii_lowercase(),
+            ),
+        );
+    }
+
     if let Some(stream_id) = catalog.entity_wal_stream_id(table_id) {
         scoped_table.entity_id = stream_id;
     }

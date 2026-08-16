@@ -86,15 +86,9 @@ Runtime-index bootstrap now defaults to a conservative memory baseline:
 - `DISTDB_PLATFORM_PROFILE=minimum` (single startup switch; default in `server/debug.sh` and `server/run.sh`)
 
 - `DISTDB_RUNTIME_INDEX_BUILD_WORKERS=1`
-- `DISTDB_RUNTIME_INDEX_MATERIALIZE_NON_PRIMARY=0`
 - `DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=0`
 - `DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS=0`
 - `DISTDB_RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS=1000000` (parallel rebuild only for very large tables)
-
-Additional guardrail for steady-state ingest memory:
-
-- `DISTDB_RUNTIME_INDEX_AGGRESSIVE_RESERVE_GROWTH=0` by default to avoid oversized reserve runway growth.
-- Set `DISTDB_RUNTIME_INDEX_AGGRESSIVE_RESERVE_GROWTH=1` only when prioritizing ingest throughput over memory footprint.
 
 For higher-throughput startup behavior, use:
 
@@ -104,7 +98,6 @@ If you need to apply the same minimum-footprint profile explicitly (for older bi
 
 ```bash
 DISTDB_RUNTIME_INDEX_BUILD_WORKERS=1 \
-DISTDB_RUNTIME_INDEX_MATERIALIZE_NON_PRIMARY=0 \
 DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=0 \
 DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS=0 \
 ./target/release/server datadir=./data -- \

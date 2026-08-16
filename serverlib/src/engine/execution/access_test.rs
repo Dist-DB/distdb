@@ -362,6 +362,268 @@ fn durable_scoped_equality_fallback_to_legacy_stream_avoids_wal_hydration() {
 }
 
 #[test]
+fn durable_scoped_equality_probe_prefers_scoped_checkpoint_over_loaded_legacy_stream() {
+
+    let data_dir = unique_temp_dir("access-scoped-checkpoint-preferred");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
+        ("email", 2, FieldType::Text, FieldIndex::Indexed, false),
+    ]);
+
+    catalog
+        .register_table("users", schema.clone())
+        .expect("users table should register");
+
+    let table = catalog.table("users").expect("users table should exist");
+    let scoped_stream_id = "scope:users";
+
+    let actor = UserId("test-user".to_string());
+
+    let legacy_row = HashMap::from([
+        ("id".to_string(), b"1".to_vec()),
+        ("email".to_string(), b"legacy@example.com".to_vec()),
+    ]);
+    wal_writer
+        .append(
+            &table.table_id,
+            TransactionRecord::with_payload(
+                TransactionId(1),
+                None,
+                None,
+                1,
+                actor.clone(),
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &legacy_row).expect("legacy row should encode"),
+            ),
+        )
+        .expect("legacy row should append");
+
+    let scoped_row = HashMap::from([
+        ("id".to_string(), b"2".to_vec()),
+        ("email".to_string(), b"sam@example.com".to_vec()),
+    ]);
+    wal_writer
+        .append(
+            scoped_stream_id,
+            TransactionRecord::with_payload(
+                TransactionId(2),
+                None,
+                None,
+                2,
+                actor,
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &scoped_row).expect("scoped row should encode"),
+            ),
+        )
+        .expect("scoped row should append");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(scoped_stream_id)
+        .map(|tx| tx.0)
+        .expect("scoped latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        scoped_stream_id,
+    )
+    .expect("scoped wal fingerprint should exist");
+
+    let scoped_live_rows = load_live_rows(&wal_writer, scoped_stream_id, &table.table_id, &schema);
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        scoped_stream_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &scoped_live_rows,
+    )
+    .expect("scoped live-row checkpoint should save");
+
+    RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
+        &data_dir,
+        &table,
+        scoped_stream_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        scoped_live_rows.len(),
+    )
+    .expect("scoped live-row count checkpoint should save");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    assert!(wal_cold.latest_transaction_id_if_loaded(scoped_stream_id).is_none());
+
+    let _ = wal_cold.latest_transaction_id(&table.table_id);
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_some());
+
+    let mut scoped_table = table.clone();
+    scoped_table.entity_id = scoped_stream_id.to_string();
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &scoped_table,
+        &schema,
+        &RuntimeIndexStore::new(),
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::TemporaryIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.get("email"), Some(&b"sam@example.com".to_vec()));
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
+fn durable_scoped_numeric_equality_probe_uses_scoped_checkpoint_after_restart() {
+
+    let data_dir = unique_temp_dir("access-scoped-numeric-checkpoint");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::Int(32), FieldIndex::PrimaryKey, false),
+        ("id_parent", 2, FieldType::Int(32), FieldIndex::Indexed, false),
+    ]);
+
+    let table = crate::DatabaseTable::new("regions".to_string(), schema.clone(), HashMap::new());
+    let scoped_stream_id = "scope:regions";
+    let actor = UserId("test-user".to_string());
+
+    let target_rows = 64usize;
+
+    for id in 1..=target_rows {
+        let row = HashMap::from([
+            ("id".to_string(), id.to_string().into_bytes()),
+            ("id_parent".to_string(), b"254".to_vec()),
+        ]);
+
+        wal_writer
+            .append(
+                scoped_stream_id,
+                TransactionRecord::with_payload(
+                    TransactionId(id as u64),
+                    None,
+                    None,
+                    id as u64,
+                    actor.clone(),
+                    TransactionKind::Insert,
+                    encode_row_payload(&schema, &row).expect("scoped row should encode"),
+                ),
+            )
+            .expect("scoped row should append");
+    }
+
+    let legacy_row = HashMap::from([
+        ("id".to_string(), b"9999".to_vec()),
+        ("id_parent".to_string(), b"999".to_vec()),
+    ]);
+
+    wal_writer
+        .append(
+            &table.table_id,
+            TransactionRecord::with_payload(
+                TransactionId((target_rows + 1) as u64),
+                None,
+                None,
+                (target_rows + 1) as u64,
+                actor,
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &legacy_row).expect("legacy row should encode"),
+            ),
+        )
+        .expect("legacy row should append");
+
+    let latest_tx_id = wal_writer
+        .latest_transaction_id(scoped_stream_id)
+        .map(|tx| tx.0)
+        .expect("scoped latest tx id should exist");
+
+    let wal_fingerprint = RuntimeIndexSnapshotService::wal_stream_fingerprint(
+        &data_dir,
+        scoped_stream_id,
+    )
+    .expect("scoped wal fingerprint should exist");
+
+    let scoped_live_rows = load_live_rows(&wal_writer, scoped_stream_id, &table.table_id, &schema);
+
+    RuntimeIndexSnapshotService::save_live_row_checkpoint(
+        &data_dir,
+        &table,
+        scoped_stream_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        &scoped_live_rows,
+    )
+    .expect("scoped live-row checkpoint should save");
+
+    RuntimeIndexSnapshotService::save_live_row_count_checkpoint(
+        &data_dir,
+        &table,
+        scoped_stream_id,
+        latest_tx_id,
+        Some(wal_fingerprint),
+        scoped_live_rows.len(),
+    )
+    .expect("scoped live-row count checkpoint should save");
+
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    assert!(wal_cold.latest_transaction_id_if_loaded(scoped_stream_id).is_none());
+
+    let _ = wal_cold.latest_transaction_id(&table.table_id);
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_some());
+
+    let mut scoped_table = table.clone();
+    scoped_table.entity_id = scoped_stream_id.to_string();
+
+    let lookup_value = convert_value_to_field_type(
+        b"254",
+        &FieldType::Int(32),
+        crate::TypeConversionPolicy::Safe,
+    )
+    .expect("lookup value should normalize");
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &scoped_table,
+        &schema,
+        &RuntimeIndexStore::new(),
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "id_parent".to_string(),
+                lookup_value: lookup_value.clone(),
+                source: EqualityProbeSource::TemporaryIndex,
+                equality_filters: HashMap::from([(
+                    "id_parent".to_string(),
+                    lookup_value,
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), target_rows);
+    assert!(rows.iter().all(|(_, row)| row.get("id_parent").is_some()));
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
 fn durable_existing_index_equality_without_runtime_state_falls_through_to_cold_scan() {
 
     let data_dir = unique_temp_dir("access-existing-index-no-runtime-state");
@@ -502,7 +764,68 @@ fn durable_cold_unique_row_ref_probe_uses_checkpoint_without_wal_hydration() {
 }
 
 #[test]
-fn durable_cold_non_unique_key_present_without_row_refs_returns_empty() {
+fn durable_cold_non_unique_row_refs_without_checkpoint_hydrate_instead_of_scanning() {
+
+    let data_dir = unique_temp_dir("access-non-unique-row-refs-no-checkpoint");
+    fs::create_dir_all(&data_dir).expect("temp data dir should be created");
+
+    let wal_writer = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let schema = seed_users_table(&mut catalog, &wal_writer);
+    let table = catalog.table("users").expect("users table should exist");
+
+    let email_index = table
+        .indexes
+        .values()
+        .find(|index| {
+            index.field_names.len() == 1 && index.field_names[0] == "email"
+        })
+        .cloned()
+        .expect("email index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &email_index.index_id.0);
+    state.index = Some(email_index.clone());
+    state.insert_with_row_ref(vec![b"sam@example.com".to_vec()], Some(1));
+
+    // No live-row checkpoint is saved: the probe must hydrate the stream to resolve
+    // its row refs rather than abandoning them for a full WAL scan.
+    let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
+    assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
+
+    let rows = materialize_relation_rows(
+        &wal_cold,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::EqualityProbe {
+                field_name: "email".to_string(),
+                lookup_value: b"sam@example.com".to_vec(),
+                source: EqualityProbeSource::ExistingIndex,
+                equality_filters: HashMap::from([(
+                    "email".to_string(),
+                    b"sam@example.com".to_vec(),
+                )]),
+            },
+        },
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.get("email"), Some(&b"sam@example.com".to_vec()));
+
+    assert!(
+        wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_some(),
+        "row refs without a checkpoint should resolve through a hydrated stream read",
+    );
+
+    let _ = fs::remove_dir_all(&data_dir);
+
+}
+
+#[test]
+fn durable_cold_non_unique_key_present_without_row_refs_uses_checkpoint() {
 
     let data_dir = unique_temp_dir("access-non-unique-key-present-no-row-refs");
     fs::create_dir_all(&data_dir).expect("temp data dir should be created");
@@ -574,7 +897,8 @@ fn durable_cold_non_unique_key_present_without_row_refs_returns_empty() {
         },
     );
 
-    assert!(rows.is_empty());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.get("email"), Some(&b"sam@example.com".to_vec()));
 
     assert!(
         wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none(),
@@ -1004,7 +1328,10 @@ fn durable_cold_repeated_equality_probe_reuses_scoped_cache_without_second_scan(
     assert!(wal_cold.latest_transaction_id_if_loaded(&table.table_id).is_none());
 
     let filters = HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]);
-    let initial_wal_scan_loads = accessor_load_source_stats_for_test(&table.table_id)
+    let initial_wal_scan_loads = accessor_load_source_stats_for_test(
+        wal_cold.cache_scope_id(),
+        &table.table_id,
+    )
         .map(|stats| stats.2)
         .unwrap_or(0);
 
@@ -1037,7 +1364,10 @@ fn durable_cold_repeated_equality_probe_reuses_scoped_cache_without_second_scan(
         "repeated cold equality probes should not hydrate WAL",
     );
 
-    let stats = accessor_load_source_stats_for_test(&table.table_id)
+    let stats = accessor_load_source_stats_for_test(
+        wal_cold.cache_scope_id(),
+        &table.table_id,
+    )
         .expect("accessor load source stats should be recorded for stream");
     assert_eq!(
         stats.2.saturating_sub(initial_wal_scan_loads),
@@ -1097,7 +1427,10 @@ fn durable_cold_equality_cache_does_not_poison_other_values() {
     let table = catalog.table("places").expect("places table should exist");
     let wal_cold = ConcurrentWalManager::with_data_dir(data_dir.clone());
 
-    let initial_wal_scan_loads = accessor_load_source_stats_for_test(&table.table_id)
+    let initial_wal_scan_loads = accessor_load_source_stats_for_test(
+        wal_cold.cache_scope_id(),
+        &table.table_id,
+    )
         .map(|stats| stats.2)
         .unwrap_or(0);
 
@@ -1125,7 +1458,10 @@ fn durable_cold_equality_cache_does_not_poison_other_values() {
     assert_eq!(rows_beta.len(), 1);
     assert_eq!(rows_beta[0].1.get("name"), Some(&b"beta".to_vec()));
 
-    let stats = accessor_load_source_stats_for_test(&table.table_id)
+    let stats = accessor_load_source_stats_for_test(
+        wal_cold.cache_scope_id(),
+        &table.table_id,
+    )
         .expect("accessor load source stats should be recorded for stream");
     assert_eq!(
         stats.2.saturating_sub(initial_wal_scan_loads),

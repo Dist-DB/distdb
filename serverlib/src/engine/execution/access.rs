@@ -135,9 +135,9 @@ pub fn clear_cached_table_state(cache_scope_id: usize, table_id: &str, stream_id
     if let Some(stats_map) = ACCESSOR_LOAD_SOURCE_STATS.get()
         && let Ok(mut guard) = stats_map.lock()
     {
-        guard.remove(stream_id);
+        guard.remove(&(cache_scope_id, stream_id.to_string()));
         if table_id != stream_id {
-            guard.remove(table_id);
+            guard.remove(&(cache_scope_id, table_id.to_string()));
         }
     }
 
@@ -183,7 +183,7 @@ struct AccessorLoadSourceStats {
     last_log_epoch_ms: u64,
 }
 
-static ACCESSOR_LOAD_SOURCE_STATS: OnceLock<Mutex<AHashMap<String, AccessorLoadSourceStats>>> =
+static ACCESSOR_LOAD_SOURCE_STATS: OnceLock<Mutex<AHashMap<(usize, String), AccessorLoadSourceStats>>> =
     OnceLock::new();
 static EQUALITY_PROBE_RESULT_CACHE: OnceLock<Mutex<EqualityProbeResultCacheScopeMap>> =
     OnceLock::new();
@@ -204,31 +204,24 @@ struct EqualityProbeCacheEntry {
 }
 
 fn equality_probe_result_cache_max_entries_per_table() -> usize {
-
-    std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-    .filter(|value| *value > 0)
-        .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE)
-
+    common::settings::positive_usize(
+        common::settings::EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES,
+        EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRIES_PER_TABLE,
+    )
 }
 
 fn equality_probe_result_cache_max_entry_rows() -> usize {
-
-    std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ROWS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_ROWS)
-
+    common::settings::usize_allowing_zero(
+        common::settings::EQUALITY_PROBE_RESULT_CACHE_MAX_ROWS,
+        EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_ROWS,
+    )
 }
 
 fn equality_probe_result_cache_max_entry_bytes() -> usize {
-
-    std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES)
-
+    common::settings::usize_allowing_zero(
+        common::settings::EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES,
+        EQUALITY_PROBE_RESULT_CACHE_MAX_ENTRY_BYTES,
+    )
 }
 
 fn equality_probe_result_cache_ttl_ms_from_config(ttl_ms: i64) -> Option<Duration> {
@@ -243,27 +236,17 @@ fn equality_probe_result_cache_ttl_ms_from_config(ttl_ms: i64) -> Option<Duratio
 
 fn equality_probe_result_cache_ttl() -> Option<Duration> {
 
-    let ttl_ms = std::env::var("DISTDB_EQUALITY_PROBE_RESULT_CACHE_TTL_MS")
-        .ok()
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .unwrap_or(EQUALITY_PROBE_RESULT_CACHE_TTL_MS);
+    let ttl_ms = common::settings::i64_allowing_zero(
+        common::settings::EQUALITY_PROBE_RESULT_CACHE_TTL_MS,
+        EQUALITY_PROBE_RESULT_CACHE_TTL_MS,
+    );
 
     equality_probe_result_cache_ttl_ms_from_config(ttl_ms)
 
 }
 
 fn equality_probe_result_cache_debug_enabled() -> bool {
-
-    std::env::var("DISTDB_DEBUG_EQUALITY_PROBE_RESULT_CACHE")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
+    common::settings::flag(common::settings::DEBUG_EQUALITY_PROBE_RESULT_CACHE, false)
 }
 
 fn equality_probe_cache_entry_is_expired(
@@ -502,7 +485,13 @@ fn maybe_cache_equality_probe_rows_with_latest_tx_id(
 
 }
 
-fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: usize, elapsed_ms: u128) {
+fn record_accessor_load_source(
+    cache_scope_id: usize,
+    table_stream_id: &str,
+    source: &str,
+    live_rows: usize,
+    elapsed_ms: u128,
+) {
 
     let stats_map = ACCESSOR_LOAD_SOURCE_STATS.get_or_init(|| Mutex::new(AHashMap::new()));
 
@@ -511,7 +500,7 @@ fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: u
     };
 
     let now_ms = common::epoch_ms!();
-    let stats = guard.entry(table_stream_id.to_string()).or_default();
+    let stats = guard.entry((cache_scope_id, table_stream_id.to_string())).or_default();
 
     match source {
 
@@ -568,12 +557,13 @@ fn record_accessor_load_source(table_stream_id: &str, source: &str, live_rows: u
 
 #[cfg(test)]
 pub(crate) fn accessor_load_source_stats_for_test(
+    cache_scope_id: usize,
     stream_id: &str,
 ) -> Option<(u64, u64, u64)> {
 
     let stats_map = ACCESSOR_LOAD_SOURCE_STATS.get()?;
     let guard = stats_map.lock().ok()?;
-    let stats = guard.get(stream_id)?;
+    let stats = guard.get(&(cache_scope_id, stream_id.to_string()))?;
 
     Some((
         stats.snapshot_loads,
@@ -654,10 +644,6 @@ fn with_matching_equality_cache_entry<R>(
     f: impl FnOnce(&mut EqualityTableCacheEntry) -> R,
 ) -> Option<R> {
 
-    if disable_accessor_row_cache() {
-        return None;
-    }
-
     let cache_scope_id = wal.cache_scope_id();
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
 
@@ -681,10 +667,6 @@ fn insert_scoped_equality_cache_entry(
     mut entry: EqualityTableCacheEntry,
 ) {
 
-    if disable_accessor_row_cache() {
-        return;
-    }
-
     if !enforce_entry_row_budget(&mut entry, table_stream_id, "insert") {
         return;
     }
@@ -699,52 +681,28 @@ fn insert_scoped_equality_cache_entry(
 }
 
 fn accessor_cold_direct_scan_min_rows() -> usize {
-
-    std::env::var("DISTDB_ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS)
-
-}
-
-fn disable_accessor_row_cache() -> bool {
-
-    false
-
+    common::settings::positive_usize(
+        common::settings::ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS,
+        ACCESSOR_COLD_DIRECT_SCAN_MIN_ROWS,
+    )
 }
 
 fn accessor_snapshot_max_live_rows() -> usize {
-
-    std::env::var("DISTDB_ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS)
-
+    common::settings::positive_usize(
+        common::settings::ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS,
+        ACCESSOR_SNAPSHOT_MAX_LIVE_ROWS,
+    )
 }
 
 fn range_intersection_diagnostics_enabled() -> bool {
-
-    std::env::var("DISTDB_RANGE_INTERSECTION_DIAGNOSTICS")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
+    common::settings::flag(common::settings::RANGE_INTERSECTION_DIAGNOSTICS, false)
 }
 
 fn accessor_cache_rows_max_bytes() -> usize {
-
-    std::env::var("DISTDB_ACCESSOR_CACHE_MAX_ROWS_BYTES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(ACCESSOR_CACHE_MAX_ROWS_BYTES)
-
+    common::settings::usize_allowing_zero(
+        common::settings::ACCESSOR_CACHE_MAX_ROWS_BYTES,
+        ACCESSOR_CACHE_MAX_ROWS_BYTES,
+    )
 }
 
 fn estimate_row_map_bytes(row_map: &HashMap<String, Vec<u8>>) -> usize {
@@ -1075,10 +1033,6 @@ pub fn snapshot_equality_cache(
     table_id: &str,
 ) -> Option<EqualityTableCacheSnapshot> {
 
-    if disable_accessor_row_cache() {
-        return None;
-    }
-
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     let cache_guard = cache.lock().ok()?;
     let entry = equality_cache_entry(&cache_guard, cache_scope_id, table_id)?;
@@ -1093,10 +1047,6 @@ pub fn restore_equality_cache_from_snapshot(
     snapshot: EqualityTableCacheSnapshot,
 ) {
 
-    if disable_accessor_row_cache() {
-        return;
-    }
-    
     let cache = EQUALITY_TABLE_CACHE.get_or_init(|| Mutex::new(AHashMap::new()));
     
     if let Ok(mut cache_guard) = cache.lock() {
@@ -1132,23 +1082,17 @@ pub fn warm_string_like_cache_for_fields(
 }
 
 fn live_row_apply_max_workers() -> usize {
-
-    std::env::var("DISTDB_LIVE_ROW_APPLY_WORKERS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(LIVE_ROW_APPLY_PARALLEL_MAX_WORKERS)
-
+    common::settings::positive_usize(
+        common::settings::LIVE_ROW_APPLY_WORKERS,
+        LIVE_ROW_APPLY_PARALLEL_MAX_WORKERS,
+    )
 }
 
 fn equality_warm_max_workers() -> usize {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_WARM_WORKERS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(EQUALITY_WARM_PARALLEL_MAX_WORKERS)
-
+    common::settings::positive_usize(
+        common::settings::RUNTIME_INDEX_WARM_WORKERS,
+        EQUALITY_WARM_PARALLEL_MAX_WORKERS,
+    )
 }
 
 #[inline]
@@ -2592,7 +2536,13 @@ fn load_live_rows_by_in_list_direct_wal_scan(
         );
     }
 
-    record_accessor_load_source(table_stream_id, "wal_scan_filtered", rows.len(), elapsed_ms);
+    record_accessor_load_source(
+        wal.cache_scope_id(),
+        table_stream_id,
+        "wal_scan_filtered",
+        rows.len(),
+        elapsed_ms,
+    );
 
     rows
 
@@ -3391,17 +3341,7 @@ fn equality_probe_direct_scan_enabled() -> bool {
 }
 
 fn equality_probe_runtime_state_debug_enabled() -> bool {
-
-    std::env::var("DISTDB_DEBUG_EQUALITY_PROBE_RUNTIME_STATE")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
+    common::settings::flag(common::settings::DEBUG_EQUALITY_PROBE_RUNTIME_STATE, false)
 }
 
 fn equality_probe_cold_durable_direct_scan_enabled() -> bool {
@@ -3981,7 +3921,13 @@ fn load_live_rows_by_equality_filters_direct_wal_scan(
         );
     }
 
-    record_accessor_load_source(table_stream_id, "wal_scan_filtered", scan_result.rows.len(), elapsed_ms);
+    record_accessor_load_source(
+        wal.cache_scope_id(),
+        table_stream_id,
+        "wal_scan_filtered",
+        scan_result.rows.len(),
+        elapsed_ms,
+    );
 
     maybe_cache_equality_probe_rows(
         wal,
@@ -5154,6 +5100,7 @@ fn load_live_rows_for_accessor_miss(
                 );
             }
             record_accessor_load_source(
+                wal.cache_scope_id(),
                 table_stream_id,
                 "accessor_snapshot",
                 live_rows.len(),
@@ -5212,6 +5159,7 @@ fn load_live_rows_for_accessor_miss(
             );
         }
         record_accessor_load_source(
+            wal.cache_scope_id(),
             table_stream_id,
             "live_row_checkpoint",
             live_rows.len(),
@@ -5243,6 +5191,7 @@ fn load_live_rows_for_accessor_miss(
             );
         }
         record_accessor_load_source(
+            wal.cache_scope_id(),
             table_stream_id,
             "accessor_snapshot",
             live_rows.len(),
@@ -5279,7 +5228,13 @@ fn load_live_rows_for_accessor_miss(
         );
     }
 
-    record_accessor_load_source(table_stream_id, "wal_scan", live_rows.len(), elapsed_ms);
+    record_accessor_load_source(
+        wal.cache_scope_id(),
+        table_stream_id,
+        "wal_scan",
+        live_rows.len(),
+        elapsed_ms,
+    );
 
     (latest_tx_id, live_rows)
 
@@ -6331,6 +6286,41 @@ fn load_live_rows_by_runtime_index_row_refs_from_checkpoint(
 
 }
 
+fn resolve_live_rows_for_row_refs(
+    wal: &ConcurrentWalManager,
+    table_stream_id: &str,
+    table_id: &str,
+    schema: &TableSchema,
+    row_refs: &[u64],
+    can_direct_lookup: bool,
+) -> Vec<(u64, HashMap<String, Vec<u8>>)> {
+
+    if can_direct_lookup {
+        return load_live_rows_by_runtime_index_row_refs(wal, table_stream_id, schema, row_refs);
+    }
+
+    if let Some(checkpoint_rows) = load_live_rows_by_runtime_index_row_refs_from_checkpoint(
+        wal,
+        table_stream_id,
+        table_id,
+        schema,
+        row_refs,
+    ) {
+        return checkpoint_rows;
+    }
+
+    // Without a checkpoint the only alternative is abandoning usable row refs for a
+    // full WAL scan, so pay the one-off stream hydration instead.
+    log::debug!(
+        "relation row ref hydration stream={} row_refs={} reason=no_live_row_checkpoint",
+        table_stream_id,
+        row_refs.len(),
+    );
+
+    load_live_rows_by_runtime_index_row_refs(wal, table_stream_id, schema, row_refs)
+
+}
+
 fn load_live_rows_by_equality_filters_from_checkpoint_with_limit(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,
@@ -6826,23 +6816,14 @@ where
 
                 if !candidate_row_refs.is_empty() {
 
-                    let mut candidate_rows = if can_direct_lookup {
-                        load_live_rows_by_runtime_index_row_refs(
-                            wal,
-                            &runtime_index_scope_id,
-                            schema,
-                            &candidate_row_refs,
-                        )
-                    } else {
-                        load_live_rows_by_runtime_index_row_refs_from_checkpoint(
-                            wal,
-                            &runtime_index_scope_id,
-                            &table.table_id,
-                            schema,
-                            &candidate_row_refs,
-                        )
-                        .unwrap_or_default()
-                    };
+                    let mut candidate_rows = resolve_live_rows_for_row_refs(
+                        wal,
+                        &runtime_index_scope_id,
+                        &table.table_id,
+                        schema,
+                        &candidate_row_refs,
+                        can_direct_lookup,
+                    );
 
                     if let Some(single_field_name) = single_field_name {
                         candidate_rows.retain(|(_, row_map)| {
@@ -6968,6 +6949,7 @@ where
                 if let Some(equality_filters) = lookup_equality_filters.as_ref() {
                     return load_equality_probe_rows_for_filters(
                         wal,
+                        &runtime_index_scope_id,
                         &table.table_id,
                         schema,
                         equality_filters,
@@ -7003,6 +6985,7 @@ where
                     if let Some(equality_filters) = equality_filters_for_index_lookup(index, lookup_key) {
                         return load_equality_probe_rows_for_filters(
                             wal,
+                            &table_stream_id,
                             &table.table_id,
                             schema,
                             &equality_filters,
@@ -7114,7 +7097,35 @@ where
                         )
                     };
 
+                let scoped_has_checkpoint = if let Some(data_dir) = wal.data_dir_path() {
+                    load_live_row_checkpoint_rows(
+                        &data_dir,
+                        equality_probe_stream_scope.as_ref(),
+                        &table.table_id,
+                        schema,
+                    )
+                    .is_some()
+                        || load_live_row_count_checkpoint(
+                            &data_dir,
+                            equality_probe_stream_scope.as_ref(),
+                            &table.table_id,
+                            schema,
+                        )
+                        .is_some()
+                } else {
+                    false
+                };
+
                 if !scoped_has_data_writes && legacy_has_data_writes {
+                    if scoped_has_checkpoint {
+                        log::debug!(
+                            "relation equality probe table={} field={} scoped_stream={} legacy_stream={} scoped_checkpoint=true -> keep_scoped_stream",
+                            table.table_id,
+                            field_name,
+                            equality_probe_stream_scope.as_ref(),
+                            table.table_id,
+                        );
+                    } else {
                     log::debug!(
                         "relation equality probe table={} field={} scoped_stream={} scoped_has_data_writes=false legacy_stream={} legacy_has_data_writes=true -> fallback_legacy_stream",
                         table.table_id,
@@ -7123,6 +7134,7 @@ where
                         table.table_id,
                     );
                     equality_probe_stream_scope = Cow::Borrowed(table.table_id.as_str());
+                    }
                 }
 
                 if equality_probe_stream_scope.as_ref() != table.table_id
@@ -7277,6 +7289,23 @@ where
                         );
                     }
 
+                    if candidate_row_refs.is_empty()
+                        && !table.entity_id.is_empty()
+                        && runtime_index_scope_id == table.entity_id.as_str()
+                        && ((wal.data_dir_path().is_none()
+                            && table_stream_id != table.entity_id.as_str())
+                            || (wal.data_dir_path().is_some()
+                                && wal.latest_transaction_id_if_loaded(&table.table_id).is_none()))
+                    {
+                        log::debug!(
+                            "relation equality probe table={} field={} scope={} reason=scoped_stream_without_writes_has_no_row_refs",
+                            table.table_id,
+                            field_name,
+                            runtime_index_scope_id,
+                        );
+                        return Vec::new();
+                    }
+
                     log::debug!(
                         "relation equality probe paging result table={} field={} index_id={} scope={} exact_candidates={} final_candidates={} used_paged_probe={}",
                         table.table_id,
@@ -7289,23 +7318,14 @@ where
                     );
 
                     if !candidate_row_refs.is_empty() {
-                        let mut candidate_rows = if can_direct_lookup {
-                            load_live_rows_by_runtime_index_row_refs(
-                                wal,
-                                &runtime_index_scope_id,
-                                schema,
-                                &candidate_row_refs,
-                            )
-                        } else {
-                            load_live_rows_by_runtime_index_row_refs_from_checkpoint(
-                                wal,
-                                &runtime_index_scope_id,
-                                &table.table_id,
-                                schema,
-                                &candidate_row_refs,
-                            )
-                            .unwrap_or_default()
-                        };
+                        let mut candidate_rows = resolve_live_rows_for_row_refs(
+                            wal,
+                            &runtime_index_scope_id,
+                            &table.table_id,
+                            schema,
+                            &candidate_row_refs,
+                            can_direct_lookup,
+                        );
 
                         candidate_rows.retain(|(_, row_map)| {
                             equality_filters.iter().all(|(filter_field_name, filter_lookup_value)| {
@@ -7358,7 +7378,6 @@ where
                         field_name,
                         runtime_index_scope_id,
                     );
-                    return Vec::new();
                 }
 
                 log::debug!(
@@ -7789,6 +7808,7 @@ fn equality_filters_for_index_lookup(
 
 fn load_equality_probe_rows_for_filters(
     wal: &ConcurrentWalManager,
+    table_stream_id: &str,
     table_id: &str,
     schema: &TableSchema,
     equality_filters: &HashMap<String, Vec<u8>>,
@@ -7797,7 +7817,7 @@ fn load_equality_probe_rows_for_filters(
     if equality_filters.len() > 1 {
         load_live_rows_by_equality_filters_with_limit(
             wal,
-            table_id,
+            table_stream_id,
             table_id,
             schema,
             equality_filters,
@@ -7810,7 +7830,7 @@ fn load_equality_probe_rows_for_filters(
 
         load_live_rows_by_equality_with_limit(
             wal,
-            table_id,
+            table_stream_id,
             table_id,
             schema,
             field_name,

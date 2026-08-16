@@ -126,7 +126,7 @@ impl ServerApp {
 
             let wal_id = catalog.database_id.0.clone();
             let applied = catalog
-                .replay_entity_construction_from_log(&wal_id, &self.wal)
+                .replay_entity_construction_from_log(&wal_id, self.wal.as_ref())
                 .map_err(|msg| ServerAppError::Runtime(msg.to_string()))?;
 
             replayed_transactions += applied;

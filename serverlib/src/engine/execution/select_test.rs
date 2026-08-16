@@ -561,6 +561,77 @@ fn execute_relation_select_plan_count_star_equality_probe_uses_fast_path() {
 }
 
 #[test]
+fn execute_relation_select_plan_count_star_runtime_index_lookup_uses_fast_path() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let runtime_indexes = RuntimeIndexStore::new();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    seed_rows(&mut catalog, &wal);
+
+    let read_plan = parse_select_read_plan_from_statement(
+        "select count(*) from users where id=1",
+    )
+    .expect("count equality select should parse");
+
+    let relation = catalog
+        .table(&read_plan.table_id)
+        .expect("relation table should exist");
+
+    let schema = catalog
+        .table_schema(&read_plan.table_id)
+        .expect("relation schema should exist");
+
+    let primary_index = relation
+        .indexes
+        .values()
+        .find(|index| index.is_primary_key())
+        .expect("primary key index should exist");
+
+    let mut equality_filters = std::collections::HashMap::new();
+    
+    let where_condition = read_plan
+        .where_condition
+        .as_ref()
+        .expect("where condition should exist");
+
+    assert!(crate::collect_indexable_equality_filters_for_schema(
+        &schema,
+        where_condition,
+        &mut equality_filters,
+    ));
+
+    let lookup_value = equality_filters
+        .remove("id")
+        .expect("id equality filter should exist");
+
+    let access_plan = crate::RelationAccessPlan {
+        strategy: crate::RelationAccessStrategy::RuntimeIndexLookup {
+            index_id: primary_index.index_id.0.clone(),
+            lookup_key: vec![lookup_value],
+        },
+    };
+
+    let result = execute_relation_select_plan(
+        &wal,
+        relation,
+        schema,
+        &runtime_indexes,
+        &read_plan,
+        &access_plan,
+        &mut evaluate_none_for_test,
+        &mut |_row_map, _nested_condition| {
+            panic!("runtime index count fast path should avoid row materialization")
+        },
+    )
+    .expect("runtime index count select should execute");
+
+    assert_eq!(result.rows, vec![vec![b"1".to_vec()]]);
+
+}
+
+#[test]
 fn materialize_relation_rows_with_limit_bounds_equality_probe_results() {
 
     let wal = ConcurrentWalManager::in_memory();

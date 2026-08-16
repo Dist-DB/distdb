@@ -488,3 +488,65 @@ fn row_payload_decryption_transform_uses_provider_when_encryption_context_is_pre
 
     assert_eq!(plaintext, b"plain-text-payload".to_vec());
 }
+
+#[test]
+fn schema_ordinal_cache_is_keyed_by_schema_content_not_address() {
+
+    fn alternate_schema() -> TableSchema {
+        TableSchema::new(vec![
+            FieldDef {
+                seqno: 1,
+                field_name: "uid".to_string(),
+                field_type: FieldType::UInt(64),
+                nullable: false,
+                indexed: FieldIndex::PrimaryKey,
+                default_value: None,
+                metadata: None,
+            },
+            FieldDef {
+                seqno: 2,
+                field_name: "city".to_string(),
+                field_type: FieldType::Text,
+                nullable: true,
+                indexed: FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            },
+            FieldDef {
+                seqno: 3,
+                field_name: "postcode".to_string(),
+                field_type: FieldType::Text,
+                nullable: true,
+                indexed: FieldIndex::None,
+                default_value: None,
+                metadata: None,
+            },
+        ])
+    }
+
+    assert_eq!(schema_cache_key(&test_schema()), schema_cache_key(&test_schema()));
+    assert_ne!(schema_cache_key(&test_schema()), schema_cache_key(&alternate_schema()));
+
+    let payload = common::helpers::bincode_compat::serialize(&vec![
+        Some(b"1".to_vec()),
+        Some(b"sam@example.com".to_vec()),
+        Some(b"sam".to_vec()),
+    ])
+    .expect("payload should encode");
+
+    // Short-lived schema snapshots frequently reuse the same allocation, so an
+    // address-keyed cache decoded later tables with this table's field names.
+    let first = Box::new(test_schema());
+    let first_row = decode_row_payload(&first, &payload).expect("row should decode");
+    assert_eq!(first_row.get("email"), Some(&b"sam@example.com".to_vec()));
+    drop(first);
+
+    let second = Box::new(alternate_schema());
+    let second_row = decode_row_payload(&second, &payload).expect("row should decode");
+
+    assert_eq!(second_row.get("uid"), Some(&b"1".to_vec()));
+    assert_eq!(second_row.get("city"), Some(&b"sam@example.com".to_vec()));
+    assert_eq!(second_row.get("postcode"), Some(&b"sam".to_vec()));
+    assert!(!second_row.contains_key("email"));
+
+}

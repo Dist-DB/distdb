@@ -74,6 +74,12 @@ The state machine for database objects (databases, tables, indexes) is as follow
 
 impl ObjectStatus {
 
+    /// Queries require a materialized object. `Load` and `Indexing` precede
+    /// materialization; `Lock` and `Sync` follow it and carry committed data.
+    pub fn allows_reads(self) -> bool {
+        matches!(self, Self::Ready | Self::Sync | Self::Lock)
+    }
+
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),

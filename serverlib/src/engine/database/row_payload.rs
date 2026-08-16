@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use openssl::rand::rand_bytes;
 use openssl::sha::sha256;
@@ -538,11 +540,36 @@ pub struct RowPayloadSchemaCache {
     max_seqno: usize,
 }
 
-static SCHEMA_ORDINAL_CACHE: OnceLock<Mutex<HashMap<usize, SchemaOrdinalCacheEntry>>> =
+static SCHEMA_ORDINAL_CACHE: OnceLock<Mutex<HashMap<u64, SchemaOrdinalCacheEntry>>> =
     OnceLock::new();
 
-fn schema_cache_key(schema: &TableSchema) -> usize {
-    schema as *const TableSchema as usize
+/// Content fingerprint of the schema shape used for ordinal row decoding.
+/// Must never be derived from the schema's memory address: schemas are commonly
+/// short-lived snapshots, so a reused allocation would decode a table's rows
+/// with another table's field names.
+fn schema_cache_key(schema: &TableSchema) -> u64 {
+
+    let mut hasher = DefaultHasher::new();
+
+    schema.fields.len().hash(&mut hasher);
+
+    for field in &schema.fields {
+        field.seqno.hash(&mut hasher);
+        field.field_name.hash(&mut hasher);
+    }
+
+    hasher.finish()
+
+}
+
+fn cache_entry_matches_schema(entry: &SchemaOrdinalCacheEntry, schema: &TableSchema) -> bool {
+
+    entry.ordered_field_names.len() == schema.fields.len()
+        && schema
+            .fields
+            .iter()
+            .all(|field| entry.field_name_index.contains_key(&field.field_name))
+
 }
 
 fn schema_ordinal_cache_entry(schema: &TableSchema) -> SchemaOrdinalCacheEntry {
@@ -553,7 +580,9 @@ fn schema_ordinal_cache_entry(schema: &TableSchema) -> SchemaOrdinalCacheEntry {
 
         let key = schema_cache_key(schema);
 
-        if let Some(entry) = guard.get(&key) {
+        if let Some(entry) = guard.get(&key)
+            && cache_entry_matches_schema(entry, schema)
+        {
             return entry.clone();
         }
 

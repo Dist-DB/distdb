@@ -4846,7 +4846,7 @@ fn select_query_returns_table_schema_columns() {
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
     catalog
-        .register_table(
+        .create_table(
             "users",
             TableSchema::new(vec![
                 FieldDef {
@@ -10268,7 +10268,7 @@ fn connector_client_path_can_query_select_without_simulation() {
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
     catalog
-        .register_table(
+        .create_table(
             "users",
             TableSchema::new(vec![
                 FieldDef {
@@ -10349,7 +10349,7 @@ fn query_path_stress_respects_timing_thresholds() {
         DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
 
     catalog
-        .register_table(
+        .create_table(
             "users",
             TableSchema::new(vec![
                 FieldDef {

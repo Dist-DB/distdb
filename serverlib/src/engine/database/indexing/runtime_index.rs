@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
 use std::ops::Bound;
 use std::num::NonZeroU64;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use super::runtime_index_key_codec::{
@@ -29,6 +29,7 @@ use crate::engine::execution::access::{
 };
 use crate::{
     restore_equality_cache_from_snapshot,
+    render_stored_field_value,
     warm_equality_cache_from_live_rows, ConcurrentWalManager, DatabaseCatalog, DatabaseIndex,
     DatabaseIndexOrigin, FieldKind, FieldType, TableSchema, TransactionKind,
 };
@@ -85,74 +86,38 @@ pub fn current_runtime_index_bootstrap_progress() -> RuntimeIndexBootstrapProgre
 }
 
 fn runtime_index_parallel_build_max_workers() -> usize {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_BUILD_WORKERS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS)
-
+    common::settings::positive_usize(
+        common::settings::RUNTIME_INDEX_BUILD_WORKERS,
+        RUNTIME_INDEX_PARALLEL_BUILD_MAX_WORKERS,
+    )
 }
 
 fn runtime_index_parallel_build_min_rows() -> usize {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS)
-
-}
-
-fn runtime_index_aggressive_reserve_growth() -> bool {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_AGGRESSIVE_RESERVE_GROWTH")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
+    common::settings::positive_usize(
+        common::settings::RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS,
+        RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS,
+    )
 }
 
 fn runtime_index_migrate_legacy_snapshot_on_bootstrap() -> bool {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
+    common::settings::flag(
+        common::settings::RUNTIME_INDEX_MIGRATE_LEGACY_ON_BOOTSTRAP,
+        false,
+    )
 }
 
 fn runtime_index_incremental_persistence_on_commit() -> bool {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_ON_COMMIT")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true)
-
+    common::settings::flag(
+        common::settings::RUNTIME_INDEX_INCREMENTAL_PERSIST_ON_COMMIT,
+        true,
+    )
 }
 
 fn runtime_index_incremental_persistence_min_interval_ms() -> u64 {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_INCREMENTAL_PERSIST_MIN_INTERVAL_MS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(1_000)
-
+    common::settings::u64_allowing_zero(
+        common::settings::RUNTIME_INDEX_INCREMENTAL_PERSIST_MIN_INTERVAL_MS,
+        1_000,
+    )
 }
 
 fn runtime_index_incremental_persistence_large_table_interval_ms(
@@ -172,48 +137,21 @@ fn runtime_index_incremental_persistence_large_table_interval_ms(
 }
 
 fn runtime_index_preload_accessors_on_bootstrap() -> bool {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
-}
-
-fn runtime_index_bootstrap_accessor_preload_max_live_rows() -> usize {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_ACCESSOR_PRELOAD_MAX_LIVE_ROWS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(150_000)
-
+    common::settings::flag(
+        common::settings::RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP,
+        false,
+    )
 }
 
 fn runtime_index_realign_wal_records_on_bootstrap() -> bool {
-    std::env::var("DISTDB_REALIGN_WAL_RECORDS")
-        .ok()
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+    common::settings::flag(common::settings::REALIGN_WAL_RECORDS, false)
 }
 
 fn runtime_index_background_prewarm_skipped_accessors() -> bool {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
+    common::settings::flag(
+        common::settings::RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS,
+        false,
+    )
 }
 
 fn numeric_kind_for_index(index: &DatabaseIndex, schema: &TableSchema) -> Option<RuntimeIndexNumericKind> {
@@ -233,40 +171,21 @@ fn numeric_kind_for_index(index: &DatabaseIndex, schema: &TableSchema) -> Option
 }
 
 fn runtime_index_bootstrap_live_row_checkpoint_max_rows() -> usize {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS_DEFAULT)
-
+    common::settings::usize_allowing_zero(
+        common::settings::RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS,
+        RUNTIME_INDEX_BOOTSTRAP_LIVE_ROW_CHECKPOINT_MAX_ROWS_DEFAULT,
+    )
 }
 
 fn runtime_index_bootstrap_index_build_chunk_rows() -> usize {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS_DEFAULT)
-
+    common::settings::positive_usize(
+        common::settings::RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS,
+        RUNTIME_INDEX_BOOTSTRAP_INDEX_BUILD_CHUNK_ROWS_DEFAULT,
+    )
 }
 
 fn runtime_index_probe_paging_debug_enabled() -> bool {
-
-    std::env::var("DISTDB_RUNTIME_INDEX_PAGING_DEBUG")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-
-}
-
-fn should_preload_accessors_for_bootstrap(live_row_count: usize) -> bool {
-    live_row_count <= runtime_index_bootstrap_accessor_preload_max_live_rows()
+    common::settings::flag(common::settings::RUNTIME_INDEX_PAGING_DEBUG, false)
 }
 
 fn spawn_background_accessor_prewarm_from_checkpoint(
@@ -335,12 +254,16 @@ pub struct RuntimeIndexState {
     pub index: Option<DatabaseIndex>,
     numeric_kind: Option<RuntimeIndexNumericKind>,
     string_case_insensitive: bool,
-    entries: AHashMap<Vec<u8>, Option<NonZeroU64>>,
-    non_unique_row_refs: AHashMap<Vec<u8>, PostingPages>,
-    ordered_entry_keys: BTreeSet<Vec<u8>>,
+    entries: AHashMap<IndexKey, Option<NonZeroU64>>,
+    non_unique_row_refs: AHashMap<IndexKey, PostingPages>,
+    ordered_entry_keys: BTreeSet<IndexKey>,
 }
 
 const RUNTIME_INDEX_POSTING_PAGE_SIZE: usize = 1_024;
+
+/// Index keys are shared between the entry map, the postings map and the ordered
+/// key set, so the bytes are allocated once per distinct key rather than three times.
+type IndexKey = Arc<[u8]>;
 
 #[derive(Debug, Clone, Default)]
 struct PostingPages {
@@ -354,7 +277,7 @@ impl PostingPages {
             && last_page.last().is_some_and(|last| *last < row_ref)
         {
             if last_page.len() == RUNTIME_INDEX_POSTING_PAGE_SIZE {
-                self.pages.push(Vec::with_capacity(RUNTIME_INDEX_POSTING_PAGE_SIZE));
+                self.pages.push(Vec::new());
                 self.pages.last_mut().expect("posting page should exist").push(row_ref);
             } else {
                 last_page.push(row_ref);
@@ -367,8 +290,10 @@ impl PostingPages {
             page.last().is_some_and(|last| *last < row_ref)
         });
 
+        // Pages grow on demand: most non-unique keys hold a handful of row refs,
+        // so reserving a full page per key costs orders of magnitude more than it saves.
         if page_index == self.pages.len() {
-            self.pages.push(Vec::with_capacity(RUNTIME_INDEX_POSTING_PAGE_SIZE));
+            self.pages.push(Vec::new());
         }
 
         let search_result = self.pages[page_index].binary_search(&row_ref);
@@ -449,7 +374,7 @@ fn unpack_row_ref(row_ref: Option<NonZeroU64>) -> Option<u64> {
 
 fn collect_row_refs_for_encoded_key(
     state: &RuntimeIndexState,
-    encoded_key: &Vec<u8>,
+    encoded_key: &[u8],
     row_refs: &mut Vec<u64>,
 ) {
     if let Some(row_ref) = state
@@ -575,7 +500,10 @@ impl RuntimeIndexState {
 
         if key.len() == 1
             && let Some(numeric_kind) = self.numeric_kind
-            && let Some(value) = encode_sortable_numeric(&key[0], numeric_kind)
+            && let Some(value) = encode_sortable_numeric(
+                &render_stored_field_value(&key[0]),
+                numeric_kind,
+            )
         {
             return encode_runtime_index_entry_key(&[value]);
         }
@@ -585,7 +513,7 @@ impl RuntimeIndexState {
 
     pub fn contains(&self, pk_val: &[Vec<u8>]) -> bool {
         self.encode_key(pk_val)
-            .as_ref()
+            .as_deref()
             .is_some_and(|encoded| self.entries.contains_key(encoded))
     }
 
@@ -610,14 +538,23 @@ impl RuntimeIndexState {
             None
         };
 
-        self.entries.insert(encoded_key.clone(), stored_row_ref);
-        self.ordered_entry_keys.insert(encoded_key.clone());
+        let shared_key = self.intern_key(encoded_key);
+
+        self.entries.insert(Arc::clone(&shared_key), stored_row_ref);
+        self.ordered_entry_keys.insert(Arc::clone(&shared_key));
 
         if !is_unique_key
             && let Some(row_ref) = row_ref.and_then(pack_row_ref)
         {
-            let postings = self.non_unique_row_refs.entry(encoded_key).or_default();
+            let postings = self.non_unique_row_refs.entry(shared_key).or_default();
             postings.insert_unique_sorted(row_ref);
+        }
+    }
+
+    fn intern_key(&self, encoded_key: Vec<u8>) -> IndexKey {
+        match self.entries.get_key_value(encoded_key.as_slice()) {
+            Some((existing, _)) => Arc::clone(existing),
+            None => Arc::from(encoded_key.into_boxed_slice()),
         }
     }
 
@@ -627,6 +564,7 @@ impl RuntimeIndexState {
 
     pub fn remove_with_row_ref(&mut self, pk_val: &[Vec<u8>], row_ref: Option<u64>) {
         if let Some(encoded_key) = self.encode_key(pk_val) {
+            let encoded_key = encoded_key.as_slice();
             let is_unique_key = self
                 .index
                 .as_ref()
@@ -634,12 +572,12 @@ impl RuntimeIndexState {
                 .unwrap_or(true);
 
             if is_unique_key {
-                self.entries.remove(&encoded_key);
-                self.ordered_entry_keys.remove(&encoded_key);
+                self.entries.remove(encoded_key);
+                self.ordered_entry_keys.remove(encoded_key);
                 return;
             }
 
-            let should_remove_key = if let Some(non_unique_row_refs) = self.non_unique_row_refs.get_mut(&encoded_key) {
+            let should_remove_key = if let Some(non_unique_row_refs) = self.non_unique_row_refs.get_mut(encoded_key) {
                 if let Some(row_ref) = row_ref.and_then(pack_row_ref) {
                     non_unique_row_refs.remove(row_ref);
                     non_unique_row_refs.is_empty()
@@ -651,9 +589,9 @@ impl RuntimeIndexState {
             };
 
             if should_remove_key {
-                self.non_unique_row_refs.remove(&encoded_key);
-                self.entries.remove(&encoded_key);
-                self.ordered_entry_keys.remove(&encoded_key);
+                self.non_unique_row_refs.remove(encoded_key);
+                self.entries.remove(encoded_key);
+                self.ordered_entry_keys.remove(encoded_key);
             }
         }
     }
@@ -672,8 +610,8 @@ impl RuntimeIndexState {
         self.entries = entries
             .into_iter()
             .filter_map(|key| {
-                let encoded = self.encode_key(&key)?;
-                self.ordered_entry_keys.insert(encoded.clone());
+                let encoded: IndexKey = Arc::from(self.encode_key(&key)?.into_boxed_slice());
+                self.ordered_entry_keys.insert(Arc::clone(&encoded));
                 Some((encoded, None))
             })
             .collect();
@@ -696,8 +634,8 @@ impl RuntimeIndexState {
         self.entries = entries
             .into_iter()
             .filter_map(|key| {
-                let encoded = self.encode_key(&key)?;
-                self.ordered_entry_keys.insert(encoded.clone());
+                let encoded: IndexKey = Arc::from(self.encode_key(&key)?.into_boxed_slice());
+                self.ordered_entry_keys.insert(Arc::clone(&encoded));
                 let stored_row_ref = if is_unique_key {
                     row_refs
                         .get(&key)
@@ -718,11 +656,21 @@ impl RuntimeIndexState {
                 let Some(encoded) = self.encode_key(&key) else {
                     continue;
                 };
+                let Some(shared_key) = self
+                    .entries
+                    .get_key_value(encoded.as_slice())
+                    .map(|(existing, _)| Arc::clone(existing))
+                else {
+                    continue;
+                };
                 for row_ref in refs {
                     let Some(packed) = pack_row_ref(row_ref) else {
                         continue;
                     };
-                    let postings = self.non_unique_row_refs.entry(encoded.clone()).or_default();
+                    let postings = self
+                        .non_unique_row_refs
+                        .entry(Arc::clone(&shared_key))
+                        .or_default();
                     postings.insert_unique_sorted(packed);
                 }
             }
@@ -731,7 +679,7 @@ impl RuntimeIndexState {
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
         let encoded_key = self.encode_key(pk_val)?;
-        unpack_row_ref(self.entries.get(&encoded_key).copied().flatten())
+        unpack_row_ref(self.entries.get(encoded_key.as_slice()).copied().flatten())
     }
 
     pub fn row_refs_for_key(&self, pk_val: &[Vec<u8>], limit: Option<usize>) -> Vec<u64> {
@@ -740,15 +688,16 @@ impl RuntimeIndexState {
             return Vec::new();
         };
 
-        if let Some(row_ref) = unpack_row_ref(self.entries.get(&encoded_key).copied().flatten()) {
+        if let Some(row_ref) = unpack_row_ref(self.entries.get(encoded_key.as_slice()).copied().flatten()) {
             return vec![row_ref];
         }
 
-        let Some(non_unique_row_refs) = self.non_unique_row_refs.get(&encoded_key) else {
+        let Some(non_unique_row_refs) = self.non_unique_row_refs.get(encoded_key.as_slice()) else {
             return Vec::new();
         };
 
-        let mut row_refs = Vec::with_capacity(limit.unwrap_or(non_unique_row_refs.len()));
+        let posting_count = non_unique_row_refs.len();
+        let mut row_refs = Vec::with_capacity(limit.unwrap_or(posting_count).min(posting_count));
         non_unique_row_refs.append_row_refs(&mut row_refs, limit);
 
         row_refs
@@ -758,12 +707,12 @@ impl RuntimeIndexState {
     pub fn row_ref_count_for_key(&self, pk_val: &[Vec<u8>]) -> Option<usize> {
         let encoded_key = self.encode_key(pk_val)?;
 
-        if self.entries.get(&encoded_key).copied().flatten().is_some() {
+        if self.entries.get(encoded_key.as_slice()).copied().flatten().is_some() {
             return Some(1);
         }
 
         self.non_unique_row_refs
-            .get(&encoded_key)
+            .get(encoded_key.as_slice())
             .filter(|postings| !postings.is_empty())
             .map(PostingPages::len)
     }
@@ -826,7 +775,19 @@ impl RuntimeIndexState {
 
         let mut row_refs = Vec::new();
 
-        for encoded_key in self.ordered_entry_keys.range((lower, upper)) {
+        let lower_bound = match &lower {
+            Bound::Included(key) => Bound::Included(key.as_slice()),
+            Bound::Excluded(key) => Bound::Excluded(key.as_slice()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        let upper_bound = match &upper {
+            Bound::Included(key) => Bound::Included(key.as_slice()),
+            Bound::Excluded(key) => Bound::Excluded(key.as_slice()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        for encoded_key in self.ordered_entry_keys.range::<[u8], _>((lower_bound, upper_bound)) {
             collect_row_refs_for_encoded_key(self, encoded_key, &mut row_refs);
         }
 
@@ -875,7 +836,7 @@ impl RuntimeIndexState {
         }
 
         let mut row_refs = Vec::new();
-        let mut seen_keys = AHashSet::<Vec<u8>>::new();
+        let mut seen_keys = AHashSet::<IndexKey>::new();
 
         for (probe_idx, probe_key) in probe_keys.iter().enumerate() {
             let Some(encoded_probe_key) = self.encode_key(probe_key) else {
@@ -888,9 +849,14 @@ impl RuntimeIndexState {
             while pages_visited < max_pages_per_probe {
                 let row_refs_before_page = row_refs.len();
                 let seen_keys_before_page = seen_keys.len();
+                let lower_bound = match &next_lower_bound {
+                    Bound::Included(key) => Bound::Included(key.as_slice()),
+                    Bound::Excluded(key) => Bound::Excluded(key.as_slice()),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
                 let page_keys = self
                     .ordered_entry_keys
-                    .range((next_lower_bound.clone(), Bound::Unbounded))
+                    .range::<[u8], _>((lower_bound, Bound::Unbounded))
                     .take(key_page_size)
                     .cloned()
                     .collect::<Vec<_>>();
@@ -908,7 +874,7 @@ impl RuntimeIndexState {
                 }
 
                 for encoded_key in &page_keys {
-                    if !seen_keys.insert(encoded_key.clone()) {
+                    if !seen_keys.insert(Arc::clone(encoded_key)) {
                         continue;
                     }
 
@@ -943,7 +909,7 @@ impl RuntimeIndexState {
                     break;
                 }
 
-                let Some(last_key) = page_keys.last().cloned() else {
+                let Some(last_key) = page_keys.last().map(|key| key.to_vec()) else {
                     break;
                 };
 
@@ -1075,13 +1041,19 @@ impl RuntimeIndexState {
 
         for encoded_key in &encoded_keys {
 
-            if let Some(value) = self.entries.get(encoded_key) {
-                scoped.entries.insert(encoded_key.clone(), *value);
-                scoped.ordered_entry_keys.insert(encoded_key.clone());
-            }
+            let Some((shared_key, value)) = self
+                .entries
+                .get_key_value(encoded_key.as_slice())
+                .map(|(key, value)| (Arc::clone(key), *value))
+            else {
+                continue;
+            };
 
-            if let Some(row_refs) = self.non_unique_row_refs.get(encoded_key) {
-                scoped.non_unique_row_refs.insert(encoded_key.clone(), row_refs.clone());
+            scoped.entries.insert(Arc::clone(&shared_key), value);
+            scoped.ordered_entry_keys.insert(Arc::clone(&shared_key));
+
+            if let Some(row_refs) = self.non_unique_row_refs.get(encoded_key.as_slice()) {
+                scoped.non_unique_row_refs.insert(shared_key, row_refs.clone());
             }
 
         }
@@ -1110,93 +1082,9 @@ impl RuntimeIndexState {
             return;
         }
 
-        // Keep reserve decisions conservative: reserve when required capacity
-        // would be exceeded, and only apply extra runway for large batches.
-        // This avoids triggering expensive doublings on small tail batches.
-        let len = self.entries.len();
-        let required = len.saturating_add(additional);
-        let capacity = self.entries.capacity();
-        let spare = capacity.saturating_sub(len);
-
-        let high_ingest_batch = additional >= 64;
-        let near_capacity = capacity > 0
-            && len.saturating_mul(10) >= capacity.saturating_mul(9);
-
-        let is_unique_key_index = self
-            .index
-            .as_ref()
-            .is_some_and(|index| index.is_unique_key());
-
-        // For sustained bulk ingest on large unique-key indexes, grow before
-        // hitting the near-full threshold so rehash happens on smaller maps.
-        let proactive_growth = runtime_index_aggressive_reserve_growth()
-            && is_unique_key_index
-            && high_ingest_batch
-            && capacity >= 16_384
-            && len.saturating_mul(100) >= capacity.saturating_mul(55);
-
-        // Keep large unique-key indexes below dense occupancy during sustained
-        // ingest so expensive rehashes happen less often and on smaller states.
-        let proactive_target_capacity = if proactive_growth {
-            let target_load_percent = if capacity >= 229_376 {
-                40usize
-            } else if capacity >= 114_688 {
-                50usize
-            } else {
-                60usize
-            };
-
-            required
-                .saturating_mul(100)
-                .checked_div(target_load_percent)
-                .unwrap_or(usize::MAX)
-        } else {
-            required
-        };
-
-        let proactive_skip_capacity = if proactive_growth {
-            if capacity >= 229_376 {
-                capacity.saturating_mul(4)
-            } else if capacity >= 57_344 {
-                capacity.saturating_mul(3)
-            } else {
-                capacity.saturating_mul(2)
-            }
-        } else {
-            0
-        };
-
-        let should_add_runway = additional >= 1_024
-            || (high_ingest_batch && near_capacity)
-            || proactive_growth;
-
-        let desired_runway = if should_add_runway {
-            if proactive_growth {
-                if capacity >= 229_376 {
-                    capacity.clamp(131_072, 2_097_152)
-                } else if capacity >= 114_688 {
-                    capacity.clamp(65_536, 1_048_576)
-                } else {
-                    capacity.clamp(16_384, 262_144)
-                }
-            } else if high_ingest_batch && near_capacity {
-                // Under sustained large-batch ingest near load threshold, reserve
-                // a wider runway to avoid repeated tier-by-tier rehash cliffs.
-                capacity.clamp(4_096, 32_768)
-            } else {
-                additional.saturating_mul(2).clamp(4_096, 32_768)
-            }
-        } else {
-            0
-        };
-
-        if capacity < required || (should_add_runway && spare < desired_runway) {
-            let target = required
-                .saturating_add(desired_runway)
-                .max(proactive_target_capacity)
-                .max(proactive_skip_capacity);
-            self.entries.reserve(target.saturating_sub(len));
-        }
+        // The map already grows geometrically, so reserve the known shortfall and
+        // let it size itself rather than projecting runway it may never use.
+        self.entries.reserve(additional);
     }
 
 }
@@ -1287,7 +1175,7 @@ impl RuntimeIndexStore {
 
         Self {
             indexes: AHashMap::new(),
-            materialize_non_primary: runtime_index_materialize_non_primary(),
+            materialize_non_primary: true,
             non_primary_field_allowlist: runtime_index_non_primary_field_allowlist(),
             non_primary_index_allowlist: runtime_index_non_primary_index_allowlist(),
             incremental_persist_last_saved_ms: AHashMap::new(),
@@ -1757,6 +1645,25 @@ impl RuntimeIndexStore {
         catalogs: &HashMap<String, DatabaseCatalog>,
         wal: &ConcurrentWalManager,
     ) {
+        self.bootstrap_from_catalogs_filtered(catalogs, wal, None);
+    }
+
+    /// Adopt every index built by `other`, replacing any state held for the same
+    /// scoped index id. Used to install a table bootstrapped on a worker thread.
+    pub fn merge_from(&mut self, other: Self) {
+        for (scoped_index_id, indexor) in other.indexes {
+            self.indexes.insert(scoped_index_id, indexor);
+        }
+    }
+
+    /// When `only_table_ids` is set, restrict the bootstrap to those tables so
+    /// callers can materialize tables individually rather than as one batch.
+    pub fn bootstrap_from_catalogs_filtered(
+        &mut self,
+        catalogs: &HashMap<String, DatabaseCatalog>,
+        wal: &ConcurrentWalManager,
+        only_table_ids: Option<&HashSet<String>>,
+    ) {
 
         let bootstrap_started_at = Instant::now();
         let preload_accessors_on_bootstrap = runtime_index_preload_accessors_on_bootstrap();
@@ -1782,10 +1689,8 @@ impl RuntimeIndexStore {
         }
 
         log::info!(
-            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} preload_accessor_max_live_rows={} warm_equality_cache_on_bootstrap={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
+            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
             self.materialize_non_primary,
-            preload_accessors_on_bootstrap,
-            runtime_index_bootstrap_accessor_preload_max_live_rows(),
             preload_accessors_on_bootstrap,
             
             if self.non_primary_field_allowlist.is_empty() {
@@ -1816,7 +1721,15 @@ impl RuntimeIndexStore {
 
         let tables_total = catalogs
             .values()
-            .map(|catalog| catalog.table_ids().len())
+            .map(|catalog| {
+                catalog
+                    .table_ids()
+                    .into_iter()
+                    .filter(|table_id| {
+                        only_table_ids.is_none_or(|only| only.contains(table_id))
+                    })
+                    .count()
+            })
             .sum::<usize>();
 
         set_runtime_index_bootstrap_progress(|progress| {
@@ -1835,6 +1748,10 @@ impl RuntimeIndexStore {
         for (database_id, catalog) in catalogs {
             
             for table_id in catalog.table_ids() {
+
+                if only_table_ids.is_some_and(|only| !only.contains(&table_id)) {
+                    continue;
+                }
 
                 set_runtime_index_bootstrap_progress(|progress| {
                     let now = epoch_ms!();
@@ -2387,21 +2304,11 @@ impl RuntimeIndexStore {
 
                     warm_started_at.elapsed().as_millis()
                 } else {
-                    if !preload_accessors_on_bootstrap {
-                        log::debug!(
-                            "runtime index bootstrap equality warm skipped database={} table={} reason=preload_disabled",
-                            database_id,
-                            table_id,
-                        );
-                    } else {
-                        log::info!(
-                            "runtime index bootstrap equality warm skipped database={} table={} live_rows={} max_live_rows={}",
-                            database_id,
-                            table_id,
-                            live_row_count,
-                            runtime_index_bootstrap_accessor_preload_max_live_rows(),
-                        );
-                    }
+                    log::debug!(
+                        "runtime index bootstrap equality warm skipped database={} table={} reason=preload_disabled",
+                        database_id,
+                        table_id,
+                    );
                     0
                 };
 
@@ -3223,18 +3130,12 @@ impl Default for RuntimeIndexStore {
 
 }
 
-fn runtime_index_materialize_non_primary() -> bool {
-
-    true
-
-}
-
 fn runtime_index_non_primary_field_allowlist() -> AHashSet<String> {
-    parse_runtime_index_allowlist_env("DISTDB_RUNTIME_INDEX_NON_PRIMARY_FIELDS")
+    parse_runtime_index_allowlist_env(common::settings::RUNTIME_INDEX_NON_PRIMARY_FIELDS)
 }
 
 fn runtime_index_non_primary_index_allowlist() -> AHashSet<String> {
-    parse_runtime_index_allowlist_env("DISTDB_RUNTIME_INDEX_NON_PRIMARY_INDEX_IDS")
+    parse_runtime_index_allowlist_env(common::settings::RUNTIME_INDEX_NON_PRIMARY_INDEX_IDS)
 }
 
 fn parse_runtime_index_allowlist_entries(value: &str) -> AHashSet<String> {
@@ -3248,7 +3149,7 @@ fn parse_runtime_index_allowlist_entries(value: &str) -> AHashSet<String> {
 
 fn parse_runtime_index_allowlist_env(var_name: &str) -> AHashSet<String> {
 
-    let Some(value) = std::env::var(var_name).ok() else {
+    let Some(value) = common::settings::text(var_name) else {
         return AHashSet::new();
     };
 

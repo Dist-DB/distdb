@@ -34,6 +34,7 @@
 
 pub mod helpers;
 pub mod schema;
+pub mod settings;
 
 pub use schema::{
 	PeerServiceType, PeerSession, SessionLog, SessionLogEntry, SessionLogEventType, TlsMode,
