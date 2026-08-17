@@ -56,8 +56,8 @@ pub(super) struct ReadObservation {
     pub(super) observed_row_ids: HashSet<u64>,
 }
 
-const TX_SNAPSHOT_TTL_SECONDS_DEFAULT: u64 = 0;
-const TX_SNAPSHOT_MAX_SESSIONS_DEFAULT: usize = 0;
+const TX_SNAPSHOT_TTL_SECONDS_DEFAULT: u64 = 900;
+const TX_SNAPSHOT_MAX_SESSIONS_DEFAULT: usize = 4;
 
 impl ServerApp {
 
@@ -88,7 +88,6 @@ impl ServerApp {
         let ttl_nanos = Self::transaction_snapshot_ttl_nanos();
         let max_sessions = Self::transaction_snapshot_max_sessions();
 
-        // Limits are opt-in. By default, do not auto-evict transaction snapshots.
         if ttl_nanos == 0 && max_sessions == 0 {
             return;
         }
