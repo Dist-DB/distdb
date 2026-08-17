@@ -256,7 +256,7 @@ pub struct RuntimeIndexState {
     string_case_insensitive: bool,
     entries: AHashMap<IndexKey, Option<NonZeroU64>>,
     non_unique_row_refs: AHashMap<IndexKey, PostingPages>,
-    ordered_entry_keys: BTreeSet<IndexKey>,
+    ordered_entry_keys: Option<BTreeSet<IndexKey>>,
 }
 
 const RUNTIME_INDEX_POSTING_PAGE_SIZE: usize = 1_024;
@@ -588,14 +588,18 @@ impl RuntimeIndexState {
         if is_unique_key {
             let shared_key = self.intern_key(encoded_key);
             self.entries.insert(Arc::clone(&shared_key), row_ref.and_then(pack_row_ref));
-            self.ordered_entry_keys.insert(shared_key);
+            if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
+                ordered_entry_keys.insert(shared_key);
+            }
             return;
         }
 
         let Some(row_ref) = row_ref.and_then(pack_row_ref) else {
             let shared_key = self.intern_key(encoded_key);
             self.entries.entry(shared_key.clone()).or_insert(None);
-            self.ordered_entry_keys.insert(shared_key);
+            if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
+                ordered_entry_keys.insert(shared_key);
+            }
             return;
         };
 
@@ -603,7 +607,9 @@ impl RuntimeIndexState {
         match self.entries.entry(Arc::clone(&shared_key)) {
             Entry::Vacant(entry) => {
                 entry.insert(Some(row_ref));
-                self.ordered_entry_keys.insert(shared_key);
+                if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
+                    ordered_entry_keys.insert(shared_key);
+                }
             }
             Entry::Occupied(mut entry) => match *entry.get() {
                 Some(existing_row_ref) if existing_row_ref == row_ref => {}
@@ -630,7 +636,9 @@ impl RuntimeIndexState {
         };
 
         let shared_key = self.intern_key(encoded_key);
-        self.ordered_entry_keys.insert(Arc::clone(&shared_key));
+        if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
+            ordered_entry_keys.insert(Arc::clone(&shared_key));
+        }
 
         match row_refs {
             [] => {
@@ -681,7 +689,9 @@ impl RuntimeIndexState {
 
             if is_unique_key {
                 self.entries.remove(encoded_key);
-                self.ordered_entry_keys.remove(encoded_key);
+                if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
+                    ordered_entry_keys.remove(encoded_key);
+                }
                 return;
             }
 
@@ -692,7 +702,9 @@ impl RuntimeIndexState {
             if let Some(single_row_ref) = entry {
                 if row_ref.is_none_or(|row_ref| pack_row_ref(row_ref) == Some(single_row_ref)) {
                     self.entries.remove(encoded_key);
-                    self.ordered_entry_keys.remove(encoded_key);
+                    if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
+                        ordered_entry_keys.remove(encoded_key);
+                    }
                 }
                 return;
             }
@@ -718,7 +730,9 @@ impl RuntimeIndexState {
             } else if should_remove_key {
                 self.non_unique_row_refs.remove(encoded_key);
                 self.entries.remove(encoded_key);
-                self.ordered_entry_keys.remove(encoded_key);
+                if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
+                    ordered_entry_keys.remove(encoded_key);
+                }
             }
         }
     }
@@ -733,12 +747,11 @@ impl RuntimeIndexState {
 
     pub fn rebuild(&mut self, entries: AHashSet<Vec<Vec<u8>>>) {
         self.non_unique_row_refs.clear();
-        self.ordered_entry_keys.clear();
+        self.ordered_entry_keys = None;
         self.entries = entries
             .into_iter()
             .filter_map(|key| {
                 let encoded: IndexKey = Arc::from(self.encode_key(&key)?.into_boxed_slice());
-                self.ordered_entry_keys.insert(Arc::clone(&encoded));
                 Some((encoded, None))
             })
             .collect();
@@ -750,7 +763,7 @@ impl RuntimeIndexState {
         mut row_refs: AHashMap<Vec<Vec<u8>>, Vec<u64>>,
     ) {
         self.non_unique_row_refs.clear();
-        self.ordered_entry_keys.clear();
+        self.ordered_entry_keys = None;
         row_refs.retain(|key, _| entries.contains(key));
 
         let is_unique_key = self
@@ -762,7 +775,6 @@ impl RuntimeIndexState {
             .into_iter()
             .filter_map(|key| {
                 let encoded: IndexKey = Arc::from(self.encode_key(&key)?.into_boxed_slice());
-                self.ordered_entry_keys.insert(Arc::clone(&encoded));
                 let stored_row_ref = if is_unique_key {
                     row_refs
                         .get(&key)
@@ -942,7 +954,8 @@ impl RuntimeIndexState {
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        for encoded_key in self.ordered_entry_keys.range::<[u8], _>((lower_bound, upper_bound)) {
+        let ordered_entry_keys = self.entries.keys().cloned().collect::<BTreeSet<_>>();
+        for encoded_key in ordered_entry_keys.range::<[u8], _>((lower_bound, upper_bound)) {
             collect_row_refs_for_encoded_key(self, encoded_key, &mut row_refs);
         }
 
@@ -984,7 +997,7 @@ impl RuntimeIndexState {
                 key_page_size,
                 max_pages_per_probe,
                 limit,
-                self.ordered_entry_keys.len(),
+                self.entries.len(),
                 self.entries.len(),
                 self.non_unique_row_refs.len(),
             );
@@ -992,6 +1005,7 @@ impl RuntimeIndexState {
 
         let mut row_refs = Vec::new();
         let mut seen_keys = AHashSet::<IndexKey>::new();
+        let ordered_entry_keys = self.entries.keys().cloned().collect::<BTreeSet<_>>();
 
         for (probe_idx, probe_key) in probe_keys.iter().enumerate() {
             let Some(encoded_probe_key) = self.encode_key(probe_key) else {
@@ -1009,8 +1023,7 @@ impl RuntimeIndexState {
                     Bound::Excluded(key) => Bound::Excluded(key.as_slice()),
                     Bound::Unbounded => Bound::Unbounded,
                 };
-                let page_keys = self
-                    .ordered_entry_keys
+                let page_keys = ordered_entry_keys
                     .range::<[u8], _>((lower_bound, Bound::Unbounded))
                     .take(key_page_size)
                     .cloned()
@@ -1191,7 +1204,7 @@ impl RuntimeIndexState {
             string_case_insensitive: self.string_case_insensitive,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
-            ordered_entry_keys: BTreeSet::new(),
+            ordered_entry_keys: self.ordered_entry_keys.as_ref().map(|_| BTreeSet::new()),
         };
 
         for encoded_key in &encoded_keys {
@@ -1205,7 +1218,9 @@ impl RuntimeIndexState {
             };
 
             scoped.entries.insert(Arc::clone(&shared_key), value);
-            scoped.ordered_entry_keys.insert(Arc::clone(&shared_key));
+            if let Some(ordered_entry_keys) = scoped.ordered_entry_keys.as_mut() {
+                ordered_entry_keys.insert(Arc::clone(&shared_key));
+            }
 
             if let Some(row_refs) = self.non_unique_row_refs.get(encoded_key.as_slice()) {
                 scoped.non_unique_row_refs.insert(shared_key, row_refs.clone());
@@ -1228,7 +1243,7 @@ impl RuntimeIndexState {
             string_case_insensitive: self.string_case_insensitive,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
-            ordered_entry_keys: BTreeSet::new(),
+            ordered_entry_keys: None,
         }
     }
 
@@ -1496,7 +1511,7 @@ impl RuntimeIndexStore {
             string_case_insensitive: false,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
-            ordered_entry_keys: BTreeSet::new(),
+            ordered_entry_keys: None,
         }));
 
     }
@@ -1514,7 +1529,7 @@ impl RuntimeIndexStore {
             string_case_insensitive: false,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
-            ordered_entry_keys: BTreeSet::new(),
+            ordered_entry_keys: None,
         }));
 
     }
@@ -2945,7 +2960,7 @@ impl RuntimeIndexStore {
                                 string_case_insensitive: false,
                                 entries: AHashMap::new(),
                                 non_unique_row_refs: AHashMap::new(),
-                                ordered_entry_keys: BTreeSet::new(),
+                                ordered_entry_keys: None,
                             }),
                         );
                     }

@@ -1948,7 +1948,7 @@ fn spawn_worker(
                 Arc::new(Mutex::new(Vec::new()))
             };
 
-            if let Ok(mut entries) = entries.lock() {
+            if let Ok(entries) = entries.lock() {
                 count = entries.len();
             }
 
