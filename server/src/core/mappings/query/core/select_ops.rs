@@ -12,11 +12,17 @@ fn apply_console_result_limit(
     request_id: &str,
     read_plan: &serverlib::SelectReadPlan,
 ) -> serverlib::SelectReadPlan {
-    if !request_id.starts_with("console-req-") || read_plan.limit.is_some() {
-        return read_plan.clone();
+    let mut capped = read_plan.clone();
+
+    if capped.limit == Some(0) {
+        capped.limit = None;
+        return capped;
     }
 
-    let mut capped = read_plan.clone();
+    if !request_id.starts_with("console-req-") || capped.limit.is_some() {
+        return capped;
+    }
+
     capped.limit = Some(CONSOLE_DEFAULT_RESULT_LIMIT);
     capped
 }

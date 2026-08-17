@@ -3257,7 +3257,7 @@ fn execute_relation_select_plan_uses_unordered_limit_fast_path() {
 }
 
 #[test]
-fn execute_relation_select_plan_caps_unbounded_simple_selects() {
+fn execute_relation_select_plan_allows_unbounded_simple_service_selects() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let mut catalog =
@@ -3337,11 +3337,11 @@ fn execute_relation_select_plan_caps_unbounded_simple_selects() {
     )
     .expect("unbounded relation select should succeed");
 
-    assert_eq!(result.rows.len(), 1_000);
+    assert_eq!(result.rows.len(), 1_100);
 }
 
 #[test]
-fn execute_relation_select_plan_caps_unbounded_runtime_lookup_fallback() {
+fn execute_relation_select_plan_allows_unbounded_runtime_lookup_fallback_for_service_selects() {
     let wal = ConcurrentWalManager::in_memory();
     let mut runtime_indexes = RuntimeIndexStore::new();
     let mut catalog =
@@ -3425,7 +3425,7 @@ fn execute_relation_select_plan_caps_unbounded_runtime_lookup_fallback() {
     )
     .expect("unbounded runtime lookup fallback should succeed");
 
-    assert_eq!(result.rows.len(), 1_000);
+    assert_eq!(result.rows.len(), 1_100);
 }
 
 #[test]

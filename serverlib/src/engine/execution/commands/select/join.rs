@@ -791,9 +791,6 @@ where
 }
 
 fn simple_unordered_relation_row_limit(read_plan: &SelectReadPlan) -> Option<usize> {
-
-    const DEFAULT_UNBOUNDED_RELATION_ROW_LIMIT: usize = 1_000;
-
     if read_plan.offset.unwrap_or(0) != 0 {
         return None;
     }
@@ -818,7 +815,7 @@ fn simple_unordered_relation_row_limit(read_plan: &SelectReadPlan) -> Option<usi
         return None;
     }
 
-    read_plan.limit.or(Some(DEFAULT_UNBOUNDED_RELATION_ROW_LIMIT))
+    read_plan.limit
 
 }
 
