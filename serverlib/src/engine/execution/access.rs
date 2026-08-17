@@ -6992,6 +6992,7 @@ where
                             row_limit,
                         );
                     }
+                    
                 }
 
                 load_live_rows_with_optional_pk_cap(

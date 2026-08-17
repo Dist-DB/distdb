@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::borrow::Cow;
 use std::fs;
 use std::io::BufReader;
@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Instant;
@@ -235,6 +235,7 @@ enum WalCommand {
 pub struct ConcurrentWalManager {
     workers: Mutex<HashMap<String, Sender<WalCommand>>>,
     storage: Arc<Mutex<HashMap<String, Arc<Mutex<Vec<TransactionRecord>>>>>>,
+    hydrating_streams: Arc<(Mutex<HashSet<String>>, Condvar)>,
     cache_scope_id: usize,
     write_high_water_by_stream: Mutex<HashMap<String, u64>>,
     stream_modes: Mutex<HashMap<String, WalStreamMode>>,
@@ -247,6 +248,7 @@ impl Default for ConcurrentWalManager {
         Self {
             workers: Mutex::new(HashMap::new()),
             storage: Arc::new(Mutex::new(HashMap::new())),
+            hydrating_streams: Arc::new((Mutex::new(HashSet::new()), Condvar::new())),
             cache_scope_id: next_wal_cache_scope_id(),
             write_high_water_by_stream: Mutex::new(HashMap::new()),
             stream_modes: Mutex::new(HashMap::new()),
@@ -426,14 +428,33 @@ impl ConcurrentWalManager {
             return;
         };
 
-        let needs_hydration = match self.storage.lock() {
-            Ok(store) => !store.contains_key(stream_key),
+        let (hydrating, wake) = &*self.hydrating_streams;
+        let mut hydrating_guard = match hydrating.lock() {
+            Ok(guard) => guard,
             Err(_) => return,
         };
 
-        if !needs_hydration {
-            return;
+        loop {
+            if self
+                .storage
+                .lock()
+                .ok()
+                .is_some_and(|store| store.contains_key(stream_key))
+            {
+                return;
+            }
+
+            if hydrating_guard.insert(stream_key.to_string()) {
+                break;
+            }
+
+            hydrating_guard = match wake.wait(hydrating_guard) {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
         }
+
+        drop(hydrating_guard);
 
         let wal_path = data_dir.join(FileKind::Data.file_name(stream_key));
         if !wal_path.exists() {
@@ -443,6 +464,10 @@ impl ConcurrentWalManager {
                 store
                     .entry(stream_key.to_string())
                     .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
+            }
+            if let Ok(mut guard) = hydrating.lock() {
+                guard.remove(stream_key);
+                wake.notify_all();
             }
             return;
         }
@@ -461,6 +486,11 @@ impl ConcurrentWalManager {
             && entries.is_empty()
         {
             entries.extend(existing);
+        }
+
+        if let Ok(mut guard) = hydrating.lock() {
+            guard.remove(stream_key);
+            wake.notify_all();
         }
 
         if let (Some(entries_handle), Ok(mut high_water)) = (
@@ -545,6 +575,7 @@ impl ConcurrentWalManager {
         Self {
             workers: Mutex::new(HashMap::new()),
             storage: Arc::new(Mutex::new(HashMap::new())),
+            hydrating_streams: Arc::new((Mutex::new(HashSet::new()), Condvar::new())),
             cache_scope_id: next_wal_cache_scope_id(),
             write_high_water_by_stream: Mutex::new(HashMap::new()),
             stream_modes: Mutex::new(HashMap::new()),
@@ -629,6 +660,8 @@ impl ConcurrentWalManager {
         timestamp_epoch_ms: u64,
     ) -> Result<(), &'static str> {
 
+        let stream_key = obfuscated_stream_key(wal_id)?;
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
         let sender = self.get_or_spawn_worker(wal_id)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
 
@@ -643,8 +676,6 @@ impl ConcurrentWalManager {
         ack_rx
             .recv()
             .map_err(|_| "failed to receive WAL compact acknowledgement")??;
-
-        let stream_key = obfuscated_stream_key(wal_id)?;
 
         if let (Some(entries), Ok(mut high_water)) = (
             self.stream_entries_handle(&stream_key),
@@ -950,6 +981,7 @@ impl ConcurrentWalManager {
             .max();
 
         let stream_key = obfuscated_stream_key(wal_id)?;
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
         let sender = self.get_or_spawn_worker_for_stream_key(&stream_key)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
 
@@ -1164,6 +1196,7 @@ impl ConcurrentWalManager {
 
         let write_ts = write_timestamp_if_data_write(&record);
         let stream_key = obfuscated_stream_key(wal_id)?;
+        self.hydrate_stream_if_needed(wal_id, &stream_key);
 
         let sender = self.get_or_spawn_worker_for_stream_key(&stream_key)?;
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), &'static str>>();
@@ -1907,7 +1940,6 @@ fn spawn_worker(
 
             append_file = open_wal_append_file(path).ok();
 
-            let existing = load_records_from_path(path);
             let mut count = 0usize;
 
             let entries = if let Ok(mut state) = storage.lock() {
@@ -1917,12 +1949,7 @@ fn spawn_worker(
             };
 
             if let Ok(mut entries) = entries.lock() {
-                if entries.is_empty() {
-                    count = existing.len();
-                    entries.extend(existing);
-                } else {
-                    count = entries.len();
-                }
+                count = entries.len();
             }
 
             log::info!(
