@@ -2,7 +2,7 @@ use super::*;
 use crate::core::identity::UserId;
 use crate::engine::database::core::ObjectStatus;
 use crate::engine::database::row_payload::{decode_row_payload, encode_row_payload};
-use crate::engine::database::table::schema::TableSchema;
+use crate::engine::database::table::schema::{FieldType, TableSchema};
 use crate::engine::database::transaction::{TransactionId, TransactionKind, TransactionRecord};
 use common::helpers::format::FileKind;
 use common::helpers::write_bytes;
@@ -337,6 +337,15 @@ fn disk_executor_safe_type_change_rejects_invalid_value() {
     assert!(result.is_err());
 
     let _ = std::fs::remove_dir_all(temp_root);
+}
+
+#[test]
+fn safe_type_change_converts_datetime_text_to_epoch_seconds() {
+    let value = b"2026-08-17 08:28:57";
+    let converted = convert_value_to_field_type(value, &FieldType::Int(64), TypeConversionPolicy::Safe)
+        .expect("datetime should convert to bigint");
+
+    assert_eq!(render_stored_field_value(&converted), b"1786955337");
 }
 
 #[test]

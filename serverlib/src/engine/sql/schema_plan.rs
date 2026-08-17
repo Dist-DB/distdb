@@ -348,10 +348,9 @@ fn parse_modify_column_change_op(
         )));
     };
 
-    Ok(Some(AlterTableChangeOp::ModifyField {
-        field_name: common::normalize_identifier!(&field.field_name),
-        new_type: field.field_type.clone(),
-    }))
+    let mut field = field.clone();
+    field.field_name = common::normalize_identifier!(&field.field_name);
+    Ok(Some(AlterTableChangeOp::ModifyField(field)))
 
 }
 

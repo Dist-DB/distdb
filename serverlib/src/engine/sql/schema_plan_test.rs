@@ -333,12 +333,27 @@ fn alter_table_change_plan_parses_modify_column() {
     assert_eq!(plan.operations.len(), 1);
 
     match &plan.operations[0] {
-        AlterTableChangeOp::ModifyField {
-            field_name,
-            new_type,
-        } => {
-            assert_eq!(field_name, "email");
-            assert_eq!(new_type, &FieldType::StringFixed(512));
+        AlterTableChangeOp::ModifyField(field) => {
+            assert_eq!(field.field_name, "email");
+            assert_eq!(field.field_type, FieldType::StringFixed(512));
+        }
+        _ => panic!("expected modify field operation"),
+    }
+}
+
+#[test]
+fn alter_table_change_plan_parses_modify_bigint_with_default() {
+    let plan = parse_alter_table_change_plan_from_statement(
+        "alter table places modify date_updated bigint default 0",
+    )
+    .expect("alter table bigint modify should parse");
+
+    assert_eq!(plan.operations.len(), 1);
+    match &plan.operations[0] {
+        AlterTableChangeOp::ModifyField(field) => {
+            assert_eq!(field.field_name, "date_updated");
+            assert_eq!(field.field_type, FieldType::Int(64));
+            assert_eq!(field.default_value.as_deref(), Some(&b"0"[..]));
         }
         _ => panic!("expected modify field operation"),
     }

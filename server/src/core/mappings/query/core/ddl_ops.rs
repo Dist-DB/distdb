@@ -92,10 +92,9 @@ pub(super) fn execute_alter_table_impl(
                 }
             },
 
-            AlterTableChangeOp::ModifyField {
-                field_name,
-                new_type,
-            } => {
+            AlterTableChangeOp::ModifyField(mut modified_field) => {
+                let field_name = modified_field.field_name.clone();
+                let new_type = modified_field.field_type.clone();
                 
                 type_changes.push(serverlib::FieldTypeChangeRule {
                     field_name: field_name.clone(),
@@ -106,9 +105,11 @@ pub(super) fn execute_alter_table_impl(
 
                 match existing {
                     
-                    Some(mut field) => {
-                        field.field_type = new_type;
-                        tx.update_field(field)
+                    Some(existing) => {
+                        modified_field.seqno = existing.seqno;
+                        modified_field.nullable = existing.nullable;
+                        modified_field.indexed = existing.indexed;
+                        tx.update_field(modified_field)
                     },
 
                     None => Err(serverlib::DatabaseError::SchemaChange(
@@ -201,6 +202,14 @@ pub(super) fn execute_alter_table_impl(
             return ConnectorResponse::rejected(
                 request_id.to_string(),
                 format!("alter table schema migration failed: {err}"),
+            );
+        }
+
+        if let Err(err) = wal.invalidate_stream_cache(&entity_wal_id) {
+            let _ = tx.abort(catalog);
+            return ConnectorResponse::rejected(
+                request_id.to_string(),
+                format!("alter table WAL cache refresh failed: {err}"),
             );
         }
 

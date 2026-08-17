@@ -991,10 +991,7 @@ pub enum AlterTableChangeOp {
         from: String,
         to: String,
     },
-    ModifyField {
-        field_name: String,
-        new_type: FieldType,
-    },
+    ModifyField(FieldDef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -284,6 +284,24 @@ impl ConcurrentWalManager {
 
     }
 
+    /// Discard the hydrated cache while preserving the durable WAL file.
+    /// The next access reloads records from disk.
+    pub fn invalidate_stream_cache(&self, wal_id: &str) -> Result<(), &'static str> {
+        let stream_key = obfuscated_stream_key(wal_id)?;
+
+        self.storage
+            .lock()
+            .map_err(|_| "failed to lock WAL storage")?
+            .remove(&stream_key);
+
+        self.write_high_water_by_stream
+            .lock()
+            .map_err(|_| "failed to lock WAL high-water map")?
+            .remove(&stream_key);
+
+        Ok(())
+    }
+
     pub fn scan_durable_records_if_unloaded<F>(
         &self,
         wal_id: &str,

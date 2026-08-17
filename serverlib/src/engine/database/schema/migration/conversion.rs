@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use chrono::{NaiveDate, NaiveDateTime};
 use common::Uuid;
 
 use crate::engine::database::core::DatabaseError;
@@ -92,6 +93,16 @@ pub fn convert_value_to_field_type(
                 return encode_signed_numeric(target_type.clone(), v);
             }
 
+            if let Ok(text) = std::str::from_utf8(&render_stored_field_value(value)) {
+                if let Ok(v) = text.trim().parse::<i128>() {
+                    return encode_signed_numeric(target_type.clone(), v);
+                }
+
+                if let Some(v) = parse_temporal_epoch_seconds(text) {
+                    return encode_signed_numeric(target_type.clone(), v as i128);
+                }
+            }
+
             match policy {
                 TypeConversionPolicy::Force => encode_signed_numeric(target_type.clone(), 0),
                 TypeConversionPolicy::Safe  => Err(()),
@@ -162,6 +173,25 @@ pub fn convert_value_to_field_type(
 
     }
 
+}
+
+fn parse_temporal_epoch_seconds(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+    ]
+    .into_iter()
+    .find_map(|format| NaiveDateTime::parse_from_str(trimmed, format).ok())
+    .map(|datetime| datetime.and_utc().timestamp())
+    .or_else(|| {
+        NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+            .ok()
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|datetime| datetime.and_utc().timestamp())
+    })
 }
 
 pub fn render_stored_field_value(value: &[u8]) -> Vec<u8> {
