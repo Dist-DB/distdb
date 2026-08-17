@@ -228,7 +228,6 @@ fn explain_runtime_index_lookup_summary<'a>(
 
 fn explain_fast_plan_ranking(
     index: &DatabaseIndex,
-    access_plan: Option<&RelationAccessPlan>,
 ) -> (String, String, String) {
     let score = if index.is_primary_key() {
         1010
@@ -242,17 +241,6 @@ fn explain_fast_plan_ranking(
 
     let index_hint = index.index_id.0.clone();
     let reason = format!("runtime lookup for index {}", index.index_id.0);
-    let equality_reason = if access_plan
-        .and_then(|plan| match &plan.strategy {
-            RelationAccessStrategy::EqualityProbe { .. } => Some(()),
-            _ => None,
-        })
-        .is_some()
-    {
-        "equality filter matched indexed field"
-    } else {
-        "equality filter matched indexed field"
-    };
 
     let prioritization = format!(
         "1.index_lookup_then_scan(score={},index={},reason={}) > 2.equality_probe(score=780,index={},reason={}) > 3.full_scan(score=0,index=-,reason=fallback when no candidate can beat scan)",
@@ -260,7 +248,7 @@ fn explain_fast_plan_ranking(
         index_hint,
         reason,
         index_hint,
-        equality_reason,
+        "equality filter matched indexed field",
     );
 
     (score.to_string(), prioritization, index_hint)
@@ -273,8 +261,6 @@ fn explain_direct_access_plan_ranking(
     match &access_plan.strategy {
         RelationAccessStrategy::EqualityProbe {
             field_name,
-            source: _,
-            equality_filters: _,
             ..
         } => {
             let index_hint = single_field_index_id(table, field_name).unwrap_or_default();
@@ -287,7 +273,6 @@ fn explain_direct_access_plan_ranking(
         }
         RelationAccessStrategy::InListProbe {
             field_name,
-            source: _,
             ..
         } => {
             let index_hint = single_field_index_id(table, field_name).unwrap_or_default();
@@ -524,8 +509,7 @@ pub fn explain_select_plan_result(
     let (planner_score, index_prioritization, chosen_index_hint) = if let Some(table) = table {
 
         if let Some((index, _)) = index_lookup {
-            let (score, prioritization, chosen_index_hint) =
-                explain_fast_plan_ranking(index, access_plan);
+            let (score, prioritization, chosen_index_hint) = explain_fast_plan_ranking(index);
             (score, prioritization, chosen_index_hint)
         } else if let Some(access_plan) = access_plan
             && matches!(

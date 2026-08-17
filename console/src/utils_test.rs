@@ -52,7 +52,7 @@ fn sql_timeout_uses_default_when_env_missing() {
         std::env::remove_var(SQL_TIMEOUT_ENV);
     }
 
-    assert_eq!(sql_request_timeout_secs(), 300);
+    assert_eq!(sql_request_timeout_secs(), 120);
 }
 
 #[test]

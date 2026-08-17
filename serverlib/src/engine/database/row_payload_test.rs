@@ -527,7 +527,7 @@ fn schema_ordinal_cache_is_keyed_by_schema_content_not_address() {
     assert_eq!(schema_cache_key(&test_schema()), schema_cache_key(&test_schema()));
     assert_ne!(schema_cache_key(&test_schema()), schema_cache_key(&alternate_schema()));
 
-    let payload = common::helpers::bincode_compat::serialize(&vec![
+    let payload = common::helpers::bincode_compat::serialize(vec![
         Some(b"1".to_vec()),
         Some(b"sam@example.com".to_vec()),
         Some(b"sam".to_vec()),

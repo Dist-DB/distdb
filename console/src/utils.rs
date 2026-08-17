@@ -3,7 +3,7 @@ use connector::{ConnectorCommand, ConnectorRequest, ConnectorResponse, Connector
 use peerlib::ConnectorTlsConfig;
 
 pub(crate) const AUTH_FALLBACK_DATABASE: &str = "main";
-const SQL_REQUEST_TIMEOUT_SECS_DEFAULT: u64 = 300;
+const SQL_REQUEST_TIMEOUT_SECS_DEFAULT: u64 = 120;
 const SQL_REQUEST_TIMEOUT_SECS_ENV: &str = common::settings::CONSOLE_SQL_TIMEOUT_SECS;
 const SHOW_PEERS_REQUEST_TIMEOUT_SECS_DEFAULT: u64 = 1;
 const SHOW_PEERS_REQUEST_TIMEOUT_SECS_ENV: &str = common::settings::CONSOLE_SHOW_PEERS_TIMEOUT_SECS;

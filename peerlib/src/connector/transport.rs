@@ -23,7 +23,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
-const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 300;
+const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 0;
 const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 3;
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 60;
 const CONNECTOR_CONNECT_RETRY_ATTEMPTS_DEFAULT: u64 = 3;
@@ -114,7 +114,7 @@ fn connector_stream_timeout_secs() -> u64 {
     std::env::var(CONNECTOR_STREAM_TIMEOUT_SECS_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|value| value.clamp(5, 3600))
+        .map(|value| value.clamp(0, 3600))
         .unwrap_or(CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT)
 }
 
@@ -1250,10 +1250,9 @@ fn ensure_live_connection(
                     socket_addr
                 );
 
-                stream.set_timeouts(
-                    Some(std::time::Duration::from_secs(stream_timeout_secs)),
-                    Some(std::time::Duration::from_secs(stream_timeout_secs)),
-                )?;
+                let stream_timeout = (stream_timeout_secs > 0)
+                    .then(|| std::time::Duration::from_secs(stream_timeout_secs));
+                stream.set_timeouts(stream_timeout, stream_timeout)?;
 
                 *connection = Some(LiveConnection {
                     peer_id: peer.peer_id.clone(),

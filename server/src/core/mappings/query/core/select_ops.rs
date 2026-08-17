@@ -6,6 +6,21 @@ use super::variables::{
     SessionVariableOverrides,
 };
 
+const CONSOLE_DEFAULT_RESULT_LIMIT: usize = 1_000;
+
+fn apply_console_result_limit(
+    request_id: &str,
+    read_plan: &serverlib::SelectReadPlan,
+) -> serverlib::SelectReadPlan {
+    if !request_id.starts_with("console-req-") || read_plan.limit.is_some() {
+        return read_plan.clone();
+    }
+
+    let mut capped = read_plan.clone();
+    capped.limit = Some(CONSOLE_DEFAULT_RESULT_LIMIT);
+    capped
+}
+
 pub(super) fn execute_select_plan_result(
     catalog: &DatabaseCatalog,
     wal: &ConcurrentWalManager,
@@ -1668,6 +1683,8 @@ fn execute_select_read_plan(
     session_variable_overrides: Option<&SessionVariableOverrides>,
 ) -> ConnectorResponse {
 
+    let read_plan = apply_console_result_limit(request_id, read_plan);
+
     if read_plan.lock_mode != serverlib::SelectLockMode::None {
 
         if read_plan.is_explain {
@@ -1677,7 +1694,7 @@ fn execute_select_read_plan(
             );
         }
 
-        let lock_targets = match resolve_select_lock_targets(catalog, read_plan) {
+        let lock_targets = match resolve_select_lock_targets(catalog, &read_plan) {
             Ok(targets) => targets,
             Err(message) => {
                 return ConnectorResponse::rejected(request_id.to_string(), message);
@@ -1705,7 +1722,7 @@ fn execute_select_read_plan(
             catalog,
             wal,
             runtime_indexes,
-            read_plan,
+            &read_plan,
             session_variable_overrides,
         );
 
@@ -1722,7 +1739,7 @@ fn execute_select_read_plan(
         catalog,
         wal,
         runtime_indexes,
-        read_plan,
+        &read_plan,
         session_variable_overrides,
     )
 
