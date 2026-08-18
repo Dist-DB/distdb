@@ -495,6 +495,44 @@ where
     let wal_append_us = wal_append_start.elapsed().as_micros() as u64;
     let latest_tx_id = next_id.saturating_sub(1);
 
+    #[cfg(debug_assertions)]
+    let alignment_result = wal
+        .with_records(&stream_id, |wal_records| {
+        let appended_records = wal_records
+            .iter()
+            .rev()
+            .take(payload_count)
+            .collect::<Vec<_>>();
+
+        let row_refs_align = appended_records.len() == payload_count
+            && appended_records.iter().rev().enumerate().all(|(offset, record)| {
+                record.id.0 == first_row_id.saturating_add(offset as u64)
+                    && record.kind == kind
+            });
+
+        if !row_refs_align {
+            log::error!(
+                "row reference alignment mismatch table={} stream={} kind={:?} first_row_id={} payload_count={} latest_tx_id={} wal_tail={:?}",
+                table.table_id,
+                stream_id,
+                kind,
+                first_row_id,
+                payload_count,
+                latest_tx_id,
+                appended_records
+                    .iter()
+                    .rev()
+                    .map(|record| (record.id.0, record.kind))
+                    .collect::<Vec<_>>(),
+            );
+            return Err("row reference alignment mismatch after WAL append".to_string());
+        }
+
+        Ok(())
+        })
+        .ok_or_else(|| format!("WAL stream '{}' unavailable after append", stream_id))?;
+    alignment_result?;
+
     let index_apply_start = Instant::now();
     let pre_index_stats = apply_row_index_mutation.then(|| {
         derived_indexes

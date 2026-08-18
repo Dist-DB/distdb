@@ -311,9 +311,6 @@ fn derived_indexes_for_table_and_primary_key_index_prefer_expected_entries() {
 fn runtime_index_store_can_remove_scoped_index_and_table_indexes() {
     let mut store = RuntimeIndexStore {
         indexes: AHashMap::new(),
-        materialize_non_primary: true,
-        non_primary_field_allowlist: AHashSet::new(),
-        non_primary_index_allowlist: AHashSet::new(),
         incremental_persist_last_saved_ms: AHashMap::new(),
     };
 
@@ -369,12 +366,9 @@ fn runtime_index_store_can_remove_scoped_index_and_table_indexes() {
 }
 
 #[test]
-fn runtime_index_policy_keeps_unique_indexes_and_skips_non_unique_by_default() {
+fn runtime_index_policy_tracks_all_declared_indexes() {
     let store = RuntimeIndexStore {
         indexes: AHashMap::new(),
-        materialize_non_primary: false,
-        non_primary_field_allowlist: AHashSet::new(),
-        non_primary_index_allowlist: AHashSet::new(),
         incremental_persist_last_saved_ms: AHashMap::new(),
     };
 
@@ -396,16 +390,13 @@ fn runtime_index_policy_keeps_unique_indexes_and_skips_non_unique_by_default() {
 
     assert!(store.should_track_index(&primary));
     assert!(store.should_track_index(&unique));
-    assert!(!store.should_track_index(&indexed));
+    assert!(store.should_track_index(&indexed));
 }
 
 #[test]
 fn runtime_index_store_batch_record_and_remove_restores_cardinality() {
     let mut store = RuntimeIndexStore {
         indexes: AHashMap::new(),
-        materialize_non_primary: true,
-        non_primary_field_allowlist: AHashSet::new(),
-        non_primary_index_allowlist: AHashSet::new(),
         incremental_persist_last_saved_ms: AHashMap::new(),
     };
 
@@ -443,9 +434,6 @@ fn runtime_index_store_batch_record_and_remove_restores_cardinality() {
 fn runtime_index_store_keeps_row_refs_for_unique_indexes_only() {
     let mut store = RuntimeIndexStore {
         indexes: AHashMap::new(),
-        materialize_non_primary: true,
-        non_primary_field_allowlist: AHashSet::new(),
-        non_primary_index_allowlist: AHashSet::new(),
         incremental_persist_last_saved_ms: AHashMap::new(),
     };
 

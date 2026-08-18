@@ -1263,9 +1263,6 @@ impl RuntimeIndexState {
 #[derive(Debug, Clone)]
 pub struct RuntimeIndexStore {
     indexes: AHashMap<String, DatatypeIndexor>,
-    materialize_non_primary: bool,
-    non_primary_field_allowlist: AHashSet<String>,
-    non_primary_index_allowlist: AHashSet<String>,
     incremental_persist_last_saved_ms: AHashMap<String, u64>,
 }
 
@@ -1312,32 +1309,8 @@ fn resolve_table_stream_id_for_bootstrap(
 impl RuntimeIndexStore {
 
     fn should_track_non_primary_index(&self, index: &DatabaseIndex) -> bool {
-
-        if self.materialize_non_primary {
-            return true;
-        }
-
-        if self
-            .non_primary_index_allowlist
-            .contains(&common::normalize_identifier!(&index.index_id.0))
-        {
-            return true;
-        }
-
-        if index.field_names.is_empty() {
-            return !index.field_name.is_empty()
-                && self
-                    .non_primary_field_allowlist
-                    .contains(&common::normalize_identifier!(&index.field_name));
-        }
-
-        index
-            .field_names
-            .iter()
-            .any(|field_name| {
-                self.non_primary_field_allowlist
-                    .contains(&common::normalize_identifier!(field_name))
-            })
+        let _ = index;
+        true
 
     }
 
@@ -1345,9 +1318,6 @@ impl RuntimeIndexStore {
 
         Self {
             indexes: AHashMap::new(),
-            materialize_non_primary: true,
-            non_primary_field_allowlist: runtime_index_non_primary_field_allowlist(),
-            non_primary_index_allowlist: runtime_index_non_primary_index_allowlist(),
             incremental_persist_last_saved_ms: AHashMap::new(),
         }
 
@@ -1372,12 +1342,8 @@ impl RuntimeIndexStore {
     }
 
     fn should_materialize_index_for_bootstrap(&self, index: &DatabaseIndex) -> bool {
-
-        if index.is_unique_key() {
-            return true;
-        }
-
-        self.should_track_non_primary_index(index)
+        let _ = index;
+        true
 
     }
 
@@ -1859,30 +1825,8 @@ impl RuntimeIndexStore {
         }
 
         log::info!(
-            "runtime index bootstrap mode materialize_non_primary={} preload_accessors_on_bootstrap={} non_primary_field_allowlist={} non_primary_index_allowlist={}",
-            self.materialize_non_primary,
+            "runtime index bootstrap mode all_non_temporary_indexes=true preload_accessors_on_bootstrap={}",
             preload_accessors_on_bootstrap,
-            
-            if self.non_primary_field_allowlist.is_empty() {
-                "<none>".to_string()
-            } else {
-                self.non_primary_field_allowlist
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(",")
-            },
-            
-            if self.non_primary_index_allowlist.is_empty() {
-                "<none>".to_string()
-            } else {
-                self.non_primary_index_allowlist
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(",")
-            },
-
         );
 
         let mut bootstrapped_tables = 0usize;
@@ -3073,9 +3017,6 @@ fn runtime_index_store_for_table(
 
     let mut scoped = RuntimeIndexStore {
         indexes: AHashMap::new(),
-        materialize_non_primary: store.materialize_non_primary,
-        non_primary_field_allowlist: store.non_primary_field_allowlist.clone(),
-        non_primary_index_allowlist: store.non_primary_index_allowlist.clone(),
         incremental_persist_last_saved_ms: AHashMap::new(),
     };
 
@@ -3435,6 +3376,7 @@ fn rebuild_bootstrap_indexes_from_live_rows(
         // Rebuild directly into index state to avoid temporary duplicate key
         // structures during bootstrap (set + row-ref map + final map).
         state.entries.clear();
+        state.non_unique_row_refs.clear();
         state.reserve_entries(live_rows.len());
 
         for live_rows_chunk in live_rows.chunks(chunk_rows) {
@@ -3442,6 +3384,61 @@ fn rebuild_bootstrap_indexes_from_live_rows(
                 let key = index_value_tuple(index, row_map);
                 state.insert_with_row_ref(key, Some(*row_id));
             }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let mut expected_counts = HashMap::<Vec<u8>, (Vec<Vec<u8>>, usize)>::new();
+            for (_, row_map) in live_rows {
+                let key = index_value_tuple(index, row_map);
+                let Some(encoded_key) = state.encode_key(&key) else {
+                    continue;
+                };
+                expected_counts
+                    .entry(encoded_key)
+                    .and_modify(|(_, count)| *count += 1)
+                    .or_insert((key, 1));
+            }
+
+            let duplicate_live_keys = expected_counts
+                .values()
+                .filter(|(_, count)| *count > 1)
+                .count();
+            let missing_keys = expected_counts
+                .iter()
+                .filter_map(|(_, (key, expected))| {
+                    let actual = state.row_ref_count_for_key(key).unwrap_or(0);
+                    let expected = if index.is_unique_key() { 1 } else { *expected };
+                    (actual != expected).then_some(())
+                })
+                .count();
+
+            let audit_failed = missing_keys > 0
+                || (index.is_unique_key() && duplicate_live_keys > 0);
+
+            if audit_failed {
+                log::error!(
+                    "runtime index bootstrap posting audit failed table={} index={} unique={} live_rows={} distinct_keys={} duplicate_live_keys={} missing_keys={}",
+                    table_stream_id,
+                    index.index_id.0,
+                    index.is_unique_key(),
+                    live_rows.len(),
+                    expected_counts.len(),
+                    duplicate_live_keys,
+                    missing_keys,
+                );
+            } else {
+                log::debug!(
+                    "runtime index bootstrap posting audit passed table={} index={} unique={} live_rows={} distinct_keys={} duplicate_live_keys={} missing_keys=0",
+                    table_stream_id,
+                    index.index_id.0,
+                    index.is_unique_key(),
+                    live_rows.len(),
+                    expected_counts.len(),
+                    duplicate_live_keys,
+                );
+            }
+
         }
 
     }

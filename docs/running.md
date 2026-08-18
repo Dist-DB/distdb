@@ -34,24 +34,10 @@ cd server
 TLS_SANS=localhost ./debug.sh
 ```
 
-`./debug.sh` now defaults to the minimum-footprint runtime-index profile.
-Use a single profile switch to control startup behavior:
-
-- `DISTDB_PLATFORM_PROFILE=minimum` (default)
-- `DISTDB_PLATFORM_PROFILE=throughput`
-
-To opt out for higher throughput benchmarking, disable it explicitly:
-
-```bash
-cd server
-DISTDB_PLATFORM_PROFILE=throughput ./debug.sh
-```
-
-Backward-compatible toggle is still accepted:
-
-```bash
-DISTDB_ENABLE_LOW_MEMORY_PROFILE=0 ./debug.sh
-```
+`./debug.sh` and `./run.sh` build every declared non-temporary runtime index.
+Index generation is not controlled by a profile or allowlist. Startup workers,
+accessor preloading, and background prewarming may be tuned for available
+resources, but those settings must not change which indexes are built.
 
 Option B (explicit runtime flags):
 

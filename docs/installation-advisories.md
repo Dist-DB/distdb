@@ -81,29 +81,12 @@ For remote hosts where `tlsserver` runs on the same machine, prefer:
 
 If the deployment should issue a local-only certificate, set `TLS_SANS=localhost` in the startup script or pass `tls_san=localhost` explicitly.
 
-Runtime-index bootstrap now defaults to a conservative memory baseline:
-
-- `DISTDB_PLATFORM_PROFILE=minimum` (single startup switch; default in `server/debug.sh` and `server/run.sh`)
-
-- `DISTDB_RUNTIME_INDEX_BUILD_WORKERS=1`
-- `DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=0`
-- `DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS=0`
-- `DISTDB_RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS=1000000` (parallel rebuild only for very large tables)
-
-For higher-throughput startup behavior, use:
-
-- `DISTDB_PLATFORM_PROFILE=throughput`
-
-If you need to apply the same minimum-footprint profile explicitly (for older binaries or external service managers), use:
-
-```bash
-DISTDB_RUNTIME_INDEX_BUILD_WORKERS=1 \
-DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP=0 \
-DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS=0 \
-./target/release/server datadir=./data -- \
-  wss=on \
-  tls_san=localhost,provision.distdb.com \
-  tls_server=127.0.0.1:5443
-```
+Runtime-index bootstrap builds every declared non-temporary index. Profiles and
+allowlists must not gate index generation, because doing so can make valid
+indexed queries incomplete. `DISTDB_RUNTIME_INDEX_BUILD_WORKERS`,
+`DISTDB_RUNTIME_INDEX_PRELOAD_ACCESSORS_ON_BOOTSTRAP`,
+`DISTDB_RUNTIME_INDEX_BACKGROUND_PREWARM_SKIPPED_ACCESSORS`, and
+`DISTDB_RUNTIME_INDEX_PARALLEL_BUILD_MIN_ROWS` tune resource use and startup
+time only; they do not change index coverage.
 
 These flags are stabilization levers, not long-term replacements for adequate memory sizing.
