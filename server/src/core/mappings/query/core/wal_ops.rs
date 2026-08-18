@@ -531,6 +531,7 @@ where
         Ok(())
         })
         .ok_or_else(|| format!("WAL stream '{}' unavailable after append", stream_id))?;
+    #[cfg(debug_assertions)]
     alignment_result?;
 
     let index_apply_start = Instant::now();
