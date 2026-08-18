@@ -495,7 +495,6 @@ where
     let wal_append_us = wal_append_start.elapsed().as_micros() as u64;
     let latest_tx_id = next_id.saturating_sub(1);
 
-    #[cfg(debug_assertions)]
     let alignment_result = wal
         .with_records(&stream_id, |wal_records| {
         let appended_records = wal_records
@@ -531,7 +530,6 @@ where
         Ok(())
         })
         .ok_or_else(|| format!("WAL stream '{}' unavailable after append", stream_id))?;
-    #[cfg(debug_assertions)]
     alignment_result?;
 
     let index_apply_start = Instant::now();

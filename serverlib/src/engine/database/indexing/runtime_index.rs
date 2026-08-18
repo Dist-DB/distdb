@@ -1988,9 +1988,7 @@ impl RuntimeIndexStore {
                 warm_fields.sort();
                 warm_fields.dedup();
 
-                if !preload_accessors_on_bootstrap
-                    && let Some(data_dir) = snapshot_data_dir.as_ref()
-                {
+                if let Some(data_dir) = snapshot_data_dir.as_ref() {
                     let mut restored_index_ids = HashSet::new();
                     let mut restored_entry_count = 0usize;
                     let streamed_snapshot = RuntimeIndexSnapshotService::stream_runtime_index_snapshot_chunks(
