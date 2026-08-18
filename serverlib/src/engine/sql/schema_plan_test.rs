@@ -58,6 +58,68 @@ fn create_table_plan_infers_columns_from_as_select_projection() {
 }
 
 #[test]
+fn create_table_schema_keeps_every_mysql_dump_column() {
+    let (_, schema) = create_table_schema_from_statement(
+        "CREATE TABLE `places` (\n\
+          `uid` bigint  NOT NULL AUTO_INCREMENT,\n\
+          `id` bigint NOT NULL,\n\
+          `uni_id` bigint NOT NULL,\n\
+          `form` varchar(3) NOT NULL DEFAULT '',\n\
+          `class` varchar(10) DEFAULT NULL,\n\
+          `type` varchar(1) DEFAULT NULL,\n\
+          `latitude` decimal(10,7) NOT NULL,\n\
+          `longitude` decimal(10,7) NOT NULL,\n\
+          `elevation` int NOT NULL,\n\
+          `display_name` varchar(120) NOT NULL,\n\
+          `country_code` varchar(10) NOT NULL,\n\
+          `id_region` int  NOT NULL,\n\
+          `date_updated` bigint NOT NULL,\n\
+          PRIMARY KEY (`uid`),\n\
+          UNIQUE KEY `id` (`uni_id`,`form`),\n\
+          KEY `id_region` (`id_region`),\n\
+          KEY `latitude` (`latitude`),\n\
+          KEY `longitude` (`longitude`),\n\
+          KEY `display_name` (`display_name`),\n\
+          KEY `form` (`form`),\n\
+          KEY `class` (`class`),\n\
+          KEY `country_code` (`country_code`),\n\
+          KEY `type` (`type`),\n\
+          KEY `uni_id` (`uni_id`),\n\
+          KEY `id_2` (`id`),\n\
+          KEY `country_code_2` (`country_code`,`class`),\n\
+          KEY `class_2` (`class`,`longitude`,`latitude`),\n\
+          CONSTRAINT `places_ibfk_1` FOREIGN KEY (`id_region`) REFERENCES `regions` (`id`)\n\
+        ) ENGINE=InnoDB AUTO_INCREMENT=4989267 DEFAULT CHARSET=utf8mb3",
+    )
+    .expect("mysql dump create table should parse");
+
+    let field_names = schema
+        .fields
+        .iter()
+        .map(|field| field.field_name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        field_names,
+        vec![
+            "uid",
+            "id",
+            "uni_id",
+            "form",
+            "class",
+            "type",
+            "latitude",
+            "longitude",
+            "elevation",
+            "display_name",
+            "country_code",
+            "id_region",
+            "date_updated",
+        ]
+    );
+}
+
+#[test]
 fn create_table_schema_maps_varchar_with_length() {
     let (_, schema) =
         create_table_schema_from_statement("create table users (email varchar(34) not null)")

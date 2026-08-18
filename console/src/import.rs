@@ -84,6 +84,56 @@ where
     let mut parser = SqlStatementParser::default();
     let mut pending_bytes = Vec::<u8>::new();
 
+    let mut handle_statement = |statement: &str, line: usize| -> Result<(), String> {
+
+        if statement_starts_with_use(statement) {
+            return Ok(());
+        }
+
+        let normalized_statement = normalize_import_statement(statement);
+
+        if statement_is_import_dump_directive(&normalized_statement) {
+            return Ok(());
+        }
+
+        if normalized_statement.len() >= super::IMPORT_LARGE_STATEMENT_BYTES {
+            log::debug!(
+                "import executing large statement: line={} bytes={} head='{}'",
+                line,
+                normalized_statement.len(),
+                statement_head_token(&normalized_statement)
+            );
+        }
+
+        transaction_state.current_statement_line = line;
+
+        stream_import_insert_values_statements(
+            &normalized_statement,
+            import_insert_chunk_target_bytes(),
+            import_insert_chunk_max_tuples(),
+            |import_statement| {
+                if let Err(err) =
+                    execute_statement(database_id, import_statement, transaction_state)
+                {
+                    if should_skip_import_error(import_statement, &err) {
+                        log::debug!(
+                            "import skipped statement error at line={}: {}",
+                            line,
+                            err
+                        );
+                        return Ok(());
+                    }
+
+                    return Err(format!("{err} (at line {line})"));
+                }
+
+                Ok(())
+            },
+        )?;
+
+        Ok(())
+    };
+
     loop {
         let chunk_len = {
             let buffer = reader.fill_buf().map_err(|err| err.to_string())?;
@@ -109,46 +159,7 @@ where
 
             let chunk_len = match std::str::from_utf8(&pending_bytes) {
                 Ok(valid) => {
-                    parser.push_chunk(valid, &mut |statement| {
-                        if statement_starts_with_use(statement) {
-                            return Ok(());
-                        }
-
-                        let normalized_statement = normalize_import_statement(statement);
-
-                        if statement_is_import_dump_directive(&normalized_statement) {
-                            return Ok(());
-                        }
-
-                        if normalized_statement.len() >= super::IMPORT_LARGE_STATEMENT_BYTES {
-                            log::debug!(
-                                "import executing large statement: bytes={} head='{}'",
-                                normalized_statement.len(),
-                                statement_head_token(&normalized_statement)
-                            );
-                        }
-
-                        stream_import_insert_values_statements(
-                            &normalized_statement,
-                            import_insert_chunk_target_bytes(),
-                            import_insert_chunk_max_tuples(),
-                            |import_statement| {
-                                if let Err(err) =
-                                    execute_statement(database_id, import_statement, transaction_state)
-                                {
-                                    if should_skip_import_error(import_statement, &err) {
-                                        return Ok(());
-                                    }
-
-                                    return Err(err);
-                                }
-
-                                Ok(())
-                            },
-                        )?;
-
-                        Ok(())
-                    })?;
+                    parser.push_chunk(valid, &mut handle_statement)?;
 
                     pending_bytes.clear();
 
@@ -174,87 +185,13 @@ where
             let valid_chunk =
                 std::str::from_utf8(&pending_bytes[..chunk_len]).map_err(|err| err.to_string())?;
 
-            parser.push_chunk(valid_chunk, &mut |statement| {
-                if statement_starts_with_use(statement) {
-                    return Ok(());
-                }
-
-                let normalized_statement = normalize_import_statement(statement);
-                if statement_is_import_dump_directive(&normalized_statement) {
-                    return Ok(());
-                }
-
-                if normalized_statement.len() >= super::IMPORT_LARGE_STATEMENT_BYTES {
-                    log::debug!(
-                        "import executing large statement: bytes={} head='{}'",
-                        normalized_statement.len(),
-                        statement_head_token(&normalized_statement)
-                    );
-                }
-
-                stream_import_insert_values_statements(
-                    &normalized_statement,
-                    import_insert_chunk_target_bytes(),
-                    import_insert_chunk_max_tuples(),
-                    |import_statement| {
-                        if let Err(err) =
-                            execute_statement(database_id, import_statement, transaction_state)
-                        {
-                            if should_skip_import_error(import_statement, &err) {
-                                return Ok(());
-                            }
-
-                            return Err(err);
-                        }
-
-                        Ok(())
-                    },
-                )?;
-
-                Ok(())
-            })?;
+            parser.push_chunk(valid_chunk, &mut handle_statement)?;
 
             pending_bytes.drain(..chunk_len);
         }
     }
 
-    parser.flush(&mut |statement| {
-        if statement_starts_with_use(statement) {
-            return Ok(());
-        }
-
-        let normalized_statement = normalize_import_statement(statement);
-        if statement_is_import_dump_directive(&normalized_statement) {
-            return Ok(());
-        }
-
-        if normalized_statement.len() >= super::IMPORT_LARGE_STATEMENT_BYTES {
-            log::debug!(
-                "import executing large statement: bytes={} head='{}'",
-                normalized_statement.len(),
-                statement_head_token(&normalized_statement)
-            );
-        }
-
-        stream_import_insert_values_statements(
-            &normalized_statement,
-            import_insert_chunk_target_bytes(),
-            import_insert_chunk_max_tuples(),
-            |import_statement| {
-                if let Err(err) = execute_statement(database_id, import_statement, transaction_state) {
-                    if should_skip_import_error(import_statement, &err) {
-                        return Ok(());
-                    }
-
-                    return Err(err);
-                }
-
-                Ok(())
-            },
-        )?;
-
-        Ok(())
-    })?;
+    parser.flush(&mut handle_statement)?;
 
     Ok(())
 }
@@ -331,7 +268,6 @@ fn statement_is_import_dump_directive(statement: &str) -> bool {
 
     starts_with_ascii_case_insensitive(normalized, "lock tables ")
         || starts_with_ascii_case_insensitive(normalized, "unlock tables")
-        || starts_with_ascii_case_insensitive(normalized, "drop table ")
         || starts_with_keyword_ascii_case_insensitive(normalized, "delimiter")
         || starts_with_ascii_case_insensitive(normalized, "set ")
         || normalized.starts_with("/*!")
@@ -697,6 +633,8 @@ fn is_identifier_byte(ch: u8) -> bool {
 struct SqlStatementParser {
     buffer: String,
     delimiter: String,
+    current_line: usize,
+    statement_start_line: usize,
     in_single_quote: bool,
     in_double_quote: bool,
     in_backtick_quote: bool,
@@ -712,6 +650,8 @@ impl Default for SqlStatementParser {
         Self {
             buffer: String::new(),
             delimiter: ";".to_string(),
+            current_line: 1,
+            statement_start_line: 1,
             in_single_quote: false,
             in_double_quote: false,
             in_backtick_quote: false,
@@ -727,9 +667,19 @@ impl Default for SqlStatementParser {
 impl SqlStatementParser {
     fn push_chunk<F>(&mut self, chunk: &str, on_statement: &mut F) -> Result<(), String>
     where
-        F: FnMut(&str) -> Result<(), String>,
+        F: FnMut(&str, usize) -> Result<(), String>,
     {
         for ch in chunk.chars() {
+            if ch == '\n' {
+                self.current_line += 1;
+            }
+
+            // The buffer keeps the whitespace between statements, so a statement starts
+            // at the first non-whitespace char after the previous one was emitted.
+            if !ch.is_whitespace() && self.buffer.trim_start().is_empty() {
+                self.statement_start_line = self.current_line;
+            }
+
             if self.in_line_comment {
                 if ch == '\n' {
                     self.in_line_comment = false;
@@ -852,7 +802,7 @@ impl SqlStatementParser {
                 self.buffer.truncate(statement_len);
                 let statement = self.buffer.trim();
                 if !statement.is_empty() {
-                    on_statement(statement)?;
+                    on_statement(statement, self.statement_start_line)?;
                 }
                 self.buffer.clear();
             }
@@ -863,7 +813,7 @@ impl SqlStatementParser {
 
     fn flush<F>(&mut self, on_statement: &mut F) -> Result<(), String>
     where
-        F: FnMut(&str) -> Result<(), String>,
+        F: FnMut(&str, usize) -> Result<(), String>,
     {
         if self.pending_dash {
             self.buffer.push('-');
@@ -879,7 +829,7 @@ impl SqlStatementParser {
 
         let statement = self.buffer.trim();
         if !statement.is_empty() {
-            on_statement(statement)?;
+            on_statement(statement, self.statement_start_line)?;
         }
 
         self.buffer.clear();

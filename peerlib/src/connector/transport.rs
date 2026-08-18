@@ -1,6 +1,6 @@
 use connector::{
-    ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorResult,
-    ConnectorTransport, ResponseStatus,
+    ConnectorCommand, ConnectorError, ConnectorRequest, ConnectorResponse, ConnectorResult,
+    ConnectorTransport, DataQuery, ResponseStatus,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -23,6 +23,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 const SERVER_PASSWORD_CHALLENGE_REQUEST_ID: &str = "__p2p_password_challenge__";
 const SERVER_BOOTSTRAP_REJECT_REQUEST_ID: &str = "__distdb_bootstrap__";
+const SESSION_REAUTH_REQUEST_ID: &str = "__distdb_session_reauth__";
 const CONNECTOR_STREAM_TIMEOUT_SECS_DEFAULT: u64 = 0;
 const CONNECTOR_CONNECT_TIMEOUT_SECS_DEFAULT: u64 = 3;
 const CONNECTOR_HANDSHAKE_TIMEOUT_SECS_DEFAULT: u64 = 60;
@@ -367,6 +368,8 @@ pub struct ConnectorP2pTransport {
     queued_responses: Arc<Mutex<HashMap<String, ConnectorResponse>>>,
     live_connection: Arc<Mutex<Option<LiveConnection>>>,
     cached_ca_pem: Arc<Mutex<Option<String>>>,
+    // Survives reconnects so a replacement stream can be re-authenticated.
+    session_auth_token: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -464,6 +467,7 @@ impl ConnectorP2pTransport {
             queued_responses: Arc::new(Mutex::new(HashMap::new())),
             live_connection: Arc::new(Mutex::new(None)),
             cached_ca_pem: Arc::new(Mutex::new(None)),
+            session_auth_token: Arc::new(Mutex::new(None)),
         }
 
     }
@@ -902,39 +906,42 @@ impl ConnectorP2pTransport {
 
     }
 
+    fn stored_session_auth_token(&self) -> Option<String> {
+
+        self.session_auth_token
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+
+    }
+
+    fn store_session_auth_token(&self, token: Option<String>) {
+
+        if let Ok(mut guard) = self.session_auth_token.lock() {
+            *guard = token;
+        }
+
+    }
+
     pub fn set_session_auth_token(&self, token: Option<String>) -> Result<(), ConnectorError> {
+
+        self.store_session_auth_token(token.clone());
 
         let mut connection = self
             .live_connection
             .lock()
             .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
 
-        let Some(live) = connection.as_mut() else {
-            return Err(ConnectorError::Transport(
-                "no active peer connection for auth token update".to_string(),
-            ));
-        };
+        if let Some(live) = connection.as_mut() {
+            live.session.auth_token = token;
+        }
 
-        live.session.auth_token = token;
-        
         Ok(())
 
     }
 
     pub fn session_auth_token(&self) -> Result<Option<String>, ConnectorError> {
-
-        let connection = self
-            .live_connection
-            .lock()
-            .map_err(|_| ConnectorError::Transport("connector connection lock poisoned".to_string()))?;
-
-        let Some(live) = connection.as_ref() else {
-            return Err(ConnectorError::Transport(
-                "no active peer connection for auth token retrieval".to_string(),
-            ));
-        };
-
-        Ok(live.session.auth_token.clone())
+        Ok(self.stored_session_auth_token())
     }
 
     pub fn session_id(&self) -> Result<Option<String>, ConnectorError> {
@@ -1254,11 +1261,50 @@ fn ensure_live_connection(
                     .then(|| std::time::Duration::from_secs(stream_timeout_secs));
                 stream.set_timeouts(stream_timeout, stream_timeout)?;
 
+                let restored_auth_token = transport.stored_session_auth_token();
+
                 *connection = Some(LiveConnection {
                     peer_id: peer.peer_id.clone(),
                     stream,
-                    session,
+                    session: session.clone(),
                 });
+
+                // Server authentication is per-connection, so a replacement stream starts
+                // unauthenticated and must replay the session token before any request.
+                if let Some(token) = restored_auth_token {
+
+                    let live = connection.as_mut().ok_or_else(|| {
+                        ConnectorError::Transport(
+                            "active connection missing after connect".to_string(),
+                        )
+                    })?;
+
+                    match reauthenticate_stream(&mut live.stream, &token) {
+
+                        Ok(()) => {
+                            live.session.auth_token = Some(token);
+                            log::info!(
+                                "connector transport re-authenticated session peer={} addr={}",
+                                peer.peer_id,
+                                socket_addr
+                            );
+                        }
+
+                        Err(err) => {
+                            log::warn!(
+                                "connector transport session re-authentication failed peer={} addr={} err={}",
+                                peer.peer_id,
+                                socket_addr,
+                                err
+                            );
+                            let _ = connection.take();
+                            transport.store_session_auth_token(None);
+                            return Err(err);
+                        }
+
+                    }
+
+                }
 
                 return Ok(());
             },
@@ -1280,6 +1326,33 @@ fn ensure_live_connection(
     Err(last_err.unwrap_or_else(|| {
         ConnectorError::Transport("failed to establish connection to any peer address".to_string())
     }))
+
+}
+
+fn reauthenticate_stream(
+    stream: &mut ConnectorWireStream,
+    token: &str,
+) -> Result<(), ConnectorError> {
+
+    let request = ConnectorRequest::new(
+        SESSION_REAUTH_REQUEST_ID,
+        ConnectorCommand::Query {
+            query: DataQuery {
+                database_id: String::new(),
+                sql: format!("password_token {token}"),
+            },
+        },
+    );
+
+    let response = send_request_frame(stream, &request)?;
+
+    match response.status {
+        ResponseStatus::Applied => Ok(()),
+        _ => Err(ConnectorError::Rejected(match &response.result {
+            ConnectorResult::Error(message) => message.clone(),
+            _ => "session re-authentication rejected".to_string(),
+        })),
+    }
 
 }
 

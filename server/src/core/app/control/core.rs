@@ -2464,6 +2464,15 @@ impl ServerApp {
             .query_session_context(session_id)
             .ok_or_else(|| format!("invalid session '{}'", session_id))?;
 
+        for (database_id, catalog) in sandbox_catalogs.iter() {
+            log::debug!(
+                "staged validation sandbox catalog database={} schema_epoch={} tables={}",
+                database_id,
+                catalog.schema_epoch(),
+                catalog.table_ids().join(","),
+            );
+        }
+
         let validation_write_group_id = TransactionId(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

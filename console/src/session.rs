@@ -23,13 +23,20 @@ use crate::{
 #[path = "session_import.rs"]
 mod session_import;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportTransactionState {
     pub(crate) enabled: bool,
     pub(crate) active: bool,
     pub(crate) dml_statements_in_batch: usize,
     pub(crate) committed_batches: usize,
     pub(crate) batch_started_at: Option<std::time::Instant>,
+    // Source line of the statement being executed, and of the first statement in the
+    // open batch, so failures can be traced back to the dump file.
+    pub(crate) current_statement_line: usize,
+    pub(crate) batch_first_line: usize,
+    // Buffered DML of the uncommitted batch; the server transaction is bound to the
+    // connection, so a reconnect forces a replay from `begin`.
+    pub(crate) pending_statements: Vec<String>,
     pub(crate) statement_calls: usize,
     pub(crate) execute_statement_ms: u128,
     pub(crate) begin_statement_ms: u128,

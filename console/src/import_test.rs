@@ -8,6 +8,9 @@ fn new_transaction_state() -> crate::session::ImportTransactionState {
         dml_statements_in_batch: 0,
         committed_batches: 0,
         batch_started_at: None,
+        current_statement_line: 0,
+        batch_first_line: 0,
+        pending_statements: Vec::new(),
         statement_calls: 0,
         execute_statement_ms: 0,
         begin_statement_ms: 0,
@@ -122,6 +125,7 @@ fn import_reader_skips_drop_table_not_found_errors() {
     ";
 
     let mut executed = Vec::<String>::new();
+    let mut dispatched = Vec::<String>::new();
     let mut transaction_state = new_transaction_state();
 
     execute_import_from_reader(
@@ -129,6 +133,8 @@ fn import_reader_skips_drop_table_not_found_errors() {
         "main",
         &mut transaction_state,
         |_db, statement, _transaction_state| {
+            dispatched.push(statement.trim().to_string());
+
             let normalized = statement.trim().to_ascii_lowercase();
             if normalized.starts_with("drop table") {
                 return Err("drop table failed: 'ip_lookup' not found".to_string());
@@ -141,6 +147,8 @@ fn import_reader_skips_drop_table_not_found_errors() {
     .expect("import reader should continue past non-fatal drop errors");
 
     assert_eq!(transaction_state.committed_batches, 0);
+    assert_eq!(dispatched.len(), 3);
+    assert_eq!(dispatched[0], "drop table ip_lookup");
     assert_eq!(executed.len(), 2);
 }
 
@@ -235,6 +243,80 @@ fn import_reader_skips_mysql_dump_directives() {
 
     assert_eq!(transaction_state.committed_batches, 0);
     assert_eq!(executed, vec!["insert ignore into ip_lookup values (1)"]);
+}
+
+#[test]
+fn normalize_import_statement_keeps_every_create_table_column() {
+    let statement = "CREATE TABLE `places` (\n\
+      `uid` bigint unsigned NOT NULL AUTO_INCREMENT,\n\
+      `id` bigint NOT NULL,\n\
+      `uni_id` bigint NOT NULL,\n\
+      `form` varchar(3) NOT NULL DEFAULT '',\n\
+      `class` varchar(10) DEFAULT NULL,\n\
+      `type` varchar(1) DEFAULT NULL,\n\
+      `latitude` decimal(10,7) NOT NULL,\n\
+      `longitude` decimal(10,7) NOT NULL,\n\
+      `elevation` int NOT NULL,\n\
+      `display_name` varchar(120) NOT NULL,\n\
+      `country_code` varchar(10) NOT NULL,\n\
+      `id_region` int unsigned NOT NULL,\n\
+      `date_updated` bigint NOT NULL,\n\
+      PRIMARY KEY (`uid`),\n\
+      UNIQUE KEY `id` (`uni_id`,`form`) USING BTREE,\n\
+      KEY `class_2` (`class`,`longitude`,`latitude`)\n\
+    ) ENGINE=InnoDB AUTO_INCREMENT=4989267 DEFAULT CHARSET=utf8mb3";
+
+    let normalized = normalize_import_statement(statement);
+
+    for column in [
+        "`uid`",
+        "`id`",
+        "`uni_id`",
+        "`form`",
+        "`class`",
+        "`type`",
+        "`latitude`",
+        "`longitude`",
+        "`elevation`",
+        "`display_name`",
+        "`country_code`",
+        "`id_region`",
+        "`date_updated`",
+    ] {
+        assert!(
+            normalized.contains(column),
+            "normalized create table lost column {column}: {normalized}"
+        );
+    }
+
+    assert!(!normalized.to_ascii_lowercase().contains("unsigned"));
+    assert!(!normalized.to_ascii_uppercase().contains("USING BTREE"));
+}
+
+#[test]
+fn import_reader_reports_statement_line_in_failures() {
+    let input = "-- header comment\ninsert into ip_lookup values (1);\n\ninsert into ip_lookup values (2);\n";
+
+    let mut lines = Vec::<usize>::new();
+    let mut transaction_state = new_transaction_state();
+
+    let result = execute_import_from_reader(
+        BufReader::new(input.as_bytes()),
+        "main",
+        &mut transaction_state,
+        |_db, statement, transaction_state| {
+            lines.push(transaction_state.current_statement_line);
+
+            if statement.contains("(2)") {
+                return Err("boom".to_string());
+            }
+
+            Ok(())
+        },
+    );
+
+    assert_eq!(lines, vec![2, 4]);
+    assert_eq!(result, Err("boom (at line 4)".to_string()));
 }
 
 #[test]

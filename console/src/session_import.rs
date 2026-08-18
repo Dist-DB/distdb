@@ -29,6 +29,9 @@ pub(super) fn execute_import_file(
         dml_statements_in_batch: 0,
         committed_batches: 0,
         batch_started_at: None,
+        current_statement_line: 0,
+        batch_first_line: 0,
+        pending_statements: Vec::new(),
         statement_calls: 0,
         execute_statement_ms: 0,
         begin_statement_ms: 0,
@@ -103,64 +106,24 @@ pub(super) fn execute_import_statement(
 
     for attempt in 0..=IMPORT_TRANSPORT_RETRY_LIMIT {
 
-        let request_id = session.next_request_id();
+        match execute_import_statement_once(
+            session,
+            database_id,
+            statement,
+            statement_kind,
+            transaction_state,
+        ) {
 
-        let request = ConnectorRequest::new(
-            request_id,
-            ConnectorCommand::Query {
-                query: DataQuery {
-                    database_id: database_id.to_string(),
-                    sql: statement.to_string(),
-                },
-            },
-        );
+            Ok(outcome) => return outcome,
 
-        let execute_started_at = std::time::Instant::now();
-
-        match session.runtime.transport().request(&request) {
-            Ok(response) => {
-                let elapsed_ms = execute_started_at.elapsed().as_millis();
-
-                import::record_import_statement_timing(
-                    transaction_state,
-                    statement_kind,
-                    statement.len(),
-                    elapsed_ms,
-                );
-
-                return match response.result {
-                    ConnectorResult::Error(message) => {
-                        log::warn!(
-                            "import execution failed: db={} kind={} statement_bytes={} preview='{}' error={}",
-                            database_id,
-                            statement_kind.as_str(),
-                            statement.len(),
-                            import::statement_preview(statement),
-                            message,
-                        );
-                        Err(message)
-                    }
-                    _ => Ok(()),
-                };
-            }
-
-            Err(err) => {
-                let elapsed_ms = execute_started_at.elapsed().as_millis();
-
-                import::record_import_statement_timing(
-                    transaction_state,
-                    statement_kind,
-                    statement.len(),
-                    elapsed_ms,
-                );
-
-                let message = err.to_string();
+            Err(message) => {
                 let is_retryable = import::import_transport_error_is_retryable(&message);
 
                 if !is_retryable || attempt >= IMPORT_TRANSPORT_RETRY_LIMIT {
                     log::warn!(
-                        "import transport failed: db={} kind={} statement_bytes={} preview='{}' error={}",
+                        "import transport failed: db={} line={} kind={} statement_bytes={} preview='{}' error={}",
                         database_id,
+                        transaction_state.current_statement_line,
                         statement_kind.as_str(),
                         statement.len(),
                         import::statement_preview(statement),
@@ -169,7 +132,8 @@ pub(super) fn execute_import_statement(
                     return Err(message);
                 }
 
-                recover_import_transport(session)?
+                recover_import_transport(session)?;
+                replay_pending_batch(session, database_id, transaction_state)?;
             }
         }
     }
@@ -178,10 +142,120 @@ pub(super) fn execute_import_statement(
 
 }
 
+/// `Ok(Ok(()))`/`Ok(Err(..))` carry the server outcome; the outer `Err` is a transport failure.
+fn execute_import_statement_once(
+    session: &mut ConsoleSession,
+    database_id: &str,
+    statement: &str,
+    statement_kind: import::ImportStatementKind,
+    transaction_state: &mut ImportTransactionState,
+) -> Result<Result<(), String>, String> {
+
+    let request_id = session.next_request_id();
+
+    let request = ConnectorRequest::new(
+        request_id,
+        ConnectorCommand::Query {
+            query: DataQuery {
+                database_id: database_id.to_string(),
+                sql: statement.to_string(),
+            },
+        },
+    );
+
+    let execute_started_at = std::time::Instant::now();
+    let result = session.runtime.transport().request(&request);
+    let elapsed_ms = execute_started_at.elapsed().as_millis();
+
+    import::record_import_statement_timing(
+        transaction_state,
+        statement_kind,
+        statement.len(),
+        elapsed_ms,
+    );
+
+    match result {
+        Ok(response) => Ok(match response.result {
+            ConnectorResult::Error(message) => {
+                log::warn!(
+                    "import execution failed: db={} line={} kind={} statement_bytes={} preview='{}' error={}",
+                    database_id,
+                    transaction_state.current_statement_line,
+                    statement_kind.as_str(),
+                    statement.len(),
+                    import::statement_preview(statement),
+                    message,
+                );
+                Err(message)
+            }
+            _ => Ok(()),
+        }),
+
+        Err(err) => Err(err.to_string()),
+    }
+
+}
+
+/// Re-opens the batch on a replacement connection: the server discards the transaction
+/// with the old stream, so `begin` plus every buffered DML must be re-issued.
+fn replay_pending_batch(
+    session: &mut ConsoleSession,
+    database_id: &str,
+    transaction_state: &mut ImportTransactionState,
+) -> Result<(), String> {
+
+    if !transaction_state.active {
+        return Ok(());
+    }
+
+    let pending = transaction_state.pending_statements.clone();
+
+    log::info!(
+        "import replaying batch after transport recovery: db={} statements={}",
+        database_id,
+        pending.len(),
+    );
+
+    execute_import_statement_once(
+        session,
+        database_id,
+        IMPORT_BEGIN_STATEMENT,
+        import::ImportStatementKind::Begin,
+        transaction_state,
+    )
+    .map_err(|err| format!("batch replay failed to begin transaction: {err}"))?
+    .map_err(|err| format!("batch replay failed to begin transaction: {err}"))?;
+
+    for statement in &pending {
+
+        let outcome = execute_import_statement_once(
+            session,
+            database_id,
+            statement,
+            import::classify_import_statement(statement),
+            transaction_state,
+        )
+        .map_err(|err| format!("batch replay transport failure: {err}"))?;
+
+        // A replay after a timed-out commit can re-apply rows the server already
+        // persisted, so treat duplicates as already-applied.
+        if let Err(err) = outcome
+            && !import::import_duplicate_key_error_is_skippable(&err) {
+                return Err(format!("batch replay failed: {err}"));
+            }
+
+    }
+
+    Ok(())
+
+}
+
 fn reset_active_batch_state(transaction_state: &mut ImportTransactionState) {
     transaction_state.active = false;
     transaction_state.dml_statements_in_batch = 0;
     transaction_state.batch_started_at = None;
+    transaction_state.batch_first_line = 0;
+    transaction_state.pending_statements.clear();
 }
 
 fn mark_batch_committed(transaction_state: &mut ImportTransactionState) {
@@ -215,6 +289,7 @@ pub(super) fn execute_import_with_batching(
                 Ok(()) => {
                     transaction_state.active = true;
                     transaction_state.batch_started_at = Some(std::time::Instant::now());
+                    transaction_state.batch_first_line = transaction_state.current_statement_line;
                 }
 
                 Err(err) => {
@@ -237,8 +312,10 @@ pub(super) fn execute_import_with_batching(
                 }
 
                 log::warn!(
-                    "import batch failed: db={} statement_bytes={} preview='{}' error={}",
+                    "import batch failed: db={} lines={}-{} statement_bytes={} preview='{}' error={}",
                     database_id,
+                    transaction_state.batch_first_line,
+                    transaction_state.current_statement_line,
                     statement.len(),
                     import::statement_preview(statement),
                     err,
@@ -251,6 +328,7 @@ pub(super) fn execute_import_with_batching(
 
         if transaction_state.active {
 
+            transaction_state.pending_statements.push(statement.to_string());
             transaction_state.dml_statements_in_batch += 1;
 
             let should_commit_by_size =
@@ -271,8 +349,10 @@ pub(super) fn execute_import_with_batching(
 
                     Err(err) => {
                         log::warn!(
-                            "import batch commit failed: db={} queued_dml={} error={}",
+                            "import batch commit failed: db={} lines={}-{} queued_dml={} error={}",
                             database_id,
+                            transaction_state.batch_first_line,
+                            transaction_state.current_statement_line,
                             transaction_state.dml_statements_in_batch,
                             err,
                         );
@@ -303,8 +383,9 @@ pub(super) fn execute_import_with_batching(
         
         Err(err) => {
             log::warn!(
-                "import statement failed outside batching: db={} statement_bytes={} preview='{}' error={}",
+                "import statement failed outside batching: db={} line={} statement_bytes={} preview='{}' error={}",
                 database_id,
+                transaction_state.current_statement_line,
                 statement.len(),
                 import::statement_preview(statement),
                 err,
@@ -343,8 +424,10 @@ pub(super) fn finalize_import_batching(
                 Ok(())
             } else {
                 log::warn!(
-                    "import finalize failed: db={} queued_dml={} error={}",
+                    "import finalize failed: db={} lines={}-{} queued_dml={} error={}",
                     database_id,
+                    transaction_state.batch_first_line,
+                    transaction_state.current_statement_line,
                     transaction_state.dml_statements_in_batch,
                     err,
                 );

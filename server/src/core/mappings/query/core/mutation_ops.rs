@@ -242,6 +242,7 @@ fn record_insert_select_source_materialization(
 
 fn build_insert_payload_row(
     schema: &TableSchema,
+    table_id: &str,
     row: &[Option<Vec<u8>>],
     columns_len: usize,
     insert_column_fields: &[(&str, &serverlib::FieldDef)],
@@ -250,9 +251,15 @@ fn build_insert_payload_row(
 
     if row.len() != columns_len {
         return Err(format!(
-            "insert failed: row has {} values but {} columns were specified",
+            "insert failed: row has {} values but {} columns were specified for table '{}' [{}]",
             row.len(),
             columns_len,
+            table_id,
+            insert_column_fields
+                .iter()
+                .map(|(column, _)| *column)
+                .collect::<Vec<_>>()
+                .join(","),
         ));
     }
 
@@ -838,6 +845,7 @@ fn execute_insert_locked(
 
                     let payload_row = match build_insert_payload_row(
                         &schema,
+                        &plan.table_id,
                         row,
                         columns.len(),
                         &insert_column_fields,
@@ -999,6 +1007,7 @@ fn execute_insert_locked(
 
                     let payload_row = match build_insert_payload_row(
                         &schema,
+                        &plan.table_id,
                         row,
                         columns.len(),
                         &insert_column_fields,
@@ -1185,6 +1194,7 @@ fn execute_insert_locked(
 
                     let payload_row = match build_insert_payload_row(
                         &schema,
+                        &plan.table_id,
                         row,
                         columns.len(),
                         &insert_column_fields,
@@ -1404,6 +1414,7 @@ fn execute_insert_locked(
 
                 let payload_row = match build_insert_payload_row(
                     &schema,
+                    &plan.table_id,
                     row,
                     columns.len(),
                     &insert_column_fields,
