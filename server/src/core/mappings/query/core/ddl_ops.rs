@@ -1576,18 +1576,6 @@ pub(crate) fn execute_create_view_impl(
                 );
             };
 
-            if let Err(err) = apply_entity_metadata_with_wal(
-                catalog,
-                wal,
-                &wal_id,
-                &entity_wal_id,
-                view_id,
-                created_at,
-                "create view",
-            ) {
-                return ConnectorResponse::rejected(request_id.to_string(), err);
-            }
-
             if let Err(err) = catalog.set_sql_definition(
                 view_id,
                 SqlObjectKind::View,
@@ -1600,6 +1588,8 @@ pub(crate) fn execute_create_view_impl(
                 );
             }
 
+            // The definition record must precede the metadata record: replay applies
+            // metadata against an entity that only the definition record creates.
             if let Err(err) = append_sql_definition_upsert_with_wal(
                 catalog,
                 wal,
@@ -1609,6 +1599,18 @@ pub(crate) fn execute_create_view_impl(
                 SqlObjectKind::View,
                 &statement.sql,
                 dependencies,
+                created_at,
+                "create view",
+            ) {
+                return ConnectorResponse::rejected(request_id.to_string(), err);
+            }
+
+            if let Err(err) = apply_entity_metadata_with_wal(
+                catalog,
+                wal,
+                &wal_id,
+                &entity_wal_id,
+                view_id,
                 created_at,
                 "create view",
             ) {
@@ -1685,18 +1687,6 @@ pub(super) fn execute_create_olap_view_impl(
                 );
             };
 
-            if let Err(err) = apply_entity_metadata_with_wal(
-                catalog,
-                wal,
-                &wal_id,
-                &entity_wal_id,
-                &view_id,
-                created_at,
-                "create olap view",
-            ) {
-                return ConnectorResponse::rejected(request_id.to_string(), err);
-            }
-
             if let Err(err) = catalog.set_sql_definition(
                 &view_id,
                 SqlObjectKind::OlapView,
@@ -1718,6 +1708,18 @@ pub(super) fn execute_create_olap_view_impl(
                 SqlObjectKind::OlapView,
                 &statement.sql,
                 dependencies,
+                created_at,
+                "create olap view",
+            ) {
+                return ConnectorResponse::rejected(request_id.to_string(), err);
+            }
+
+            if let Err(err) = apply_entity_metadata_with_wal(
+                catalog,
+                wal,
+                &wal_id,
+                &entity_wal_id,
+                &view_id,
                 created_at,
                 "create olap view",
             ) {
@@ -1801,18 +1803,6 @@ pub(super) fn execute_create_trigger_impl(
         );
     }
 
-    if let Err(err) = apply_entity_metadata_with_wal(
-        catalog,
-        wal,
-        &wal_id,
-        &entity_wal_id,
-        trigger_id,
-        created_at,
-        "create trigger",
-    ) {
-        return ConnectorResponse::rejected(request_id.to_string(), err);
-    }
-
     if let Err(err) = append_sql_definition_upsert_with_wal(
         catalog,
         wal,
@@ -1822,6 +1812,18 @@ pub(super) fn execute_create_trigger_impl(
         SqlObjectKind::Trigger,
         &statement.sql,
         Vec::new(),
+        created_at,
+        "create trigger",
+    ) {
+        return ConnectorResponse::rejected(request_id.to_string(), err);
+    }
+
+    if let Err(err) = apply_entity_metadata_with_wal(
+        catalog,
+        wal,
+        &wal_id,
+        &entity_wal_id,
+        trigger_id,
         created_at,
         "create trigger",
     ) {
@@ -1943,18 +1945,6 @@ pub(super) fn execute_create_stored_procedure_impl(
         );
     }
 
-    if let Err(err) = apply_entity_metadata_with_wal(
-        catalog,
-        wal,
-        &wal_id,
-        &entity_wal_id,
-        procedure_id,
-        created_at,
-        if is_create_function { "create function" } else { "create procedure" },
-    ) {
-        return ConnectorResponse::rejected(request_id.to_string(), err);
-    }
-
     if let Err(err) = append_sql_definition_upsert_with_wal(
         catalog,
         wal,
@@ -1964,6 +1954,18 @@ pub(super) fn execute_create_stored_procedure_impl(
         SqlObjectKind::StoredProcedure,
         &statement.sql,
         Vec::new(),
+        created_at,
+        if is_create_function { "create function" } else { "create procedure" },
+    ) {
+        return ConnectorResponse::rejected(request_id.to_string(), err);
+    }
+
+    if let Err(err) = apply_entity_metadata_with_wal(
+        catalog,
+        wal,
+        &wal_id,
+        &entity_wal_id,
+        procedure_id,
         created_at,
         if is_create_function { "create function" } else { "create procedure" },
     ) {
