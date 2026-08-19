@@ -6166,7 +6166,7 @@ fn cross_database_function_with_select_into_and_order_by_expression_returns_near
         ("locations", "insert into places (id, display_name, longitude, latitude) values (1, 'Koeln', 6.9603, 50.9375)"),
         ("locations", "insert into places (id, display_name, longitude, latitude) values (2, 'Deutz', 6.9750, 50.9400)"),
         ("locations", "insert into places (id, display_name, longitude, latitude) values (3, 'Berlin', 13.4050, 52.5200)"),
-        ("locations", "create function fnnearesttown(lon decimal(10,7), lat decimal(10,7)) returns varchar(120) deterministic begin set @offset = 0.02; set @lon = lon; set @lat = lat; set @out = ''; select plc.display_name into @out from locations.places plc where plc.longitude > (@lon - @offset) and plc.longitude < (@lon + @offset) and plc.latitude > (@lat - @offset) and plc.latitude < (@lat + @offset) order by distance(@lon, @lat, plc.longitude, plc.latitude) limit 0,1; return @out; end"),
+        ("locations", "create function `fnnearesttown`(lon DECIMAL(10,7), lat DECIMAL(10,7)) RETURNS varchar(120) CHARSET utf8mb3 DETERMINISTIC begin set @offset = 0.02; set @lon = lon; set @lat = lat; set @out = \"\"; select plc.display_name into @out from locations.places plc where plc.longitude > (@lon - @offset) and plc.longitude < (@lon + @offset) and plc.latitude > (@lat - @offset) and plc.latitude < (@lat + @offset) order by distance(@lon, @lat, plc.longitude, plc.latitude) limit 0,1; return @out; end"),
     ];
 
     for (index, (database_id, sql)) in setup.iter().enumerate() {

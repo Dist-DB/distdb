@@ -35,6 +35,34 @@ fn parse_custom_delimiter_executes_sql_with_suffix() {
 }
 
 #[test]
+fn comment_lines_do_not_block_following_directives() {
+
+	assert!(matches!(
+		parse_console_command_with_delimiter("-- a comment\n", TEMP_CONNECT_USER, ";"),
+		Ok(None)
+	));
+
+	assert!(matches!(
+		parse_console_command_with_delimiter(
+			"-- the body contains ';'\ndelimiter //",
+			TEMP_CONNECT_USER,
+			";",
+		),
+		Ok(Some(ConsoleCommand::SetDelimiter(delimiter))) if delimiter == "//"
+	));
+
+	assert!(matches!(
+		parse_console_command_with_delimiter(
+			"-- leading note\nselect 1;",
+			TEMP_CONNECT_USER,
+			";",
+		),
+		Ok(Some(ConsoleCommand::Sql(sql))) if sql == "select 1"
+	));
+
+}
+
+#[test]
 fn parse_delimiter_requires_token() {
 	assert!(parse_console_command_with_delimiter("delimiter", TEMP_CONNECT_USER, ";").is_err());
 	assert!(parse_console_command_with_delimiter("delimiter ;", TEMP_CONNECT_USER, ";").is_ok());

@@ -122,6 +122,7 @@ pub fn parse_console_command_with_delimiter(
         return Err("active delimiter cannot be empty".to_string());
     }
 
+    let input = strip_whole_line_comments(input);
     let trimmed = input.trim();
 
     if trimmed.is_empty() {
@@ -381,6 +382,21 @@ fn is_global_sql_without_database(sql: &str) -> bool {
         ("create", "database") |
         ("drop", "database")
     )
+
+}
+
+/// Drops `--` comment lines so a pasted script cannot leave the input buffer unterminated.
+fn strip_whole_line_comments(input: &str) -> String {
+
+    if !input.contains("--") {
+        return input.to_string();
+    }
+
+    input
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n")
 
 }
 
