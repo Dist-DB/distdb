@@ -7792,19 +7792,53 @@ fn try_runtime_index_range_rows(
     row_limit: Option<usize>,
 ) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
 
-    let (anchor_position, anchor_index_id, anchor_state) = filters
+    let (anchor_position, anchor_index_id, anchor_scope_id, anchor_state) = filters
         .iter()
         .enumerate()
         .find_map(|(position, filter)| {
 
-            let index_id = single_field_index_id(table, &filter.field_name)?;
-            let state = runtime_indexes.index_for_table(table_stream_id, &index_id)?;
+            let Some(index_id) = single_field_index_id(table, &filter.field_name) else {
+                log::debug!(
+                    "relation range index candidate table={} field={} result=index_metadata_missing",
+                    table.table_id,
+                    filter.field_name,
+                );
+                return None;
+            };
+            let Some((scope_id, state)) = runtime_indexes
+                .index_for_table(table_stream_id, &index_id)
+                .map(|state| (table_stream_id, state))
+                .or_else(|| {
+                    (table_stream_id != table.table_id.as_str())
+                        .then(|| runtime_indexes.index_for_table(&table.table_id, &index_id))
+                        .flatten()
+                        .map(|state| (table.table_id.as_str(), state))
+                }) else {
+                log::debug!(
+                    "relation range index candidate table={} field={} index_id={} requested_scope={} result=state_missing",
+                    table.table_id,
+                    filter.field_name,
+                    index_id,
+                    table_stream_id,
+                );
+                return None;
+            };
+
+            log::debug!(
+                "relation range index candidate table={} field={} index_id={} requested_scope={} resolved_scope={} supports_ordered={}",
+                table.table_id,
+                filter.field_name,
+                index_id,
+                table_stream_id,
+                scope_id,
+                state.supports_ordered_range_scan(),
+            );
 
             // Text keys sort lexicographically, which is not the range order the
             // predicate asked for.
             state
                 .supports_ordered_range_scan()
-                .then_some((position, index_id, state))
+                .then_some((position, index_id, scope_id.to_owned(), state))
 
         })?;
 
@@ -7825,9 +7859,10 @@ fn try_runtime_index_range_rows(
     let row_refs = anchor_state.row_refs_for_key_range(lower.as_ref(), upper.as_ref(), scan_limit);
 
     log::debug!(
-        "relation range scan table={} index_id={} anchor_field={} candidate_refs={} filters={}",
+        "relation range scan table={} index_id={} scope={} anchor_field={} candidate_refs={} filters={}",
         table.table_id,
         anchor_index_id,
+        anchor_scope_id,
         anchor_filter.field_name,
         row_refs.len(),
         filters.len(),
@@ -7839,11 +7874,11 @@ fn try_runtime_index_range_rows(
 
     let mut rows = resolve_live_rows_for_row_refs(
         wal,
-        table_stream_id,
+        anchor_scope_id.as_str(),
         &table.table_id,
         schema,
         &row_refs,
-        should_attempt_row_ref_direct_lookup(wal, table_stream_id),
+        should_attempt_row_ref_direct_lookup(wal, anchor_scope_id.as_str()),
     );
 
     if rows.is_empty() {
