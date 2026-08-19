@@ -5816,7 +5816,7 @@ fn collect_relation_access_candidates(
 
     if allow_index_short_circuit
         && let Some((index, lookup_key)) = choose_index_lookup(table, index_filter_map)
-        && runtime_index_lookup_allowed(index)
+        && runtime_index_lookup_allowed(index, runtime_hint.is_some() && index_filter_map.len() == 1)
     {
         consider_relation_access_candidate(
             &mut candidates,
@@ -8119,8 +8119,10 @@ fn index_lookup_priority(index: &DatabaseIndex) -> u8 {
 
 }
 
-fn runtime_index_lookup_allowed(index: &DatabaseIndex) -> bool {
-    index.is_unique_key() || index.is_relationship_driven()
+fn runtime_index_lookup_allowed(index: &DatabaseIndex, has_runtime_hint: bool) -> bool {
+    index.is_unique_key()
+        || index.is_relationship_driven()
+        || (has_runtime_hint && !index.field_names.is_empty())
 }
 
 fn choose_equality_probe_filter<T>(

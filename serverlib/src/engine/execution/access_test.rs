@@ -1812,6 +1812,39 @@ fn plan_relation_access_with_runtime_hint_prefers_more_selective_multi_filter_fi
 }
 
 #[test]
+fn planner_uses_runtime_lookup_for_non_unique_indexed_field() {
+    let mut catalog = DatabaseCatalog::create_empty_from_name("main")
+        .expect("catalog should be created");
+    let wal = ConcurrentWalManager::in_memory();
+    seed_users_table(&mut catalog, &wal);
+
+    let table = catalog.table("users").expect("users table should exist");
+    let email_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["email".to_string()])
+        .expect("email index should exist");
+
+    assert!(!email_index.is_unique_key());
+
+    let runtime_indexes = RuntimeIndexStore::new();
+    let plan = plan_relation_access_with_runtime_hint(
+        table,
+        true,
+        HashMap::from([("email".to_string(), b"sam@example.com".to_vec())]),
+        None,
+        Vec::new(),
+        None,
+        Some((&runtime_indexes, "users")),
+    );
+
+    assert!(matches!(
+        plan.strategy,
+        RelationAccessStrategy::RuntimeIndexLookup { .. }
+    ));
+}
+
+#[test]
 fn runtime_index_equality_count_uses_posting_cardinality() {
     let schema = table_schema(vec![
         ("uid", 1, FieldType::UInt(64), FieldIndex::PrimaryKey, false),
