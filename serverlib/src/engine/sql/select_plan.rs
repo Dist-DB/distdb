@@ -3621,6 +3621,12 @@ fn parse_condition_literal_value(expression: &Expr) -> Result<Vec<u8>, SqlParseE
     }
 
     if !matches!(expression, Expr::Value(_)) {
+
+        // Constant arithmetic reaches here from routine bodies once variables are substituted.
+        if let Some(folded) = fold_constant_numeric_expression(expression) {
+            return Ok(render_folded_number(folded).into_bytes());
+        }
+
         return Err(SqlParseError::UnsupportedStatement(
             "WHERE currently supports only literal values".to_string(),
         ));
@@ -3633,6 +3639,53 @@ fn parse_condition_literal_value(expression: &Expr) -> Result<Vec<u8>, SqlParseE
     };
 
     Ok(value)
+
+}
+
+fn fold_constant_numeric_expression(expression: &Expr) -> Option<f64> {
+
+    match unwrap_nested_expression(expression) {
+
+        Expr::Value(Value::Number(number, _)) => number.parse::<f64>().ok(),
+
+        Expr::UnaryOp { op, expr } => {
+            let value = fold_constant_numeric_expression(expr)?;
+            match op {
+                UnaryOperator::Minus => Some(-value),
+                UnaryOperator::Plus => Some(value),
+                _ => None,
+            }
+        },
+
+        Expr::BinaryOp { left, op, right } => {
+
+            let left = fold_constant_numeric_expression(left)?;
+            let right = fold_constant_numeric_expression(right)?;
+
+            match op {
+                BinaryOperator::Plus => Some(left + right),
+                BinaryOperator::Minus => Some(left - right),
+                BinaryOperator::Multiply => Some(left * right),
+                BinaryOperator::Divide if right != 0.0 => Some(left / right),
+                BinaryOperator::Modulo if right != 0.0 => Some(left % right),
+                _ => None,
+            }
+
+        },
+
+        _ => None,
+
+    }
+
+}
+
+fn render_folded_number(value: f64) -> String {
+
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        return format!("{}", value as i64);
+    }
+
+    format!("{}", value)
 
 }
 

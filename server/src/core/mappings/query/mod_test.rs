@@ -6145,6 +6145,105 @@ fn local_function_name_is_checked_before_inbuilt_resolution() {
 }
 
 #[test]
+fn cross_database_function_with_select_into_and_order_by_expression_returns_nearest_row() {
+
+    let mut catalogs = HashMap::new();
+    catalogs.insert(
+        "main".to_string(),
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created"),
+    );
+    catalogs.insert(
+        "locations".to_string(),
+        DatabaseCatalog::create_empty_from_name("locations").expect("catalog should be created"),
+    );
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let node_data_dir = test_node_data_dir();
+
+    let setup = [
+        ("locations", "create table places (id bigint primary key, display_name varchar(120), longitude decimal(10,7), latitude decimal(10,7))"),
+        ("locations", "insert into places (id, display_name, longitude, latitude) values (1, 'Koeln', 6.9603, 50.9375)"),
+        ("locations", "insert into places (id, display_name, longitude, latitude) values (2, 'Deutz', 6.9750, 50.9400)"),
+        ("locations", "insert into places (id, display_name, longitude, latitude) values (3, 'Berlin', 13.4050, 52.5200)"),
+        ("locations", "create function fnnearesttown(lon decimal(10,7), lat decimal(10,7)) returns varchar(120) deterministic begin set @offset = 0.02; set @lon = lon; set @lat = lat; set @out = ''; select plc.display_name into @out from locations.places plc where plc.longitude > (@lon - @offset) and plc.longitude < (@lon + @offset) and plc.latitude > (@lat - @offset) and plc.latitude < (@lat + @offset) order by distance(@lon, @lat, plc.longitude, plc.latitude) limit 0,1; return @out; end"),
+    ];
+
+    for (index, (database_id, sql)) in setup.iter().enumerate() {
+
+        let response = handle_query_command(
+            &format!("req-setup-{}", index),
+            &DataQuery {
+                database_id: (*database_id).to_string(),
+                sql: (*sql).to_string(),
+            },
+            &mut catalogs,
+            &wal,
+            &node_data_dir,
+            &mut runtime_indexes,
+            "session-test",
+            1,
+            Some("root@localhost".to_string()),
+        );
+
+        assert!(
+            matches!(response.status, connector::ResponseStatus::Applied),
+            "setup statement '{}' failed: {:?}",
+            sql,
+            response,
+        );
+
+    }
+
+    let local_response = handle_query_command(
+        "req-select-local-fn",
+        &DataQuery {
+            database_id: "locations".to_string(),
+            sql: "select fnnearesttown(6.9603, 50.9375) as city".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(local_response.status, connector::ResponseStatus::Applied),
+        "unqualified call failed: {:?}",
+        local_response,
+    );
+
+    assert_eq!(query_result_rows(local_response), vec![vec!["Koeln".to_string()]]);
+
+    let cross_response = handle_query_command(
+        "req-select-cross-fn",
+        &DataQuery {
+            database_id: "main".to_string(),
+            sql: "select locations.fnnearesttown(6.9603, 50.9375) as city".to_string(),
+        },
+        &mut catalogs,
+        &wal,
+        &node_data_dir,
+        &mut runtime_indexes,
+        "session-test",
+        1,
+        Some("root@localhost".to_string()),
+    );
+
+    assert!(
+        matches!(cross_response.status, connector::ResponseStatus::Applied),
+        "cross-database call failed: {:?}",
+        cross_response,
+    );
+
+    assert_eq!(query_result_rows(cross_response), vec![vec!["Koeln".to_string()]]);
+
+}
+
+#[test]
 fn create_select_and_drop_function_work_end_to_end() {
     let mut catalogs = HashMap::new();
     catalogs.insert(
