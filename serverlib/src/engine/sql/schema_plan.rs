@@ -513,6 +513,11 @@ fn map_sql_data_type(data_type: &DataType) -> FieldType {
         return FieldType::Float(64);
     }
 
+    // DECIMAL/NUMERIC are fixed-point in MySQL; float keeps them numerically ordered.
+    if lowered.contains("decimal") || lowered.contains("numeric") {
+        return FieldType::Float(64);
+    }
+
     if lowered.contains("float") || lowered.contains("real") {
         return FieldType::Float(32);
     }

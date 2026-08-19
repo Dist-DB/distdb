@@ -717,6 +717,7 @@ impl SqlStatementParser {
                 }
 
                 self.buffer.push('-');
+                self.try_emit_statement(on_statement)?;
             }
 
             if self.pending_slash {
@@ -732,7 +733,9 @@ impl SqlStatementParser {
                     continue;
                 }
 
+                // A held '/' can complete a custom delimiter such as '//'.
                 self.buffer.push('/');
+                self.try_emit_statement(on_statement)?;
             }
 
             if !self.in_single_quote && !self.in_double_quote && !self.in_backtick_quote {
@@ -783,30 +786,44 @@ impl SqlStatementParser {
 
             self.buffer.push(ch);
 
-            if !self.in_single_quote
-                && !self.in_double_quote
-                && !self.in_backtick_quote
-                && !delimiter_directive_uses_line_termination(self.buffer.trim_start())
-                && self.buffer.ends_with(&self.delimiter)
-            {
-                if let Some(next_delimiter) = parse_import_delimiter_directive(
-                    self.buffer.trim(),
-                    Some(self.delimiter.as_str()),
-                )? {
-                    self.delimiter = next_delimiter;
-                    self.buffer.clear();
-                    continue;
-                }
-
-                let statement_len = self.buffer.len() - self.delimiter.len();
-                self.buffer.truncate(statement_len);
-                let statement = self.buffer.trim();
-                if !statement.is_empty() {
-                    on_statement(statement, self.statement_start_line)?;
-                }
-                self.buffer.clear();
-            }
+            self.try_emit_statement(on_statement)?;
         }
+
+        Ok(())
+    }
+
+    fn try_emit_statement<F>(&mut self, on_statement: &mut F) -> Result<(), String>
+    where
+        F: FnMut(&str, usize) -> Result<(), String>,
+    {
+
+        if self.in_single_quote
+            || self.in_double_quote
+            || self.in_backtick_quote
+            || delimiter_directive_uses_line_termination(self.buffer.trim_start())
+            || !self.buffer.ends_with(&self.delimiter)
+        {
+            return Ok(());
+        }
+
+        if let Some(next_delimiter) = parse_import_delimiter_directive(
+            self.buffer.trim(),
+            Some(self.delimiter.as_str()),
+        )? {
+            self.delimiter = next_delimiter;
+            self.buffer.clear();
+            return Ok(());
+        }
+
+        let statement_len = self.buffer.len() - self.delimiter.len();
+        self.buffer.truncate(statement_len);
+        let statement = self.buffer.trim();
+
+        if !statement.is_empty() {
+            on_statement(statement, self.statement_start_line)?;
+        }
+
+        self.buffer.clear();
 
         Ok(())
     }

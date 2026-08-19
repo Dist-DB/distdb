@@ -68,6 +68,59 @@ fn import_reader_splits_and_executes_statements() {
 }
 
 #[test]
+fn import_reader_keeps_delimited_routine_body_intact() {
+
+    let input = "\
+DROP FUNCTION IF EXISTS fnnearesttown;\n\
+\n\
+delimiter //\n\
+\n\
+CREATE FUNCTION `fnnearesttown`(lon DECIMAL(10,7), lat DECIMAL(10,7)) RETURNS varchar(120) CHARSET utf8mb3\n\
+    DETERMINISTIC\n\
+BEGIN\n\
+\n\
+SET @offset = 0.02;\n\
+SET @out = \"\";\n\
+\n\
+SELECT plc.display_name INTO @out\n\
+FROM locations.places plc\n\
+WHERE plc.longitude > (@lon - @offset)\n\
+ORDER BY distance(@lon, @lat, plc.longitude, plc.latitude)\n\
+LIMIT 0,1;\n\
+\n\
+RETURN @out;\n\
+\n\
+END //\n\
+\n\
+delimiter ;\n\
+";
+
+    let mut executed = Vec::<String>::new();
+    let mut transaction_state = new_transaction_state();
+
+    execute_import_from_reader(
+        BufReader::new(input.as_bytes()),
+        "locations",
+        &mut transaction_state,
+        |_db, statement, _transaction_state| {
+            executed.push(statement.trim().to_string());
+            Ok(())
+        },
+    )
+    .expect("import reader should succeed");
+
+    assert_eq!(executed.len(), 2, "unexpected statements: {:#?}", executed);
+    assert!(executed[0].to_ascii_lowercase().starts_with("drop function"));
+
+    let create = executed[1].to_ascii_lowercase();
+    assert!(create.starts_with("create function"), "got: {}", executed[1]);
+    assert!(create.contains("begin"), "body lost BEGIN: {}", executed[1]);
+    assert!(create.contains("return @out"), "body lost RETURN: {}", executed[1]);
+    assert!(create.trim_end().ends_with("end"), "body lost END: {}", executed[1]);
+
+}
+
+#[test]
 fn import_reader_populates_mock_table_structures() {
     let input = "\
         create table users (id int, name text);\n\

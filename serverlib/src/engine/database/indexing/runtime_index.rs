@@ -166,6 +166,7 @@ fn numeric_kind_for_index(index: &DatabaseIndex, schema: &TableSchema) -> Option
     match schema.field(field_name)?.field_type {
         FieldType::Int(_) => Some(RuntimeIndexNumericKind::Signed),
         FieldType::UInt(_) => Some(RuntimeIndexNumericKind::Unsigned),
+        FieldType::Float(_) => Some(RuntimeIndexNumericKind::Float),
         _ => None,
     }
 }

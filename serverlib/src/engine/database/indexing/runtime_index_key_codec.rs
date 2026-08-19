@@ -12,6 +12,7 @@ pub enum RuntimeIndexKeyStrategy {
 pub enum RuntimeIndexNumericKind {
     Signed,
     Unsigned,
+    Float,
 }
 
 pub fn numeric_gate_depth(bit_width: usize) -> usize {
@@ -34,6 +35,26 @@ pub fn encode_sortable_numeric(value: &[u8], kind: RuntimeIndexNumericKind) -> O
         RuntimeIndexNumericKind::Unsigned => {
             let value = std::str::from_utf8(value).ok()?.parse::<u64>().ok()?;
             Some(value.to_be_bytes().to_vec())
+        }
+        RuntimeIndexNumericKind::Float => {
+            let value = std::str::from_utf8(value).ok()?.trim().parse::<f64>().ok()?;
+
+            // NaN has no position in a total order, so it stays out of the index.
+            if value.is_nan() {
+                return None;
+            }
+
+            let bits = value.to_bits();
+
+            // Flip the sign bit for positives and every bit for negatives so the
+            // big-endian bytes sort in numeric order.
+            let sortable = if bits & (1u64 << 63) != 0 {
+                !bits
+            } else {
+                bits ^ (1u64 << 63)
+            };
+
+            Some(sortable.to_be_bytes().to_vec())
         }
     }
 }

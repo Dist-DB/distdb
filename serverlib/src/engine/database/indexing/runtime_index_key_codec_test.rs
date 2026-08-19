@@ -68,6 +68,40 @@ fn sortable_unsigned_numeric_encoding_orders_values_by_magnitude() {
 }
 
 #[test]
+fn sortable_float_numeric_encoding_orders_across_sign_and_magnitude() {
+
+    let encode = |value: &str| {
+        encode_sortable_numeric(value.as_bytes(), RuntimeIndexNumericKind::Float)
+            .unwrap_or_else(|| panic!("'{value}' should encode"))
+    };
+
+    // Lexicographic ordering of the source text would get every one of these wrong.
+    let ordered = ["-180.0", "-6.9603", "-0.5", "0", "0.0000001", "6.9603", "50.9375", "180.0"];
+
+    for pair in ordered.windows(2) {
+        assert!(
+            encode(pair[0]) < encode(pair[1]),
+            "expected {} to sort before {}",
+            pair[0],
+            pair[1],
+        );
+    }
+
+}
+
+#[test]
+fn sortable_float_numeric_encoding_rejects_nan() {
+    assert!(encode_sortable_numeric(b"NaN", RuntimeIndexNumericKind::Float).is_none());
+}
+
+#[test]
+fn sortable_float_numeric_encoding_matches_equal_values_with_different_text() {
+    let plain = encode_sortable_numeric(b"6.96", RuntimeIndexNumericKind::Float).unwrap();
+    let padded = encode_sortable_numeric(b"6.9600000", RuntimeIndexNumericKind::Float).unwrap();
+    assert_eq!(plain, padded);
+}
+
+#[test]
 fn narrow_numeric_types_stop_at_their_domain_leaf_width() {
     assert_eq!(numeric_gate_depth(8), 0);
     assert_eq!(numeric_gate_depth(16), 1);
