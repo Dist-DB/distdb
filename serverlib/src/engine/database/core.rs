@@ -5,6 +5,9 @@ pub use crate::engine::database::error::DatabaseError;
 pub use crate::engine::database::schema::error::SchemaError;
 pub use crate::engine::database::status::ObjectStatus;
 pub use crate::engine::database::catalog::{DatabaseCatalog, RecursiveCteExecutionSettings};
+pub use crate::engine::database::catalog_scope::{
+	resolve_foreign_catalog, split_qualified_object_name, with_foreign_catalogs, ForeignCatalogs,
+};
 pub use crate::engine::database::id::DatabaseId;
 pub use crate::engine::database::replica_state::DatabaseReplicaState;
 pub use crate::engine::database::entity::metadata::EntityMetadata;

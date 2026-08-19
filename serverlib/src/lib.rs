@@ -53,6 +53,7 @@ pub use common::schema::{
 
 pub use engine::database::core::{
 	DatabaseCatalog, DatabaseEntity, DatabaseError, DatabaseId, DatabaseIndex,
+	ForeignCatalogs, resolve_foreign_catalog, split_qualified_object_name, with_foreign_catalogs,
 	RecursiveCteExecutionSettings,
 	DatabaseIndexKind, DatabaseIndexOrigin,
 	DatabaseEntityAspect, DatabaseEntityKind, DatabaseRelationship, DatabaseReplicaState,

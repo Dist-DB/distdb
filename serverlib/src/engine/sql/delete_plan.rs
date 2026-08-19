@@ -187,6 +187,7 @@ fn parse_delete_order_by_items(
         items.push(SelectOrderByItem {
             field_name,
             descending: expression.asc == Some(false),
+            function: None,
         });
     }
 

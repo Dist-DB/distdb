@@ -17,6 +17,8 @@ use crate::{
     TableSchema,
 };
 
+use crate::engine::database::catalog_scope::{resolve_foreign_catalog, split_qualified_object_name};
+
 use crate::engine::sql::SelectExpression;
 
 use super::{
@@ -723,7 +725,25 @@ pub fn execute_sql_function_with_lookup(
     lookup: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
 ) -> Result<Option<Vec<u8>>, String> {
 
-    let function_id = common::normalize_identifier!(function.name.to_string());
+    let raw_name = function.name.to_string();
+    let (database_qualifier, function_id) = split_qualified_object_name(&raw_name);
+
+    // A qualifier names another database, whose routines live in its own catalog.
+    if let Some(database_name) = database_qualifier.as_deref() {
+
+        if let Some(foreign_catalog) = resolve_foreign_catalog(database_name)
+            && let Some(local_function) = foreign_catalog.stored_procedure(&function_id) {
+                return execute_local_sql_function_with_lookup(
+                    &foreign_catalog,
+                    wal,
+                    runtime_indexes,
+                    &local_function,
+                    function,
+                    lookup,
+                );
+            }
+
+    }
 
     if let Some(local_function) = catalog.stored_procedure(&function_id) {
         return execute_local_sql_function_with_lookup(
@@ -736,7 +756,41 @@ pub fn execute_sql_function_with_lookup(
         );
     }
 
+    if let Some(database_name) = database_qualifier {
+        return Err(format!(
+            "unknown function '{}.{}'",
+            database_name, function_id,
+        ));
+    }
+
     evaluate_inbuilt_sql_function_with_lookup(function, lookup)
+
+}
+
+/// Points a routine-body read plan at the catalog named by its `db.table` qualifier.
+fn resolve_read_plan_target_catalog(
+    mut read_plan: SelectReadPlan,
+) -> (SelectReadPlan, Option<DatabaseCatalog>) {
+
+    let (Some(database_name), table_id) = split_qualified_object_name(&read_plan.table_id) else {
+        return (read_plan, None);
+    };
+
+    let Some(catalog) = resolve_foreign_catalog(&database_name) else {
+        return (read_plan, None);
+    };
+
+    let qualified_table_id = read_plan.table_id.clone();
+
+    for relation in read_plan.relations.iter_mut() {
+        if relation.table_id == qualified_table_id {
+            relation.table_id = table_id.clone();
+        }
+    }
+
+    read_plan.table_id = table_id;
+
+    (read_plan, Some(catalog))
 
 }
 
@@ -887,16 +941,26 @@ fn execute_local_function_action_statement(
     }
 
     if lowered.starts_with("select ") {
+
+        let (select_sql, into_target) = split_select_into_target(statement).map_err(|err| {
+            format!("function '{}' action parse failed: {err}", function_id)
+        })?;
+
         let value = execute_local_function_scalar_select(
             catalog,
             wal,
             runtime_indexes,
             function_id,
-            statement,
+            select_sql.as_str(),
             inbound_provider,
             local_scope,
         )?
         .unwrap_or_else(|| b"NULL".to_vec());
+
+        if let Some(target) = into_target {
+            local_scope.insert(target, value);
+            return Ok(LocalFunctionActionOutcome::Continue);
+        }
 
         return Ok(LocalFunctionActionOutcome::Scalar(value));
     }
@@ -909,8 +973,96 @@ fn execute_local_function_action_statement(
 
 }
 
-fn parse_local_function_set_assignment(statement: &str) -> Result<(String, &str), String> {
+/// Splits `SELECT ... INTO @var ...` into the bare SELECT and the assignment target.
+fn split_select_into_target(statement: &str) -> Result<(String, Option<String>), String> {
 
+    let chars = statement.chars().collect::<Vec<char>>();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut depth = 0usize;
+    let mut index = 0usize;
+
+    while index < chars.len() {
+
+        let ch = chars[index];
+
+        if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            index += 1;
+            continue;
+        }
+
+        if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            index += 1;
+            continue;
+        }
+
+        if in_single_quote || in_double_quote {
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth == 0
+            && ch.is_whitespace()
+            && chars[index..]
+                .iter()
+                .take(6)
+                .collect::<String>()
+                .to_ascii_lowercase()
+                .starts_with(" into ")
+        {
+            let target_start = index + " into ".len();
+            let mut target_end = target_start;
+
+            while target_end < chars.len()
+                && !chars[target_end].is_whitespace()
+                && chars[target_end] != ';'
+                && chars[target_end] != ','
+            {
+                target_end += 1;
+            }
+
+            if target_end < chars.len() && chars[target_end] == ',' {
+                return Err("SELECT INTO with multiple targets is not supported".to_string());
+            }
+
+            let target = chars[target_start..target_end]
+                .iter()
+                .collect::<String>();
+
+            let target = target
+                .trim()
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_start_matches('@')
+                .trim();
+
+            if target.is_empty() {
+                return Err("SELECT INTO target variable is empty".to_string());
+            }
+
+            let mut select_sql = chars[..index].iter().collect::<String>();
+            select_sql.push_str(chars[target_end..].iter().collect::<String>().as_str());
+
+            return Ok((select_sql, Some(common::normalize_identifier!(target))));
+        }
+
+        index += 1;
+
+    }
+
+    Ok((statement.to_string(), None))
+
+}
+
+fn parse_local_function_set_assignment(statement: &str) -> Result<(String, &str), String> {
     let body = statement["set".len()..].trim();
     let eq_index = body.find('=').ok_or_else(|| {
         "local function assignment parse failed: SET statement is missing '='".to_string()
@@ -989,6 +1141,9 @@ fn execute_local_function_scalar_select(
 
     let read_plan = parse_select_read_plan_from_statement(&rewritten_sql)
         .map_err(|err| format!("function '{}' action parse failed: {err}", function_id))?;
+
+    let (read_plan, foreign_catalog) = resolve_read_plan_target_catalog(read_plan);
+    let catalog = foreign_catalog.as_ref().unwrap_or(catalog);
 
     let result = execute_select_plan_result_with_function_evaluator(
         catalog,

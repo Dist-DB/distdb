@@ -855,6 +855,7 @@ fn parse_order_by_items(
             items.push(SelectOrderByItem {
                 field_name,
                 descending: expression.asc == Some(false),
+                function: None,
             });
 
         }
@@ -864,7 +865,7 @@ fn parse_order_by_items(
 
     let mut items = Vec::with_capacity(order_by.exprs.len());
     
-    for expression in &order_by.exprs {
+    for (position, expression) in order_by.exprs.iter().enumerate() {
 
         if expression.nulls_first.is_some() || expression.with_fill.is_some() {
             return Err(SqlParseError::UnsupportedStatement(
@@ -872,21 +873,52 @@ fn parse_order_by_items(
             ));
         }
 
-        let field_name = parse_condition_column_name(&expression.expr, relation_bindings).map_err(|_| {
-            SqlParseError::UnsupportedStatement(
-                "ORDER BY currently supports only direct column references".to_string(),
-            )
-        })?;
+        let descending = expression.asc == Some(false);
 
-        items.push(SelectOrderByItem {
-            field_name,
-            descending: expression.asc == Some(false),
-        });
+        match parse_condition_column_name(&expression.expr, relation_bindings) {
+
+            Ok(field_name) => items.push(SelectOrderByItem {
+                field_name,
+                descending,
+                function: None,
+            }),
+
+            // A call is ordered on by materialising it as a hidden projection column.
+            Err(_) => {
+
+                let Some(function) = order_by_function_expression(&expression.expr) else {
+                    return Err(SqlParseError::UnsupportedStatement(
+                        "ORDER BY currently supports only direct column references or function calls"
+                            .to_string(),
+                    ));
+                };
+
+                items.push(SelectOrderByItem {
+                    field_name: order_by_expression_output_name(position),
+                    descending,
+                    function: Some(Box::new(function.clone())),
+                });
+
+            },
+
+        }
 
     }
 
     Ok(items)
 
+}
+
+fn order_by_function_expression(expression: &Expr) -> Option<&sqlparser::ast::Function> {
+    match expression {
+        Expr::Function(function) => Some(function),
+        Expr::Nested(inner) => order_by_function_expression(inner),
+        _ => None,
+    }
+}
+
+fn order_by_expression_output_name(position: usize) -> String {
+    format!("__order_by_expr_{}", position)
 }
 
 pub fn parse_union_select_read_plans_from_statement(
@@ -1186,6 +1218,7 @@ fn parse_union_order_by_items(
         items.push(SelectOrderByItem {
             field_name,
             descending: expression.asc == Some(false),
+            function: None,
         });
 
     }
@@ -3133,6 +3166,7 @@ fn append_compat_order_by_items(
         items.push(SelectOrderByItem {
             field_name,
             descending: false,
+            function: None,
         });
     }
 

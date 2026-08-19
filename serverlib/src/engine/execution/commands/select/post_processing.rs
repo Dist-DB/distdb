@@ -122,9 +122,10 @@ pub fn apply_select_post_processing(
 
                 for (index, descending) in &order_indexes {
 
-                    let ordering = left
-                        .get(*index)
-                        .cmp(&right.get(*index));
+                    let ordering = compare_order_by_values(
+                        left.get(*index).map(Vec::as_slice),
+                        right.get(*index).map(Vec::as_slice),
+                    );
 
                     if ordering != Ordering::Equal {
                         return if *descending { ordering.reverse() } else { ordering };
@@ -241,8 +242,30 @@ fn apply_top_with_ties_post_filter(
 
 }
 
-fn resolve_order_by_projection_index(columns: &[FieldDef], field_name: &str) -> Option<usize> {
+/// Rendered values are text, so numeric columns must not fall back to lexicographic order.
+fn compare_order_by_values(left: Option<&[u8]>, right: Option<&[u8]>) -> Ordering {
 
+    let (Some(left), Some(right)) = (left, right) else {
+        return left.cmp(&right);
+    };
+
+    if let (Ok(left_text), Ok(right_text)) = (
+        std::str::from_utf8(left),
+        std::str::from_utf8(right),
+    ) && let (Ok(left_number), Ok(right_number)) = (
+        left_text.trim().parse::<f64>(),
+        right_text.trim().parse::<f64>(),
+    ) {
+        return left_number
+            .partial_cmp(&right_number)
+            .unwrap_or(Ordering::Equal);
+    }
+
+    left.cmp(right)
+
+}
+
+fn resolve_order_by_projection_index(columns: &[FieldDef], field_name: &str) -> Option<usize> {
     let direct_index = columns
         .iter()
         .enumerate()

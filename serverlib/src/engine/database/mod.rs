@@ -3,6 +3,7 @@ pub mod core;
 pub mod error;
 pub mod status;
 pub mod catalog;
+pub mod catalog_scope;
 pub mod id;
 pub mod stored_procedure;
 pub mod field_def;

@@ -797,6 +797,8 @@ pub struct SelectJoin {
 pub struct SelectOrderByItem {
     pub field_name: String,
     pub descending: bool,
+    /// Set when ordering by a computed call; materialised as a hidden projection column.
+    pub function: Option<Box<Function>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

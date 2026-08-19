@@ -558,18 +558,24 @@ fn handle_query_command_internal_with_parsed(
         );
     }
 
-    let response = execute_parsed_query(
-        request_id,
-        database_id,
-        catalogs,
-        wal,
-        node_data_dir,
-        runtime_indexes,
-        parsed,
-        external_write_group_id,
-        touched_tables,
-        session_context,
-    );
+    // Published for the statement so schema-qualified routines can reach other databases.
+    // Catalog clones share entity handles, so this observes live data.
+    let foreign_catalogs: serverlib::ForeignCatalogs = std::sync::Arc::new(catalogs.clone());
+
+    let response = serverlib::with_foreign_catalogs(foreign_catalogs, || {
+        execute_parsed_query(
+            request_id,
+            database_id,
+            catalogs,
+            wal,
+            node_data_dir,
+            runtime_indexes,
+            parsed,
+            external_write_group_id,
+            touched_tables,
+            session_context,
+        )
+    });
 
     with_query_timings(response, make_query_timings(request_start, parse_ms))
 

@@ -872,10 +872,21 @@ fn ensure_order_by_projection_items(
         });
 
         if !covered {
-            projection_items.push(SelectProjectionItem::Column {
-                field_name: order_by.field_name.clone(),
-                output_name: order_by.field_name.clone(),
-            });
+
+            match order_by.function.as_ref() {
+
+                Some(function) => projection_items.push(SelectProjectionItem::InbuiltFunction {
+                    output_name: order_by.field_name.clone(),
+                    function: (**function).clone(),
+                }),
+
+                None => projection_items.push(SelectProjectionItem::Column {
+                    field_name: order_by.field_name.clone(),
+                    output_name: order_by.field_name.clone(),
+                }),
+
+            }
+
         }
 
     }

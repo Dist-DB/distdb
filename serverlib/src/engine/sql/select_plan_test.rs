@@ -94,8 +94,20 @@ fn select_order_by_returns_explicit_unsupported_error() {
 }
 
 #[test]
-fn select_projection_only_order_by_ordinal_is_supported() {
-    let plan = parse_select_read_plan_from_statement("select now() as ts order by 1 desc")
+fn select_order_by_function_call_becomes_hidden_sort_expression() {
+    let plan = parse_select_read_plan_from_statement(
+        "select name from places order by fndistance(1, 2, longitude, latitude)",
+    )
+    .expect("order by function call should parse");
+
+    assert_eq!(plan.order_by.len(), 1);
+    assert_eq!(plan.order_by[0].field_name, "__order_by_expr_0");
+    assert!(plan.order_by[0].function.is_some());
+    assert_eq!(plan.projection_items.len(), 1);
+}
+
+#[test]
+fn select_projection_only_order_by_ordinal_is_supported() {    let plan = parse_select_read_plan_from_statement("select now() as ts order by 1 desc")
         .expect("projection-only order by ordinal should parse");
 
     assert_eq!(plan.order_by.len(), 1);

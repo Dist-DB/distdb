@@ -471,6 +471,7 @@ fn parse_update_order_by_items_from_text(
         items.push(SelectOrderByItem {
             field_name,
             descending,
+            function: None,
         });
     }
 
