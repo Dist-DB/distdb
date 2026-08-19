@@ -26,17 +26,14 @@ impl DatabaseStoredProcedure {
 
     pub fn new(procedure_id: String, sql: String, dependencies: Vec<String>) -> Self {
 
-        let mut procedure = Self {
+        Self {
             entity_id: common::helpers::utils::unique_id(),
             procedure_id,
             sql,
             dependencies,
             metadata: EntityMetadata::default(),
             compiled_artifact: None,
-        };
-
-        procedure.refresh_compilation_cache();
-        procedure
+        }
 
     }
 
@@ -44,7 +41,6 @@ impl DatabaseStoredProcedure {
 
         self.sql = sql;
         self.invalidate_compilation_cache();
-        self.refresh_compilation_cache();
         
     }
 
@@ -67,6 +63,15 @@ impl DatabaseStoredProcedure {
 
     pub fn compiled_artifact(&self) -> Option<&SQLProgramaticCompilationArtifact> {
         self.compiled_artifact.as_ref()
+    }
+
+    pub fn compiled_artifact_for_invocation(&self) -> SQLProgramaticCompilationArtifact {
+        self.compiled_artifact.clone().unwrap_or_else(|| {
+            compile_sql_programatic_artifact_with_services(
+                &self.sql,
+                &DefaultSQLProgramaticCompilerServices,
+            )
+        })
     }
 
     pub fn compiled_ir(&self) -> Option<&SQLProgramaticIr> {
@@ -124,7 +129,6 @@ impl DatabaseEntityAspect for DatabaseStoredProcedure {
             .collect();
 
         self.invalidate_compilation_cache();
-        self.refresh_compilation_cache();
 
     }
     

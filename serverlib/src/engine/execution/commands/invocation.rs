@@ -82,7 +82,10 @@ where
     P: FnMut(&dyn ConditionValueProvider, &crate::SelectCondition) -> Result<bool, String>,
 {
 
-    if let Some(ir) = procedure.compiled_ir() {
+    let compiled_artifact = procedure.compiled_artifact_for_invocation();
+    let ir = &compiled_artifact.ir;
+
+    {
         if let Some(plan) = ir.if_else_end_plan() {
             return execute_if_else_branch_block(provider, plan, predicate_matches, execute_action);
         }

@@ -80,6 +80,87 @@ impl ServerApp {
 
     }
 
+    fn read_only_runtime_index_scope_routine_tables(
+        parsed_requests: &[SqlRequest],
+        catalogs: &HashMap<String, DatabaseCatalog>,
+    ) -> HashSet<String> {
+
+        let routine_ids = parsed_requests.iter().flat_map(|request| {
+            let Ok(plan) = parse_select_read_plan_from_statement(&request.sql) else {
+                return Vec::new();
+            };
+
+            plan.projection_items
+                .iter()
+                .filter_map(|item| match item {
+                    SelectProjectionItem::InbuiltFunction { function, .. } |
+                    SelectProjectionItem::WindowFunction { function, .. } => Some(
+                        function
+                            .name
+                            .to_string()
+                            .rsplit('.')
+                            .next()
+                            .map(|name| common::normalize_identifier!(name))
+                            .unwrap_or_default(),
+                    ),
+                    _ => None,
+                })
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+        }).collect::<HashSet<_>>();
+
+        if routine_ids.is_empty() {
+            return HashSet::new();
+        }
+
+        let mut table_ids = HashSet::new();
+
+        for catalog in catalogs.values() {
+            for routine_id in routine_ids.iter().filter(|routine_id| {
+                catalog.stored_procedure(routine_id.as_str()).is_some()
+            }) {
+                let Some(routine) = catalog.stored_procedure(&routine_id) else {
+                    continue;
+                };
+
+                let Some(action_statements) = routine
+                    .compiled_ir()
+                    .and_then(|ir| ir.action_statements())
+                else {
+                    continue;
+                };
+
+                for action_sql in action_statements {
+                    let Ok(action_requests) = parse_mysql8_sql_requests(
+                        action_sql,
+                        &catalog.database_id.0,
+                    ) else {
+                        continue;
+                    };
+
+                    for action_request in action_requests {
+                        for object_name in action_request.referenced_object_names() {
+                            let normalized = common::normalize_identifier!(object_name.as_str());
+                            if !normalized.is_empty() {
+                                table_ids.insert(normalized.clone());
+                            }
+                            if let Some(unqualified) = object_name.rsplit('.').next() {
+                                let normalized_unqualified =
+                                    common::normalize_identifier!(unqualified);
+                                if !normalized_unqualified.is_empty() {
+                                    table_ids.insert(normalized_unqualified);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        table_ids
+
+    }
+
     fn collect_read_only_equality_filter_fields(
         condition: &SelectCondition,
         fields: &mut HashSet<String>,
@@ -1236,7 +1317,11 @@ impl ServerApp {
         let mut catalogs = self.catalogs.clone();
         let catalog_clone_ms = catalog_clone_started_at.elapsed().as_millis() as u64;
 
-        let scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
+        let mut scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
+        scope_table_ids.extend(Self::read_only_runtime_index_scope_routine_tables(
+            &parsed_requests,
+            &catalogs,
+        ));
         let selected_fields_by_table =
             Self::read_only_runtime_index_scope_selected_fields(&parsed_requests);
         let selected_field_values_by_table =
@@ -1256,17 +1341,14 @@ impl ServerApp {
         };
 
         let runtime_clone_started_at = Instant::now();
-        let mut runtime_indexes = if scope_table_ids.is_empty() {
-            self.runtime_indexes.clone()
-        } else {
-            self.runtime_indexes
-                .clone_for_tables_unique_and_selected_single_field_indexes_with_values(
-                    &catalogs,
-                    &scope_table_ids,
-                    &selected_fields_by_table,
-                    &selected_field_values_by_table,
-                )
-        };
+        let mut runtime_indexes = self
+            .runtime_indexes
+            .clone_for_tables_unique_and_selected_single_field_indexes_with_values(
+                &catalogs,
+                &scope_table_ids,
+                &selected_fields_by_table,
+                &selected_field_values_by_table,
+            );
         let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
 
         if catalog_clone_ms > 50 || runtime_clone_ms > 50 {

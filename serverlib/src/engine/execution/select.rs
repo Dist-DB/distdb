@@ -853,12 +853,7 @@ fn execute_local_sql_function_with_lookup(
         .zip(argument_values)
         .collect::<HashMap<_, _>>();
 
-    let artifact = local_function.compiled_artifact().ok_or_else(|| {
-        format!(
-            "function '{}' compiled artifact is not available",
-            local_function.procedure_id,
-        )
-    })?;
+    let artifact = local_function.compiled_artifact_for_invocation();
 
     let action_statements = if let Some(plan) = artifact.ir.if_else_end_plan() {
         let Some(action_sql) = super::commands::execute_if_else_end_plan(

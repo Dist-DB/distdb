@@ -94,9 +94,9 @@ fn execute_stored_procedure_invocation_executes_non_if_top_level_actions_in_orde
 }
 
 #[test]
-fn execute_stored_procedure_invocation_prefers_compiled_action_list_ir_over_raw_sql_fallback() {
+fn execute_stored_procedure_invocation_compiles_action_list_ir_on_demand() {
 
-    let mut procedure = DatabaseStoredProcedure::new(
+    let procedure = DatabaseStoredProcedure::new(
         "refresh_accounts".to_string(),
         "create procedure refresh_accounts() begin set @phase = 'boot'; select 1; select 2; end"
             .to_string(),
@@ -105,8 +105,7 @@ fn execute_stored_procedure_invocation_prefers_compiled_action_list_ir_over_raw_
 
     let mut executed = Vec::new();
 
-    // Deliberately corrupt raw SQL text after compilation to ensure invocation uses cached IR.
-    procedure.sql = "create procedure refresh_accounts() begin select".to_string();
+    assert!(procedure.compiled_artifact().is_none());
 
     let result = execute_stored_procedure_invocation(
         &HashMap::new(),
