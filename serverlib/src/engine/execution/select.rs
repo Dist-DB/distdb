@@ -26,7 +26,8 @@ use super::{
     collect_indexable_in_list_filter_for_schema,
     collect_indexable_like_filter_for_schema, collect_indexable_range_filters_for_schema,
     materialize_relation_rows,
-    plan_relation_access, relation_qualifier, row_matches_condition_with_result_and_expression,
+    plan_relation_access_with_runtime_hint, relation_qualifier,
+    row_matches_condition_with_result_and_expression,
     ConditionValueProvider, JoinedRowTuple,
 };
 
@@ -199,13 +200,19 @@ fn collect_subquery_exists_with_outer(
             })
             .unwrap_or(true);
 
-        let access_plan = plan_relation_access(
+        let table_scope_id = if scoped_table.entity_id.is_empty() {
+            subquery.table_id.as_str()
+        } else {
+            scoped_table.entity_id.as_str()
+        };
+        let access_plan = plan_relation_access_with_runtime_hint(
             scoped_table,
             allow_index_short_circuit,
             index_filter_map,
             in_list_filter,
             range_filters,
             like_filter,
+            Some((runtime_indexes, table_scope_id)),
         );
 
         let qualifier = subquery
@@ -360,13 +367,19 @@ fn collect_subquery_projection_values_with_outer(
             })
             .unwrap_or(true);
 
-        let access_plan = plan_relation_access(
+        let table_scope_id = if scoped_table.entity_id.is_empty() {
+            subquery.table_id.as_str()
+        } else {
+            scoped_table.entity_id.as_str()
+        };
+        let access_plan = plan_relation_access_with_runtime_hint(
             scoped_table,
             allow_index_short_circuit,
             index_filter_map,
             in_list_filter,
             range_filters,
             like_filter,
+            Some((runtime_indexes, table_scope_id)),
         );
 
         return execute_relation_select_plan(
@@ -494,13 +507,19 @@ fn collect_subquery_scalar_value_with_outer(
             })
             .unwrap_or(true);
 
-        let access_plan = plan_relation_access(
+        let table_scope_id = if table.entity_id.is_empty() {
+            subquery.table_id.as_str()
+        } else {
+            table.entity_id.as_str()
+        };
+        let access_plan = plan_relation_access_with_runtime_hint(
             &table,
             allow_index_short_circuit,
             index_filter_map,
             in_list_filter,
             range_filters,
             like_filter,
+            Some((runtime_indexes, table_scope_id)),
         );
 
         return super::execute_relation_select_plan_with_row_bound(
@@ -686,13 +705,19 @@ where
         })
         .unwrap_or(true);
 
-    let access_plan = plan_relation_access(
+    let table_scope_id = if scoped_table.entity_id.is_empty() {
+        table_id
+    } else {
+        scoped_table.entity_id.as_str()
+    };
+    let access_plan = plan_relation_access_with_runtime_hint(
         scoped_table,
         allow_index_short_circuit,
         index_filter_map,
         in_list_filter,
         range_filters,
         like_filter,
+        Some((runtime_indexes, table_scope_id)),
     );
 
     execute_relation_select_plan(
