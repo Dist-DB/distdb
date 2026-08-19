@@ -373,6 +373,20 @@ fn bind_call_procedure_argument_bindings_rejects_non_identifier_out_target() {
 }
 
 #[test]
+fn parse_create_function_action_statements_handles_multiline_mysql_body() {
+
+    let sql = "CREATE FUNCTION `fnnearesttown`(lon DECIMAL(10,7), lat DECIMAL(10,7)) RETURNS varchar(120) CHARSET utf8mb3\n    DETERMINISTIC\nBEGIN\n\nSET @offset = 0.02;\nSET @lon = lon;\nSET @lat = lat;\nSET @out = \"\";\n\nSELECT plc.display_name INTO @out\nFROM locations.places plc \nWHERE \n\tplc.longitude > (@lon - @offset) \n\tAND plc.longitude < (@lon + @offset) \n\tAND plc.latitude > (@lat - @offset)\n\tAND plc.latitude < (@lat + @offset)\nORDER BY distance(@lon, @lat, plc.longitude, plc.latitude)\nLIMIT 0,1;\n\nRETURN @out;\n\nEND";
+
+    let actions = parse_create_function_action_statements(sql)
+        .expect("function actions should parse");
+
+    assert_eq!(actions.len(), 6, "unexpected actions: {:#?}", actions);
+    assert_eq!(actions[0], "SET @offset = 0.02");
+    assert_eq!(actions[5], "RETURN @out");
+
+}
+
+#[test]
 fn parse_create_procedure_action_statements_splits_top_level_statements() {
     let actions = parse_create_procedure_action_statements(
         "create procedure p_sync() begin set @x = 1; select (@x + 1); select ';'; end",
