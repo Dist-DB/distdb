@@ -13,6 +13,7 @@ use crate::engine::database::indexing::runtime_index::{
     derived_indexes_for_table,
     load_live_row_count_checkpoint,
     load_live_row_checkpoint_rows,
+    RuntimeIndexRangeBound,
 };
 use crate::engine::database::indexing::runtime_index_key_codec::{
     RuntimeIndexKeyStrategy,
@@ -7618,6 +7619,22 @@ where
                     .unwrap_or_else(|| "none".to_string()),
             );
 
+            if let Some(rows) = try_runtime_index_range_rows(
+                wal,
+                table,
+                table_stream_id,
+                schema,
+                runtime_indexes,
+                std::slice::from_ref(&RangeFilterBounds {
+                    field_name: field_name.clone(),
+                    lower_bound: lower_bound.clone(),
+                    upper_bound: upper_bound.clone(),
+                }),
+                row_limit,
+            ) {
+                return rows;
+            }
+
             load_live_rows_by_range(
                 wal,
                 table_stream_id,
@@ -7639,6 +7656,18 @@ where
                 table.table_id,
                 filters.len(),
             );
+
+            if let Some(rows) = try_runtime_index_range_rows(
+                wal,
+                table,
+                table_stream_id,
+                schema,
+                runtime_indexes,
+                filters,
+                row_limit,
+            ) {
+                return rows;
+            }
 
             load_live_rows_by_range_intersection(
                 wal,
@@ -7747,6 +7776,100 @@ fn resolve_materialization_stream_id<'a>(
     }
 
     scoped_stream_id
+
+}
+
+/// Resolves ANDed range predicates through an ordered runtime index instead of walking
+/// every distinct value. Returns None when no anchor index can serve the range, so the
+/// caller can fall back to the postings path.
+fn try_runtime_index_range_rows(
+    wal: &ConcurrentWalManager,
+    table: &DatabaseTable,
+    table_stream_id: &str,
+    schema: &TableSchema,
+    runtime_indexes: &RuntimeIndexStore,
+    filters: &[RangeFilterBounds],
+    row_limit: Option<usize>,
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
+
+    let (anchor_position, anchor_index_id, anchor_state) = filters
+        .iter()
+        .enumerate()
+        .find_map(|(position, filter)| {
+
+            let index_id = single_field_index_id(table, &filter.field_name)?;
+            let state = runtime_indexes.index_for_table(table_stream_id, &index_id)?;
+
+            // Text keys sort lexicographically, which is not the range order the
+            // predicate asked for.
+            state
+                .supports_ordered_range_scan()
+                .then_some((position, index_id, state))
+
+        })?;
+
+    let anchor_filter = filters.get(anchor_position)?;
+
+    let lower = anchor_filter.lower_bound.as_ref().map(|bound| RuntimeIndexRangeBound {
+        key: vec![bound.value.clone()],
+        inclusive: bound.inclusive,
+    });
+
+    let upper = anchor_filter.upper_bound.as_ref().map(|bound| RuntimeIndexRangeBound {
+        key: vec![bound.value.clone()],
+        inclusive: bound.inclusive,
+    });
+
+    // The remaining predicates still have to be applied, so the scan cannot stop early.
+    let scan_limit = (filters.len() == 1).then_some(row_limit).flatten();
+    let row_refs = anchor_state.row_refs_for_key_range(lower.as_ref(), upper.as_ref(), scan_limit);
+
+    log::debug!(
+        "relation range scan table={} index_id={} anchor_field={} candidate_refs={} filters={}",
+        table.table_id,
+        anchor_index_id,
+        anchor_filter.field_name,
+        row_refs.len(),
+        filters.len(),
+    );
+
+    if row_refs.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut rows = resolve_live_rows_for_row_refs(
+        wal,
+        table_stream_id,
+        &table.table_id,
+        schema,
+        &row_refs,
+        should_attempt_row_ref_direct_lookup(wal, table_stream_id),
+    );
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    rows.retain(|(_, row_map)| {
+        filters.iter().all(|filter| {
+            row_map
+                .get(&filter.field_name)
+                .map(|value| {
+                    value_within_range(
+                        value,
+                        filter.lower_bound.as_ref(),
+                        filter.upper_bound.as_ref(),
+                    )
+                })
+                .unwrap_or(false)
+        })
+    });
+
+    if let Some(limit) = row_limit {
+        rows.truncate(limit);
+    }
+
+    Some(rows)
 
 }
 

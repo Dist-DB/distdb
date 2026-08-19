@@ -2614,6 +2614,120 @@ fn non_unique_numeric_equality_miss_returns_empty_from_index() {
 }
 
 #[test]
+fn range_intersection_probe_uses_ordered_runtime_index_scan() {
+
+    let wal = ConcurrentWalManager::in_memory();
+    let mut catalog =
+        DatabaseCatalog::create_empty_from_name("main").expect("catalog should be created");
+
+    let schema = table_schema(vec![
+        ("id", 1, FieldType::Int(32), FieldIndex::PrimaryKey, false),
+        ("longitude", 2, FieldType::Float(64), FieldIndex::Indexed, true),
+        ("latitude", 3, FieldType::Float(64), FieldIndex::Indexed, true),
+    ]);
+
+    catalog
+        .register_table("places", schema.clone())
+        .expect("places table should register");
+
+    // Text ordering would place "50.9375" and "-6.9" inside a "6.93".."6.97" window.
+    let seeded = [
+        (1, "6.9603", "50.9375"),
+        (2, "50.9375", "6.9603"),
+        (3, "-6.9500", "50.9375"),
+        (4, "6.9500", "50.9375"),
+        (5, "6.9900", "50.9375"),
+    ];
+
+    let actor = UserId("test-user".to_string());
+
+    for (transaction_id, id, longitude, latitude) in seeded
+        .iter()
+        .enumerate()
+        .map(|(index, (id, longitude, latitude))| (index as u64 + 1, id, longitude, latitude))
+    {
+        let row = HashMap::from([
+            ("id".to_string(), id.to_string().into_bytes()),
+            ("longitude".to_string(), longitude.as_bytes().to_vec()),
+            ("latitude".to_string(), latitude.as_bytes().to_vec()),
+        ]);
+
+        wal.append(
+            "places",
+            TransactionRecord::with_payload(
+                TransactionId(transaction_id),
+                None,
+                None,
+                transaction_id,
+                actor.clone(),
+                TransactionKind::Insert,
+                encode_row_payload(&schema, &row).expect("row should encode"),
+            ),
+        )
+        .expect("row should append");
+    }
+
+    let table = catalog.table("places").expect("places table should exist");
+
+    let longitude_index = table
+        .indexes
+        .values()
+        .find(|index| index.field_names == vec!["longitude".to_string()])
+        .cloned()
+        .expect("longitude index should exist");
+
+    let mut runtime_indexes = RuntimeIndexStore::new();
+    let state = runtime_indexes.index_mut_for_table(&table.table_id, &longitude_index.index_id.0);
+    state.index = Some(longitude_index.clone());
+    state.set_numeric_kind(Some(
+        crate::engine::database::indexing::runtime_index_key_codec::RuntimeIndexNumericKind::Float,
+    ));
+
+    assert!(
+        state.supports_ordered_range_scan(),
+        "a float index should keep an ordered key set",
+    );
+
+    for (index, (_, longitude, _)) in seeded.iter().enumerate() {
+        state.insert_with_row_ref(vec![longitude.as_bytes().to_vec()], Some(index as u64));
+    }
+
+    let filters = vec![
+        RangeFilterBounds {
+            field_name: "longitude".to_string(),
+            lower_bound: Some(RangeBound { value: b"6.93".to_vec(), inclusive: false }),
+            upper_bound: Some(RangeBound { value: b"6.97".to_vec(), inclusive: false }),
+        },
+        RangeFilterBounds {
+            field_name: "latitude".to_string(),
+            lower_bound: Some(RangeBound { value: b"50.91".to_vec(), inclusive: false }),
+            upper_bound: Some(RangeBound { value: b"50.95".to_vec(), inclusive: false }),
+        },
+    ];
+
+    let rows = materialize_relation_rows(
+        &wal,
+        &table,
+        &schema,
+        &runtime_indexes,
+        &RelationAccessPlan {
+            strategy: RelationAccessStrategy::RangeIntersectionProbe { filters },
+        },
+    );
+
+    let mut matched_ids = rows
+        .iter()
+        .filter_map(|(_, row_map)| row_map.get("id").cloned())
+        .map(|id| String::from_utf8(id).expect("id should be utf8"))
+        .collect::<Vec<_>>();
+
+    matched_ids.sort();
+
+    assert_eq!(matched_ids, vec!["1".to_string(), "4".to_string()]);
+
+}
+
+#[test]
 fn materialize_relation_rows_falls_back_to_scan_when_runtime_lookup_state_missing() {
     let wal = ConcurrentWalManager::in_memory();
     let mut catalog =

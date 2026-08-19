@@ -537,6 +537,18 @@ impl RuntimeIndexState {
 
     pub fn set_numeric_kind(&mut self, numeric_kind: Option<RuntimeIndexNumericKind>) {
         self.numeric_kind = numeric_kind;
+        self.refresh_ordered_entry_keys();
+    }
+
+    /// Numeric keys encode in value order, so those indexes keep an ordered view for range scans.
+    fn refresh_ordered_entry_keys(&mut self) {
+        self.ordered_entry_keys = self
+            .numeric_kind
+            .map(|_| self.entries.keys().cloned().collect::<BTreeSet<_>>());
+    }
+
+    pub fn supports_ordered_range_scan(&self) -> bool {
+        self.ordered_entry_keys.is_some()
     }
 
     pub fn set_string_case_insensitive(&mut self, enabled: bool) {
@@ -756,6 +768,7 @@ impl RuntimeIndexState {
                 Some((encoded, None))
             })
             .collect();
+        self.refresh_ordered_entry_keys();
     }
 
     pub fn rebuild_with_row_refs(
@@ -823,6 +836,8 @@ impl RuntimeIndexState {
                 }
             }
         }
+
+        self.refresh_ordered_entry_keys();
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
@@ -955,7 +970,17 @@ impl RuntimeIndexState {
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        let ordered_entry_keys = self.entries.keys().cloned().collect::<BTreeSet<_>>();
+        let ordered_entry_keys_fallback = self
+            .ordered_entry_keys
+            .is_none()
+            .then(|| self.entries.keys().cloned().collect::<BTreeSet<_>>());
+
+        let ordered_entry_keys = self
+            .ordered_entry_keys
+            .as_ref()
+            .or(ordered_entry_keys_fallback.as_ref())
+            .expect("one of the ordered key sources is always present");
+
         for encoded_key in ordered_entry_keys.range::<[u8], _>((lower_bound, upper_bound)) {
             collect_row_refs_for_encoded_key(self, encoded_key, &mut row_refs);
         }
