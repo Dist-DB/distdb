@@ -738,12 +738,9 @@ fn estimate_rows_by_id_bytes(rows_by_id: &AHashMap<u64, HashMap<String, Vec<u8>>
 
 fn clear_cache_entry_payload(entry: &mut EqualityTableCacheEntry) {
 
-    entry.rows_by_id.clear();
-    entry.approx_rows_bytes = 0;
-    entry.row_ids_by_field_value.clear();
-    entry.string_index_by_field.clear();
-    entry.string_index_ci_by_field.clear();
-    entry.range_row_ids_cache.clear();
+    // Replacing the entry drops the backing allocations. Calling `clear()` on
+    // the nested maps would retain their capacity after an oversized hydrate.
+    *entry = EqualityTableCacheEntry::default();
 
 }
 

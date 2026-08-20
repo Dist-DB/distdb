@@ -130,49 +130,43 @@ impl ServerApp {
                 };
 
                 for action_sql in action_statements {
-                    let Ok(action_requests) = parse_mysql8_sql_requests(
-                        action_sql,
-                        &catalog.database_id.0,
+                    if !action_sql.trim_start().to_ascii_lowercase().starts_with("select") {
+                        continue;
+                    }
+
+                    let normalized_action_sql = Self::replace_routine_variables_with_zero(action_sql);
+                    let Ok(action_plan) = parse_select_read_plan_from_statement(
+                        normalized_action_sql.as_str(),
                     ) else {
                         continue;
                     };
 
-                    for action_request in action_requests {
-                        if let Ok(action_plan) = parse_select_read_plan_from_statement(action_sql)
-                            && let Some(condition) = action_plan.where_condition.as_ref()
-                        {
-                            let mut fields = HashSet::new();
-                            Self::collect_read_only_condition_fields(condition, &mut fields);
-                            if !fields.is_empty() {
-                                let table_id = common::normalize_identifier!(&action_plan.table_id);
-                                if !table_id.is_empty() {
+                    if let Some(condition) = action_plan.where_condition.as_ref() {
+                        let mut fields = HashSet::new();
+                        Self::collect_read_only_condition_fields(condition, &mut fields);
+                        if !fields.is_empty() {
+                            let table_id = common::normalize_identifier!(&action_plan.table_id);
+                            if !table_id.is_empty() {
+                                selected_fields_by_table
+                                    .entry(table_id.clone())
+                                    .or_default()
+                                    .extend(fields.iter().cloned());
+                                if let Some(unqualified) = table_id.rsplit('.').next()
+                                    && unqualified != table_id.as_str() {
                                     selected_fields_by_table
-                                        .entry(table_id.clone())
+                                        .entry(unqualified.to_string())
                                         .or_default()
-                                        .extend(fields.iter().cloned());
-                                    if let Some(unqualified) = table_id.rsplit('.').next()
-                                        && unqualified != table_id.as_str() {
-                                        selected_fields_by_table
-                                            .entry(unqualified.to_string())
-                                            .or_default()
-                                            .extend(fields);
-                                    }
+                                        .extend(fields);
                                 }
                             }
                         }
+                    }
 
-                        for object_name in action_request.referenced_object_names() {
-                            let normalized = common::normalize_identifier!(object_name.as_str());
-                            if !normalized.is_empty() {
-                                table_ids.insert(normalized.clone());
-                            }
-                            if let Some(unqualified) = object_name.rsplit('.').next() {
-                                let normalized_unqualified =
-                                    common::normalize_identifier!(unqualified);
-                                if !normalized_unqualified.is_empty() {
-                                    table_ids.insert(normalized_unqualified);
-                                }
-                            }
+                    let table_id = common::normalize_identifier!(&action_plan.table_id);
+                    if !table_id.is_empty() {
+                        table_ids.insert(table_id.clone());
+                        if let Some(unqualified) = table_id.rsplit('.').next() {
+                            table_ids.insert(common::normalize_identifier!(unqualified));
                         }
                     }
                 }
@@ -181,6 +175,42 @@ impl ServerApp {
 
         (table_ids, selected_fields_by_table)
 
+    }
+
+    fn replace_routine_variables_with_zero(sql: &str) -> String {
+        let mut output = String::with_capacity(sql.len());
+        let chars = sql.chars().collect::<Vec<_>>();
+        let mut index = 0usize;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+
+        while index < chars.len() {
+            let character = chars[index];
+            if character == '\'' && !in_double_quote {
+                in_single_quote = !in_single_quote;
+            } else if character == '"' && !in_single_quote {
+                in_double_quote = !in_double_quote;
+            }
+
+            if character == '@' && !in_single_quote && !in_double_quote {
+                let mut end = index + 1;
+                while end < chars.len()
+                    && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                if end > index + 1 {
+                    output.push('0');
+                    index = end;
+                    continue;
+                }
+            }
+
+            output.push(character);
+            index += 1;
+        }
+
+        output
     }
 
     fn collect_read_only_condition_fields(
