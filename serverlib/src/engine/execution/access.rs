@@ -4130,14 +4130,16 @@ pub fn load_live_rows_by_runtime_index_equality(
         },
     };
 
-    Some(materialize_relation_rows_with_limit(
+    let rows = materialize_relation_rows_with_limit(
         wal,
         table,
         schema,
         runtime_indexes,
         &access_plan,
         None,
-    ))
+    );
+
+    (!rows.is_empty()).then_some(rows)
 
 }
 
