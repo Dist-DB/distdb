@@ -116,12 +116,21 @@ impl ServerApp {
                     request
                         .sql
                         .to_ascii_lowercase()
+                        .chars()
+                        .filter(|character| !character.is_ascii_whitespace())
+                        .collect::<String>()
                         .contains(routine_token.as_str())
                 }) {
                     routine_ids.insert(common::normalize_identifier!(&routine_id));
                 }
             }
         }
+
+        log::info!(
+            "read-only routine scope discovery routine_ids={:?} catalog_count={}",
+            routine_ids,
+            catalogs.len(),
+        );
 
         if routine_ids.is_empty() {
             return (HashSet::new(), HashMap::new());
@@ -131,9 +140,11 @@ impl ServerApp {
         let mut selected_fields_by_table = HashMap::<String, HashSet<String>>::new();
 
         for catalog in catalogs.values() {
+
             for routine_id in routine_ids.iter().filter(|routine_id| {
                 catalog.stored_procedure(routine_id.as_str()).is_some()
             }) {
+
                 let Some(routine) = catalog.stored_procedure(routine_id) else {
                     continue;
                 };
@@ -144,6 +155,7 @@ impl ServerApp {
                 };
 
                 for action_sql in action_statements {
+
                     if !action_sql.trim_start().to_ascii_lowercase().starts_with("select") {
                         continue;
                     }
@@ -156,8 +168,10 @@ impl ServerApp {
                     };
 
                     if let Some(condition) = action_plan.where_condition.as_ref() {
+                        
                         let mut fields = HashSet::new();
                         Self::collect_read_only_condition_fields(condition, &mut fields);
+
                         if !fields.is_empty() {
                             let table_id = common::normalize_identifier!(&action_plan.table_id);
                             if !table_id.is_empty() {
@@ -174,6 +188,7 @@ impl ServerApp {
                                 }
                             }
                         }
+
                     }
 
                     let table_id = common::normalize_identifier!(&action_plan.table_id);
@@ -183,8 +198,11 @@ impl ServerApp {
                             table_ids.insert(common::normalize_identifier!(unqualified));
                         }
                     }
+
                 }
+
             }
+
         }
 
         (table_ids, selected_fields_by_table)
@@ -199,7 +217,9 @@ impl ServerApp {
         let mut in_double_quote = false;
 
         while index < chars.len() {
+
             let character = chars[index];
+            
             if character == '\'' && !in_double_quote {
                 in_single_quote = !in_single_quote;
             } else if character == '"' && !in_single_quote {
@@ -207,24 +227,29 @@ impl ServerApp {
             }
 
             if character == '@' && !in_single_quote && !in_double_quote {
+
                 let mut end = index + 1;
-                while end < chars.len()
-                    && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
                 {
                     end += 1;
                 }
+
                 if end > index + 1 {
                     output.push('0');
                     index = end;
                     continue;
                 }
+
             }
 
             output.push(character);
             index += 1;
+
         }
 
         output
+
     }
 
     fn collect_read_only_condition_fields(
@@ -232,14 +257,18 @@ impl ServerApp {
         fields: &mut HashSet<String>,
     ) {
         match condition {
-            SelectCondition::And(children) | SelectCondition::Or(children) => {
+            
+            SelectCondition::And(children) | 
+            SelectCondition::Or(children) => {
                 for child in children {
                     Self::collect_read_only_condition_fields(child, fields);
                 }
-            }
+            },
+
             SelectCondition::Not(child) => {
                 Self::collect_read_only_condition_fields(child, fields);
-            }
+            },
+
             SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. }) => {
                 let normalized = common::normalize_identifier!(field_name);
                 if !normalized.is_empty() {
@@ -251,9 +280,12 @@ impl ServerApp {
                         fields.insert(normalized_unqualified);
                     }
                 }
-            }
+            },
+
             SelectCondition::Predicate(_) => {}
+
         }
+
     }
 
     fn collect_read_only_equality_filter_fields(
@@ -262,11 +294,12 @@ impl ServerApp {
     ) {
 
         match condition {
+
             SelectCondition::And(children) => {
                 for child in children {
                     Self::collect_read_only_equality_filter_fields(child, fields);
                 }
-            }
+            },
 
             SelectCondition::Predicate(SelectPredicate::Comparison {
                 field_name,
@@ -284,19 +317,20 @@ impl ServerApp {
                         fields.insert(normalized_unqualified);
                     }
                 }
-            }
+            },
 
-            SelectCondition::Predicate(_) => {}
+            SelectCondition::Predicate(_) => {},
 
             SelectCondition::Or(children) => {
                 for child in children {
                     Self::collect_read_only_equality_filter_fields(child, fields);
                 }
-            }
+            },
 
             SelectCondition::Not(child) => {
                 Self::collect_read_only_equality_filter_fields(child, fields);
             }
+
         }
 
     }
@@ -307,11 +341,12 @@ impl ServerApp {
     ) {
 
         match condition {
+
             SelectCondition::And(children) => {
                 for child in children {
                     Self::collect_read_only_equality_filter_field_values(child, field_values);
                 }
-            }
+            },
 
             SelectCondition::Predicate(SelectPredicate::Comparison {
                 field_name,
@@ -332,19 +367,20 @@ impl ServerApp {
                             .insert(value.clone());
                     }
                 }
-            }
+            },
 
-            SelectCondition::Predicate(_) => {}
+            SelectCondition::Predicate(_) => {},
 
             SelectCondition::Or(children) => {
                 for child in children {
                     Self::collect_read_only_equality_filter_field_values(child, field_values);
                 }
-            }
+            },
 
             SelectCondition::Not(child) => {
                 Self::collect_read_only_equality_filter_field_values(child, field_values);
-            }
+            },
+
         }
 
     }
@@ -356,6 +392,7 @@ impl ServerApp {
         let mut selected_fields_by_table = HashMap::<String, HashSet<String>>::new();
 
         for request in parsed_requests {
+
             let Ok(read_plan) = parse_select_read_plan_from_statement(&request.sql) else {
                 continue;
             };
@@ -371,8 +408,8 @@ impl ServerApp {
             }
 
             let mut candidate_tables = Vec::new();
-
             let top_level_table = common::normalize_identifier!(&read_plan.table_id);
+
             if !top_level_table.is_empty() {
                 candidate_tables.push(top_level_table);
             }
@@ -394,6 +431,7 @@ impl ServerApp {
                     .or_default()
                     .extend(selected_fields.iter().cloned());
             }
+
         }
 
         selected_fields_by_table
@@ -408,6 +446,7 @@ impl ServerApp {
             HashMap::<String, HashMap<String, HashSet<Vec<u8>>>>::new();
 
         for request in parsed_requests {
+
             let Ok(read_plan) = parse_select_read_plan_from_statement(&request.sql) else {
                 continue;
             };
@@ -452,6 +491,7 @@ impl ServerApp {
                         .extend(values.iter().cloned());
                 }
             }
+
         }
 
         selected_field_values_by_table
@@ -469,7 +509,9 @@ impl ServerApp {
     fn sql_literal_for_field_bytes(value: &[u8]) -> String {
 
         if let Ok(text) = std::str::from_utf8(value) {
+            
             let trimmed = text.trim();
+            
             if !trimmed.is_empty() {
                 let is_numeric = trimmed
                     .chars()
@@ -494,6 +536,7 @@ impl ServerApp {
     }
 
     fn sql_column_definition_from_field_spec(field: &connector::FieldSpec) -> String {
+
         let mut definition = format!(
             "{} {}",
             Self::quoted_sql_identifier(&field.name),
@@ -514,6 +557,7 @@ impl ServerApp {
         }
 
         definition
+        
     }
 
     fn query_from_schema_command(
