@@ -85,7 +85,7 @@ impl ServerApp {
         catalogs: &HashMap<String, DatabaseCatalog>,
     ) -> (HashSet<String>, HashMap<String, HashSet<String>>) {
 
-        let routine_ids = parsed_requests.iter().flat_map(|request| {
+        let mut routine_ids = parsed_requests.iter().flat_map(|request| {
             let Ok(plan) = parse_select_read_plan_from_statement(&request.sql) else {
                 return Vec::new();
             };
@@ -108,6 +108,20 @@ impl ServerApp {
                 .filter(|name| !name.is_empty())
                 .collect::<Vec<_>>()
         }).collect::<HashSet<_>>();
+
+        for catalog in catalogs.values() {
+            for routine_id in catalog.stored_procedure_ids() {
+                let routine_token = format!("{}(", common::normalize_identifier!(&routine_id));
+                if parsed_requests.iter().any(|request| {
+                    request
+                        .sql
+                        .to_ascii_lowercase()
+                        .contains(routine_token.as_str())
+                }) {
+                    routine_ids.insert(common::normalize_identifier!(&routine_id));
+                }
+            }
+        }
 
         if routine_ids.is_empty() {
             return (HashSet::new(), HashMap::new());
