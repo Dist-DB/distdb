@@ -287,7 +287,9 @@ struct PostingPages {
 }
 
 impl PostingPages {
+
     fn insert_unique_sorted(&mut self, row_ref: NonZeroU64) {
+
         if self.len == 0 {
             self.inline_row_ref = Some(row_ref);
             self.len = 1;
@@ -338,8 +340,11 @@ impl PostingPages {
         }
 
         let search_result = self.pages[page_index].binary_search(&row_ref);
+
         match search_result {
-            Ok(_) => {}
+            
+            Ok(_) => {},
+            
             Err(insert_at) => {
                 let split_page = {
                     let page = &mut self.pages[page_index];
@@ -352,10 +357,12 @@ impl PostingPages {
                     self.pages.insert(page_index + 1, split_page);
                 }
             }
+
         }
     }
 
     fn remove(&mut self, row_ref: NonZeroU64) -> bool {
+
         if self.len == 1 {
             if self.inline_row_ref == Some(row_ref) {
                 self.inline_row_ref = None;
@@ -386,6 +393,7 @@ impl PostingPages {
         }
 
         false
+
     }
 
     fn is_empty(&self) -> bool {
@@ -397,6 +405,7 @@ impl PostingPages {
     }
 
     fn append_row_refs(&self, row_refs: &mut Vec<u64>, limit: Option<usize>) {
+
         if let Some(row_ref) = self.inline_row_ref {
             if let Some(row_ref) = unpack_row_ref(Some(row_ref)) {
                 row_refs.push(row_ref);
@@ -414,6 +423,7 @@ impl PostingPages {
                 }
             }
         }
+
     }
 
     fn iter(&self) -> impl Iterator<Item = NonZeroU64> + '_ {
@@ -425,6 +435,7 @@ impl PostingPages {
     fn only_row_ref(&self) -> Option<NonZeroU64> {
         (self.len == 1).then(|| self.iter().next()).flatten()
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -540,6 +551,7 @@ fn log_runtime_index_bootstrap_table_memory_profile(
         total_key_bytes,
         top_indexes,
     );
+
 }
 
 impl RuntimeIndexState {
@@ -1303,6 +1315,7 @@ impl RuntimeIndexState {
 
     }
 
+
     /// Build a clone carrying only the index metadata (no entries/postings),
     /// used when a table's index isn't referenced by the current query's
     /// known equality values; avoids an O(table rows) deep clone while still
@@ -1333,7 +1346,7 @@ impl RuntimeIndexState {
 /// Runtime indexes for all tables across all databases.
 #[derive(Debug, Clone)]
 pub struct RuntimeIndexStore {
-    indexes: AHashMap<String, DatatypeIndexor>,
+    indexes: AHashMap<String, Arc<DatatypeIndexor>>,
     incremental_persist_last_saved_ms: AHashMap<String, u64>,
 }
 
@@ -1419,12 +1432,12 @@ impl RuntimeIndexStore {
     }
 
     pub fn index(&self, index_id: &str) -> Option<&RuntimeIndexState> {
-        self.indexes.get(index_id).map(DatatypeIndexor::state)
+        self.indexes.get(index_id).map(|indexor| indexor.state())
     }
 
     pub fn index_for_table(&self, table_scope_id: &str, index_id: &str) -> Option<&RuntimeIndexState> {
         let scoped = scoped_index_id(table_scope_id, index_id);
-        self.indexes.get(&scoped).map(DatatypeIndexor::state)
+        self.indexes.get(&scoped).map(|indexor| indexor.state())
     }
 
     pub fn find_scoped_index_state_for_lookup<'a>(
@@ -1486,8 +1499,8 @@ impl RuntimeIndexStore {
     pub fn index_mut(&mut self, index_id: &str) -> &mut RuntimeIndexState {
         
         match self.indexes.entry(index_id.to_string()) {
-            Entry::Occupied(entry) => entry.into_mut().state_mut(),
-            Entry::Vacant(entry) => entry.insert(DatatypeIndexor::from_state(RuntimeIndexState::default())).state_mut(),
+            Entry::Occupied(entry) => Arc::make_mut(entry.into_mut()).state_mut(),
+            Entry::Vacant(entry) => Arc::make_mut(entry.insert(Arc::new(DatatypeIndexor::from_state(RuntimeIndexState::default())))).state_mut(),
         }
 
     }
@@ -1497,8 +1510,8 @@ impl RuntimeIndexStore {
         let scoped = scoped_index_id(table_scope_id, index_id);
 
         match self.indexes.entry(scoped) {
-            Entry::Occupied(entry) => entry.into_mut().state_mut(),
-            Entry::Vacant(entry) => entry.insert(DatatypeIndexor::from_state(RuntimeIndexState::default())).state_mut(),
+            Entry::Occupied(entry) => Arc::make_mut(entry.into_mut()).state_mut(),
+            Entry::Vacant(entry) => Arc::make_mut(entry.insert(Arc::new(DatatypeIndexor::from_state(RuntimeIndexState::default())))).state_mut(),
         }
 
     }
@@ -1542,14 +1555,14 @@ impl RuntimeIndexStore {
         }
 
         let index_id = index.index_id.0.clone();
-        self.indexes.entry(index_id).or_insert_with(|| DatatypeIndexor::from_state(RuntimeIndexState {
+        self.indexes.entry(index_id).or_insert_with(|| Arc::new(DatatypeIndexor::from_state(RuntimeIndexState {
             index: Some(index),
             numeric_kind: None,
             string_case_insensitive: false,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
             ordered_entry_keys: None,
-        }));
+        })));
 
     }
 
@@ -1560,14 +1573,14 @@ impl RuntimeIndexStore {
         }
 
         let index_id = scoped_index_id(table_scope_id, &index.index_id.0);
-        self.indexes.entry(index_id).or_insert_with(|| DatatypeIndexor::from_state(RuntimeIndexState {
+        self.indexes.entry(index_id).or_insert_with(|| Arc::new(DatatypeIndexor::from_state(RuntimeIndexState {
             index: Some(index.clone()),
             numeric_kind: None,
             string_case_insensitive: false,
             entries: AHashMap::new(),
             non_unique_row_refs: AHashMap::new(),
             ordered_entry_keys: None,
-        }));
+        })));
 
     }
 
@@ -1583,7 +1596,7 @@ impl RuntimeIndexStore {
 
         let scoped_id = scoped_index_id(table_scope_id, &index.index_id.0);
         self.indexes
-            .insert(scoped_id, DatatypeIndexor::for_field_kind(index.clone(), field_kind));
+            .insert(scoped_id, Arc::new(DatatypeIndexor::for_field_kind(index.clone(), field_kind)));
     }
 
     pub fn record_row(&mut self, index: &DatabaseIndex, row_map: &HashMap<String, Vec<u8>>) {
@@ -1635,6 +1648,7 @@ impl RuntimeIndexStore {
     where
         I: IntoIterator<Item = &'a DatabaseIndex>,
     {
+
         for index in indexes {
 
             if !self.should_track_index(index) {
@@ -1647,6 +1661,7 @@ impl RuntimeIndexStore {
             state.insert_with_row_ref(key, row_ref);
 
         }
+
     }
 
     pub fn remove_table_row<'a, I>(&mut self, indexes: I, row_map: &HashMap<String, Vec<u8>>)
@@ -1877,10 +1892,10 @@ impl RuntimeIndexStore {
         let realign_wal_records = runtime_index_realign_wal_records_on_bootstrap();
         let snapshot_data_dir = wal.data_dir_path();
 
-        if realign_wal_records
-            && let Some(data_dir) = snapshot_data_dir.as_ref()
-        {
+        if realign_wal_records && let Some(data_dir) = snapshot_data_dir.as_ref() {
+
             let derived_dir = data_dir.join("runtime-index");
+            
             if let Err(err) = std::fs::remove_dir_all(&derived_dir)
                 && err.kind() != std::io::ErrorKind::NotFound
             {
@@ -1890,9 +1905,11 @@ impl RuntimeIndexStore {
                     err,
                 );
             }
+            
             log::warn!(
                 "runtime index WAL realignment enabled; derived snapshots/caches will be rebuilt"
             );
+
         }
 
         log::info!(
@@ -1958,13 +1975,16 @@ impl RuntimeIndexStore {
                 let table_stream_id = resolve_table_stream_id_for_bootstrap(catalog, &table_id, wal);
 
                 if realign_wal_records {
+
                     match wal.validate_stream_record_positions(&table_stream_id) {
+                        
                         Ok(()) => log::info!(
                             "runtime index WAL positions already aligned database={} table={} stream={}",
                             database_id,
                             table_id,
                             table_stream_id,
                         ),
+                        
                         Err(err) => log::warn!(
                             "runtime index WAL positions misaligned database={} table={} stream={} reason={}",
                             database_id,
@@ -1972,6 +1992,7 @@ impl RuntimeIndexStore {
                             table_stream_id,
                             err,
                         ),
+
                     }
 
                     if let Err(err) = wal.realign_stream_records(&table_stream_id) {
@@ -1984,12 +2005,14 @@ impl RuntimeIndexStore {
                         );
                     } else {
                         match wal.validate_stream_record_positions(&table_stream_id) {
+
                             Ok(()) => log::info!(
                                 "runtime index WAL realigned and positions validated database={} table={} stream={}",
                                 database_id,
                                 table_id,
                                 table_stream_id,
                             ),
+
                             Err(err) => log::error!(
                                 "runtime index WAL realignment validation failed database={} table={} stream={} reason={}",
                                 database_id,
@@ -1997,8 +2020,10 @@ impl RuntimeIndexStore {
                                 table_stream_id,
                                 err,
                             ),
+
                         }
                     }
+
                 }
 
                 if table.indexes.is_empty() {
@@ -2022,7 +2047,9 @@ impl RuntimeIndexStore {
                 }
 
                 for index in &tracked_indexes {
+
                     self.register_index_for_table(&table_stream_id, index);
+
                     let field_kind = if index.field_names.len() == 1 {
                         table.schema.field(&index.field_names[0]).map(|field| field.field_type.clone())
                     } else if index.field_names.is_empty() && !index.field_name.is_empty() {
@@ -2030,38 +2057,50 @@ impl RuntimeIndexStore {
                     } else {
                         None
                     };
+
                     if let Some(field_kind) = field_kind {
                         self.select_indexor_for_table(&table_stream_id, index, &field_kind);
                     }
+
                     let state = self.index_mut_for_table(&table_stream_id, &index.index_id.0);
                     state.set_numeric_kind(numeric_kind_for_index(index, &table.schema));
+
                 }
 
                 let wal_fingerprint = snapshot_data_dir
                     .as_ref()
                     .and_then(|data_dir| RuntimeIndexSnapshotService::wal_stream_fingerprint(data_dir, &table_stream_id));
+
                 let mut warm_fields = Vec::with_capacity(tracked_indexes.len());
 
                 for index in &tracked_indexes {
+
                     if index.field_names.len() == 1 {
+
                         let normalized = common::normalize_identifier!(&index.field_names[0]);
                         if !normalized.is_empty() {
                             warm_fields.push(normalized);
                         }
+
                     } else if index.field_names.is_empty() && !index.field_name.is_empty() {
+
                         let normalized = common::normalize_identifier!(&index.field_name);
                         if !normalized.is_empty() {
                             warm_fields.push(normalized);
                         }
+
                     }
+
                 }
 
                 warm_fields.sort();
                 warm_fields.dedup();
 
                 if let Some(data_dir) = snapshot_data_dir.as_ref() {
+                    
                     let mut restored_index_ids = HashSet::new();
                     let mut restored_entry_count = 0usize;
+
                     let streamed_snapshot = RuntimeIndexSnapshotService::stream_runtime_index_snapshot_chunks(
                         data_dir,
                         &table,
@@ -2069,10 +2108,12 @@ impl RuntimeIndexStore {
                         &tracked_indexes,
                         wal_fingerprint,
                         |snapshot_index| {
+
                             let index = tracked_indexes
                                 .iter()
                                 .find(|index| index.index_id.0 == snapshot_index.index_id)
                                 .ok_or_else(|| format!("unexpected_index={}", snapshot_index.index_id))?;
+
                             let is_first_chunk = restored_index_ids.insert(index.index_id.0.clone());
                             let state = self.index_mut_for_table(&table_stream_id, &index.index_id.0);
 
@@ -2115,10 +2156,13 @@ impl RuntimeIndexStore {
                             }
 
                             Ok(())
+
                         },
+
                     );
 
                     if let Ok(metadata) = streamed_snapshot {
+
                         bootstrapped_tables += 1;
                         bootstrapped_indexes += tracked_indexes.len();
                         bootstrapped_rows += metadata.live_row_count;
@@ -2131,6 +2175,7 @@ impl RuntimeIndexStore {
                             restored_entry_count,
                             metadata.live_row_count,
                         );
+
                         log::info!(
                             "runtime index bootstrap table complete database={} table={} indexes={} live_rows={} mode=snapshot_stream elapsed_ms={}",
                             database_id,
@@ -2139,6 +2184,7 @@ impl RuntimeIndexStore {
                             metadata.live_row_count,
                             table_started_at.elapsed().as_millis(),
                         );
+
                         log_runtime_index_bootstrap_table_memory_profile(
                             self,
                             &table_stream_id,
@@ -2146,9 +2192,12 @@ impl RuntimeIndexStore {
                             &table_id,
                             &tracked_indexes,
                         );
+
                         mark_runtime_index_bootstrap_table_complete();
                         continue;
+                    
                     }
+
                 }
 
                 if let Some(snapshot_info) = snapshot_data_dir
@@ -2167,6 +2216,7 @@ impl RuntimeIndexStore {
                     let snapshot = &snapshot_info.snapshot;
                     bootstrapped_tables += 1;
                     bootstrapped_indexes += tracked_indexes.len();
+
                     let mut effective_live_row_count = snapshot.live_row_count;
                     let mut snapshot_table_mode = "snapshot";
 
@@ -2175,6 +2225,7 @@ impl RuntimeIndexStore {
                     let mut snapshot_postings_incomplete = false;
 
                     for index in &tracked_indexes {
+                        
                         let Some(snapshot_index) = snapshot
                             .indexes
                             .iter()
@@ -2719,7 +2770,7 @@ impl RuntimeIndexStore {
                     for index in table.indexes.values() {
                         if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
+                            scoped.indexes.insert(scoped_id, Arc::new(DatatypeIndexor::from_state(state.clone())));
                         }
                     }
                 });
@@ -2764,7 +2815,7 @@ impl RuntimeIndexStore {
 
                         if let Some(state) = self.index_for_table(&table_stream_id, &index.index_id.0) {
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
+                            scoped.indexes.insert(scoped_id, Arc::new(DatatypeIndexor::from_state(state.clone())));
                         }
                     }
                 });
@@ -2895,8 +2946,26 @@ impl RuntimeIndexStore {
                                 }
 
                                 let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                                scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(scoped_state));
+                                scoped.indexes.insert(scoped_id, Arc::new(DatatypeIndexor::from_state(scoped_state)));
                                 continue;
+                            }
+
+                            if !index.is_unique_key() && known_values.is_none() {
+                                if !state.has_row_ref_postings() {
+                                    log::debug!(
+                                        "runtime index scoped clone skipped selected non-unique index without postings table={} stream={} index_id={} entries={}",
+                                        table.table_id,
+                                        table_stream_id,
+                                        index.index_id.0,
+                                        state.cardinality(),
+                                    );
+                                    continue;
+                                }
+                                let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
+                                if let Some(shared_indexor) = self.indexes.get(&scoped_id).cloned() {
+                                    scoped.indexes.insert(scoped_id, shared_indexor);
+                                    continue;
+                                }
                             }
 
                             if !index.is_unique_key() && !state.has_row_ref_postings() {
@@ -2927,7 +2996,7 @@ impl RuntimeIndexStore {
                             scoped_state.set_numeric_kind(numeric_kind_for_index(index, &table.schema));
 
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
-                            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(scoped_state));
+                            scoped.indexes.insert(scoped_id, Arc::new(DatatypeIndexor::from_state(scoped_state)));
                         }
                     }
                 });
@@ -2969,14 +3038,14 @@ impl RuntimeIndexStore {
                         let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
                         scoped.indexes.insert(
                             scoped_id,
-                            DatatypeIndexor::from_state(RuntimeIndexState {
+                            Arc::new(DatatypeIndexor::from_state(RuntimeIndexState {
                                 index: Some(index.clone()),
                                 numeric_kind: None,
                                 string_case_insensitive: false,
                                 entries: AHashMap::new(),
                                 non_unique_row_refs: AHashMap::new(),
                                 ordered_entry_keys: None,
-                            }),
+                            })),
                         );
                     }
                 });
@@ -3095,12 +3164,12 @@ fn runtime_index_store_for_table(
         let scoped_id = scoped_index_id(table_stream_id, &index.index_id.0);
 
         if let Some(state) = store.index_for_table(table_stream_id, &index.index_id.0) {
-            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
+            scoped.indexes.insert(scoped_id, Arc::new(DatatypeIndexor::from_state(state.clone())));
             continue;
         }
 
         if let Some(state) = store.index(&index.index_id.0) {
-            scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(state.clone()));
+            scoped.indexes.insert(scoped_id, Arc::new(DatatypeIndexor::from_state(state.clone())));
         }
     }
 
