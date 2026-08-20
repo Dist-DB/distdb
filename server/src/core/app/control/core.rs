@@ -272,23 +272,24 @@ impl ServerApp {
     }
 
     fn routine_comparison_fields(sql: &str) -> HashSet<String> {
+
         let tokens = sql
             .split_whitespace()
             .map(|token| token.trim_matches(|character: char| {
                 character == '`' || character == ',' || character == ';' || character == ')'
             }))
             .collect::<Vec<_>>();
+        
         let mut fields = HashSet::new();
 
         for window in tokens.windows(2) {
-            if matches!(window[1], ">" | ">=" | "<" | "<=") {
-                if let Some(field) = window[0].rsplit('.').next() {
+            if matches!(window[1], ">" | ">=" | "<" | "<=")
+                && let Some(field) = window[0].rsplit('.').next() {
                     let normalized = common::normalize_identifier!(field);
                     if !normalized.is_empty() {
                         fields.insert(normalized);
                     }
                 }
-            }
         }
 
         fields
