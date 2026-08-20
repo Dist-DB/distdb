@@ -575,6 +575,15 @@ pub fn join_condition_matches_provider(
             right_field_name,
         }) => compare_provider_fields(provider, left_field_name, right_field_name, op),
 
+        SelectCondition::Predicate(SelectPredicate::Comparison {
+            field_name,
+            op,
+            value,
+        }) => provider
+            .value(field_name)
+            .map(|actual| compare_row_value(actual, value, op))
+            .unwrap_or(false),
+
         SelectCondition::And(children) => children
             .iter()
             .all(|child| join_condition_matches_provider(provider, child)),
