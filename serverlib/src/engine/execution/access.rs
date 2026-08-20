@@ -4113,6 +4113,34 @@ pub fn load_live_rows_by_equality(
 
 }
 
+pub fn load_live_rows_by_runtime_index_equality(
+    wal: &ConcurrentWalManager,
+    table: &DatabaseTable,
+    schema: &TableSchema,
+    runtime_indexes: &RuntimeIndexStore,
+    field_name: &str,
+    lookup_value: &[u8],
+) -> Option<Vec<(u64, HashMap<String, Vec<u8>>)>> {
+
+    let index_id = single_field_index_id(table, field_name)?;
+    let access_plan = RelationAccessPlan {
+        strategy: RelationAccessStrategy::RuntimeIndexLookup {
+            index_id,
+            lookup_key: vec![lookup_value.to_vec()],
+        },
+    };
+
+    Some(materialize_relation_rows_with_limit(
+        wal,
+        table,
+        schema,
+        runtime_indexes,
+        &access_plan,
+        None,
+    ))
+
+}
+
 pub fn load_live_rows_by_equality_with_limit(
     wal: &ConcurrentWalManager,
     table_stream_id: &str,

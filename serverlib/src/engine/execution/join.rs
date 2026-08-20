@@ -13,7 +13,8 @@ use super::access::{
     build_relation_probe_index, collect_indexable_equality_filters_for_schema,
     collect_indexable_in_list_filter_for_schema,
     collect_indexable_like_filter_for_schema, collect_indexable_range_filters_for_schema,
-    field_has_single_column_index, load_live_rows_by_equality, materialize_relation_rows,
+    field_has_single_column_index, load_live_rows_by_equality,
+    load_live_rows_by_runtime_index_equality, materialize_relation_rows,
     plan_relation_access,
     EqualityProbeSource,
 };
@@ -281,14 +282,24 @@ where
 
                     for probe_key in probe_keys {
 
-                        for (row_id, row_map) in load_live_rows_by_equality(
+                        let probed_rows = load_live_rows_by_runtime_index_equality(
+                            wal,
+                            scoped_right_table,
+                            right_schema,
+                            runtime_indexes,
+                            right_join_field_name,
+                            &probe_key,
+                        )
+                        .unwrap_or_else(|| load_live_rows_by_equality(
                             wal,
                             right_table_stream_id,
                             &scoped_right_table.table_id,
                             right_schema,
                             right_join_field_name,
                             &probe_key,
-                        ) {
+                        ));
+
+                        for (row_id, row_map) in probed_rows {
                             if !seen_right_row_ids.insert(row_id) {
                                 continue;
                             }
