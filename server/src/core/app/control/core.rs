@@ -298,8 +298,9 @@ impl ServerApp {
 
     fn replace_routine_variables_with_zero(sql: &str) -> String {
 
-        let mut output = String::with_capacity(sql.len());
         let chars = sql.chars().collect::<Vec<_>>();
+
+        let mut output = String::with_capacity(sql.len());
         let mut index = 0usize;
         let mut in_single_quote = false;
         let mut in_double_quote = false;

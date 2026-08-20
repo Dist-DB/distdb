@@ -2835,7 +2835,8 @@ impl RuntimeIndexStore {
                                 && let Some(values) = known_values
                                 && !values.is_empty()
                             {
-                                let scoped_state = state.clone_scoped_to_field_values(values);
+                                let mut scoped_state = state.clone_scoped_to_field_values(values);
+                                scoped_state.set_numeric_kind(numeric_kind_for_index(index, &table.schema));
 
                                 if !scoped_state.has_row_ref_postings() {
                                     log::debug!(
@@ -2864,7 +2865,7 @@ impl RuntimeIndexStore {
                                 continue;
                             }
 
-                            let scoped_state = if index.is_unique_key()
+                            let mut scoped_state = if index.is_unique_key()
                                 && index_single_field.is_some()
                                 && !field_is_selected
                             {
@@ -2878,6 +2879,7 @@ impl RuntimeIndexStore {
                             } else {
                                 state.clone()
                             };
+                            scoped_state.set_numeric_kind(numeric_kind_for_index(index, &table.schema));
 
                             let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
                             scoped.indexes.insert(scoped_id, DatatypeIndexor::from_state(scoped_state));
