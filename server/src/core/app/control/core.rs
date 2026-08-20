@@ -15,7 +15,7 @@ use serverlib::{
     current_runtime_index_bootstrap_progress, primary_key_index,
     load_live_row_count_checkpoint,
     load_live_row_count, parse_select_read_plan_from_statement,
-    parse_mysql8_sql_requests,
+    parse_mysql8_sql_requests, parse_create_function_action_statements,
 };
 
 use crate::core::app::helpers::{
@@ -150,9 +150,20 @@ impl ServerApp {
                 };
 
                 let artifact = routine.compiled_artifact_for_invocation();
-                let Some(action_statements) = artifact.ir.action_statements() else {
-                    continue;
-                };
+                let action_statements = artifact
+                    .ir
+                    .action_statements()
+                    .map(|statements| statements.to_vec())
+                    .or_else(|| parse_create_function_action_statements(&routine.sql).ok())
+                    .unwrap_or_default();
+
+                if action_statements.is_empty() {
+                    log::info!(
+                        "read-only routine scope action discovery empty routine={} sql_prefix={}",
+                        routine.procedure_id,
+                        routine.sql.chars().take(48).collect::<String>(),
+                    );
+                }
 
                 for action_sql in action_statements {
 
@@ -160,7 +171,8 @@ impl ServerApp {
                         continue;
                     }
 
-                    let normalized_action_sql = Self::replace_routine_variables_with_zero(action_sql);
+                    let normalized_action_sql = Self::replace_routine_variables_with_zero(&action_sql);
+                    
                     let Ok(action_plan) = parse_select_read_plan_from_statement(
                         normalized_action_sql.as_str(),
                     ) else {
@@ -210,6 +222,7 @@ impl ServerApp {
     }
 
     fn replace_routine_variables_with_zero(sql: &str) -> String {
+
         let mut output = String::with_capacity(sql.len());
         let chars = sql.chars().collect::<Vec<_>>();
         let mut index = 0usize;
@@ -881,6 +894,7 @@ impl ServerApp {
         let first_schema_wal_ts = self.first_wal_record_timestamp_for_database(&database_name);
 
         for (target, _) in create_user_targets.iter().zip(parsed_requests.iter()) {
+
             let (user_id, password, if_not_exists) = target
                 .as_ref()
                 .expect("create user targets are pre-validated as Some");
@@ -1461,22 +1475,28 @@ impl ServerApp {
             &parsed_requests,
             &catalogs,
         );
+
         scope_table_ids.extend(routine_table_ids);
+        
         let mut selected_fields_by_table =
             Self::read_only_runtime_index_scope_selected_fields(&parsed_requests);
+
         for (table_id, fields) in routine_selected_fields {
             selected_fields_by_table
                 .entry(table_id)
                 .or_default()
                 .extend(fields);
         }
+
         let selected_field_values_by_table =
             Self::read_only_runtime_index_scope_selected_field_values(&parsed_requests);
+
         let scope_table_count = scope_table_ids.len();
         let selected_field_count = selected_fields_by_table
             .values()
             .map(HashSet::len)
             .sum::<usize>();
+
         let scope_preview = if scope_table_ids.is_empty() {
             "<none>".to_string()
         } else {
@@ -1487,6 +1507,7 @@ impl ServerApp {
         };
 
         let runtime_clone_started_at = Instant::now();
+
         let mut runtime_indexes = self
             .runtime_indexes
             .clone_for_tables_unique_and_selected_single_field_indexes_with_values(
@@ -1506,7 +1527,9 @@ impl ServerApp {
             selected_field_values_by_table.len(),
         );
 
-        if catalog_clone_ms > 50 || runtime_clone_ms > 50 {
+        if catalog_clone_ms > 50 || 
+            runtime_clone_ms > 50 
+        {
             log::info!(
                 "read-only clone timing request_id={} catalog_clone_ms={} runtime_index_clone_ms={} scope_tables={} scope_preview={} runtime_mode={}",
                 request.request_id,
@@ -1533,6 +1556,7 @@ impl ServerApp {
                 format!("invalid session '{}'", session_id),
             ));
         };
+
         let mut session_variable_overrides = self.session_variable_overrides_for(session_id);
         let session_ctx_ms = session_ctx_started_at.elapsed().as_millis() as u64;
 
@@ -1549,8 +1573,8 @@ impl ServerApp {
             &session_ctx,
             &mut session_variable_overrides,
         );
-        let dispatch_ms = dispatch_started_at.elapsed().as_millis() as u64;
 
+        let dispatch_ms = dispatch_started_at.elapsed().as_millis() as u64;
         let total_ms = request_started_at.elapsed().as_millis() as u64;
 
         if total_ms >= 100 {
@@ -1610,6 +1634,7 @@ impl ServerApp {
                     .ok()
                     .and_then(|database_id| self.catalogs.get(&database_id.0))
             })?;
+
         let table = catalog.table(&read_plan.table_id)?;
 
         let scoped_stream_id = catalog
@@ -1736,16 +1761,23 @@ impl ServerApp {
         }
 
         let object_name = statement.object_name.as_deref()?;
+        
         let (catalog, normalized_table_id) = if query.database_id.trim().is_empty() {
+            
             let (database_name, object_id) = object_name.rsplit_once('.')?;
             let catalog = self.resolve_catalog_by_name(database_name)?;
             (catalog, common::normalize_identifier!(object_id))
+
         } else if let Some((database_name, object_id)) = object_name.rsplit_once('.') {
+            
             let catalog = self.resolve_catalog_by_name(database_name)?;
             (catalog, common::normalize_identifier!(object_id))
+
         } else {
+            
             let catalog = self.resolve_catalog_by_name(query.database_id.as_str())?;
             (catalog, common::normalize_identifier!(object_name))
+
         };
 
         let table = catalog.table(&normalized_table_id)?;

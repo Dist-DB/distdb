@@ -219,6 +219,7 @@ pub use engine::sql::{
 	parse_if_else_end_plan_from_create_procedure_statement,
 	parse_if_else_end_plan_from_statement,
 	parse_create_function_return_type_from_statement,
+	parse_create_function_action_statements,
 	parse_create_procedure_parameter_declarations_from_statement,
 	parse_create_procedure_parameter_names_from_statement,
 	bind_call_procedure_argument_bindings,
