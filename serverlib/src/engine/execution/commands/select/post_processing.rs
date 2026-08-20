@@ -111,8 +111,24 @@ pub fn apply_select_post_processing(
         let mut order_indexes = Vec::with_capacity(read_plan.order_by.len());
 
         for item in &read_plan.order_by {
-            if let Some(index) = column_indexes.get(&item.field_name) {
-                order_indexes.push((*index, item.descending));
+            let index = column_indexes
+                .get(&item.field_name)
+                .copied()
+                .or_else(|| {
+                    let (_, unqualified) = item.field_name.rsplit_once('.')?;
+                    let matches = columns
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, column)| {
+                            column.field_name.eq_ignore_ascii_case(unqualified)
+                        })
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    (matches.len() == 1).then_some(matches[0])
+                });
+
+            if let Some(index) = index {
+                order_indexes.push((index, item.descending));
             }
         }
 
