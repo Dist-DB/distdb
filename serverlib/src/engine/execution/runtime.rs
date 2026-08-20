@@ -583,17 +583,30 @@ pub fn join_condition_matches_provider(
 
 pub fn join_condition_field_names(join: &SelectJoin) -> Option<(&str, &str)> {
 
-    match &join.on_condition {
+    fn find_equality(condition: &SelectCondition) -> Option<(&str, &str)> {
         
-        SelectCondition::Predicate(SelectPredicate::FieldComparison {
-            left_field_name,
-            op: SelectComparisonOp::Eq,
-            right_field_name,
-        }) => Some((left_field_name.as_str(), right_field_name.as_str())),
+        match condition {
+            
+            SelectCondition::Predicate(SelectPredicate::FieldComparison {
+                left_field_name,
+                op: SelectComparisonOp::Eq,
+                right_field_name,
+            }) => Some((left_field_name.as_str(), right_field_name.as_str())),
+            
+            SelectCondition::And(children) | 
+            SelectCondition::Or(children) => {
+                children.iter().find_map(find_equality)
+            }
+            
+            SelectCondition::Not(child) => find_equality(child),
+            
+            _ => None,
 
-        _ => None,
+        }
 
     }
+
+    find_equality(&join.on_condition)
 
 }
 

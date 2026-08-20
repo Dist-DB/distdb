@@ -144,42 +144,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match editor.readline(&prompt) {
 
             Ok(line) => {
-                accumulated_command.push_str(&line);
-                accumulated_command.push('\n');
+                let pasted_lines = line.split('\n').collect::<Vec<_>>();
+                for pasted_line in pasted_lines {
+                    accumulated_command.push_str(pasted_line);
+                    accumulated_command.push('\n');
 
-                match parse_console_command_with_delimiter(
-                    &accumulated_command,
-                    &active_delimiter,
-                ) {
+                    match parse_console_command_with_delimiter(
+                        &accumulated_command,
+                        &active_delimiter,
+                    ) {
+                        Ok(Some(command)) => {
+                            let _ = editor.add_history_entry(accumulated_command.trim());
+                            accumulated_command.clear();
 
-                    Ok(Some(command)) => {
-                        // Add completed command to history (trimmed, without trailing newline)
-                        let _ = editor.add_history_entry(accumulated_command.trim());
-                        accumulated_command.clear();
+                            if let ConsoleCommand::SetDelimiter(next_delimiter) = &command {
+                                active_delimiter = next_delimiter.clone();
+                            }
 
-                        if let ConsoleCommand::SetDelimiter(next_delimiter) = &command {
-                            active_delimiter = next_delimiter.clone();
-                        }
-
-                        match session.execute(command) {
-                            Ok(should_continue) => {
-                                if !should_continue {
-                                    break;
+                            match session.execute(command) {
+                                Ok(should_continue) => {
+                                    if !should_continue {
+                                        return Ok(());
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("error: {error}");
                                 }
                             }
-                            Err(error) => {
-                                eprintln!("error: {error}");
-                            }
+                        }
+
+                        Ok(None) => {}
+
+                        Err(error) => {
+                            accumulated_command.clear();
+                            println!("error: {error}");
                         }
                     }
-
-                    Ok(None) => {}
-
-                    Err(error) => {
-                        accumulated_command.clear();
-                        println!("error: {error}");
-                    }
-
                 }
             }
 

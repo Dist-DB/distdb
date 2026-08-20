@@ -129,6 +129,10 @@ pub fn parse_console_command_with_delimiter(
         return Ok(None);
     }
 
+    if trimmed == delimiter {
+        return Ok(None);
+    }
+
     if let Some(next_delimiter) = parse_delimiter_directive(trimmed, delimiter)? {
         return Ok(Some(ConsoleCommand::SetDelimiter(next_delimiter)));
     }

@@ -359,6 +359,7 @@ impl PostingPages {
             }
 
         }
+
     }
 
     fn remove(&mut self, row_ref: NonZeroU64) -> bool {
@@ -654,20 +655,24 @@ impl RuntimeIndexState {
             },
 
             Entry::Occupied(mut entry) => match *entry.get() {
+
                 Some(existing_row_ref) if existing_row_ref == row_ref => {}
+
                 Some(existing_row_ref) => {
                     let mut postings = PostingPages::default();
                     postings.insert_unique_sorted(existing_row_ref);
                     postings.insert_unique_sorted(row_ref);
                     *entry.get_mut() = None;
                     self.non_unique_row_refs.insert(shared_key, postings);
-                }
+                },
+
                 None => {
                     self.non_unique_row_refs
                         .entry(shared_key)
                         .or_default()
                         .insert_unique_sorted(row_ref);
                 }
+
             },
 
         }
@@ -696,7 +701,9 @@ impl RuntimeIndexState {
             },
 
             _ => {
+
                 let mut postings = PostingPages::default();
+
                 for row_ref in row_refs {
                     if let Some(row_ref) = pack_row_ref(*row_ref) {
                         postings.insert_unique_sorted(row_ref);
@@ -711,6 +718,7 @@ impl RuntimeIndexState {
                     self.entries.insert(Arc::clone(&shared_key), None);
                     self.non_unique_row_refs.insert(shared_key, postings);
                 }
+
             }
 
         }
@@ -792,6 +800,7 @@ impl RuntimeIndexState {
                     ordered_entry_keys.remove(encoded_key);
                 }
             }
+
         }
 
     }
@@ -849,9 +858,12 @@ impl RuntimeIndexState {
             .collect();
 
         if !is_unique_key {
+
             // Multiple rows can legitimately share the same non-unique key; keep
             // every row ref instead of collapsing to a single entry per key.
+
             for (key, refs) in row_refs {
+
                 let Some(encoded) = self.encode_key(&key) else {
                     continue;
                 };
@@ -887,6 +899,7 @@ impl RuntimeIndexState {
         }
 
         self.refresh_ordered_entry_keys();
+
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
@@ -1458,9 +1471,10 @@ impl RuntimeIndexStore {
                     }
 
                 let normalized_scoped_id = common::normalize_identifier!(scoped_id);
-                if normalized_scoped_id == normalized_index_id
-                    || normalized_scoped_id.ends_with(&normalized_index_id)
-                    || normalized_scoped_id.contains(&normalized_index_id)
+
+                if normalized_scoped_id == normalized_index_id ||
+                    normalized_scoped_id.ends_with(&normalized_index_id) ||
+                    normalized_scoped_id.contains(&normalized_index_id)
                 {
                     return Some((scoped_id.as_str(), state));
                 }

@@ -35,6 +35,14 @@ fn parse_custom_delimiter_executes_sql_with_suffix() {
 }
 
 #[test]
+fn parse_standalone_delimiter_is_ignored_after_pasted_script() {
+	assert!(matches!(
+		parse_console_command_with_delimiter(";", TEMP_CONNECT_USER, ";"),
+		Ok(None)
+	));
+}
+
+#[test]
 fn comment_lines_do_not_block_following_directives() {
 
 	assert!(matches!(
