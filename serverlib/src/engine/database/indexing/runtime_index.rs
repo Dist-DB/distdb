@@ -2993,23 +2993,27 @@ impl RuntimeIndexStore {
                                 continue;
                             }
 
+                            let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
+                            if index.is_unique_key()
+                                && index_single_field.is_some()
+                                && field_is_selected
+                                && let Some(shared_indexor) = self.indexes.get(&scoped_id).cloned()
+                            {
+                                // Join keys arrive from the left input at execution time, so
+                                // metadata-only unique indexes cannot serve these probes.
+                                scoped.indexes.insert(scoped_id, shared_indexor);
+                                continue;
+                            }
+
                             let mut scoped_state = if index.is_unique_key()
                                 && index_single_field.is_some()
                                 && !field_is_selected
                             {
-                                // Single-field unique/primary index not referenced by any
-                                // known equality filter for this request: keep metadata
-                                // only rather than deep-cloning the full O(table rows)
-                                // posting map. Composite-key unique indexes still fall
-                                // through to a full clone since we can't cheaply scope
-                                // a multi-field match here.
                                 state.metadata_only_clone()
                             } else {
                                 state.clone()
                             };
                             scoped_state.set_numeric_kind(numeric_kind_for_index(index, &table.schema));
-
-                            let scoped_id = scoped_index_id(&table_stream_id, &index.index_id.0);
                             scoped.indexes.insert(scoped_id, Arc::new(DatatypeIndexor::from_state(scoped_state)));
                         }
                     }

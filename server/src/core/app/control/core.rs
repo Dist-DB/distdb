@@ -283,7 +283,7 @@ impl ServerApp {
         let mut fields = HashSet::new();
 
         for window in tokens.windows(2) {
-            if matches!(window[1], ">" | ">=" | "<" | "<=")
+            if matches!(window[1], "=" | ">" | ">=" | "<" | "<=")
                 && let Some(field) = window[0].rsplit('.').next() {
                     let normalized = common::normalize_identifier!(field);
                     if !normalized.is_empty() {
