@@ -147,9 +147,16 @@ impl ServerApp {
                                 let table_id = common::normalize_identifier!(&action_plan.table_id);
                                 if !table_id.is_empty() {
                                     selected_fields_by_table
-                                        .entry(table_id)
+                                        .entry(table_id.clone())
                                         .or_default()
-                                        .extend(fields);
+                                        .extend(fields.iter().cloned());
+                                    if let Some(unqualified) = table_id.rsplit('.').next()
+                                        && unqualified != table_id.as_str() {
+                                        selected_fields_by_table
+                                            .entry(unqualified.to_string())
+                                            .or_default()
+                                            .extend(fields);
+                                    }
                                 }
                             }
                         }

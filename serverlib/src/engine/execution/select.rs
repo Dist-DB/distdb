@@ -1080,7 +1080,9 @@ fn split_select_into_target(statement: &str) -> Result<(String, Option<String>),
 }
 
 fn parse_local_function_set_assignment(statement: &str) -> Result<(String, &str), String> {
+
     let body = statement["set".len()..].trim();
+    
     let eq_index = body.find('=').ok_or_else(|| {
         "local function assignment parse failed: SET statement is missing '='".to_string()
     })?;
@@ -1243,12 +1245,16 @@ fn rewrite_local_function_expression_literals(
             }
 
             i = end;
+            
             continue;
+
         }
 
         if ch.is_ascii_alphabetic() || ch == '_' {
+
             let start = i;
             let mut end = i + 1;
+            
             while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
                 end += 1;
             }
@@ -1263,11 +1269,14 @@ fn rewrite_local_function_expression_literals(
             }
 
             i = end;
+
             continue;
+
         }
 
         output.push(ch);
         i += 1;
+
     }
 
     if in_single_quote || in_double_quote {
@@ -1290,7 +1299,9 @@ fn local_sql_literal_for_bytes(value: &[u8]) -> String {
 
         let mut saw_digit = false;
         let mut saw_dot = false;
+
         let is_numeric = trimmed.chars().enumerate().all(|(idx, ch)| {
+
             if ch.is_ascii_digit() {
                 saw_digit = true;
                 return true;
@@ -1306,6 +1317,7 @@ fn local_sql_literal_for_bytes(value: &[u8]) -> String {
             }
 
             false
+
         });
 
         if is_numeric && saw_digit {
@@ -1313,6 +1325,7 @@ fn local_sql_literal_for_bytes(value: &[u8]) -> String {
         }
 
         return format!("'{}'", trimmed.replace('\\', "\\\\").replace('\'', "\\'"));
+        
     }
 
     let hex = value
