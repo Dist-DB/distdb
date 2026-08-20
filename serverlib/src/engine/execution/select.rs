@@ -754,9 +754,8 @@ pub fn execute_sql_function_with_lookup(
     let (database_qualifier, function_id) = split_qualified_object_name(&raw_name);
 
     // A qualifier names another database, whose routines live in its own catalog.
-    if let Some(database_name) = database_qualifier.as_deref() {
-
-        if let Some(foreign_catalog) = resolve_foreign_catalog(database_name)
+    if let Some(database_name) = database_qualifier.as_deref()
+        && let Some(foreign_catalog) = resolve_foreign_catalog(database_name)
             && let Some(local_function) = foreign_catalog.stored_procedure(&function_id) {
                 return execute_local_sql_function_with_lookup(
                     &foreign_catalog,
@@ -767,8 +766,6 @@ pub fn execute_sql_function_with_lookup(
                     lookup,
                 );
             }
-
-    }
 
     if let Some(local_function) = catalog.stored_procedure(&function_id) {
         return execute_local_sql_function_with_lookup(

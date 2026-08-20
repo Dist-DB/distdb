@@ -83,7 +83,7 @@ impl ServerApp {
     fn read_only_runtime_index_scope_routine_tables(
         parsed_requests: &[SqlRequest],
         catalogs: &HashMap<String, DatabaseCatalog>,
-    ) -> HashSet<String> {
+    ) -> (HashSet<String>, HashMap<String, HashSet<String>>) {
 
         let routine_ids = parsed_requests.iter().flat_map(|request| {
             let Ok(plan) = parse_select_read_plan_from_statement(&request.sql) else {
@@ -110,23 +110,22 @@ impl ServerApp {
         }).collect::<HashSet<_>>();
 
         if routine_ids.is_empty() {
-            return HashSet::new();
+            return (HashSet::new(), HashMap::new());
         }
 
         let mut table_ids = HashSet::new();
+        let mut selected_fields_by_table = HashMap::<String, HashSet<String>>::new();
 
         for catalog in catalogs.values() {
             for routine_id in routine_ids.iter().filter(|routine_id| {
                 catalog.stored_procedure(routine_id.as_str()).is_some()
             }) {
-                let Some(routine) = catalog.stored_procedure(&routine_id) else {
+                let Some(routine) = catalog.stored_procedure(routine_id) else {
                     continue;
                 };
 
-                let Some(action_statements) = routine
-                    .compiled_ir()
-                    .and_then(|ir| ir.action_statements())
-                else {
+                let artifact = routine.compiled_artifact_for_invocation();
+                let Some(action_statements) = artifact.ir.action_statements() else {
                     continue;
                 };
 
@@ -139,6 +138,22 @@ impl ServerApp {
                     };
 
                     for action_request in action_requests {
+                        if let Ok(action_plan) = parse_select_read_plan_from_statement(action_sql)
+                            && let Some(condition) = action_plan.where_condition.as_ref()
+                        {
+                            let mut fields = HashSet::new();
+                            Self::collect_read_only_condition_fields(condition, &mut fields);
+                            if !fields.is_empty() {
+                                let table_id = common::normalize_identifier!(&action_plan.table_id);
+                                if !table_id.is_empty() {
+                                    selected_fields_by_table
+                                        .entry(table_id)
+                                        .or_default()
+                                        .extend(fields);
+                                }
+                            }
+                        }
+
                         for object_name in action_request.referenced_object_names() {
                             let normalized = common::normalize_identifier!(object_name.as_str());
                             if !normalized.is_empty() {
@@ -157,8 +172,37 @@ impl ServerApp {
             }
         }
 
-        table_ids
+        (table_ids, selected_fields_by_table)
 
+    }
+
+    fn collect_read_only_condition_fields(
+        condition: &SelectCondition,
+        fields: &mut HashSet<String>,
+    ) {
+        match condition {
+            SelectCondition::And(children) | SelectCondition::Or(children) => {
+                for child in children {
+                    Self::collect_read_only_condition_fields(child, fields);
+                }
+            }
+            SelectCondition::Not(child) => {
+                Self::collect_read_only_condition_fields(child, fields);
+            }
+            SelectCondition::Predicate(SelectPredicate::Comparison { field_name, .. }) => {
+                let normalized = common::normalize_identifier!(field_name);
+                if !normalized.is_empty() {
+                    fields.insert(normalized);
+                }
+                if let Some(unqualified) = field_name.rsplit('.').next() {
+                    let normalized_unqualified = common::normalize_identifier!(unqualified);
+                    if !normalized_unqualified.is_empty() {
+                        fields.insert(normalized_unqualified);
+                    }
+                }
+            }
+            SelectCondition::Predicate(_) => {}
+        }
     }
 
     fn collect_read_only_equality_filter_fields(
@@ -1318,12 +1362,19 @@ impl ServerApp {
         let catalog_clone_ms = catalog_clone_started_at.elapsed().as_millis() as u64;
 
         let mut scope_table_ids = Self::read_only_runtime_index_scope_table_ids(&parsed_requests);
-        scope_table_ids.extend(Self::read_only_runtime_index_scope_routine_tables(
+        let (routine_table_ids, routine_selected_fields) = Self::read_only_runtime_index_scope_routine_tables(
             &parsed_requests,
             &catalogs,
-        ));
-        let selected_fields_by_table =
+        );
+        scope_table_ids.extend(routine_table_ids);
+        let mut selected_fields_by_table =
             Self::read_only_runtime_index_scope_selected_fields(&parsed_requests);
+        for (table_id, fields) in routine_selected_fields {
+            selected_fields_by_table
+                .entry(table_id)
+                .or_default()
+                .extend(fields);
+        }
         let selected_field_values_by_table =
             Self::read_only_runtime_index_scope_selected_field_values(&parsed_requests);
         let scope_table_count = scope_table_ids.len();
