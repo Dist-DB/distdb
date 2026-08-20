@@ -172,10 +172,15 @@ impl ServerApp {
                     }
 
                     let normalized_action_sql = Self::replace_routine_variables_with_zero(&action_sql);
-                    
+
                     let Ok(action_plan) = parse_select_read_plan_from_statement(
                         normalized_action_sql.as_str(),
                     ) else {
+                        log::info!(
+                            "read-only routine scope action parse failed routine={} action_prefix={}",
+                            routine.procedure_id,
+                            action_sql.chars().take(80).collect::<String>(),
+                        );
                         continue;
                     };
 
@@ -185,12 +190,16 @@ impl ServerApp {
                         Self::collect_read_only_condition_fields(condition, &mut fields);
 
                         if !fields.is_empty() {
+
                             let table_id = common::normalize_identifier!(&action_plan.table_id);
+
                             if !table_id.is_empty() {
+                                
                                 selected_fields_by_table
                                     .entry(table_id.clone())
                                     .or_default()
                                     .extend(fields.iter().cloned());
+
                                 if let Some(unqualified) = table_id.rsplit('.').next()
                                     && unqualified != table_id.as_str() {
                                     selected_fields_by_table
@@ -199,6 +208,7 @@ impl ServerApp {
                                         .extend(fields);
                                 }
                             }
+
                         }
 
                     }
@@ -213,11 +223,75 @@ impl ServerApp {
 
                 }
 
+                for table_reference in Self::routine_from_table_references(&routine.sql) {
+                    table_ids.insert(table_reference.clone());
+                    let comparison_fields = Self::routine_comparison_fields(&routine.sql);
+                    if let Some(unqualified) = table_reference.rsplit('.').next() {
+                        table_ids.insert(unqualified.to_string());
+                        selected_fields_by_table
+                            .entry(unqualified.to_string())
+                            .or_default()
+                            .extend(comparison_fields.iter().cloned());
+                    }
+                }
+
             }
 
         }
 
         (table_ids, selected_fields_by_table)
+
+    }
+
+    fn routine_from_table_references(sql: &str) -> Vec<String> {
+        let tokens = sql
+            .split_whitespace()
+            .map(|token| {
+                token.trim_matches(|character: char| {
+                    character == '`'
+                        || character == ','
+                        || character == ';'
+                        || character == '('
+                        || character == ')'
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut references = Vec::new();
+
+        for window in tokens.windows(2) {
+            if window[0].eq_ignore_ascii_case("from") {
+                let reference = common::normalize_identifier!(window[1]);
+                if !reference.is_empty() {
+                    references.push(reference);
+                }
+            }
+        }
+
+        references
+
+    }
+
+    fn routine_comparison_fields(sql: &str) -> HashSet<String> {
+        let tokens = sql
+            .split_whitespace()
+            .map(|token| token.trim_matches(|character: char| {
+                character == '`' || character == ',' || character == ';' || character == ')'
+            }))
+            .collect::<Vec<_>>();
+        let mut fields = HashSet::new();
+
+        for window in tokens.windows(2) {
+            if matches!(window[1], ">" | ">=" | "<" | "<=") {
+                if let Some(field) = window[0].rsplit('.').next() {
+                    let normalized = common::normalize_identifier!(field);
+                    if !normalized.is_empty() {
+                        fields.insert(normalized);
+                    }
+                }
+            }
+        }
+
+        fields
 
     }
 
