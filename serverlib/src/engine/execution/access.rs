@@ -4139,7 +4139,7 @@ pub fn load_live_rows_by_runtime_index_equality(
         None,
     );
 
-    log::info!(
+    log::debug!(
         "runtime join equality probe table={} field={} index_id={} rows={}",
         table.table_id,
         field_name,
