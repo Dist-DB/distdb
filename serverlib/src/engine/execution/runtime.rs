@@ -566,7 +566,7 @@ pub fn join_condition_matches_provider(
     provider: &impl ConditionValueProvider,
     condition: &SelectCondition,
 ) -> bool {
-    
+
     match condition {
 
         SelectCondition::Predicate(SelectPredicate::FieldComparison {
@@ -574,7 +574,17 @@ pub fn join_condition_matches_provider(
             op,
             right_field_name,
         }) => compare_provider_fields(provider, left_field_name, right_field_name, op),
-        
+
+        SelectCondition::And(children) => children
+            .iter()
+            .all(|child| join_condition_matches_provider(provider, child)),
+
+        SelectCondition::Or(children) => children
+            .iter()
+            .any(|child| join_condition_matches_provider(provider, child)),
+
+        SelectCondition::Not(child) => !join_condition_matches_provider(provider, child),
+
         _ => false,
 
     }
