@@ -625,7 +625,19 @@ pub fn compare_provider_fields(
         return false;
     };
 
-    compare_row_value(left_value, right_value, op)
+    if compare_row_value(left_value, right_value, op) {
+        return true;
+    }
+
+    if *op == SelectComparisonOp::Eq {
+        return compare_row_value(
+            &crate::render_stored_field_value(left_value),
+            &crate::render_stored_field_value(right_value),
+            op,
+        );
+    }
+
+    false
 }
 
 
