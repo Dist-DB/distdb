@@ -1409,6 +1409,15 @@ impl ServerApp {
             );
         let runtime_clone_ms = runtime_clone_started_at.elapsed().as_millis() as u64;
 
+        log::info!(
+            "read-only runtime index scope request_id={} scope_tables={} scope_preview={} selected_fields={:?} selected_value_tables={}",
+            request.request_id,
+            scope_table_count,
+            scope_preview,
+            selected_fields_by_table,
+            selected_field_values_by_table.len(),
+        );
+
         if catalog_clone_ms > 50 || runtime_clone_ms > 50 {
             log::info!(
                 "read-only clone timing request_id={} catalog_clone_ms={} runtime_index_clone_ms={} scope_tables={} scope_preview={} runtime_mode={}",

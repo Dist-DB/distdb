@@ -7798,7 +7798,7 @@ fn try_runtime_index_range_rows(
         .find_map(|(position, filter)| {
 
             let Some(index_id) = single_field_index_id(table, &filter.field_name) else {
-                log::debug!(
+                log::info!(
                     "relation range index candidate table={} field={} result=index_metadata_missing",
                     table.table_id,
                     filter.field_name,
@@ -7814,7 +7814,7 @@ fn try_runtime_index_range_rows(
                         .flatten()
                         .map(|state| (table.table_id.as_str(), state))
                 }) else {
-                log::debug!(
+                log::info!(
                     "relation range index candidate table={} field={} index_id={} requested_scope={} result=state_missing",
                     table.table_id,
                     filter.field_name,
@@ -7824,7 +7824,7 @@ fn try_runtime_index_range_rows(
                 return None;
             };
 
-            log::debug!(
+            log::info!(
                 "relation range index candidate table={} field={} index_id={} requested_scope={} resolved_scope={} supports_ordered={}",
                 table.table_id,
                 filter.field_name,
@@ -7858,7 +7858,7 @@ fn try_runtime_index_range_rows(
     let scan_limit = (filters.len() == 1).then_some(row_limit).flatten();
     let row_refs = anchor_state.row_refs_for_key_range(lower.as_ref(), upper.as_ref(), scan_limit);
 
-    log::debug!(
+    log::info!(
         "relation range scan table={} index_id={} scope={} anchor_field={} candidate_refs={} filters={}",
         table.table_id,
         anchor_index_id,
