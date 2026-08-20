@@ -163,11 +163,24 @@ fn numeric_kind_for_index(index: &DatabaseIndex, schema: &TableSchema) -> Option
         return None;
     };
 
-    match schema.field(field_name)?.field_type {
+    let field = schema.field(field_name)?;
+
+    match field.field_type {
         FieldType::Int(_) => Some(RuntimeIndexNumericKind::Signed),
         FieldType::UInt(_) => Some(RuntimeIndexNumericKind::Unsigned),
         FieldType::Float(_) => Some(RuntimeIndexNumericKind::Float),
-        _ => None,
+        _ => field
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.original_sql_type.as_deref())
+            .map(str::to_ascii_lowercase)
+            .filter(|sql_type| {
+                sql_type.contains("decimal") ||
+                sql_type.contains("numeric") ||
+                sql_type.contains("double") ||
+                sql_type.contains("float")
+            })
+            .map(|_| RuntimeIndexNumericKind::Float),
     }
 }
 
@@ -588,6 +601,7 @@ impl RuntimeIndexState {
     }
 
     pub fn insert_with_row_ref(&mut self, pk_val: Vec<Vec<u8>>, row_ref: Option<u64>) {
+
         let Some(encoded_key) = self.encode_key(&pk_val) else {
             return;
         };
@@ -617,13 +631,16 @@ impl RuntimeIndexState {
         };
 
         let shared_key = self.intern_key(encoded_key);
+
         match self.entries.entry(Arc::clone(&shared_key)) {
+
             Entry::Vacant(entry) => {
                 entry.insert(Some(row_ref));
                 if let Some(ordered_entry_keys) = self.ordered_entry_keys.as_mut() {
                     ordered_entry_keys.insert(shared_key);
                 }
-            }
+            },
+
             Entry::Occupied(mut entry) => match *entry.get() {
                 Some(existing_row_ref) if existing_row_ref == row_ref => {}
                 Some(existing_row_ref) => {
@@ -640,10 +657,13 @@ impl RuntimeIndexState {
                         .insert_unique_sorted(row_ref);
                 }
             },
+
         }
+
     }
 
     fn restore_non_unique_entry(&mut self, pk_val: Vec<Vec<u8>>, row_refs: &[u64]) {
+
         let Some(encoded_key) = self.encode_key(&pk_val) else {
             return;
         };
@@ -654,12 +674,15 @@ impl RuntimeIndexState {
         }
 
         match row_refs {
+
             [] => {
                 self.entries.insert(shared_key, None);
-            }
+            },
+
             [row_ref] => {
                 self.entries.insert(shared_key, pack_row_ref(*row_ref));
-            }
+            },
+
             _ => {
                 let mut postings = PostingPages::default();
                 for row_ref in row_refs {
@@ -677,14 +700,21 @@ impl RuntimeIndexState {
                     self.non_unique_row_refs.insert(shared_key, postings);
                 }
             }
+
         }
+
     }
 
     fn intern_key(&self, encoded_key: Vec<u8>) -> IndexKey {
+
         match self.entries.get_key_value(encoded_key.as_slice()) {
+
             Some((existing, _)) => Arc::clone(existing),
+
             None => Arc::from(encoded_key.into_boxed_slice()),
+
         }
+
     }
 
     pub fn remove(&mut self, pk_val: &[Vec<u8>]) {
@@ -692,8 +722,11 @@ impl RuntimeIndexState {
     }
 
     pub fn remove_with_row_ref(&mut self, pk_val: &[Vec<u8>], row_ref: Option<u64>) {
+
         if let Some(encoded_key) = self.encode_key(pk_val) {
+
             let encoded_key = encoded_key.as_slice();
+            
             let is_unique_key = self
                 .index
                 .as_ref()
@@ -748,6 +781,7 @@ impl RuntimeIndexState {
                 }
             }
         }
+
     }
 
     pub fn cardinality(&self) -> usize {
@@ -824,6 +858,7 @@ impl RuntimeIndexState {
                 else {
                     continue;
                 };
+
                 for row_ref in refs {
                     let Some(packed) = pack_row_ref(row_ref) else {
                         continue;
@@ -834,14 +869,18 @@ impl RuntimeIndexState {
                         .or_default();
                     postings.insert_unique_sorted(packed);
                 }
+            
             }
+
         }
 
         self.refresh_ordered_entry_keys();
     }
 
     pub fn row_ref(&self, pk_val: &[Vec<u8>]) -> Option<u64> {
+
         let encoded_key = self.encode_key(pk_val)?;
+        
         self.index
             .as_ref()
             .is_some_and(|index| index.is_unique_key())
@@ -849,6 +888,7 @@ impl RuntimeIndexState {
                 unpack_row_ref(self.entries.get(encoded_key.as_slice()).copied().flatten())
             })
             .flatten()
+
     }
 
     pub fn row_refs_for_key(&self, pk_val: &[Vec<u8>], limit: Option<usize>) -> Vec<u64> {
@@ -887,6 +927,7 @@ impl RuntimeIndexState {
     }
 
     pub fn row_ref_count_for_key(&self, pk_val: &[Vec<u8>]) -> Option<usize> {
+
         let encoded_key = self.encode_key(pk_val)?;
 
         let entry = self.entries.get(encoded_key.as_slice()).copied()?;
@@ -898,6 +939,7 @@ impl RuntimeIndexState {
             .get(encoded_key.as_slice())
             .filter(|postings| !postings.is_empty())
             .map(PostingPages::len)
+
     }
 
     pub fn row_refs_for_key_range(
@@ -908,6 +950,7 @@ impl RuntimeIndexState {
     ) -> Vec<u64> {
 
         let lower = match lower {
+
             Some(bound) => {
                 let Some(encoded) = self.encode_key(&bound.key) else {
                     return Vec::new();
@@ -918,8 +961,10 @@ impl RuntimeIndexState {
                 } else {
                     Bound::Excluded(encoded)
                 }
-            }
+            },
+
             None => Bound::Unbounded,
+            
         };
 
         let upper = match upper {
