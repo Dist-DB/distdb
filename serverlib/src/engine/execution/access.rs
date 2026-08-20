@@ -4139,6 +4139,17 @@ pub fn load_live_rows_by_runtime_index_equality(
         None,
     );
 
+    log::info!(
+        "runtime join equality probe table={} field={} index_id={} rows={}",
+        table.table_id,
+        field_name,
+        access_plan
+            .runtime_index_lookup(table)
+            .map(|(index, _)| index.index_id.0.as_str())
+            .unwrap_or("<missing>"),
+        rows.len(),
+    );
+
     (!rows.is_empty()).then_some(rows)
 
 }
