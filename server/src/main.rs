@@ -173,9 +173,9 @@ fn validate_startup_tls_requirements(tls_extra_sans: &[String]) -> Result<(), St
 
 }
 
-/// Materialize each table's runtime indexes after the connector gate opens.
-/// Index building happens without the app lock held so already-ready tables stay
-/// queryable; the lock is only taken to install a finished table.
+/// Materialize each table's runtime indexes before opening the connector gate.
+/// Index building happens without the app lock held; the lock is only taken to
+/// install each finished table.
 fn load_tables_in_background(
     app: Arc<RwLock<ServerApp>>,
     pending_tables: Vec<(String, String)>,
@@ -1201,13 +1201,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.records_in_primary_table
     );
 
+    let app_for_table_load = Arc::clone(&app);
+    tokio::task::spawn_blocking(move || {
+        load_tables_in_background(app_for_table_load, pending_tables);
+    })
+    .await
+    .map_err(|err| format!("table bootstrap task failed to join: {err}"))?;
+
     bootstrap_ready.store(true, Ordering::SeqCst);
     log::info!("connector bootstrap gate opened; server is ready to accept requests");
-
-    let app_for_table_load = Arc::clone(&app);
-    let _table_load_task = tokio::task::spawn_blocking(move || {
-        load_tables_in_background(app_for_table_load, pending_tables);
-    });
 
     let mut affinity_replication_task = None;
 
