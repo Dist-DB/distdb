@@ -8954,7 +8954,7 @@ fn alter_table_query_updates_schema() {
         ConnectorCommand::Query {
             query: connector::DataQuery {
                 database_id: "main".to_string(),
-                sql: "alter table users add column status varchar(20) not null default 'active', rename column email to login_email"
+                sql: "alter table main.users add column status varchar(20) not null default 'active', rename column email to login_email"
                     .to_string(),
             },
         },

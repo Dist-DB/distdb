@@ -11,13 +11,6 @@ pub(super) fn execute_alter_table_impl(
     statement: &SqlRequest,
 ) -> ConnectorResponse {
 
-    let Some(catalog) = resolve_catalog_mut(catalogs, database_id) else {
-        return ConnectorResponse::rejected(
-            request_id.to_string(),
-            format!("database '{}' not found", database_id),
-        );
-    };
-
     let plan = match serverlib::parse_alter_table_change_plan_from_statement(&statement.sql) {
         Ok(plan) => plan,
         Err(err) => {
@@ -28,7 +21,17 @@ pub(super) fn execute_alter_table_impl(
         }
     };
 
-    let table_id = common::normalize_identifier!(plan.table_id);
+    let Some((catalog, table_id)) = resolve_catalog_for_table_reference_mut(
+        catalogs,
+        database_id,
+        &plan.table_id,
+    ) else {
+        return ConnectorResponse::rejected(
+            request_id.to_string(),
+            format!("alter table failed: table '{}' not found", plan.table_id),
+        );
+    };
+
     if catalog.table(&table_id).is_none() {
         return ConnectorResponse::rejected(
             request_id.to_string(),
