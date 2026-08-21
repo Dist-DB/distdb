@@ -7895,7 +7895,59 @@ fn try_runtime_index_range_rows(
 
     // The remaining predicates still have to be applied, so the scan cannot stop early.
     let scan_limit = (filters.len() == 1).then_some(row_limit).flatten();
-    let row_refs = anchor_state.row_refs_for_key_range(lower.as_ref(), upper.as_ref(), scan_limit);
+    let mut row_refs = anchor_state.row_refs_for_key_range(lower.as_ref(), upper.as_ref(), scan_limit);
+
+    // A multi-range access plan must intersect its indexed postings before
+    // hydrating rows; otherwise it merely filters a single range scan.
+    if filters.len() > 1 && !row_refs.is_empty() {
+        let mut candidate_refs = row_refs.iter().copied().collect::<AHashSet<_>>();
+
+        for (position, filter) in filters.iter().enumerate() {
+            if position == anchor_position {
+                continue;
+            }
+
+            let Some(index_id) = single_field_index_id(table, &filter.field_name) else {
+                continue;
+            };
+            let Some((scope_id, state)) = runtime_indexes
+                .index_for_table(table_stream_id, &index_id)
+                .map(|state| (table_stream_id, state))
+                .or_else(|| {
+                    (table_stream_id != table.table_id.as_str())
+                        .then(|| runtime_indexes.index_for_table(&table.table_id, &index_id))
+                        .flatten()
+                        .map(|state| (table.table_id.as_str(), state))
+                })
+            else {
+                continue;
+            };
+
+            if scope_id != anchor_scope_id || !state.supports_ordered_range_scan() {
+                continue;
+            }
+
+            let lower = filter.lower_bound.as_ref().map(|bound| RuntimeIndexRangeBound {
+                key: vec![bound.value.clone()],
+                inclusive: bound.inclusive,
+            });
+            let upper = filter.upper_bound.as_ref().map(|bound| RuntimeIndexRangeBound {
+                key: vec![bound.value.clone()],
+                inclusive: bound.inclusive,
+            });
+            let filter_refs = state
+                .row_refs_for_key_range(lower.as_ref(), upper.as_ref(), None)
+                .into_iter()
+                .collect::<AHashSet<_>>();
+            candidate_refs.retain(|row_ref| filter_refs.contains(row_ref));
+
+            if candidate_refs.is_empty() {
+                break;
+            }
+        }
+
+        row_refs.retain(|row_ref| candidate_refs.contains(row_ref));
+    }
 
     log::info!(
         "relation range scan table={} index_id={} scope={} anchor_field={} candidate_refs={} filters={}",
