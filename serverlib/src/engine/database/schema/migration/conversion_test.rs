@@ -11,6 +11,31 @@ fn convert_numeric_string_to_int() {
 }
 
 #[test]
+fn convert_decimal_text_to_float() {
+    let stored = convert_value_to_field_type(
+        b" -71.883333 ",
+        &FieldType::Float(64),
+        TypeConversionPolicy::Safe,
+    )
+    .expect("finite decimal text should convert to float storage");
+
+    assert_eq!(stored[0], 0x22);
+    let decoded = f64::from_le_bytes(stored[1..].try_into().expect("f64 payload"));
+    assert_eq!(decoded, -71.883333);
+    assert_eq!(render_stored_field_value(&stored), b"-71.883333".to_vec());
+}
+
+#[test]
+fn convert_non_finite_float_text_safe_mode_fails() {
+    for value in [b"NaN".as_slice(), b"inf", b"-inf"] {
+        assert_eq!(
+            convert_value_to_field_type(value, &FieldType::Float(64), TypeConversionPolicy::Safe),
+            Err(())
+        );
+    }
+}
+
+#[test]
 fn convert_invalid_to_int_safe_mode_fails() {
     let result = convert_value_to_field_type(
         b"not-a-number",

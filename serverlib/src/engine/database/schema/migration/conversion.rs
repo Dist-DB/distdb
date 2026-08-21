@@ -125,7 +125,9 @@ pub fn convert_value_to_field_type(
 
         FieldType::Float(_) => {
 
-            if let Some(v) = decode_numeric_value(value).map(numeric_as_f64) {
+            if let Some(v) = decode_numeric_value(value).map(numeric_as_f64)
+                && v.is_finite()
+            {
                 return encode_float_numeric(target_type.clone(), v);
             }
 

@@ -1151,6 +1151,7 @@ fn decode_live_row_chunk(
     let chunk_size = chunk.len().div_ceil(workers);
 
     let partials = std::thread::scope(|scope| {
+        
         let mut handles = Vec::new();
 
         for worker_idx in 0..workers {

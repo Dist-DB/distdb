@@ -217,6 +217,7 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
     let actor = UserId::from_username("migrator");
     let mut row = HashMap::new();
     row.insert("first_name".to_string(), b"sam".to_vec());
+    row.insert("latitude".to_string(), b"18.783333".to_vec());
     row.insert("legacy".to_string(), b"drop".to_vec());
 
     let seed_records = vec![TransactionRecord::with_payload(
@@ -240,7 +241,10 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
                 renames: vec![("first_name".to_string(), "given_name".to_string())],
                 removals: vec!["legacy".to_string()],
                 additions: vec![("status".to_string(), b"active".to_vec())],
-                type_changes: Vec::new(),
+                type_changes: vec![FieldTypeChangeRule {
+                    field_name: "latitude".to_string(),
+                    target_type: FieldType::Float(64),
+                }],
                 target_schema: None,
                 conversion_policy: TypeConversionPolicy::Safe,
             },
@@ -262,6 +266,9 @@ fn disk_executor_applies_schema_mutation_rules_to_row_payloads() {
 
     assert_eq!(out_row.get("given_name"), Some(&b"sam".to_vec()));
     assert_eq!(out_row.get("status"), Some(&b"active".to_vec()));
+    let latitude = out_row.get("latitude").expect("latitude should be retained");
+    assert_eq!(latitude[0], 0x22);
+    assert_eq!(render_stored_field_value(latitude), b"18.783333".to_vec());
     assert!(!out_row.contains_key("first_name"));
     assert!(!out_row.contains_key("legacy"));
 
